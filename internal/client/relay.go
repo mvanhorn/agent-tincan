@@ -16,6 +16,10 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
+// AgentHeader names which of the calling machine's agents a request comes
+// from. The relay honors it only for an agent bound to that machine.
+const AgentHeader = "X-Tincan-Agent"
+
 // Result mirrors the relay's view of one request.
 type Result = envelope.Result
 
@@ -54,6 +58,7 @@ type Relay struct {
 	base  string
 	api   *http.Client
 	polls *http.Client
+	agent string // sent as AgentHeader when set
 }
 
 // NewRelay returns a client for the relay at base (for example
@@ -78,6 +83,18 @@ func NewRelay(base, proxy string) (*Relay, error) {
 		}
 	}
 	return &Relay{base: base, api: api, polls: polls}, nil
+}
+
+// NewRelayFor returns a client for a saved config. It names the configured
+// agent on every call, so several agents on one machine (each with its own
+// TINCAN_CONFIG) are told apart.
+func NewRelayFor(c Config) (*Relay, error) {
+	r, err := NewRelay(c.Relay, c.Proxy)
+	if err != nil {
+		return nil, err
+	}
+	r.agent = c.Agent
+	return r, nil
 }
 
 // NewRelayHTTP builds a client over a caller-supplied http.Client (the
@@ -219,6 +236,9 @@ func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, i
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if r.agent != "" {
+		req.Header.Set(AgentHeader, r.agent)
 	}
 	resp, err := c.Do(req)
 	if err != nil {

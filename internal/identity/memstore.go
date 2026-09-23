@@ -44,15 +44,28 @@ func (m *MemoryStore) Agents(_ context.Context) ([]Agent, error) {
 	return out, nil
 }
 
-func (m *MemoryStore) AgentByNode(_ context.Context, nodeID string) (Agent, bool, error) {
+func (m *MemoryStore) AgentsByNode(_ context.Context, nodeID string) ([]Agent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var out []Agent
 	for _, a := range m.agents {
 		if a.NodeID == nodeID {
-			return a, true, nil
+			out = append(out, a)
 		}
 	}
-	return Agent{}, false, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (m *MemoryStore) SetAgentKind(_ context.Context, name, kind string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[name]
+	if ok {
+		a.Kind = kind
+		m.agents[name] = a
+	}
+	return ok, nil
 }
 
 func (m *MemoryStore) AgentByName(_ context.Context, name string) (Agent, bool, error) {

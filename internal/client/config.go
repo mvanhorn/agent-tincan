@@ -11,10 +11,11 @@ import (
 type Config struct {
 	Relay string `json:"relay"`           // relay base URL, e.g. http://tincan-relay
 	Proxy string `json:"proxy,omitempty"` // proxy for relay traffic (Muse: its tailnet tunnel proxy)
-	Agent string `json:"agent,omitempty"` // the name this machine joined as
+	Agent string `json:"agent,omitempty"` // the agent name this config joined as; sent on every relay call
 }
 
-// ConfigPath is where the agent config lives.
+// ConfigPath is where the agent config lives. A second agent on the same
+// machine sets TINCAN_CONFIG to its own file for join, MCP, and listen.
 func ConfigPath() string {
 	if p := os.Getenv("TINCAN_CONFIG"); p != "" {
 		return p

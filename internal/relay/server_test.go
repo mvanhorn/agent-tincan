@@ -158,6 +158,84 @@ func TestUnjoinedMachineRejected(t *testing.T) {
 	h.do(strangerAddr, "GET", "/v1/poll?hold=0", "", http.StatusForbidden, nil)
 }
 
+// doAs is do with the X-Tincan-Agent header the client sends.
+func (h *harness) doAs(addr, agent, method, path, body string, want int, out any) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.RemoteAddr = addr
+	req.Header.Set(client.AgentHeader, agent)
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		h.t.Fatalf("%s %s from %s as %q: status %d, want %d: %s", method, path, addr, agent, rec.Code, want, rec.Body.String())
+	}
+	if out != nil {
+		if err := json.Unmarshal(rec.Body.Bytes(), out); err != nil {
+			h.t.Fatalf("decode %s: %v: %s", path, err, rec.Body.String())
+		}
+	}
+	return rec
+}
+
+// joinAt invites name and joins it from addr.
+func (h *harness) joinAt(addr, name string) {
+	h.t.Helper()
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"`+name+`"}`, http.StatusOK, &inv)
+	h.do(addr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+}
+
+// Two agents on one machine: the header picks which one a request is from.
+func TestTwoAgentsOnOneMachine(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.joinAt(strangerAddr, "claude-code")
+	// One agent on the node: no header needed.
+	var req envelope.Request
+	h.do(strangerAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &req)
+	if req.From != "claude-code" {
+		t.Fatalf("single-agent from = %q", req.From)
+	}
+	h.joinAt(strangerAddr, "codex")
+	for _, name := range []string{"codex", "claude-code"} {
+		h.doAs(strangerAddr, name, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &req)
+		if req.From != name {
+			t.Fatalf("header %s: from = %q", name, req.From)
+		}
+	}
+	// Each agent polls its own inbox.
+	h.send(grokAddr, "codex", "for codex")
+	var got pollResult
+	h.doAs(strangerAddr, "codex", "GET", "/v1/poll?hold=0", "", http.StatusOK, &got)
+	if len(got.Requests) != 1 || got.Requests[0].To != "codex" {
+		t.Fatalf("codex poll = %+v", got)
+	}
+	h.doAs(strangerAddr, "claude-code", "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	// No header with two agents: rejected, naming both.
+	rec := h.do(strangerAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusForbidden, nil)
+	if b := rec.Body.String(); !strings.Contains(b, "claude-code") || !strings.Contains(b, "codex") {
+		t.Fatalf("ambiguity error should list both agents: %s", b)
+	}
+	// Removing codex leaves claude-code working without a header.
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"codex"}`, http.StatusOK, nil)
+	h.do(strangerAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &req)
+	if req.From != "claude-code" {
+		t.Fatalf("after removing codex from = %q", req.From)
+	}
+	h.doAs(strangerAddr, "codex", "GET", "/v1/poll?hold=0", "", http.StatusForbidden, nil)
+}
+
+// The header cannot borrow another machine's agent.
+func TestHeaderNamingAnotherMachinesAgentRejected(t *testing.T) {
+	h := newHarness(t, Config{})
+	rec := h.doAs(museAddr, "grokbot", "POST", "/v1/send", `{"to":"instinct","body":"hi"}`, http.StatusForbidden, nil)
+	if !strings.Contains(rec.Body.String(), identity.ErrNotJoined.Error()) {
+		t.Fatalf("want not joined, got %s", rec.Body.String())
+	}
+	h.doAs(museAddr, "grokbot", "GET", "/v1/poll?hold=0", "", http.StatusForbidden, nil)
+	// The matching header is fine.
+	h.doAs(museAddr, "muse", "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+}
+
 // AE6: claiming to be someone else changes nothing.
 func TestSpoofedFromIsIgnored(t *testing.T) {
 	h := newHarness(t, Config{})

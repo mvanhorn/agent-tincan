@@ -210,9 +210,11 @@ func (s *Server) remote(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// agent attributes the request or writes an error and returns "".
+// agent attributes the request or writes an error and returns "". WhoIs
+// picks the node; the client's X-Tincan-Agent header picks among that node's
+// agents and is refused for a name bound elsewhere.
 func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
-	name, err := s.dir.Attribute(r.Context(), r.RemoteAddr)
+	name, err := s.dir.Resolve(r.Context(), r.RemoteAddr, r.Header.Get(client.AgentHeader))
 	if err != nil {
 		writeErr(w, http.StatusForbidden, err)
 		return ""
@@ -586,9 +588,10 @@ func statusFor(err error) int {
 		return se.Code
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent):
 		return http.StatusNotFound
-	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined):
+	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined),
+		errors.Is(err, identity.ErrAgentAmbiguous):
 		return http.StatusForbidden
-	case errors.Is(err, store.ErrWrongState), errors.Is(err, identity.ErrNodeTaken):
+	case errors.Is(err, store.ErrWrongState):
 		return http.StatusConflict
 	case errors.Is(err, identity.ErrBadInvite):
 		return http.StatusBadRequest

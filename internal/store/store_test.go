@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -79,6 +80,132 @@ func TestDirectoryOnSQLite(t *testing.T) {
 	}
 	if got, err := dir.Attribute(ctx, "100.0.0.4:1"); err != nil || got != "muse" {
 		t.Fatalf("attribute = %q, %v", got, err)
+	}
+}
+
+// Several agents on one machine, end to end on SQLite: a second join leaves
+// the first agent intact, a re-invite moves only that name, and removing one
+// leaves the other working.
+func TestMultipleAgentsPerNodeOnSQLite(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	who := fakeWho{
+		"100.0.0.1:1": {ID: "nMAC", Name: "macbook-pro-44"},
+		"100.0.0.5:1": {ID: "nMINI", Name: "matts-mac-mini"},
+	}
+	dir := identity.NewDirectory(s, who, identity.Config{Admins: []string{"macbook-pro-44"}})
+	join := func(addr, name string) {
+		t.Helper()
+		code, err := dir.Invite(ctx, identity.LocalAdmin, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := dir.Join(ctx, addr, code); err != nil || got != name {
+			t.Fatalf("join %s from %s: %q, %v", name, addr, got, err)
+		}
+	}
+	join("100.0.0.1:1", "claude-code")
+	join("100.0.0.1:1", "codex")
+	for _, name := range []string{"claude-code", "codex"} {
+		if got, err := dir.Resolve(ctx, "100.0.0.1:1", name); err != nil || got != name {
+			t.Fatalf("resolve %s: %q, %v", name, got, err)
+		}
+	}
+	if _, err := dir.Resolve(ctx, "100.0.0.1:1", ""); !errors.Is(err, identity.ErrAgentAmbiguous) {
+		t.Fatalf("no claim with two agents: want ErrAgentAmbiguous, got %v", err)
+	}
+	byNode, err := s.AgentsByNode(ctx, "nMAC")
+	if err != nil || len(byNode) != 2 || byNode[0].Name != "claude-code" || byNode[1].Name != "codex" {
+		t.Fatalf("agents by node = %+v, %v", byNode, err)
+	}
+	// Moving codex to the mini leaves claude-code on the laptop.
+	join("100.0.0.5:1", "codex")
+	if got, err := dir.Attribute(ctx, "100.0.0.1:1"); err != nil || got != "claude-code" {
+		t.Fatalf("laptop after move: %q, %v", got, err)
+	}
+	if got, err := dir.Attribute(ctx, "100.0.0.5:1"); err != nil || got != "codex" {
+		t.Fatalf("mini after move: %q, %v", got, err)
+	}
+	join("100.0.0.5:1", "hermes")
+	if err := dir.Remove(ctx, identity.LocalAdmin, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := dir.Attribute(ctx, "100.0.0.5:1"); err != nil || got != "hermes" {
+		t.Fatalf("mini after removing codex: %q, %v", got, err)
+	}
+}
+
+func TestAgentKindOnSQLite(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	s.PutAgent(ctx, identity.Agent{Name: "hermes", NodeID: "nMINI", NodeName: "mini", JoinedAt: c.t})
+	if a, _, _ := s.AgentByName(ctx, "hermes"); a.Kind != "" {
+		t.Fatalf("kind should start empty, got %q", a.Kind)
+	}
+	if ok, err := s.SetAgentKind(ctx, "hermes", "hermes"); err != nil || !ok {
+		t.Fatalf("set kind: %v, %v", ok, err)
+	}
+	if ok, err := s.SetAgentKind(ctx, "nobody", "codex"); err != nil || ok {
+		t.Fatalf("set kind on unknown agent: %v, %v", ok, err)
+	}
+	agents, _ := s.Agents(ctx)
+	if len(agents) != 1 || agents[0].Kind != "hermes" {
+		t.Fatalf("agents = %+v", agents)
+	}
+	// Clearing stores NULL and reads back empty.
+	s.SetAgentKind(ctx, "hermes", "")
+	if a, _, _ := s.AgentByName(ctx, "hermes"); a.Kind != "" {
+		t.Fatalf("cleared kind = %q", a.Kind)
+	}
+	s.PutAgent(ctx, identity.Agent{Name: "codex", NodeID: "nMAC", NodeName: "mac", JoinedAt: c.t, Kind: "codex"})
+	if a, _, _ := s.AgentByName(ctx, "codex"); a.Kind != "codex" {
+		t.Fatalf("PutAgent kind = %q", a.Kind)
+	}
+}
+
+// A relay database created before multi-agent support (node_id UNIQUE, no
+// kind column) migrates on startup, keeps its agents, and then accepts a
+// second name on one node.
+func TestOldSchemaMigratesOnOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE agents (name TEXT PRIMARY KEY, node_id TEXT NOT NULL UNIQUE, node_name TEXT NOT NULL, joined_at INTEGER NOT NULL)`,
+		`INSERT INTO agents VALUES ('grokbot', 'nGROK', 'grok-bot', 1790000000000)`,
+		`INSERT INTO agents VALUES ('claude-code', 'nMAC', 'macbook-pro-44', 1790000000001)`,
+	} {
+		if _, err := old.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	old.Close()
+
+	s, c := open(t, path)
+	ctx := context.Background()
+	agents, err := s.Agents(ctx)
+	if err != nil || len(agents) != 2 || agents[0].Name != "claude-code" || agents[1].Name != "grokbot" || agents[1].NodeID != "nGROK" {
+		t.Fatalf("agents after migration = %+v, %v", agents, err)
+	}
+	if err := s.PutAgent(ctx, identity.Agent{Name: "codex", NodeID: "nMAC", NodeName: "macbook-pro-44", JoinedAt: c.t, Kind: "codex"}); err != nil {
+		t.Fatalf("second agent on node after migration: %v", err)
+	}
+	byNode, _ := s.AgentsByNode(ctx, "nMAC")
+	if len(byNode) != 2 {
+		t.Fatalf("nMAC agents = %+v", byNode)
+	}
+	var idx int
+	s.DB().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'agents' AND name = 'agents_node_id'`).Scan(&idx)
+	if idx != 1 {
+		t.Fatal("migration should add the non-unique node_id index")
+	}
+	s.Close()
+	// Reopening an already-migrated database is a no-op.
+	s2, _ := open(t, path)
+	if agents, _ := s2.Agents(ctx); len(agents) != 3 {
+		t.Fatalf("agents after reopen = %+v", agents)
 	}
 }
 

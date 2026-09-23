@@ -35,5 +35,9 @@ func (d *Directory) BindVirtual(ctx context.Context, name string) error {
 	if !nameRE.MatchString(name) {
 		return ErrUnknownAgent
 	}
-	return d.store.PutAgent(ctx, Agent{Name: name, NodeID: VirtualAddr(name), NodeName: VirtualAddr(name), JoinedAt: d.cfg.Now()})
+	prev, _, err := d.store.AgentByName(ctx, name)
+	if err != nil {
+		return err
+	}
+	return d.store.PutAgent(ctx, Agent{Name: name, NodeID: VirtualAddr(name), NodeName: VirtualAddr(name), JoinedAt: d.cfg.Now(), Kind: prev.Kind})
 }

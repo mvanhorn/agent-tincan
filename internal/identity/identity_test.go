@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,20 +174,105 @@ func TestReinviteMovesAgentToNewMachine(t *testing.T) {
 	}
 }
 
-func TestOneMachineOneAgent(t *testing.T) {
+// Several agents can share one machine (claude-code and codex on a laptop).
+// Each joins with its own invite and the client names itself per request.
+func TestSecondAgentJoinsSameMachine(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
+	if got, err := f.dir.Join(ctx, "100.0.0.4:1", f.invite(t, "claude-code")); err != nil || got != "claude-code" {
+		t.Fatalf("first join: %q, %v", got, err)
+	}
+	// One agent on the node: no claim needed, current behavior preserved.
+	if got, err := f.dir.Attribute(ctx, "100.0.0.4:1"); err != nil || got != "claude-code" {
+		t.Fatalf("single agent attribute: %q, %v", got, err)
+	}
+	if got, err := f.dir.Join(ctx, "100.0.0.4:1", f.invite(t, "codex")); err != nil || got != "codex" {
+		t.Fatalf("second join on same node: %q, %v", got, err)
+	}
+	for _, name := range []string{"claude-code", "codex"} {
+		if got, err := f.dir.Resolve(ctx, "100.0.0.4:1", name); err != nil || got != name {
+			t.Errorf("resolve claim %s: %q, %v", name, got, err)
+		}
+	}
+	_, err := f.dir.Resolve(ctx, "100.0.0.4:1", "")
+	if !errors.Is(err, identity.ErrAgentAmbiguous) {
+		t.Fatalf("two agents, no claim: want ErrAgentAmbiguous, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "claude-code") || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("ambiguity error should list both names: %v", err)
+	}
+}
+
+// A claim is only honored for a name bound to the calling node.
+func TestClaimForAnotherNodeIsNotJoined(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.dir.Join(ctx, "100.0.0.2:1", f.invite(t, "grokbot"))
 	f.dir.Join(ctx, "100.0.0.4:1", f.invite(t, "muse"))
-	code := f.invite(t, "muse2")
-	if _, err := f.dir.Join(ctx, "100.0.0.4:1", code); !errors.Is(err, identity.ErrNodeTaken) {
-		t.Fatalf("second name on same node: want ErrNodeTaken, got %v", err)
+	if _, err := f.dir.Resolve(ctx, "100.0.0.4:1", "grokbot"); !errors.Is(err, identity.ErrNotJoined) {
+		t.Fatalf("claiming another node's agent: want ErrNotJoined, got %v", err)
 	}
-	// The rejected attempt must not burn the code: the right machine can still use it.
-	if got, err := f.dir.Join(ctx, "100.0.0.3:1", code); err != nil || got != "muse2" {
-		t.Fatalf("join after rejected attempt: got %q, %v", got, err)
+	if _, err := f.dir.Resolve(ctx, "100.0.0.4:1", "nobody"); !errors.Is(err, identity.ErrNotJoined) {
+		t.Fatalf("claiming an unknown agent: want ErrNotJoined, got %v", err)
 	}
-	if _, err := f.dir.Join(ctx, "100.0.0.2:1", code); !errors.Is(err, identity.ErrBadInvite) {
-		t.Fatalf("code reused after successful join: want ErrBadInvite, got %v", err)
+	if _, err := f.dir.Resolve(ctx, "100.0.0.1:1", "muse"); !errors.Is(err, identity.ErrNotJoined) {
+		t.Fatalf("claim from an unjoined node: want ErrNotJoined, got %v", err)
+	}
+}
+
+// Re-inviting a name still moves it, and only it: other agents on the old
+// machine stay put.
+func TestReinviteMovesOnlyThatAgent(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.dir.Join(ctx, "100.0.0.3:1", f.invite(t, "hermes"))
+	f.dir.Join(ctx, "100.0.0.3:1", f.invite(t, "openclaw"))
+	if _, err := f.dir.Join(ctx, "100.0.0.4:1", f.invite(t, "openclaw")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.dir.Attribute(ctx, "100.0.0.4:1"); err != nil || got != "openclaw" {
+		t.Fatalf("new machine: %q, %v", got, err)
+	}
+	if got, err := f.dir.Attribute(ctx, "100.0.0.3:1"); err != nil || got != "hermes" {
+		t.Fatalf("old machine should keep hermes alone: %q, %v", got, err)
+	}
+}
+
+func TestRemoveLeavesOtherAgentOnSameMachine(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.dir.Join(ctx, "100.0.0.1:1", f.invite(t, "claude-code"))
+	f.dir.Join(ctx, "100.0.0.1:1", f.invite(t, "codex"))
+	if err := f.dir.Remove(ctx, "100.0.0.1:1", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.dir.Attribute(ctx, "100.0.0.1:1"); err != nil || got != "claude-code" {
+		t.Fatalf("after removing codex: %q, %v", got, err)
+	}
+	if _, err := f.dir.Resolve(ctx, "100.0.0.1:1", "codex"); !errors.Is(err, identity.ErrNotJoined) {
+		t.Fatalf("removed codex claim: want ErrNotJoined, got %v", err)
+	}
+}
+
+// An agent's kind survives a move to a new machine.
+func TestKindSurvivesMove(t *testing.T) {
+	store := identity.NewMemoryStore()
+	who := identitytest.New(map[string]identity.Node{"100.0.0.3:1": instinctNode, "100.0.0.4:1": museNode})
+	dir := identity.NewDirectory(store, who, identity.Config{})
+	ctx := context.Background()
+	code, _ := dir.Invite(ctx, identity.LocalAdmin, "hermes")
+	dir.Join(ctx, "100.0.0.3:1", code)
+	if ok, err := store.SetAgentKind(ctx, "hermes", "hermes"); err != nil || !ok {
+		t.Fatalf("set kind: %v, %v", ok, err)
+	}
+	if ok, _ := store.SetAgentKind(ctx, "nobody", "codex"); ok {
+		t.Fatal("setting kind on an unknown agent should report false")
+	}
+	code, _ = dir.Invite(ctx, identity.LocalAdmin, "hermes")
+	dir.Join(ctx, "100.0.0.4:1", code)
+	a, _, _ := store.AgentByName(ctx, "hermes")
+	if a.NodeID != museNode.ID || a.Kind != "hermes" {
+		t.Fatalf("after move: %+v", a)
 	}
 }
 

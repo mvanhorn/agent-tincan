@@ -1,6 +1,9 @@
 // Package identity decides which agent sent a request. An agent is a name Matt
 // chose, bound to one tailnet node by a one-time invite code. There are no
 // keys: Tailscale authenticates the node, and the directory maps node to name.
+// A node may carry several agents (claude-code and codex on one laptop); the
+// client then names itself and the directory accepts the name only if it is
+// bound to the calling node.
 package identity
 
 import (
@@ -27,7 +30,9 @@ var (
 	ErrNotAdmin     = errors.New("admin commands must come from an admin device")
 	ErrBadInvite    = errors.New("invite code is invalid, used, or expired")
 	ErrUnknownAgent = errors.New("no such agent")
-	ErrNodeTaken    = errors.New("this machine is already joined as another agent")
+	// ErrAgentAmbiguous means several agents share the calling machine and the
+	// request did not say which one it comes from.
+	ErrAgentAmbiguous = errors.New("several agents share this machine; the client must name one (point TINCAN_CONFIG at that agent's config)")
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -38,6 +43,8 @@ type Agent struct {
 	NodeID   string    `json:"node_id"`
 	NodeName string    `json:"node_name"`
 	JoinedAt time.Time `json:"joined_at"`
+	// Kind is the agent runtime (hermes, codex, ...), empty when unknown.
+	Kind string `json:"kind,omitempty"`
 }
 
 // Invite is a pending one-time code.
@@ -53,9 +60,13 @@ type Store interface {
 	PutAgent(ctx context.Context, a Agent) error
 	DeleteAgent(ctx context.Context, name string) (bool, error)
 	Agents(ctx context.Context) ([]Agent, error)
-	// AgentByNode and AgentByName are point lookups for the hot request path.
-	AgentByNode(ctx context.Context, nodeID string) (Agent, bool, error)
+	// AgentsByNode and AgentByName are lookups for the hot request path.
+	// AgentsByNode returns every agent bound to the node, ordered by name.
+	AgentsByNode(ctx context.Context, nodeID string) ([]Agent, error)
 	AgentByName(ctx context.Context, name string) (Agent, bool, error)
+	// SetAgentKind records an agent's runtime kind ("" clears it) and reports
+	// whether the agent exists.
+	SetAgentKind(ctx context.Context, name, kind string) (bool, error)
 	PutInvite(ctx context.Context, inv Invite) error
 	// TakeInvite removes and returns the invite, so a code works once.
 	TakeInvite(ctx context.Context, code string) (Invite, bool, error)
@@ -78,7 +89,7 @@ type Directory struct {
 	store Store
 	who   Resolver
 	cfg   Config
-	mu    sync.Mutex // serializes join so one node cannot bind two names
+	mu    sync.Mutex // serializes join so a name moves atomically
 }
 
 // NewDirectory builds a Directory.
@@ -89,20 +100,45 @@ func NewDirectory(store Store, who Resolver, cfg Config) *Directory {
 	return &Directory{store: store, who: who, cfg: cfg}
 }
 
-// Attribute returns the agent name for the node behind remoteAddr.
+// Attribute returns the agent name for the node behind remoteAddr when the
+// caller does not name itself. It fails with ErrAgentAmbiguous when the node
+// carries several agents.
 func (d *Directory) Attribute(ctx context.Context, remoteAddr string) (string, error) {
+	return d.Resolve(ctx, remoteAddr, "")
+}
+
+// Resolve returns the agent behind remoteAddr. WhoIs authenticates the node;
+// claimed, when set, picks one of the node's agents and is accepted only if
+// that name is bound to the node. With no claim, a node with one agent
+// resolves to it and a node with several fails with the choices.
+func (d *Directory) Resolve(ctx context.Context, remoteAddr, claimed string) (string, error) {
 	n, err := d.who.WhoIs(ctx, remoteAddr)
 	if err != nil {
 		return "", err
 	}
-	a, ok, err := d.store.AgentByNode(ctx, n.ID)
+	agents, err := d.store.AgentsByNode(ctx, n.ID)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		return "", fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
+	if claimed != "" {
+		for _, a := range agents {
+			if a.Name == claimed {
+				return a.Name, nil
+			}
+		}
+		return "", fmt.Errorf("%s is not %q: %w", n.Name, claimed, ErrNotJoined)
 	}
-	return a.Name, nil
+	switch len(agents) {
+	case 0:
+		return "", fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
+	case 1:
+		return agents[0].Name, nil
+	}
+	names := make([]string, len(agents))
+	for i, a := range agents {
+		names[i] = a.Name
+	}
+	return "", fmt.Errorf("%s runs %s: %w", n.Name, strings.Join(names, ", "), ErrAgentAmbiguous)
 }
 
 // Has reports whether name is a joined agent.
@@ -131,8 +167,10 @@ func (d *Directory) Invite(ctx context.Context, remoteAddr, name string) (string
 	return code, nil
 }
 
-// Join binds the node behind remoteAddr to the invite's name. Re-inviting an
-// existing name moves it to the new machine.
+// Join binds the node behind remoteAddr to the invite's name. A node that
+// already carries agents gains another name alongside them. Re-inviting an
+// existing name moves it (and its kind) to the new machine; other agents on
+// the old machine stay.
 func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, error) {
 	n, err := d.who.WhoIs(ctx, remoteAddr)
 	if err != nil {
@@ -140,10 +178,6 @@ func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, 
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	bound, taken, err := d.store.AgentByNode(ctx, n.ID)
-	if err != nil {
-		return "", err
-	}
 	inv, ok, err := d.store.TakeInvite(ctx, strings.ToUpper(strings.TrimSpace(code)))
 	if err != nil {
 		return "", err
@@ -151,15 +185,11 @@ func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, 
 	if !ok || d.cfg.Now().After(inv.Expires) {
 		return "", ErrBadInvite
 	}
-	if taken && bound.Name != inv.Name {
-		// A mistaken join from an already-joined machine must not burn the
-		// code. Join holds d.mu, so no other join can observe the gap.
-		if err := d.store.PutInvite(ctx, inv); err != nil {
-			return "", err
-		}
-		return "", fmt.Errorf("%s is %q: %w", n.Name, bound.Name, ErrNodeTaken)
+	prev, _, err := d.store.AgentByName(ctx, inv.Name)
+	if err != nil {
+		return "", err
 	}
-	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, JoinedAt: d.cfg.Now()}
+	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, JoinedAt: d.cfg.Now(), Kind: prev.Kind}
 	if err := d.store.PutAgent(ctx, a); err != nil {
 		return "", err
 	}

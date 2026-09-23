@@ -32,9 +32,10 @@ var (
 const schema = `
 CREATE TABLE IF NOT EXISTS agents (
   name      TEXT PRIMARY KEY,
-  node_id   TEXT NOT NULL UNIQUE,
+  node_id   TEXT NOT NULL,
   node_name TEXT NOT NULL,
-  joined_at INTEGER NOT NULL
+  joined_at INTEGER NOT NULL,
+  kind      TEXT
 );
 CREATE TABLE IF NOT EXISTS invites (
   code    TEXT PRIMARY KEY,
@@ -97,6 +98,10 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
 	s := &Store{db: db, now: time.Now}
+	if err := s.migrateAgents(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agents: %w", err)
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
@@ -113,6 +118,73 @@ func (s *Store) Close() error { return s.db.Close() }
 // DB exposes the handle for packages that add their own tables (audit).
 func (s *Store) DB() *sql.DB { return s.db }
 
+// migrateAgents upgrades an agents table created before several agents could
+// share one node: that table declared node_id UNIQUE and had no kind column.
+// SQLite cannot drop a constraint in place, so the table is rebuilt in one
+// transaction. It is a no-op on a current table.
+func (s *Store) migrateAgents() error {
+	hasKind, uniqueNode, err := s.agentsShape()
+	if err != nil {
+		return err
+	}
+	if hasKind && !uniqueNode {
+		_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS agents_node_id ON agents(node_id)`)
+		return err
+	}
+	kindCol := "NULL"
+	if hasKind {
+		kindCol = "kind"
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`CREATE TABLE agents_new (
+		  name      TEXT PRIMARY KEY,
+		  node_id   TEXT NOT NULL,
+		  node_name TEXT NOT NULL,
+		  joined_at INTEGER NOT NULL,
+		  kind      TEXT
+		)`,
+		`INSERT INTO agents_new(name, node_id, node_name, joined_at, kind)
+		  SELECT name, node_id, node_name, joined_at, ` + kindCol + ` FROM agents`,
+		`DROP TABLE agents`,
+		`ALTER TABLE agents_new RENAME TO agents`,
+		`CREATE INDEX agents_node_id ON agents(node_id)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// agentsShape reports whether the agents table has a kind column and whether
+// node_id carries a UNIQUE constraint.
+func (s *Store) agentsShape() (hasKind, uniqueNode bool, err error) {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('agents')`)
+	if err != nil {
+		return false, false, err
+	}
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			rows.Close()
+			return false, false, err
+		}
+		hasKind = hasKind || col == "kind"
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, false, err
+	}
+	// A UNIQUE column constraint shows up as an index with origin 'u'.
+	err = s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_index_list('agents') WHERE origin = 'u')`).Scan(&uniqueNode)
+	return hasKind, uniqueNode, err
+}
+
 // --- identity.Store ---
 
 func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
@@ -121,12 +193,13 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 		return err
 	}
 	defer tx.Rollback()
-	// A name moving to a new machine replaces its old binding.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ? OR node_id = ?`, a.Name, a.NodeID); err != nil {
+	// A name moving to a new machine replaces its old binding. Other agents
+	// on either machine are untouched: a node may carry several names.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at) VALUES (?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind) VALUES (?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -141,8 +214,34 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	return n > 0, err
 }
 
+// SetAgentKind records an agent's runtime kind; "" stores NULL.
+func (s *Store) SetAgentKind(ctx context.Context, name, kind string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET kind = ? WHERE name = ?`, nullable(kind), name)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *Store) Agents(ctx context.Context) ([]identity.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at FROM agents ORDER BY name`)
+	return s.agentsWhere(ctx, "1 = 1")
+}
+
+func (s *Store) AgentsByNode(ctx context.Context, nodeID string) ([]identity.Agent, error) {
+	return s.agentsWhere(ctx, "node_id = ?", nodeID)
+}
+
+func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, bool, error) {
+	agents, err := s.agentsWhere(ctx, "name = ?", name)
+	if err != nil || len(agents) == 0 {
+		return identity.Agent{}, false, err
+	}
+	return agents[0], true, nil
+}
+
+func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]identity.Agent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, '') FROM agents WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +250,7 @@ func (s *Store) Agents(ctx context.Context) ([]identity.Agent, error) {
 	for rows.Next() {
 		var a identity.Agent
 		var joined int64
-		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined); err != nil {
+		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind); err != nil {
 			return nil, err
 		}
 		a.JoinedAt = time.UnixMilli(joined)
@@ -160,27 +259,12 @@ func (s *Store) Agents(ctx context.Context) ([]identity.Agent, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) AgentByNode(ctx context.Context, nodeID string) (identity.Agent, bool, error) {
-	return s.agentWhere(ctx, "node_id = ?", nodeID)
-}
-
-func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, bool, error) {
-	return s.agentWhere(ctx, "name = ?", name)
-}
-
-func (s *Store) agentWhere(ctx context.Context, where string, arg string) (identity.Agent, bool, error) {
-	var a identity.Agent
-	var joined int64
-	err := s.db.QueryRowContext(ctx, `SELECT name, node_id, node_name, joined_at FROM agents WHERE `+where, arg).
-		Scan(&a.Name, &a.NodeID, &a.NodeName, &joined)
-	if errors.Is(err, sql.ErrNoRows) {
-		return identity.Agent{}, false, nil
+// nullable maps "" to SQL NULL.
+func nullable(v string) any {
+	if v == "" {
+		return nil
 	}
-	if err != nil {
-		return identity.Agent{}, false, err
-	}
-	a.JoinedAt = time.UnixMilli(joined)
-	return a, true, nil
+	return v
 }
 
 func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {

@@ -21,7 +21,7 @@ func connect() (*client.Relay, client.Config, error) {
 	if cfg.Relay == "" {
 		return nil, cfg, errors.New("no relay configured: run `tincan join <code> --relay http://tincan-relay` or set TINCAN_RELAY")
 	}
-	r, err := client.NewRelay(cfg.Relay, cfg.Proxy)
+	r, err := client.NewRelayFor(cfg)
 	return r, cfg, err
 }
 
@@ -120,7 +120,7 @@ func relayFor(override string) (*client.Relay, client.Config, error) {
 	}
 	cfg, _ := client.LoadConfig()
 	cfg.Relay = override
-	r, err := client.NewRelay(cfg.Relay, cfg.Proxy)
+	r, err := client.NewRelayFor(cfg)
 	return r, cfg, err
 }
 
