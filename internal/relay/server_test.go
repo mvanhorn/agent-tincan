@@ -614,3 +614,29 @@ func TestSweepRequeueWakesAgainForRelayWake(t *testing.T) {
 		t.Fatalf("wake events = %v, want the original queue and one for the requeue", rec.to)
 	}
 }
+
+type requeueRecorder struct {
+	queuedRecorder
+	requeued []string
+}
+
+func (q *requeueRecorder) Requeued(_ context.Context, req envelope.Request) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.requeued = append(q.requeued, req.To)
+}
+
+func TestSweepPrefersRequeuedHook(t *testing.T) {
+	h := newHarness(t, Config{DeliveryLease: time.Millisecond})
+	rec := &requeueRecorder{}
+	h.srv.SetEvents(rec)
+	h.send(grokAddr, "muse", "x")
+	h.do(museAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
+	time.Sleep(10 * time.Millisecond)
+	h.srv.Sweep(context.Background())
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.to) != 1 || len(rec.requeued) != 1 || rec.requeued[0] != "muse" {
+		t.Fatalf("queued = %v, requeued = %v; want the requeue to use Requeued", rec.to, rec.requeued)
+	}
+}

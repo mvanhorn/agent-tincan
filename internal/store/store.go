@@ -554,9 +554,14 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		}
 		return rows.Err()
 	}
+	// A claim past its TTL expires once its lease runs out rather than going
+	// back to the queue, where it would only wake the agent for a request
+	// Deliver rejects.
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE status IN (?, ?) AND expires_at <= ? RETURNING id, trace_id, from_agent, to_agent, status`,
-		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered), now); err != nil {
+		WHERE (status IN (?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
+		RETURNING id, trace_id, from_agent, to_agent, status`,
+		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered),
+		string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
 	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?

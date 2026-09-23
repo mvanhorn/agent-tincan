@@ -163,25 +163,37 @@ func (w *Waker) WakeMethod(agent string) string {
 // Queued implements relay.Events. Relay-side methods schedule a debounced
 // nudge; agent-side methods need nothing from the relay.
 func (w *Waker) Queued(_ context.Context, req envelope.Request) {
-	t, ok := w.cfg[req.To]
+	w.schedule(req.To, true)
+}
+
+// schedule debounces a relay-side nudge for agent. checkOnline skips agents
+// whose poller already has the request.
+func (w *Waker) schedule(agent string, checkOnline bool) {
+	t, ok := w.cfg[agent]
 	if !ok || (t.Method != Webhook && t.Method != Email) {
 		return
 	}
-	if w.opts.Online != nil && w.opts.Online(req.To) {
+	if checkOnline && w.opts.Online != nil && w.opts.Online(agent) {
 		return // its poller already has it
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.pending[req.To]++
-	if _, scheduled := w.timers[req.To]; scheduled {
+	w.pending[agent]++
+	if _, scheduled := w.timers[agent]; scheduled {
 		return
 	}
-	agent := req.To
 	w.wg.Add(1)
 	w.timers[agent] = time.AfterFunc(w.opts.Debounce, func() {
 		defer w.wg.Done()
 		w.fire(agent)
 	})
+}
+
+// Requeued implements relay.Requeuer. A requeue means the agent's own
+// delivery or claim lease ran out, so a recent poll does not prove a poller
+// holds the request; relay-side methods are nudged without the online check.
+func (w *Waker) Requeued(_ context.Context, req envelope.Request) {
+	w.schedule(req.To, false)
 }
 
 // Flush waits for scheduled nudges (tests and shutdown).

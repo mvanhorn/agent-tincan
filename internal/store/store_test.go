@@ -480,3 +480,22 @@ func TestOldInvitesTableMigratesOnOpen(t *testing.T) {
 		t.Fatalf("kind after reopen = %+v", inv)
 	}
 }
+
+// A claim whose lease runs out after the request's TTL expires it directly;
+// requeueing it would only wake the agent for a request Deliver then rejects.
+func TestSweepExpiresClaimPastTTLInsteadOfRequeueing(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	req := ask(t, s, "grokbot", "hermes", "x") // one-hour TTL
+	if _, err := s.Deliver(ctx, "hermes", 10, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, req.ID, "hermes", 2*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(2*time.Hour + time.Second) // past both the TTL and the claim lease
+	tr, err := s.Sweep(ctx)
+	if err != nil || len(tr) != 1 || tr[0].Status != envelope.StatusExpired {
+		t.Fatalf("sweep = %+v, %v; want one expiry and no requeue", tr, err)
+	}
+}

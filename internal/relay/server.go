@@ -70,6 +70,12 @@ type Events interface {
 	Queued(ctx context.Context, req envelope.Request)
 }
 
+// Requeuer is an optional Events extension for requests the sweep returned to
+// the queue after a lease ran out. Without it the sweep falls back to Queued.
+type Requeuer interface {
+	Requeued(ctx context.Context, req envelope.Request)
+}
+
 // Server is the relay.
 type Server struct {
 	cfg    Config
@@ -200,8 +206,11 @@ func (s *Server) Sweep(ctx context.Context) {
 			s.hub.notify(inboxKey(t.To))
 			// An agent woken by the relay has no poller to see the requeue,
 			// so wake it again; pollers are skipped by the waker itself.
-			if s.events != nil {
-				s.events.Queued(ctx, envelope.Request{ID: t.ID, TraceID: t.TraceID, From: t.From, To: t.To})
+			req := envelope.Request{ID: t.ID, TraceID: t.TraceID, From: t.From, To: t.To}
+			if rq, ok := s.events.(Requeuer); ok {
+				rq.Requeued(ctx, req)
+			} else if s.events != nil {
+				s.events.Queued(ctx, req)
 			}
 		}
 	}

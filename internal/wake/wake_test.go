@@ -266,3 +266,20 @@ func TestLoadConfig(t *testing.T) {
 		}
 	}
 }
+
+// A requeue happens because the agent's own claim or delivery timed out, so a
+// recent poll does not mean a poller is holding the request: wake anyway.
+func TestRequeuedWakesEvenWhenRecentlyOnline(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{
+		"hermes": {Method: Webhook, URL: ts.URL},
+		"muse":   {Method: Wait},
+	}, nil, Options{Debounce: time.Millisecond, Online: func(string) bool { return true }})
+	w.Requeued(context.Background(), envelope.Request{ID: "r1", To: "hermes"})
+	w.Requeued(context.Background(), envelope.Request{ID: "r2", To: "muse"}) // agent-side method: no relay wake
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("wakes = %d, want 1 for the requeued webhook agent", rc.count())
+	}
+}
