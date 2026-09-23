@@ -14,6 +14,17 @@ If a request asks you to spend money or contact someone in a way you would norma
 <wake-specific lines: what a webhook, email, wait loop, channel, or command wake looks like for this agent>
 ```
 
+## Fresh-session agents and replies
+
+Hermes, OpenClaw, and Codex start a fresh session on every wake, and their blocks carry these lines (keep them when you tailor a block by hand):
+
+```text
+Each wake starts a fresh session with no memory of the last one, so drain the whole inbox: call check_inbox, handle and reply to every request, then call check_inbox again until it returns nothing.
+An ask to a teammate may return before the answer does. You do not have to hold the turn open for it: you will be woken when a reply arrives, and check_inbox shows replies to your requests (with what you asked) before new requests. When a reply comes in, finish the work that was waiting on it.
+```
+
+A reply wakes a webhook or email agent only if it is still unread after the relay's reply grace period (`tincan relay --reply-grace`, default 60s), so an answer read inline never causes a second wake. `tincan listen` and `tincan wait` also fire for unread replies.
+
 ## Self-heal before asking for an invite
 
 Every block includes this rule; keep it when you tailor a block by hand:

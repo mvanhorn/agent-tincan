@@ -18,11 +18,12 @@ func listenCmd() *cobra.Command {
 	var once bool
 	cmd := &cobra.Command{
 		Use:   "listen --exec <command>",
-		Short: "Stay connected and run a command whenever teammates' requests are waiting",
-		Long: `Hold a long-poll to the relay and run --exec when requests are waiting.
-The requests are not taken, so the agent picks them up itself with
-check_inbox or "tincan inbox". The command gets TINCAN_WAITING (the count)
-in its environment and runs through "sh -c".
+		Short: "Stay connected and run a command whenever teammates' requests or replies are waiting",
+		Long: `Hold a long-poll to the relay and run --exec when requests, or replies to
+this agent's own requests, are waiting. Nothing is taken, so the agent picks
+them up itself with check_inbox or "tincan inbox". The command gets
+TINCAN_WAITING (requests plus unseen replies) in its environment and runs
+through "sh -c".
 
 Use this for agents whose runtime stays up and can be nudged by a command,
 for example opening a Claude Code session in cmux. For agents that get a new
@@ -38,7 +39,7 @@ turn when a background command exits (Muse), use "tincan wait" instead.`,
 			return listen(cmd.Context(), r, execCmd, once)
 		},
 	}
-	cmd.Flags().StringVar(&execCmd, "exec", "", "command to run when requests are waiting")
+	cmd.Flags().StringVar(&execCmd, "exec", "", "command to run when requests or replies are waiting")
 	cmd.Flags().BoolVar(&once, "once", false, "exit after the first nudge")
 	return cmd
 }
@@ -46,7 +47,8 @@ turn when a background command exits (Muse), use "tincan wait" instead.`,
 func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) error {
 	backoff := time.Second
 	for {
-		n, err := r.Peek(ctx, client.DefaultPollHold)
+		w, err := r.Peek(ctx, client.DefaultPollHold)
+		n := w.Total
 		switch {
 		case ctx.Err() != nil:
 			return ctx.Err()
@@ -69,7 +71,7 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 		c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(n))
 		c.Stdout, c.Stderr = os.Stdout, os.Stderr
 		if err := c.Run(); err != nil {
-			// A failed nudge is retried on the next loop; requests stay queued.
+			// A failed nudge is retried on the next loop; nothing was taken.
 			os.Stderr.WriteString("tincan listen: command failed: " + err.Error() + "\n")
 		}
 		if once {

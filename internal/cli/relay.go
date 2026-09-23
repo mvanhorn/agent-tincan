@@ -35,6 +35,7 @@ type relayFlags struct {
 	admins      []string
 	adminLogins []string
 	noRebind    bool
+	replyGrace  time.Duration
 
 	gateway         bool
 	gatewayHostname string
@@ -57,7 +58,9 @@ the state dir and from machines named in --admin that carry no Tailscale tags
 (e.g. tag:agent) so they can never be admins.
 
 Wake settings (webhook URLs, email addresses, keys) live in wake.json in the
-state dir, chmod 600. They are never sent to agents.
+state dir, chmod 600. They are never sent to agents. A webhook or email agent
+is also woken when a reply to its own request is still unread after
+--reply-grace.
 
 A rebuilt machine (a new Tailscale node with the same machine name, or that
 name plus a "-1" style suffix) is re-admitted as its old agent on its first
@@ -73,6 +76,7 @@ off with --no-auto-rebind.`,
 	cmd.Flags().StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
 	cmd.Flags().StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
 	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
+	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
 	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
 	cmd.Flags().StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
 	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
@@ -145,7 +149,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
-	waker := wake.New(wakeCfg, st, wake.Options{Online: srv.Online})
+	waker := wake.New(wakeCfg, st, wake.Options{Online: srv.Online, UnseenReplies: srv.UnseenReplies, ReplyGrace: f.replyGrace})
 	srv.SetEvents(waker)
 	srv.SetWakeNamer(waker)
 	go srv.Run(ctx)

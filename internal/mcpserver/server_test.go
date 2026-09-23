@@ -183,9 +183,9 @@ func TestNotifySendsWithoutWaiting(t *testing.T) {
 	if !strings.Contains(out, "Sent to grokbot") || time.Since(start) > 2*time.Second {
 		t.Fatalf("notify = %q after %v", out, time.Since(start))
 	}
-	reqs, _ := m.Client(t, "grokbot").Poll(context.Background(), 0)
-	if len(reqs) != 1 || reqs[0].Kind != envelope.KindNotify {
-		t.Fatalf("grokbot got %+v", reqs)
+	in, _ := m.Client(t, "grokbot").Poll(context.Background(), 0)
+	if len(in.Requests) != 1 || in.Requests[0].Kind != envelope.KindNotify {
+		t.Fatalf("grokbot got %+v", in)
 	}
 }
 
@@ -294,9 +294,9 @@ func (r *recorder) Get(context.Context, string, time.Duration) (client.Result, e
 	return client.Result{}, nil
 }
 
-func (r *recorder) Poll(context.Context, time.Duration) ([]envelope.Request, error) {
+func (r *recorder) Poll(context.Context, time.Duration) (client.Inbox, error) {
 	r.calls = append(r.calls, "Poll")
-	return nil, nil
+	return client.Inbox{}, nil
 }
 
 func (r *recorder) Claim(context.Context, string) (envelope.Request, error) {
@@ -346,5 +346,27 @@ func TestOnboardOnlyReadsRoster(t *testing.T) {
 	}
 	if k.RelayURL != "http://tincan-relay" || !slices.Equal(blockNames(k), []string{"hermes", "muse"}) || k.Agents[0].Kind != "hermes" {
 		t.Fatalf("kit = %+v", k)
+	}
+}
+
+// check_inbox shows replies to the agent's own asks first, under their own
+// heading, then new requests, and marks the replies seen.
+func TestCheckInboxShowsRepliesFirst(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
+	req, _ := grok.Send(ctx, "muse", "call the garage", envelope.KindAsk, "")
+	muse.Claim(ctx, req.ID)
+	muse.Reply(ctx, req.ID, "no slots this week", envelope.StatusDeclined)
+	m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
+
+	cs := session(t, m, "grokbot")
+	got := call(t, cs, "check_inbox", nil)
+	heading, reply, request := strings.Index(got, "Replies to your requests:"), strings.Index(got, "no slots this week"), strings.Index(got, "summarize the report")
+	if heading < 0 || reply < heading || request < reply || !strings.Contains(got, req.ID) || !strings.Contains(got, "declined") {
+		t.Fatalf("check_inbox = %q", got)
+	}
+	if again := call(t, cs, "check_inbox", nil); strings.Contains(again, "no slots") || !strings.Contains(again, "No requests waiting") {
+		t.Fatalf("second check_inbox = %q", again)
 	}
 }

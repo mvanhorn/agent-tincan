@@ -1,0 +1,152 @@
+package relay
+
+import (
+	"context"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+)
+
+type replyRecorder struct {
+	queuedRecorder
+	replied []envelope.Request
+}
+
+func (q *replyRecorder) Replied(_ context.Context, req envelope.Request) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.replied = append(q.replied, req)
+}
+
+type repliesPoll struct {
+	Requests []envelope.Request `json:"requests"`
+	Replies  []envelope.Result  `json:"replies"`
+}
+
+type peekResult struct {
+	Waiting int               `json:"waiting"`
+	Queued  int               `json:"queued"`
+	Replies []envelope.Result `json:"replies"`
+}
+
+// answer has target claim and reply to req.
+func (h *harness) answer(addr string, req envelope.Request, body string) {
+	h.t.Helper()
+	h.do(addr, "POST", "/v1/requests/"+req.ID+"/claim", "", http.StatusOK, nil)
+	h.do(addr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"`+body+`"}`, http.StatusOK, nil)
+}
+
+// A reply tells the Events listener who asked, so the waker can nudge the
+// asker rather than the agent that answered.
+func TestReplyFiresRepliedForAsker(t *testing.T) {
+	h := newHarness(t, Config{})
+	rec := &replyRecorder{}
+	h.srv.SetEvents(rec)
+	sent := h.send(grokAddr, "muse", "call the garage")
+	h.answer(museAddr, sent, "Tue 3pm")
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.replied) != 1 || rec.replied[0].ID != sent.ID || rec.replied[0].From != "grokbot" || rec.replied[0].To != "muse" {
+		t.Fatalf("replied events = %+v, want one for grokbot's request", rec.replied)
+	}
+}
+
+// Events without the Replier extension keep working when a reply lands.
+func TestReplyWithoutReplierIsFine(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.srv.SetEvents(&queuedRecorder{})
+	h.answer(museAddr, h.send(grokAddr, "muse", "x"), "y")
+}
+
+// Peek and replies=keep report an unseen reply without marking it; a plain
+// poll returns it once and marks it seen.
+func TestPollReturnsRepliesAndMarksSeenOnlyWhenTaking(t *testing.T) {
+	h := newHarness(t, Config{})
+	sent := h.send(grokAddr, "muse", "call the garage")
+	h.answer(museAddr, sent, "Tue 3pm")
+	if n := h.srv.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("unseen count = %d, want 1", n)
+	}
+
+	var pk peekResult
+	h.do(grokAddr, "GET", "/v1/poll?peek=1&hold=0", "", http.StatusOK, &pk)
+	if pk.Waiting != 1 || pk.Queued != 0 || len(pk.Replies) != 1 || pk.Replies[0].Request.ID != sent.ID || pk.Replies[0].Reply.Body != "Tue 3pm" {
+		t.Fatalf("peek = %+v", pk)
+	}
+	var kept repliesPoll
+	h.do(grokAddr, "GET", "/v1/poll?replies=keep&hold=0", "", http.StatusOK, &kept)
+	if len(kept.Replies) != 1 || len(kept.Requests) != 0 {
+		t.Fatalf("keep poll = %+v", kept)
+	}
+	h.do(grokAddr, "GET", "/v1/poll?replies=none&hold=0", "", http.StatusNoContent, nil)
+
+	var took repliesPoll
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, &took)
+	if len(took.Replies) != 1 || took.Replies[0].Reply.From != "muse" || took.Replies[0].Status != envelope.StatusAnswered {
+		t.Fatalf("poll = %+v", took)
+	}
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	h.do(grokAddr, "GET", "/v1/poll?peek=1&hold=0", "", http.StatusNoContent, nil)
+	if n := h.srv.UnseenReplies("grokbot"); n != 0 {
+		t.Fatalf("unseen count after poll = %d, want 0", n)
+	}
+}
+
+// Requests and replies come back together in one poll.
+func TestPollReturnsRequestsAndReplies(t *testing.T) {
+	h := newHarness(t, Config{})
+	sent := h.send(grokAddr, "muse", "call the garage")
+	h.answer(museAddr, sent, "Tue 3pm")
+	incoming := h.send(instinctAddr, "grokbot", "summarize the report")
+	var got repliesPoll
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, &got)
+	if len(got.Requests) != 1 || got.Requests[0].ID != incoming.ID || len(got.Replies) != 1 || got.Replies[0].Request.ID != sent.ID {
+		t.Fatalf("poll = %+v", got)
+	}
+}
+
+// A poll held open for the asker returns as soon as a reply lands, in both
+// taking and peek mode.
+func TestPollHoldReturnsEarlyOnNewReply(t *testing.T) {
+	for _, path := range []string{"/v1/poll", "/v1/poll?peek=1"} {
+		t.Run(path, func(t *testing.T) {
+			h := newHarness(t, Config{PollHold: 5 * time.Second})
+			sent := h.send(grokAddr, "muse", "call the garage")
+			h.do(museAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
+			var got repliesPoll
+			var took time.Duration
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				start := time.Now()
+				h.do(grokAddr, "GET", path, "", http.StatusOK, &got)
+				took = time.Since(start)
+			})
+			time.Sleep(100 * time.Millisecond) // let the poll start waiting
+			h.do(museAddr, "POST", "/v1/requests/"+sent.ID+"/reply", `{"body":"Tue 3pm"}`, http.StatusOK, nil)
+			wg.Wait()
+			if len(got.Replies) != 1 || got.Replies[0].Request.ID != sent.ID {
+				t.Fatalf("poll got %+v", got)
+			}
+			if took > time.Second {
+				t.Fatalf("poll returned after %v, want under 1s after the reply", took)
+			}
+		})
+	}
+}
+
+// The asker reading the reply through get-reply (or an inline ask wait)
+// marks it seen, so the next poll does not repeat it.
+func TestGetReplyMarksReplySeen(t *testing.T) {
+	h := newHarness(t, Config{})
+	sent := h.send(grokAddr, "muse", "call the garage")
+	h.answer(museAddr, sent, "Tue 3pm")
+	h.do(museAddr, "GET", "/v1/requests/"+sent.ID, "", http.StatusOK, nil) // the target's read does not count
+	if n := h.srv.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("unseen after target get = %d, want 1", n)
+	}
+	h.do(grokAddr, "GET", "/v1/requests/"+sent.ID, "", http.StatusOK, nil)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+}

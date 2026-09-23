@@ -3,7 +3,8 @@
 # WEBHOOK_ENABLED=true / WEBHOOK_PORT=8644 in ~/.hermes/.env).
 #
 # The relay POSTs to http://<this-host>:8644/webhooks/tincan with body
-# {"source":"agent-tincan","message":"<count text>","text":"<same>"} and,
+# {"source":"agent-tincan","message":"<count text>","text":"<same>"} (counts
+# of waiting requests and unread replies, never their content) and,
 # when wake.json sets hmac_secret for this agent, signs it with
 # X-Hub-Signature-256 using the secret below.
 platforms:
@@ -23,8 +24,9 @@ platforms:
             its request id. Keep calling check_inbox until it reports the
             inbox empty before you stop.
 
-            If finishing a request means asking a teammate something first,
-            send that ask and wait for the reply inline, in this same turn.
-            A reply to your own ask does not trigger another wake, only a
-            new request from a teammate does.
+            check_inbox also shows replies to requests you sent earlier,
+            with what you asked: finish the work that was waiting on each.
+            If finishing a request means asking a teammate something, send
+            that ask. It may return before the answer does; you do not have
+            to wait for it, because you will be woken when the reply arrives.
           deliver: "log"

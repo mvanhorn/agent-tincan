@@ -76,6 +76,12 @@ type Requeuer interface {
 	Requeued(ctx context.Context, req envelope.Request)
 }
 
+// Replier is an optional Events extension told when a request gets its
+// reply, so the asker can be woken to read it. req.From is the asker.
+type Replier interface {
+	Replied(ctx context.Context, req envelope.Request)
+}
+
 // Server is the relay.
 type Server struct {
 	cfg    Config
@@ -303,6 +309,11 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, req)
 }
 
+// handlePoll holds a long-poll until requests for the caller or unseen
+// replies to its own requests are waiting. A plain poll delivers the requests
+// and marks the returned replies seen. peek=1 only reports what is waiting,
+// taking nothing. replies=keep returns replies without marking them seen and
+// replies=none leaves them out, so they neither appear nor end the hold.
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	name := s.agent(w, r)
 	if name == "" {
@@ -310,6 +321,16 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 	hold := durationParam(r, "hold", s.cfg.PollHold, s.cfg.PollHold)
 	peek := r.URL.Query().Get("peek") == "1"
+	replies := r.URL.Query().Get("replies")
+	if peek {
+		replies = client.RepliesKeep
+	}
+	switch replies {
+	case client.RepliesTake, client.RepliesKeep, client.RepliesNone:
+	default:
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("replies must be %q or %q", client.RepliesKeep, client.RepliesNone))
+		return
+	}
 	s.mu.Lock()
 	s.polling[name]++
 	s.mu.Unlock()
@@ -323,17 +344,26 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	for {
 		s.touch(name)
 		wake := s.hub.wait(inboxKey(name))
+		var reps []envelope.Result
+		if replies != client.RepliesNone {
+			var err error
+			if reps, err = s.store.UnseenReplies(r.Context(), name); err != nil {
+				writeErr(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
 		if peek {
-			// Report how many are waiting without delivering them, so a
-			// listener can nudge the agent and the agent's own check_inbox
-			// still receives them.
+			// Report what is waiting without delivering it, so a listener
+			// can nudge the agent and the agent's own check_inbox still
+			// receives it. waiting counts replies too, so an older listener
+			// that reads only waiting still fires for them.
 			n, err := s.store.CountQueued(r.Context(), name)
 			if err != nil {
 				writeErr(w, http.StatusInternalServerError, err)
 				return
 			}
-			if n > 0 {
-				writeJSON(w, http.StatusOK, map[string]any{"waiting": n})
+			if n > 0 || len(reps) > 0 {
+				writeJSON(w, http.StatusOK, map[string]any{"waiting": n + len(reps), "queued": n, "replies": emptyIfNil(reps)})
 				return
 			}
 			select {
@@ -351,11 +381,25 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
-		if len(reqs) > 0 {
+		if len(reqs) > 0 || len(reps) > 0 {
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"requests": reqs})
+			if replies == client.RepliesTake && len(reps) > 0 {
+				ids := make([]string, len(reps))
+				for i, rep := range reps {
+					ids[i] = rep.Request.ID
+				}
+				if err := s.store.MarkRepliesSeen(r.Context(), name, ids); err != nil {
+					writeErr(w, http.StatusInternalServerError, err)
+					return
+				}
+			}
+			out := map[string]any{"requests": emptyIfNil(reqs)}
+			if len(reps) > 0 {
+				out["replies"] = reps
+			}
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
 		select {
@@ -368,6 +412,14 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// emptyIfNil keeps a JSON list a list rather than null.
+func emptyIfNil[T any](v []T) []T {
+	if v == nil {
+		return []T{}
+	}
+	return v
 }
 
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +460,16 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.notify(requestKey(id))
 	s.record(r.Context(), "replied", id, "", name, store.DetailJSON(map[string]any{"status": rep.Status}))
+	// The asker learns of the reply from a held poll now, or from a wake
+	// once the waker's grace period shows it went unread.
+	if req, _, err := s.store.Request(r.Context(), id); err == nil {
+		s.hub.notify(inboxKey(req.From))
+		if rp, ok := s.events.(Replier); ok {
+			rp.Replied(r.Context(), req)
+		}
+	} else {
+		log.Printf("reply %s: look up asker: %v", id, err)
+	}
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -635,6 +697,20 @@ func (s *Server) Online(agent string) bool {
 	}
 	last := s.lastPoll[agent]
 	return !last.IsZero() && s.cfg.Now().Sub(last) < 5*time.Second
+}
+
+// UnseenReplies returns how many replies to agent's own requests it has not
+// read yet. The waker asks this when a reply's grace period ends. A failed
+// count reports one, since a spare nudge costs less than a missed reply.
+func (s *Server) UnseenReplies(agent string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := s.store.CountUnseenReplies(ctx, agent)
+	if err != nil {
+		log.Printf("unseen replies for %s: %v", agent, err)
+		return 1
+	}
+	return n
 }
 
 func (s *Server) touch(agent string) {

@@ -7,8 +7,8 @@
 #
 #   tincan listen --exec ~/agent-tincan/examples/codex/codex-wake.sh
 #
-# "tincan listen" runs this script whenever requests are waiting and passes
-# the count in TINCAN_WAITING. It does not take the requests itself, and it
+# "tincan listen" runs this script whenever requests, or unread replies to
+# codex's own requests, are waiting and passes the count in TINCAN_WAITING. It does not take the requests itself, and it
 # does not wait for a previous run of this script to finish before nudging
 # again, so this script takes a lock and exits quietly if a run is already
 # in progress; requests stay queued for the next nudge.
@@ -29,7 +29,7 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 mkdir -p "$CODEX_WORKDIR"
 
-PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan request(s) waiting from teammates. Call check_inbox, and for each request handle it the way you would handle a request from your owner, then call reply with that request's id and your result. Call check_inbox again and keep going until it returns nothing waiting, so this run drains the whole inbox. If you need something from a teammate yourself, call ask and wait for its reply inline, or poll get_reply, before you move on: you will not be woken again just because that reply arrived."
+PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan item(s) waiting: requests from teammates, or replies to requests you sent. Call check_inbox. It shows replies to your requests first, with what you asked: finish the work that was waiting on each one. Then, for each request, handle it the way you would handle a request from your owner, and call reply with that request's id and your result. Call check_inbox again and keep going until it returns nothing waiting, so this run drains the whole inbox. If you need something from a teammate yourself, call ask; it may return before the answer does, and you do not have to wait for it: you will be woken again when the reply arrives."
 
 # workspace-write plus approval_policy=never lets this unattended run act
 # without a human present to answer approval prompts; commands still run

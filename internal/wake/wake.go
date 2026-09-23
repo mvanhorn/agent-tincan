@@ -15,7 +15,12 @@
 //   - command (agent-side): `tincan listen --exec` runs a command.
 //   - none: the agent checks at the start of each turn. ChatGPT.
 //
-// Wake messages carry only a count and an instruction, never request text.
+// A reply to an agent's own request also wakes a relay-side agent, after a
+// grace period that lets an inline wait read it first, and only if the reply
+// is still unseen when the grace period ends.
+//
+// Wake messages carry only counts and an instruction, never request or reply
+// text.
 // URLs, addresses, and keys live in the relay-local wake config and are never
 // served to agents.
 package wake
@@ -109,25 +114,44 @@ func LoadConfig(path string) (Config, error) {
 	return c, nil
 }
 
+// DefaultReplyGrace is how long a reply may sit unread before its asker is
+// woken for it.
+const DefaultReplyGrace = time.Minute
+
 // Options tunes a Waker.
 type Options struct {
 	Debounce     time.Duration // coalesce a burst into one nudge; default 3s
 	RetryDelay   time.Duration // wait before the single retry; default 5s
 	AgentMailAPI string        // default https://api.agentmail.to/v0
 	HTTP         *http.Client
-	Online       func(agent string) bool // skip wakes for agents already polling
-	Now          func() time.Time
+	Online       func(agent string) bool // skip request wakes for agents already polling
+	// ReplyGrace is how long a reply may go unread before the asker is
+	// woken; default DefaultReplyGrace.
+	ReplyGrace time.Duration
+	// UnseenReplies counts the replies agent has not read yet. A nudge
+	// that finds none for a reply-only wake is dropped, since the asker
+	// already read it inline.
+	UnseenReplies func(agent string) int
+	Now           func() time.Time
 }
 
-// Waker implements relay.Events and relay.WakeNamer.
+// nudge is one agent's pending wake.
+type nudge struct {
+	requests int         // requests queued since the last nudge
+	replies  int         // replies landed since the last nudge
+	timer    *time.Timer // fires the nudge
+	due      time.Time   // when timer fires (wall clock)
+}
+
+// Waker implements relay.Events, relay.Requeuer, relay.Replier and
+// relay.WakeNamer.
 type Waker struct {
 	cfg   Config
 	opts  Options
 	audit *store.Store
 
 	mu      sync.Mutex
-	pending map[string]int         // requests waiting for the next nudge
-	timers  map[string]*time.Timer // debounce timers
+	pending map[string]*nudge      // agents with a nudge scheduled
 	sent    map[string][]time.Time // relay-side wakes in the last hour
 	wg      sync.WaitGroup
 }
@@ -140,6 +164,9 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	if opts.RetryDelay == 0 {
 		opts.RetryDelay = 5 * time.Second
 	}
+	if opts.ReplyGrace == 0 {
+		opts.ReplyGrace = DefaultReplyGrace
+	}
 	if opts.AgentMailAPI == "" {
 		opts.AgentMailAPI = "https://api.agentmail.to/v0"
 	}
@@ -149,7 +176,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]int{}, timers: map[string]*time.Timer{}, sent: map[string][]time.Time{}}
+	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}}
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -166,29 +193,6 @@ func (w *Waker) Queued(_ context.Context, req envelope.Request) {
 	w.schedule(req.To, true)
 }
 
-// schedule debounces a relay-side nudge for agent. checkOnline skips agents
-// whose poller already has the request.
-func (w *Waker) schedule(agent string, checkOnline bool) {
-	t, ok := w.cfg[agent]
-	if !ok || (t.Method != Webhook && t.Method != Email) {
-		return
-	}
-	if checkOnline && w.opts.Online != nil && w.opts.Online(agent) {
-		return // its poller already has it
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.pending[agent]++
-	if _, scheduled := w.timers[agent]; scheduled {
-		return
-	}
-	w.wg.Add(1)
-	w.timers[agent] = time.AfterFunc(w.opts.Debounce, func() {
-		defer w.wg.Done()
-		w.fire(agent)
-	})
-}
-
 // Requeued implements relay.Requeuer. A requeue means the agent's own
 // delivery or claim lease ran out, so a recent poll does not prove a poller
 // holds the request; relay-side methods are nudged without the online check.
@@ -196,36 +200,118 @@ func (w *Waker) Requeued(_ context.Context, req envelope.Request) {
 	w.schedule(req.To, false)
 }
 
+// Replied implements relay.Replier: it schedules a nudge for the asker,
+// req.From, once the reply grace period ends. There is no online check,
+// because the asker's session may have ended seconds before the reply; the
+// unseen count at fire time decides instead.
+func (w *Waker) Replied(_ context.Context, req envelope.Request) {
+	if !w.relaySide(req.From) {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nudgeFor(req.From).replies++
+	w.arm(req.From, w.opts.ReplyGrace)
+}
+
+// schedule debounces a relay-side nudge for agent. checkOnline skips agents
+// whose poller already has the request.
+func (w *Waker) schedule(agent string, checkOnline bool) {
+	if !w.relaySide(agent) {
+		return
+	}
+	if checkOnline && w.opts.Online != nil && w.opts.Online(agent) {
+		return // its poller already has it
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.nudgeFor(agent).requests++
+	w.arm(agent, w.opts.Debounce)
+}
+
+// relaySide reports whether the relay itself wakes agent.
+func (w *Waker) relaySide(agent string) bool {
+	t, ok := w.cfg[agent]
+	return ok && (t.Method == Webhook || t.Method == Email)
+}
+
+// nudgeFor returns agent's pending nudge, creating it. Caller holds w.mu.
+func (w *Waker) nudgeFor(agent string) *nudge {
+	p := w.pending[agent]
+	if p == nil {
+		p = &nudge{}
+		w.pending[agent] = p
+	}
+	return p
+}
+
+// arm makes agent's nudge fire within d. A nudge already due sooner keeps
+// its time, so a burst coalesces and a reply never delays a request; one due
+// later is pulled in, so a request never waits out a reply's grace period.
+// Caller holds w.mu.
+func (w *Waker) arm(agent string, d time.Duration) {
+	p := w.pending[agent]
+	due := time.Now().Add(d)
+	if p.timer != nil {
+		if !due.Before(p.due) {
+			return
+		}
+		if !p.timer.Stop() {
+			return // already firing; it will pick up these counts
+		}
+		w.wg.Done() // the stopped timer's callback will never run
+	}
+	p.due = due
+	w.wg.Add(1)
+	p.timer = time.AfterFunc(d, func() {
+		defer w.wg.Done()
+		w.fire(agent)
+	})
+}
+
 // Flush waits for scheduled nudges (tests and shutdown).
 func (w *Waker) Flush() { w.wg.Wait() }
 
 func (w *Waker) fire(agent string) {
 	w.mu.Lock()
-	n := w.pending[agent]
+	p := w.pending[agent]
 	delete(w.pending, agent)
-	delete(w.timers, agent)
-	allowed := w.allow(agent)
 	w.mu.Unlock()
-	if n == 0 {
+	if p == nil {
 		return
+	}
+	replies := p.replies
+	if w.opts.UnseenReplies != nil {
+		replies = w.opts.UnseenReplies(agent)
+	}
+	if p.requests == 0 && replies == 0 {
+		return // every reply was already read inline
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	w.mu.Lock()
+	allowed := w.allow(agent)
+	w.mu.Unlock()
 	if !allowed {
-		w.record(ctx, "wake_skipped", agent, "hourly wake budget used up; requests stay queued")
+		w.record(ctx, "wake_skipped", agent, "hourly wake budget used up; requests and replies stay queued")
 		return
 	}
-	err := w.send(ctx, agent, n)
+	msg := WaitingMessage(p.requests, replies)
+	err := w.send(ctx, agent, msg)
 	if err != nil {
 		time.Sleep(w.opts.RetryDelay)
-		err = w.send(ctx, agent, n)
+		err = w.send(ctx, agent, msg)
 	}
 	if err != nil {
 		log.Printf("wake %s: %v", agent, err)
 		w.record(ctx, "wake_failed", agent, err.Error())
 		return
 	}
-	w.record(ctx, "woke", agent, fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, n))
+	detail := fmt.Sprintf("%s, %d waiting", w.cfg[agent].Method, p.requests)
+	if replies > 0 {
+		detail += fmt.Sprintf(", %d unseen replies", replies)
+	}
+	w.record(ctx, "woke", agent, detail)
 }
 
 // allow applies the hourly budget. Caller holds w.mu.
@@ -249,21 +335,44 @@ func (w *Waker) allow(agent string) bool {
 	return true
 }
 
-// Message is the only text a wake ever carries.
+// Message is the wake text for n waiting requests.
 func Message(n int) string {
-	noun := "request"
-	if n != 1 {
-		noun = "requests"
-	}
-	return fmt.Sprintf("Agent Tincan: %d %s from your teammates waiting. Run check_inbox (or `tincan inbox`) to pick them up, then reply to each.", n, noun)
+	return fmt.Sprintf("Agent Tincan: %d %s from your teammates waiting. Run check_inbox (or `tincan inbox`) to pick them up, then reply to each.", n, plural(n, "request", "requests"))
 }
 
-func (w *Waker) send(ctx context.Context, agent string, n int) error {
+// WaitingMessage is the only text a wake ever carries: counts of waiting
+// requests and of unseen replies to the agent's own requests, and what to
+// run. It never includes request or reply content.
+func WaitingMessage(requests, replies int) string {
+	switch {
+	case replies == 0:
+		return Message(requests)
+	case requests == 0 && replies == 1:
+		return "Agent Tincan: 1 reply to your request is waiting. Run check_inbox (or `tincan inbox`) to read it."
+	case requests == 0:
+		return fmt.Sprintf("Agent Tincan: %d replies to your requests are waiting. Run check_inbox (or `tincan inbox`) to read them.", replies)
+	}
+	then := "reply to each"
+	if requests == 1 {
+		then = "reply to it"
+	}
+	return fmt.Sprintf("Agent Tincan: %d %s from your teammates and %d %s waiting. Run check_inbox (or `tincan inbox`) to read the %s and pick up the %s, then %s.",
+		requests, plural(requests, "request", "requests"), replies, plural(replies, "reply to your request", "replies to your requests"),
+		plural(replies, "reply", "replies"), plural(requests, "request", "requests"), then)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+func (w *Waker) send(ctx context.Context, agent, msg string) error {
 	t := w.cfg[agent]
 	switch t.Method {
 	case Webhook:
 		// text mirrors message for runtimes that read text (OpenClaw /hooks/wake).
-		msg := Message(n)
 		body, _ := json.Marshal(map[string]string{"source": "agent-tincan", "message": msg, "text": msg})
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
@@ -280,7 +389,9 @@ func (w *Waker) send(ctx context.Context, agent string, n int) error {
 		}
 		return w.do(req)
 	case Email:
-		body, _ := json.Marshal(map[string]any{"to": t.EmailTo, "subject": "Agent Tincan: requests waiting", "text": Message(n)})
+		// The subject stays fixed for replies too: standing instructions
+		// match on it.
+		body, _ := json.Marshal(map[string]any{"to": t.EmailTo, "subject": "Agent Tincan: requests waiting", "text": msg})
 		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
 		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 		if err != nil {

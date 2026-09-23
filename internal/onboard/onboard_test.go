@@ -231,7 +231,7 @@ func TestFreshSessionRulesAndSecretFields(t *testing.T) {
 	}})
 	for _, n := range []string{"hermes", "openclaw", "codex"} {
 		txt := block(t, k, n).Instructions
-		if !strings.Contains(txt, "drain the whole inbox") || !strings.Contains(txt, "synchronous") {
+		if !strings.Contains(txt, "drain the whole inbox") || !strings.Contains(txt, "woken when a reply arrives") {
 			t.Errorf("%s block lacks fresh-session rules:\n%s", n, txt)
 		}
 	}
@@ -240,6 +240,30 @@ func TestFreshSessionRulesAndSecretFields(t *testing.T) {
 	}
 	if !strings.Contains(blockText(block(t, k, "openclaw")), "bearer_token") {
 		t.Error("openclaw block should name bearer_token")
+	}
+}
+
+// Replies to a fresh-session agent's own asks wake it now, so its block must
+// say so and drop the old advice to treat every ask as synchronous.
+func TestFreshSessionReplyWakeGuidance(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Roster: []Member{
+		{Name: "hermes", Wake: "webhook"}, {Name: "openclaw", Wake: "webhook"}, {Name: "codex", Wake: "command"},
+	}})
+	for _, n := range []string{"hermes", "openclaw", "codex"} {
+		txt := block(t, k, n).Instructions
+		for _, want := range []string{"may return before", "woken when a reply arrives", "check_inbox shows replies to your requests", "finish the work that was waiting on it"} {
+			if !strings.Contains(txt, want) {
+				t.Errorf("%s block missing %q:\n%s", n, want, txt)
+			}
+		}
+		for _, stale := range []string{"synchronous", "does not wake you"} {
+			if strings.Contains(txt, stale) {
+				t.Errorf("%s block still says %q:\n%s", n, stale, txt)
+			}
+		}
+	}
+	if setup := blockText(block(t, k, "codex")); !strings.Contains(setup, "requests or replies are waiting") {
+		t.Errorf("codex listener prompt should cover replies:\n%s", setup)
 	}
 }
 

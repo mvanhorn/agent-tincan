@@ -136,7 +136,8 @@ func TestChatGPTConnectsAndAsks(t *testing.T) {
 	if err != nil || res.IsError {
 		t.Fatalf("ask: %v %+v", err, res)
 	}
-	reqs, err := e.m.Client(t, "instinct").Poll(context.Background(), 0)
+	in, err := e.m.Client(t, "instinct").Poll(context.Background(), 0)
+	reqs := in.Requests
 	if err != nil || len(reqs) != 1 || reqs[0].From != "chatgpt" {
 		t.Fatalf("instinct got %+v, %v", reqs, err)
 	}

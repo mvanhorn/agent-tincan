@@ -39,9 +39,9 @@ func TestWaitRetriesTransientErrors(t *testing.T) {
 	r, _ := client.NewRelay(ts.URL, "")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	reqs, err := waitForRequests(ctx, r, 0)
-	if err != nil || len(reqs) != 1 || reqs[0].ID != "r1" {
-		t.Fatalf("wait = %+v, %v after %d calls", reqs, err, calls.Load())
+	in, err := waitForInbox(ctx, r, 0, client.RepliesKeep)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != "r1" {
+		t.Fatalf("wait = %+v, %v after %d calls", in, err, calls.Load())
 	}
 }
 
@@ -51,7 +51,7 @@ func TestWaitStopsWhenNotJoined(t *testing.T) {
 	}))
 	defer ts.Close()
 	r, _ := client.NewRelay(ts.URL, "")
-	if _, err := waitForRequests(context.Background(), r, 0); !client.IsStatus(err, http.StatusForbidden) {
+	if _, err := waitForInbox(context.Background(), r, 0, client.RepliesKeep); !client.IsStatus(err, http.StatusForbidden) {
 		t.Fatalf("want 403, got %v", err)
 	}
 }
@@ -73,9 +73,9 @@ func TestListenRunsCommandWithoutTakingRequests(t *testing.T) {
 	if strings.TrimSpace(string(got)) != "1" {
 		t.Fatalf("command saw TINCAN_WAITING=%q", got)
 	}
-	reqs, err := muse.Poll(context.Background(), 0)
-	if err != nil || len(reqs) != 1 {
-		t.Fatalf("request should still be waiting for muse: %+v %v", reqs, err)
+	in, err := muse.Poll(context.Background(), 0)
+	if err != nil || len(in.Requests) != 1 {
+		t.Fatalf("request should still be waiting for muse: %+v %v", in, err)
 	}
 }
 

@@ -1,0 +1,118 @@
+package store
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+)
+
+// MaxUnseenReplies bounds how many unseen replies one call returns.
+const MaxUnseenReplies = 50
+
+// replyStatuses are the terminal statuses a reply sets; only these requests
+// carry a reply the asker can see.
+var replyStatuses = []any{string(envelope.StatusAnswered), string(envelope.StatusFailed), string(envelope.StatusDeclined)}
+
+const replyStatusIn = `status IN (?, ?, ?)`
+
+// migrateReplySeen adds reply_seen_at to a requests table created before
+// replies were tracked as seen by the asker. Replies already stored are
+// marked seen at their last update, so an upgrade does not hand every asker
+// its whole history as new. It is a no-op on a current table.
+func (s *Store) migrateReplySeen() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'reply_seen_at')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`ALTER TABLE requests ADD COLUMN reply_seen_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE requests SET reply_seen_at = updated_at WHERE `+replyStatusIn, replyStatuses...); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_from_seen ON requests(from_agent, reply_seen_at)`)
+	return err
+}
+
+// UnseenReplies returns up to MaxUnseenReplies of agent's own requests that
+// have a reply agent has not seen yet, oldest reply first.
+func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
+	args := append([]any{agent}, replyStatuses...)
+	args = append(args, MaxUnseenReplies)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at
+		FROM requests q JOIN replies p ON p.request_id = q.id
+		WHERE q.from_agent = ? AND q.reply_seen_at = 0 AND q.`+replyStatusIn+`
+		ORDER BY p.created_at, q.id LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []envelope.Result
+	for rows.Next() {
+		var rep envelope.Reply
+		var repStatus string
+		var repCreated int64
+		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated}})
+		if err != nil {
+			return nil, err
+		}
+		rep.RequestID, rep.Status, rep.CreatedAt = req.ID, envelope.Status(repStatus), time.UnixMilli(repCreated).UTC()
+		out = append(out, envelope.Result{Request: req, Status: st, Reply: &rep})
+	}
+	return out, rows.Err()
+}
+
+// CountUnseenReplies returns how many replies to agent's requests it has not
+// seen, without the MaxUnseenReplies bound.
+func (s *Store) CountUnseenReplies(ctx context.Context, agent string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE from_agent = ? AND reply_seen_at = 0 AND `+replyStatusIn,
+		append([]any{agent}, replyStatuses...)...).Scan(&n)
+	return n, err
+}
+
+// MarkRepliesSeen records that agent has seen the replies to the requests in
+// ids. Ids agent did not send, or that have no reply yet, are left alone.
+func (s *Store) MarkRepliesSeen(ctx context.Context, agent string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := []any{s.now().UnixMilli(), agent}
+	args = append(args, replyStatuses...)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE requests SET reply_seen_at = ?
+		WHERE from_agent = ? AND reply_seen_at = 0 AND `+replyStatusIn+` AND id IN (?`+strings.Repeat(", ?", len(ids)-1)+`)`, args...)
+	return err
+}
+
+// prefixed qualifies each column in a comma-separated list with p.
+func prefixed(p, cols string) string {
+	parts := strings.Split(cols, ", ")
+	for i, c := range parts {
+		parts[i] = p + c
+	}
+	return strings.Join(parts, ", ")
+}
+
+// extraCols scans a request row that carries more columns after
+// requestCols, so scanRequest still decodes the request part.
+type extraCols struct {
+	sc    scanner
+	extra []any
+}
+
+func (e extraCols) Scan(dest ...any) error { return e.sc.Scan(append(dest, e.extra...)...) }

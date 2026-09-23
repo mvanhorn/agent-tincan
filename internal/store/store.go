@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS requests (
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL,
-  lease_until INTEGER NOT NULL DEFAULT 0
+  lease_until INTEGER NOT NULL DEFAULT 0,
+  reply_seen_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS requests_to_status ON requests(to_agent, status);
 CREATE TABLE IF NOT EXISTS replies (
@@ -111,6 +112,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate invites: %w", err)
+	}
+	if err := s.migrateReplySeen(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate reply seen: %w", err)
 	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
@@ -411,7 +416,8 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 	return req, err
 }
 
-// Reply stores the target's answer and closes the request.
+// Reply stores the target's answer and closes the request. The reply starts
+// unseen by the asker.
 func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply) (envelope.Reply, error) {
 	req, _, err := s.lookup(ctx, id)
 	if err != nil {
@@ -426,7 +432,7 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = 0
 		WHERE id = ? AND status IN (?, ?, ?)`,
 		string(rep.Status), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
@@ -447,7 +453,8 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 // Result is a request with its current status and reply, if any.
 type Result = envelope.Result
 
-// Get returns a request for its sender or its target.
+// Get returns a request for its sender or its target. When it hands the
+// sender a reply, that reply counts as seen.
 func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	req, status, err := s.lookup(ctx, id)
 	if err != nil {
@@ -459,6 +466,11 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	rep, err := s.replyFor(ctx, id)
 	if err != nil {
 		return Result{}, err
+	}
+	if rep != nil && req.From == agent {
+		if err := s.MarkRepliesSeen(ctx, agent, []string{id}); err != nil {
+			return Result{}, err
+		}
 	}
 	return Result{Request: req, Status: status, Reply: rep}, nil
 }

@@ -76,6 +76,6 @@ tincan listen --exec 'hermes -z "Call check_inbox, claim and do each waiting Age
 ## Limits
 
 - Every wake, webhook or fallback, starts a brand new Hermes session. It has no memory of an earlier wake, so the prompt must tell it to check and drain the whole inbox on every run, not just react to the message that triggered it.
-- Treat Hermes's own outbound `ask` calls as synchronous: the relay holds the connection for a teammate's reply for a while, so wait for it inline in the same turn. A reply to Hermes's own ask does not wake it again; only a new request addressed to `hermes` does.
+- An `ask` Hermes sends may return before the teammate answers; Hermes does not have to hold the turn open for it. When the reply arrives and is still unread after the relay's reply grace period (`--reply-grace`, default 60s), the relay wakes Hermes with a count-only message ("1 reply to your request is waiting"), and check_inbox shows replies to Hermes's requests (with what it asked) before new requests. The route prompt should tell Hermes to finish the work that was waiting on each reply.
 - A webhook route with no `secret` refuses to start. Do not set `secret` to `INSECURE_NO_AUTH` unless the webhook server is bound to loopback only.
 - The webhook payload's business fields (anything past `source`/`message`/`text`) are not used here, but Hermes treats all webhook payload content as untrusted by default; keep the `tincan` route's prompt narrow rather than dumping the raw payload.

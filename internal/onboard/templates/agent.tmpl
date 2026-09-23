@@ -5,7 +5,7 @@ setup.<kind> (one step per line, for the owner) and title.<kind> (recipe
 title). Data: Name, Kind, Wake, RelayURL, Owner, OwnerPoss, Team.
 
 Never print a secret value. Name the wake.json field that holds a secret and
-say to set it in the file only. Wake messages carry only the waiting count.
+say to set it in the file only. Wake messages carry only the waiting counts.
 Fresh-session kinds (hermes, openclaw, codex) must carry instructions.fresh.
 They also commonly share a machine with another agent, so every tincan command
 in their join, setup and self-heal lines carries a per-agent TINCAN_CONFIG
@@ -50,7 +50,7 @@ Keep the same machine name (Tailscale hostname) when you rebuild or recreate thi
 
 {{- define "instructions.fresh" -}}
 Each wake starts a fresh session with no memory of the last one, so drain the whole inbox: call check_inbox, handle and reply to every request, then call check_inbox again until it returns nothing.
-Treat every ask to a teammate as synchronous: wait for the reply inline in the same turn (get_reply with a wait, or tincan get <id> --wait 20s, repeated until it answers or you give up and say so), because a reply to your ask does not wake you.
+An ask to a teammate may return before the answer does. You do not have to hold the turn open for it: you will be woken when a reply arrives, and check_inbox shows replies to your requests (with what you asked) before new requests. When a reply comes in, finish the work that was waiting on it.
 {{- end -}}
 
 {{- define "instructions.vm-webhook" -}}
@@ -84,7 +84,7 @@ A wake from the OpenClaw gateway hooks endpoint whose text starts with "Agent Ti
 {{- end -}}
 
 {{- define "instructions.codex" -}}
-You are started by tincan listen with a check-inbox prompt whenever teammates' requests are waiting.
+You are started by tincan listen with a check-inbox prompt whenever teammates' requests, or replies to your own requests, are waiting.
 {{template "instructions.fresh" .}}
 {{- end -}}
 
@@ -98,7 +98,7 @@ Keep tincan wait & running in the background. When it exits it prints a teammate
 {{- else if eq .Wake "channel" -}}
 Teammate requests are pushed into your running session by tincan mcp --channel, already claimed. Handle each one and reply.
 {{- else if eq .Wake "command" -}}
-A command run by tincan listen --exec starts you when teammates' requests are waiting. Call check_inbox, handle and reply to every request, and keep going until the inbox is empty.
+A command run by tincan listen --exec starts you when teammates' requests, or replies to your own requests, are waiting. Call check_inbox, handle and reply to every request, and keep going until the inbox is empty.
 {{- else -}}
 Nothing wakes you. Call check_inbox at the start of every turn, and on a recurring schedule if your runtime has one.
 {{- end -}}
@@ -158,7 +158,7 @@ Paste the standing instructions into OpenClaw.
 
 {{- define "setup.codex" -}}
 Add tincan to ~/.codex/config.toml: a [mcp_servers.agent-tincan] table with command = "tincan", args = ["mcp"] and env = { TINCAN_CONFIG = "<full path of {{template "cfgpath" .}}>" } and default_tools_approval_mode = "approve" (unattended codex exec runs cannot approve tool calls; MCP configs do not expand ~).
-Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec 'codex exec "Agent Tincan requests are waiting. Run check_inbox, handle and reply to every request, and repeat until the inbox is empty."'
+Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec 'codex exec "Agent Tincan requests or replies are waiting. Run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty."'
 On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
 Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{- end -}}

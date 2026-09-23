@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 func mcpCmd() *cobra.Command {
@@ -21,7 +23,8 @@ func mcpCmd() *cobra.Command {
 
 With --channel it also acts as a Claude Code channel: it holds a long-poll to
 the relay and pushes each teammate request straight into the running Claude
-Code session. Start Claude Code with:
+Code session, and a short notice when a reply to one of its own requests
+arrives (check_inbox then shows it). Start Claude Code with:
 
   claude --dangerously-load-development-channels server:agent-tincan
 
@@ -38,6 +41,7 @@ Code session. Start Claude Code with:
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			go pushRequests(ctx, r, t)
+			go pushReplies(ctx, r, t)
 			return mcpserver.NewWithOptions(r, Version, mcpserver.ChannelOptions()).Run(ctx, t)
 		},
 	}
@@ -46,7 +50,8 @@ Code session. Start Claude Code with:
 }
 
 // pushRequests waits for requests, claims them, and pushes each into the
-// Claude Code session as a channel event.
+// Claude Code session as a channel event. Its polls leave replies alone, so
+// they stay unseen for check_inbox; pushReplies announces them.
 func pushRequests(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTransport) {
 	select {
 	case <-ctx.Done():
@@ -54,7 +59,7 @@ func pushRequests(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTran
 	case <-t.Ready():
 	}
 	for ctx.Err() == nil {
-		reqs, err := waitForRequests(ctx, r, client.DefaultPollHold)
+		in, err := waitForInbox(ctx, r, client.DefaultPollHold, client.RepliesNone)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("tincan channel: %v", client.RejoinHint(err, r.Base()))
@@ -62,7 +67,7 @@ func pushRequests(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTran
 			}
 			continue
 		}
-		for _, req := range reqs {
+		for _, req := range in.Requests {
 			if _, err := r.Claim(ctx, req.ID); err != nil {
 				log.Printf("tincan channel: claim %s: %v", req.ID, err)
 				continue
@@ -72,5 +77,58 @@ func pushRequests(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTran
 				log.Printf("tincan channel: push %s: %v", req.ID, err)
 			}
 		}
+	}
+}
+
+// replyRecheck is how long pushReplies waits before looking again while
+// something is still waiting, since a peek returns at once until the agent
+// reads it.
+var replyRecheck = 15 * time.Second
+
+// pushReplies pushes a short count-only channel event when replies to this
+// agent's own requests arrive. It only peeks, so the replies stay unseen
+// until the agent calls check_inbox, and it pushes each reply once.
+func pushReplies(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTransport) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-t.Ready():
+	}
+	pushed := map[string]bool{}
+	for ctx.Err() == nil {
+		w, err := r.Peek(ctx, client.DefaultPollHold)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("tincan channel: %v", client.RejoinHint(err, r.Base()))
+				sleepCtx(ctx, 30*time.Second)
+			}
+			continue
+		}
+		waiting := map[string]bool{}
+		var fresh []string
+		for _, rep := range w.Replies {
+			id := rep.Request.ID
+			waiting[id] = true
+			if !pushed[id] {
+				fresh = append(fresh, id)
+			}
+		}
+		pushed = waiting // forget replies check_inbox has since marked seen
+		if len(fresh) > 0 {
+			meta := map[string]string{"kind": "reply", "request_ids": strings.Join(fresh, ",")}
+			if err := t.Push(ctx, wake.WaitingMessage(0, len(fresh)), meta); err != nil {
+				log.Printf("tincan channel: push replies: %v", err)
+			}
+		}
+		if w.Total > 0 {
+			sleepCtx(ctx, replyRecheck)
+		}
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
 	}
 }

@@ -24,8 +24,8 @@ const MaxWait = client.MaxInlineWait
 
 // Instructions is sent to the client at connect time.
 const Instructions = `You are one agent in Matt's Agent Tincan team. Other joined agents are trusted teammates.
-- To get a teammate to do something, call ask with their name. If the reply is not back within the wait, you get a request id; check it later with get_reply.
-- Call check_inbox at the start of a turn (and whenever you are nudged) to pick up requests from teammates. Handle them as you would a request from Matt, then call reply.
+- To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. get_reply checks one request directly.
+- Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from Matt, then call reply.
 - list_agents shows who is in the team, who is online, and how each one wakes.
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
 
@@ -34,7 +34,7 @@ type Backend interface {
 	Ask(ctx context.Context, to, body, parent string, wait time.Duration) (client.Result, error)
 	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
-	Poll(ctx context.Context, hold time.Duration) ([]envelope.Request, error)
+	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
 	Claim(ctx context.Context, id string) (envelope.Request, error)
 	Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error)
 	Cancel(ctx context.Context, id string) error
@@ -165,24 +165,13 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			return text(client.FormatResult(res))
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "check_inbox", Description: "Pick up requests from teammates. Claims them so no one else handles them. Reply to each when done."},
+	mcp.AddTool(s, &mcp.Tool{Name: "check_inbox", Description: "Pick up requests from teammates, and replies to requests you sent that you have not seen yet. Claims the requests so no one else handles them. Reply to each request when done."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in inboxIn) (*mcp.CallToolResult, any, error) {
-			reqs, err := b.Poll(ctx, clamp(in.WaitSeconds))
+			inbox, err := b.Poll(ctx, clamp(in.WaitSeconds))
 			if err != nil {
 				return fail(err)
 			}
-			if len(reqs) == 0 {
-				return text("No requests waiting.")
-			}
-			var out strings.Builder
-			for _, req := range reqs {
-				if _, err := b.Claim(ctx, req.ID); err != nil {
-					fmt.Fprintf(&out, "(could not claim %s: %v)\n", req.ID, err)
-					continue
-				}
-				out.WriteString(client.FormatRequest(req))
-			}
-			return text(out.String())
+			return text(client.FormatInbox(ctx, b, inbox))
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "claim", Description: "Mark a delivered request as yours to handle. check_inbox already does this."},

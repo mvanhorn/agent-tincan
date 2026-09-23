@@ -19,7 +19,8 @@ func TestAskGetsReplyInsideWindow(t *testing.T) {
 	m := testrelay.New(t, relay.Config{PollHold: 5 * time.Second, MaxWait: 5 * time.Second})
 	grok, inst := m.Client(t, "grokbot"), m.Client(t, "instinct")
 	go func() {
-		reqs, err := inst.Poll(context.Background(), 5*time.Second)
+		in, err := inst.Poll(context.Background(), 5*time.Second)
+		reqs := in.Requests
 		if err != nil || len(reqs) != 1 {
 			t.Errorf("instinct poll: %v %v", reqs, err)
 			return
@@ -162,11 +163,11 @@ func TestTwoAgentsOnOneMachineThroughClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reqs, err := muse.Poll(ctx, 0); err != nil || len(reqs) != 0 {
-		t.Fatalf("muse must not get codex's request: %+v %v", reqs, err)
+	if in, err := muse.Poll(ctx, 0); err != nil || len(in.Requests) != 0 {
+		t.Fatalf("muse must not get codex's request: %+v %v", in, err)
 	}
-	if reqs, err := codex.Poll(ctx, 0); err != nil || len(reqs) != 1 || reqs[0].ID != sent.ID {
-		t.Fatalf("codex poll: %+v %v", reqs, err)
+	if in, err := codex.Poll(ctx, 0); err != nil || len(in.Requests) != 1 || in.Requests[0].ID != sent.ID {
+		t.Fatalf("codex poll: %+v %v", in, err)
 	}
 }
 
