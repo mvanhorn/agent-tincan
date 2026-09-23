@@ -42,8 +42,8 @@ A reply starts unseen by the agent that sent the request. It counts as seen once
 | (no `replies` param) | Left out, and they do not end the hold, the same as `replies=none`. Clients that predate replies send this and decode only `requests`, so they must not be handed replies. |
 | `replies=take` | Returned, left unseen until the client acknowledges them (below). check_inbox and `tincan inbox` use this. |
 | `replies=keep` | Returned, left unseen, never acknowledged. `tincan wait` uses this to end the wait and print a count. |
-| `replies=none` | Left out, and they do not end the hold. The Claude Code channel's request loop uses this. |
-| `peek=1` | Nothing is taken. The response is `{"waiting": <total>, "queued": <requests>}`. With `replies=keep` (or `take`) it also carries `"replies": [...]` and `waiting` counts them; without, replies are not counted. `tincan listen` and the channel's reply notices send `peek=1&replies=keep`. |
+| `replies=none` | Left out, and they do not end the hold. |
+| `peek=1` | Nothing is taken. The response is `{"waiting": <total>, "queued": <requests>}`. When requests are queued it also carries `"pending": [{"id": "...", "from": "..."}, ...]`, naming up to 50 of them, oldest first, without bodies. With `replies=keep` (or `take`) it also carries `"replies": [...]` and `waiting` counts them; without, replies are not counted. A peek changes no request's state (nothing becomes `delivered` or `claimed`) and marks no reply seen. `tincan listen` and the Claude Code channel (`tincan mcp --channel`) send `peek=1&replies=keep`; the channel never claims, and the model takes the items with check_inbox. `pending` is additive: clients that predate it ignore it. |
 
 Any other `replies` value is a 400.
 

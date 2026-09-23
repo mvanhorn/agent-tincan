@@ -15,8 +15,7 @@ const ChannelMethod = "notifications/claude/channel"
 
 // ChannelInstructions is added when the server runs as a Claude Code channel.
 const ChannelInstructions = `
-Requests from teammates also arrive on their own as <channel source="agent-tincan" from="..." request_id="...">. They are already claimed for you: handle each one as you would a request from Matt, then call reply with its request_id.
-A channel event with kind="reply" means a teammate replied to a request you sent. It carries only a count: call check_inbox to read the reply, then finish the work that was waiting on it.`
+A channel event from source "agent-tincan" (<channel source="agent-tincan" count="..." from="...">) is only a notice that Agent Tincan items are waiting: teammate requests, or replies to requests you sent. It never carries the items and nothing is claimed for you yet. Call check_inbox to take them, handle each request as you would a request from Matt and call reply with its request_id, and finish any work that was waiting on a reply. If check_inbox comes back empty, another session already took the items; there is nothing to do.`
 
 // channelProtocols are the MCP revisions a channel server offers. Claude Code
 // does not register a channel server that negotiates 2026-07-28, so channel

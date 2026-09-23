@@ -196,13 +196,13 @@ func TestChannelPushesReplyWaiting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cs.Close()
-	go pushRequests(ctx, grok, ch)
-	go pushReplies(ctx, grok, ch)
+	startWaiting(t, grok, ch)
 	time.Sleep(100 * time.Millisecond)
 	req := answered(t, m, "call the garage", "Tue 3pm works")
 	select {
 	case params := <-got:
-		if !strings.Contains(params, "1 reply") || !strings.Contains(params, "check_inbox") || strings.Contains(params, "Tue 3pm") {
+		if !strings.Contains(params, "1 Agent Tincan item waiting from muse") || !strings.Contains(params, `"kind":"reply"`) ||
+			!strings.Contains(params, "check_inbox") || strings.Contains(params, "Tue 3pm") {
 			t.Fatalf("channel event = %s", params)
 		}
 	case <-time.After(5 * time.Second):
@@ -409,9 +409,7 @@ func (f *flakyPusher) pushed() []map[string]string {
 // A reply notice that fails to reach the session is pushed again later,
 // rather than being remembered as pushed.
 func TestChannelRetriesFailedReplyPush(t *testing.T) {
-	old := replyRecheck
-	replyRecheck = 50 * time.Millisecond
-	t.Cleanup(func() { replyRecheck = old })
+	fastChannel(t, 50*time.Millisecond, time.Hour)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	req := answered(t, m, "call the garage", "Tue 3pm works")
 	f := &flakyPusher{ready: make(chan struct{})}
@@ -419,7 +417,7 @@ func TestChannelRetriesFailedReplyPush(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); pushReplies(ctx, m.Client(t, "grokbot"), f) }()
+	go func() { defer close(done); pushWaiting(ctx, m.Client(t, "grokbot"), f) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for len(f.pushed()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)

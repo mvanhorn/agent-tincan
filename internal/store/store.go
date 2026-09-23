@@ -446,6 +446,27 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
+// PendingRequests names up to limit of agent's queued requests, oldest
+// first, without delivering them or reading their bodies.
+func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent FROM requests
+		WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid LIMIT ?`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []envelope.Pending
+	for rows.Next() {
+		var p envelope.Pending
+		if err := rows.Scan(&p.ID, &p.From); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // Claim marks a request as being worked on by its target, under a lease. A
 // notify gets no lease: no reply will ever close it, so a lease would requeue
 // and redeliver it every ClaimLease. A claimed notify simply stays claimed.

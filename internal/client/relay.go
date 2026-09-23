@@ -235,6 +235,9 @@ type Waiting struct {
 	Total   int      `json:"waiting"` // queued requests plus unseen replies
 	Queued  int      `json:"queued"`
 	Replies []Result `json:"replies,omitempty"`
+	// Pending names the oldest queued requests (id and sender, no body).
+	// A relay that predates it leaves it empty.
+	Pending []envelope.Pending `json:"pending,omitempty"`
 }
 
 // Poll waits up to hold for requests addressed to this agent or unseen

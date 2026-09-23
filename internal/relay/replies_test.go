@@ -31,6 +31,10 @@ type peekResult struct {
 	Waiting int               `json:"waiting"`
 	Queued  int               `json:"queued"`
 	Replies []envelope.Result `json:"replies"`
+	Pending []struct {
+		ID   string `json:"id"`
+		From string `json:"from"`
+	} `json:"pending"`
 }
 
 // answer has target claim and reply to req.
@@ -268,5 +272,41 @@ func TestPollReplyCarriesClaimedParent(t *testing.T) {
 	h.do(museAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &other)
 	if len(other.Replies) != 1 || other.Replies[0].Parent != nil {
 		t.Fatalf("reply without a parent = %+v", other.Replies)
+	}
+}
+
+// A peek names each waiting request's id and sender so a channel can say who
+// is waiting, and still changes nothing: the requests stay queued and the
+// reply stays unseen.
+func TestPeekListsPendingWithoutChangingState(t *testing.T) {
+	h := newHarness(t, Config{})
+	fromGrok := h.send(grokAddr, "muse", "call the garage")
+	fromInst := h.send(instinctAddr, "muse", "book a table")
+	mine := h.send(museAddr, "grokbot", "check the calendar")
+	h.answer(grokAddr, mine, "free")
+
+	for range 2 {
+		var pk peekResult
+		h.do(museAddr, "GET", "/v1/poll?peek=1&hold=0&replies=keep", "", http.StatusOK, &pk)
+		if pk.Queued != 2 || pk.Waiting != 3 || len(pk.Replies) != 1 || len(pk.Pending) != 2 {
+			t.Fatalf("peek = %+v", pk)
+		}
+		if pk.Pending[0].ID != fromGrok.ID || pk.Pending[0].From != "grokbot" ||
+			pk.Pending[1].ID != fromInst.ID || pk.Pending[1].From != "instinct" {
+			t.Fatalf("pending = %+v", pk.Pending)
+		}
+	}
+	for _, q := range []struct {
+		addr string
+		req  envelope.Request
+	}{{grokAddr, fromGrok}, {instinctAddr, fromInst}} {
+		var res envelope.Result
+		h.do(q.addr, "GET", "/v1/requests/"+q.req.ID, "", http.StatusOK, &res)
+		if res.Status != envelope.StatusQueued {
+			t.Fatalf("%s status after peek = %s, want queued", q.req.ID, res.Status)
+		}
+	}
+	if n := h.srv.UnseenReplies("muse"); n != 1 {
+		t.Fatalf("peek consumed reply-seen state: unseen = %d", n)
 	}
 }

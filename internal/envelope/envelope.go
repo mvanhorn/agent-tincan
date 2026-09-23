@@ -61,6 +61,12 @@ type Request struct {
 	CreatedAt time.Time `json:"created_at,omitzero"`
 }
 
+// Pending names a queued request without its body, as a peek reports it.
+type Pending struct {
+	ID   string `json:"id"`
+	From string `json:"from"`
+}
+
 // Reply is the target's answer to a request.
 type Reply struct {
 	RequestID string    `json:"request_id,omitempty"`

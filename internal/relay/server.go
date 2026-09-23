@@ -356,7 +356,9 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 // handed them to its agent. Without a replies param (every client that
 // predates replies) they are left out and do not end the hold, as with
 // replies=none, since such a client would drop them. peek=1 only reports
-// what is waiting, and counts replies only with replies=keep or take.
+// what is waiting, and counts replies only with replies=keep or take; it
+// names the oldest queued requests (id and sender) so a channel can say who
+// is waiting, and changes no request's state or any reply's seen state.
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	name := s.agent(w, r)
 	if name == "" {
@@ -406,6 +408,14 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			}
 			if n > 0 || len(reps) > 0 {
 				out := map[string]any{"waiting": n + len(reps) + more, "queued": n}
+				if n > 0 {
+					pending, err := s.store.PendingRequests(r.Context(), name, MaxPeekPending)
+					if err != nil {
+						writeErr(w, http.StatusInternalServerError, err)
+						return
+					}
+					out["pending"] = pending
+				}
 				if replies != client.RepliesNone {
 					out["replies"] = emptyIfNil(reps)
 				}
@@ -455,6 +465,10 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// MaxPeekPending caps how many queued requests one peek names. queued still
+// counts them all.
+const MaxPeekPending = 50
 
 // MaxRepliesBytes bounds the request, reply, and parent bodies of the unseen replies
 // one poll returns, so a response stays well under the client's 4 MiB read

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -79,7 +80,11 @@ func TestListenRunsCommandWithoutTakingRequests(t *testing.T) {
 	}
 }
 
-func TestChannelPushesClaimedRequests(t *testing.T) {
+// The live bug: every open Claude Code session ran a channel, each claimed
+// requests it pushed, and sessions that dropped the push left them claimed
+// and unanswered. A channel now only announces: the request stays queued
+// until the model calls check_inbox, which claims it.
+func TestChannelAnnouncesRequestWithoutClaiming(t *testing.T) {
 	m := testrelay.New(t, relay.Config{PollHold: 2 * time.Second})
 	srvT, cliT := mcp.NewInMemoryTransports()
 	ch := mcpserver.NewChannelTransport(srvT)
@@ -98,19 +103,134 @@ func TestChannelPushesClaimedRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cs.Close()
-	go pushRequests(ctx, m.Client(t, "muse"), ch)
-	sent, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
+	startWaiting(t, m.Client(t, "muse"), ch)
+	inst := m.Client(t, "instinct")
+	sent, _ := inst.Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
 	select {
 	case params := <-got:
-		if !strings.Contains(params, sent.ID) || !strings.Contains(params, "call the dentist") || !strings.Contains(params, `"from":"instinct"`) {
-			t.Fatalf("channel event = %s", params)
+		for _, want := range []string{"1 Agent Tincan item waiting from instinct", "check_inbox", `"from":"instinct"`, `"count":"1"`, sent.ID} {
+			if !strings.Contains(params, want) {
+				t.Fatalf("channel event missing %q: %s", want, params)
+			}
+		}
+		if strings.Contains(params, "call the dentist") {
+			t.Fatalf("channel event carries the request body: %s", params)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no channel event")
 	}
-	res, _ := m.Client(t, "instinct").Get(ctx, sent.ID, 0)
+	res, _ := inst.Get(ctx, sent.ID, 0)
+	if res.Status != envelope.StatusQueued {
+		t.Fatalf("announced request status = %s, want queued (the push must not claim)", res.Status)
+	}
+	out, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "check_inbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := out.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "call the dentist") {
+		t.Fatalf("check_inbox = %q", text)
+	}
+	res, _ = inst.Get(ctx, sent.ID, 0)
 	if res.Status != envelope.StatusClaimed {
-		t.Fatalf("pushed request status = %s, want claimed", res.Status)
+		t.Fatalf("status after check_inbox = %s, want claimed", res.Status)
+	}
+}
+
+// recordPusher records every push.
+type recordPusher struct {
+	ready chan struct{}
+	mu    sync.Mutex
+	got   []map[string]string
+	texts []string
+}
+
+func newRecordPusher() *recordPusher {
+	p := &recordPusher{ready: make(chan struct{})}
+	close(p.ready)
+	return p
+}
+
+func (p *recordPusher) Ready() <-chan struct{} { return p.ready }
+
+func (p *recordPusher) Push(_ context.Context, content string, meta map[string]string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.got = append(p.got, meta)
+	p.texts = append(p.texts, content)
+	return nil
+}
+
+func (p *recordPusher) pushes() []map[string]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]map[string]string(nil), p.got...)
+}
+
+func waitPushes(t *testing.T, p *recordPusher, n int) []map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(p.pushes()) < n && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return p.pushes()
+}
+
+// startWaiting runs pushWaiting until the test ends, and waits for it to
+// stop before earlier cleanups (fastChannel) restore the timing vars.
+func startWaiting(t *testing.T, r *client.Relay, p channelPusher) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); pushWaiting(ctx, r, p) }()
+	t.Cleanup(func() { cancel(); <-done })
+}
+
+func fastChannel(t *testing.T, recheck, reannounce time.Duration) {
+	oldR, oldA := waitingRecheck, reannounceAfter
+	waitingRecheck, reannounceAfter = recheck, reannounce
+	t.Cleanup(func() { waitingRecheck, reannounceAfter = oldR, oldA })
+}
+
+// A pending set is announced once. Looking again with nothing new pushes
+// nothing; a new request pushes again, naming everything still waiting.
+func TestChannelDoesNotRepushSamePending(t *testing.T) {
+	fastChannel(t, 20*time.Millisecond, time.Hour)
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
+	p := newRecordPusher()
+	startWaiting(t, m.Client(t, "muse"), p)
+	if got := waitPushes(t, p, 1); len(got) != 1 || got[0]["request_ids"] != first.ID {
+		t.Fatalf("first pushes = %v", got)
+	}
+	time.Sleep(200 * time.Millisecond) // about ten more looks
+	if got := p.pushes(); len(got) != 1 {
+		t.Fatalf("same pending set pushed again: %v", got)
+	}
+	second, _ := m.Client(t, "grokbot").Send(ctx, "muse", "book a table", envelope.KindAsk, "")
+	got := waitPushes(t, p, 2)
+	if len(got) != 2 || got[1]["count"] != "2" || got[1]["request_ids"] != first.ID+","+second.ID || got[1]["from"] != "instinct,grokbot" {
+		t.Fatalf("pushes after a new request = %v", got)
+	}
+	res, _ := m.Client(t, "instinct").Get(ctx, first.ID, 0)
+	if res.Status != envelope.StatusQueued {
+		t.Fatalf("status = %s, want queued", res.Status)
+	}
+}
+
+// A push the session dropped is not permanent: after a quiet period the
+// channel announces what is still waiting again.
+func TestChannelReannouncesAfterQuietPeriod(t *testing.T) {
+	fastChannel(t, 20*time.Millisecond, 150*time.Millisecond)
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sent, _ := m.Client(t, "instinct").Send(ctx, "muse", "call the dentist", envelope.KindAsk, "")
+	p := newRecordPusher()
+	startWaiting(t, m.Client(t, "muse"), p)
+	got := waitPushes(t, p, 2)
+	if len(got) < 2 || got[1]["request_ids"] != sent.ID {
+		t.Fatalf("pushes = %v, want the waiting request announced again", got)
 	}
 }
 

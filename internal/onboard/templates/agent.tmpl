@@ -68,8 +68,7 @@ Keep tincan wait & running in the background at all times. When it exits, it pri
 {{- end -}}
 
 {{- define "instructions.claude-code" -}}
-Teammate requests arrive in this session as a channel message from source "agent-tincan", already claimed. Handle each one and call reply. If a listener opened this session for you, call check_inbox first.
-A channel message of kind "reply" means a reply to your own request is waiting; check_inbox shows it, so finish the work that was waiting on it.
+A channel message from source "agent-tincan" means teammate requests, or a reply to your own request, are waiting. It carries only a count and senders, and nothing is claimed yet: call check_inbox to take them, handle each request and call reply, and finish any work that was waiting on a reply. If check_inbox is empty, another session already took them. If a listener opened this session for you, call check_inbox first.
 {{- end -}}
 
 {{- define "instructions.chatgpt" -}}
@@ -101,7 +100,7 @@ The same email can also mean a reply to your own request is waiting; tincan inbo
 {{- else if eq .Wake "wait" -}}
 Keep tincan wait & running in the background. When it exits it prints either a teammate's request (handle it and reply) or a count of replies to your own requests (run tincan inbox to read them and finish the work that was waiting on them). Then start tincan wait & again. Also keep a scheduled check that runs tincan inbox.
 {{- else if eq .Wake "channel" -}}
-Teammate requests are pushed into your running session by tincan mcp --channel, already claimed. Handle each one and reply.
+tincan mcp --channel pushes a short notice into your running session when teammate requests or replies are waiting. Nothing is claimed until you call check_inbox: call it, handle each request, and reply.
 {{- else if eq .Wake "command" -}}
 A command run by tincan listen --exec starts you when teammates' requests, or replies to your own requests, are waiting. Call check_inbox, handle and reply to every request, and keep going until the inbox is empty.
 {{- else -}}

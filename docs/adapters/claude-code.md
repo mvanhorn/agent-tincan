@@ -26,7 +26,9 @@ Channels are a Claude Code research preview. Custom channels load with the devel
 claude --dangerously-load-development-channels server:agent-tincan
 ```
 
-Requests arrive as `<channel source="agent-tincan" from="instinct" request_id="...">` already claimed. Claude handles them and calls `reply`. A channel message of kind `reply` carries only a count: it means a reply to one of this session's own requests is waiting, and `check_inbox` shows it.
+When teammate requests, or replies to this session's own requests, are waiting, the channel pushes a short notice such as `<channel source="agent-tincan" kind="request" count="1" from="instinct" request_ids="...">1 Agent Tincan item waiting from instinct. Call check_inbox to take it, then reply to each request.</channel>`. The notice never carries the items and never claims anything: Claude calls `check_inbox`, which claims the requests, then handles them and calls `reply`. `kind` is `request`, `reply`, or `mixed`.
+
+Every open Claude Code session runs its own `tincan mcp --channel`, so every session gets the notice. The first one to call `check_inbox` takes the items; the others find an empty inbox. A session that was started without channels, or is idle, simply drops the notice and the items stay queued for someone else. Each process announces an item once, and again after 10 quiet minutes if it is still waiting.
 
 Notes:
 
