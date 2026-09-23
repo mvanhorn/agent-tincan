@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS invites (
   code    TEXT PRIMARY KEY,
   name    TEXT NOT NULL,
-  expires INTEGER NOT NULL
+  expires INTEGER NOT NULL,
+  kind    TEXT
 );
 CREATE TABLE IF NOT EXISTS requests (
   id          TEXT PRIMARY KEY,
@@ -102,6 +103,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agents: %w", err)
 	}
+	if err := s.migrateInvites(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate invites: %w", err)
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
@@ -159,6 +164,20 @@ func (s *Store) migrateAgents() error {
 		}
 	}
 	return tx.Commit()
+}
+
+// migrateInvites adds the kind column to an invites table created before
+// invites could carry the agent's kind. It is a no-op on a current table.
+func (s *Store) migrateInvites() error {
+	var hasKind bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('invites') WHERE name = 'kind')`).Scan(&hasKind); err != nil {
+		return err
+	}
+	if hasKind {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE invites ADD COLUMN kind TEXT`)
+	return err
 }
 
 // agentsShape reports whether the agents table has a kind column and whether
@@ -268,15 +287,15 @@ func nullable(v string) any {
 }
 
 func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO invites(code, name, expires) VALUES (?, ?, ?)`,
-		inv.Code, inv.Name, inv.Expires.UnixMilli())
+	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO invites(code, name, expires, kind) VALUES (?, ?, ?, ?)`,
+		inv.Code, inv.Name, inv.Expires.UnixMilli(), nullable(inv.Kind))
 	return err
 }
 
 func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, bool, error) {
 	var inv identity.Invite
 	var exp int64
-	err := s.db.QueryRowContext(ctx, `DELETE FROM invites WHERE code = ? RETURNING code, name, expires`, code).Scan(&inv.Code, &inv.Name, &exp)
+	err := s.db.QueryRowContext(ctx, `DELETE FROM invites WHERE code = ? RETURNING code, name, expires, COALESCE(kind, '')`, code).Scan(&inv.Code, &inv.Name, &exp, &inv.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Invite{}, false, nil
 	}

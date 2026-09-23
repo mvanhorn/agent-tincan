@@ -433,3 +433,50 @@ func TestOpenClaimOnlyWhenUnambiguous(t *testing.T) {
 		t.Fatalf("two open claims: want none, got %+v %v %v", got, ok, err)
 	}
 }
+
+// An invite keeps its kind, and a kindless invite reads back empty.
+func TestInviteKindOnSQLite(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	s.PutInvite(ctx, identity.Invite{Code: "AAAA-BBBB", Name: "hermes", Kind: "hermes", Expires: c.t})
+	s.PutInvite(ctx, identity.Invite{Code: "CCCC-DDDD", Name: "muse", Expires: c.t})
+	if inv, ok, err := s.TakeInvite(ctx, "AAAA-BBBB"); err != nil || !ok || inv.Kind != "hermes" || inv.Name != "hermes" {
+		t.Fatalf("take = %+v, %v, %v", inv, ok, err)
+	}
+	if inv, ok, err := s.TakeInvite(ctx, "CCCC-DDDD"); err != nil || !ok || inv.Kind != "" {
+		t.Fatalf("take kindless = %+v, %v, %v", inv, ok, err)
+	}
+}
+
+// An invites table from before invite kinds gains the column on open and
+// keeps its pending codes.
+func TestOldInvitesTableMigratesOnOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE invites (code TEXT PRIMARY KEY, name TEXT NOT NULL, expires INTEGER NOT NULL)`,
+		`INSERT INTO invites VALUES ('AAAA-BBBB', 'muse', 1790000600000)`,
+	} {
+		if _, err := old.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	old.Close()
+
+	s, c := open(t, path)
+	ctx := context.Background()
+	if inv, ok, err := s.TakeInvite(ctx, "AAAA-BBBB"); err != nil || !ok || inv.Name != "muse" || inv.Kind != "" {
+		t.Fatalf("old invite after migration = %+v, %v, %v", inv, ok, err)
+	}
+	if err := s.PutInvite(ctx, identity.Invite{Code: "CCCC-DDDD", Name: "codex", Kind: "codex", Expires: c.t}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, _ := open(t, path)
+	if inv, ok, _ := s2.TakeInvite(ctx, "CCCC-DDDD"); !ok || inv.Kind != "codex" {
+		t.Fatalf("kind after reopen = %+v", inv)
+	}
+}

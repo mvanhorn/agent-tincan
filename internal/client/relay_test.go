@@ -169,3 +169,57 @@ func TestTwoAgentsOnOneMachineThroughClient(t *testing.T) {
 		t.Fatalf("codex poll: %+v %v", reqs, err)
 	}
 }
+
+// An invite can carry a kind that shows in the roster after join; an admin
+// can change it; a joined non-admin cannot.
+func TestInviteKindAndSetKindThroughClient(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	admin := m.Client(t, "admin")
+	code, err := admin.InviteKind(ctx, "cx", "hermes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "stranger").Join(ctx, code); err != nil {
+		t.Fatal(err)
+	}
+	kindOf := func(name string) string {
+		t.Helper()
+		agents, err := admin.Agents(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range agents {
+			if a.Name == name {
+				return a.Kind
+			}
+		}
+		t.Fatalf("no %s in %+v", name, agents)
+		return ""
+	}
+	if k := kindOf("cx"); k != "hermes" {
+		t.Fatalf("kind after join = %q", k)
+	}
+	if err := admin.SetKind(ctx, "cx", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if k := kindOf("cx"); k != "codex" {
+		t.Fatalf("kind after set = %q", k)
+	}
+	if err := m.Client(t, "grokbot").SetKind(ctx, "cx", "openclaw"); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("non-admin set kind: %v", err)
+	}
+	if k := kindOf("cx"); k != "codex" {
+		t.Fatalf("non-admin changed kind to %q", k)
+	}
+}
+
+func TestBaseIsTheRelayURL(t *testing.T) {
+	r, err := client.NewRelay("http://tincan-relay/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Base() != "http://tincan-relay" {
+		t.Fatalf("base = %q", r.Base())
+	}
+}

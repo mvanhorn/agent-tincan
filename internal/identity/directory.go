@@ -37,6 +37,14 @@ var (
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
+// Kinds share the name shape: lowercase words such as hermes or vm-webhook.
+func checkKind(kind string) error {
+	if kind != "" && !nameRE.MatchString(kind) {
+		return fmt.Errorf("agent kind %q must be 1-32 lowercase letters, digits, or dashes", kind)
+	}
+	return nil
+}
+
 // Agent is a joined agent.
 type Agent struct {
 	Name     string    `json:"name"`
@@ -51,6 +59,7 @@ type Agent struct {
 type Invite struct {
 	Code    string
 	Name    string
+	Kind    string // applied to the agent on join when set
 	Expires time.Time
 }
 
@@ -150,17 +159,26 @@ func (d *Directory) Has(ctx context.Context, name string) (bool, error) {
 // Invite creates a one-time code that joins the next machine to use it as
 // name. Only admin devices may invite.
 func (d *Directory) Invite(ctx context.Context, remoteAddr, name string) (string, error) {
+	return d.InviteKind(ctx, remoteAddr, name, "")
+}
+
+// InviteKind is Invite that also records the agent's kind, applied when the
+// code is used. An empty kind leaves the agent's kind as it was.
+func (d *Directory) InviteKind(ctx context.Context, remoteAddr, name, kind string) (string, error) {
 	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
 		return "", err
 	}
 	if !nameRE.MatchString(name) {
 		return "", fmt.Errorf("agent name %q must be 1-32 lowercase letters, digits, or dashes", name)
 	}
+	if err := checkKind(kind); err != nil {
+		return "", err
+	}
 	code, err := NewCode()
 	if err != nil {
 		return "", err
 	}
-	inv := Invite{Code: code, Name: name, Expires: d.cfg.Now().Add(InviteTTL)}
+	inv := Invite{Code: code, Name: name, Kind: kind, Expires: d.cfg.Now().Add(InviteTTL)}
 	if err := d.store.PutInvite(ctx, inv); err != nil {
 		return "", err
 	}
@@ -169,8 +187,8 @@ func (d *Directory) Invite(ctx context.Context, remoteAddr, name string) (string
 
 // Join binds the node behind remoteAddr to the invite's name. A node that
 // already carries agents gains another name alongside them. Re-inviting an
-// existing name moves it (and its kind) to the new machine; other agents on
-// the old machine stay.
+// existing name moves it (and its kind, unless the invite names a new one) to
+// the new machine; other agents on the old machine stay.
 func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, error) {
 	n, err := d.who.WhoIs(ctx, remoteAddr)
 	if err != nil {
@@ -189,7 +207,11 @@ func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, 
 	if err != nil {
 		return "", err
 	}
-	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, JoinedAt: d.cfg.Now(), Kind: prev.Kind}
+	kind := prev.Kind
+	if inv.Kind != "" {
+		kind = inv.Kind
+	}
+	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, JoinedAt: d.cfg.Now(), Kind: kind}
 	if err := d.store.PutAgent(ctx, a); err != nil {
 		return "", err
 	}
@@ -202,6 +224,25 @@ func (d *Directory) Remove(ctx context.Context, remoteAddr, name string) error {
 		return err
 	}
 	ok, err := d.store.DeleteAgent(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+	}
+	return nil
+}
+
+// SetKind records an agent's runtime kind ("" clears it). Only admin devices
+// may set it.
+func (d *Directory) SetKind(ctx context.Context, remoteAddr, name, kind string) error {
+	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
+		return err
+	}
+	if err := checkKind(kind); err != nil {
+		return err
+	}
+	ok, err := d.store.SetAgentKind(ctx, name, kind)
 	if err != nil {
 		return err
 	}

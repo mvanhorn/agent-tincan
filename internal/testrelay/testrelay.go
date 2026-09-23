@@ -17,7 +17,9 @@ import (
 )
 
 // Mesh is a relay with grokbot, instinct, and muse joined, each on its own
-// machine. JoinOnMachineOf adds more agents to an existing machine.
+// machine. "admin" is an admin device that has not joined; "stranger" is a
+// machine that is neither joined nor an admin. JoinOnMachineOf adds more
+// agents to an existing machine.
 type Mesh struct {
 	Server *relay.Server
 	Store  *store.Store
@@ -25,7 +27,7 @@ type Mesh struct {
 	urls   map[string]string // agent (or "admin") -> its machine's endpoint
 }
 
-var addrs = map[string]string{"grokbot": "100.0.0.2:1", "instinct": "100.0.0.3:1", "muse": "100.0.0.4:1", "admin": "100.0.0.1:1"}
+var addrs = map[string]string{"grokbot": "100.0.0.2:1", "instinct": "100.0.0.3:1", "muse": "100.0.0.4:1", "admin": "100.0.0.1:1", "stranger": "100.0.0.9:1"}
 
 // New starts the mesh.
 func New(t *testing.T, cfg relay.Config) *Mesh {
@@ -40,6 +42,7 @@ func New(t *testing.T, cfg relay.Config) *Mesh {
 		addrs["grokbot"]:  {ID: "nGROK", Name: "grok-bot"},
 		addrs["instinct"]: {ID: "nINST", Name: "instinct"},
 		addrs["muse"]:     {ID: "nMUSE", Name: "muse"},
+		addrs["stranger"]: {ID: "nLAPTOP", Name: "old-laptop"},
 	})
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), identity.Config{Admins: []string{"macbook-pro-44"}})
 	srv := relay.New(dir, st, cfg)
@@ -91,7 +94,7 @@ func (m *Mesh) JoinOnMachineOf(t *testing.T, host, name string) *client.Relay {
 func (m *Mesh) Client(t *testing.T, name string) *client.Relay {
 	t.Helper()
 	cfg := client.Config{Relay: m.urls[name], Agent: name}
-	if name == "admin" {
+	if name == "admin" || name == "stranger" {
 		cfg.Agent = ""
 	}
 	r, err := client.NewRelayFor(cfg)

@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
@@ -139,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/invite", s.handleInvite)
 	mux.HandleFunc("POST /v1/admin/remove", s.handleRemove)
+	mux.HandleFunc("PUT /v1/agents/{name}/kind", s.handleSetKind)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
@@ -419,8 +422,10 @@ type WakeNamer interface{ WakeMethod(agent string) string }
 // SetWakeNamer installs the wake method lookup for the agent list.
 func (s *Server) SetWakeNamer(w WakeNamer) { s.wake = w }
 
+// handleAgents lists the roster for joined agents and for admin devices,
+// which need not be joined (onboarding runs from an admin laptop).
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
-	if !isLocalAdmin(r.Context()) && s.agent(w, r) == "" {
+	if !s.isAdmin(r) && s.agent(w, r) == "" {
 		return
 	}
 	agents, err := s.dir.Agents(r.Context())
@@ -433,7 +438,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	for _, a := range agents {
 		last := s.lastPoll[a.Name]
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none"}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind}
 		if s.wake != nil {
 			info.Wake = s.wake.WakeMethod(a.Name)
 		}
@@ -463,17 +468,58 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleInvite(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name string `json:"name"`
+		Kind string `json:"kind"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	code, err := s.dir.Invite(r.Context(), s.remote(r), in.Name)
+	if err := knownKind(in.Kind); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	code, err := s.dir.InviteKind(r.Context(), s.remote(r), in.Name, in.Kind)
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"name": in.Name, "code": code, "expires_in": identity.InviteTTL.String()})
+	writeJSON(w, http.StatusOK, map[string]any{"name": in.Name, "kind": in.Kind, "code": code, "expires_in": identity.InviteTTL.String()})
+}
+
+// handleSetKind records a joined agent's runtime kind (admin only). An empty
+// kind clears it.
+func (s *Server) handleSetKind(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return
+	}
+	if err := knownKind(in.Kind); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	name := r.PathValue("name")
+	if err := s.dir.SetKind(r.Context(), s.remote(r), name, in.Kind); err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	s.record(r.Context(), "kind", "", "", name, store.DetailJSON(map[string]any{"kind": in.Kind}))
+	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": in.Kind})
+}
+
+// knownKind accepts "" and the kinds onboarding can tailor a block to, so a
+// typo is caught when it is set rather than silently ignored later.
+func knownKind(kind string) error {
+	if kind == "" || slices.Contains(onboard.Kinds, kind) {
+		return nil
+	}
+	return fmt.Errorf("unknown kind %q (want one of %s)", kind, strings.Join(onboard.Kinds, ", "))
 }
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {

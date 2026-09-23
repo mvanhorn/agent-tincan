@@ -26,7 +26,7 @@ func connect() (*client.Relay, client.Config, error) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{joinCmd(), inviteCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{joinCmd(), inviteCmd(), kindCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), replyCmd(), cancelCmd(), waitCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -68,7 +68,7 @@ func joinCmd() *cobra.Command {
 }
 
 func inviteCmd() *cobra.Command {
-	var relayURL, socket string
+	var relayURL, socket, kind string
 	cmd := &cobra.Command{
 		Use:   "invite <name>",
 		Short: "Create a one-time code that joins a machine as <name> (admin devices only)",
@@ -78,16 +78,21 @@ func inviteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			code, err := r.Invite(cmd.Context(), args[0])
+			code, err := r.InviteKind(cmd.Context(), args[0], kind)
 			if err != nil {
 				return err
 			}
-			cmd.Printf("Invite code for %q (valid 10 minutes): %s\nOn that machine run:\n  tincan join %s --relay <relay URL>\n", args[0], code, code)
+			valid := "valid 10 minutes"
+			if kind != "" {
+				valid = "kind " + kind + ", " + valid
+			}
+			cmd.Printf("Invite code for %q (%s): %s\nOn that machine run:\n  tincan join %s --relay <relay URL>\n", args[0], valid, code, code)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
+	cmd.Flags().StringVar(&kind, "kind", "", "the agent's runtime (hermes, codex, ...), recorded on join so tincan onboard tailors its block")
 	return cmd
 }
 
@@ -146,7 +151,11 @@ func agentsCmd() *cobra.Command {
 func formatAgents(agents []client.AgentInfo) string {
 	var b strings.Builder
 	for _, a := range agents {
-		fmt.Fprintf(&b, "%-14s %-8s wake=%s\n", a.Name, a.State(), a.Wake)
+		fmt.Fprintf(&b, "%-14s %-8s wake=%s", a.Name, a.State(), a.Wake)
+		if a.Kind != "" {
+			fmt.Fprintf(&b, " kind=%s", a.Kind)
+		}
+		b.WriteString("\n")
 	}
 	if b.Len() == 0 {
 		return "No agents have joined yet.\n"

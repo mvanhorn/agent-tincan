@@ -18,7 +18,7 @@ func Root() *cobra.Command {
 	}
 	root.AddCommand(relayCmd(), versionCmd())
 	root.AddCommand(agentCmds()...)
-	root.AddCommand(mcpCmd(), traceCmd(), auditCmd(), listenCmd(), connectCmd())
+	root.AddCommand(mcpCmd(), traceCmd(), auditCmd(), listenCmd(), connectCmd(), onboardCmd())
 	return root
 }
 

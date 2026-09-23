@@ -2,6 +2,7 @@ package mcpserver_test
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
@@ -68,6 +70,12 @@ func TestToolListIsExactlyTheAgentTools(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(names, want) {
 		t.Fatalf("tools = %v, want %v", names, want)
+	}
+	if !slices.Contains(names, "onboard") {
+		t.Fatalf("onboard tool missing: %v", names)
+	}
+	if !strings.Contains(mcpserver.Instructions, "onboard") {
+		t.Fatal("Instructions should mention the onboard tool")
 	}
 	for _, n := range names {
 		if strings.Contains(n, "invite") || strings.Contains(n, "remove") {
@@ -185,4 +193,158 @@ func between(s, a, b string) string {
 	_, rest, _ := strings.Cut(s, a)
 	out, _, _ := strings.Cut(rest, b)
 	return out
+}
+
+func kitFrom(t *testing.T, out string) onboard.Kit {
+	t.Helper()
+	var k onboard.Kit
+	if err := json.Unmarshal([]byte(out), &k); err != nil {
+		t.Fatalf("onboard output is not a Kit: %v: %q", err, out)
+	}
+	return k
+}
+
+func blockNames(k onboard.Kit) []string {
+	var names []string
+	for _, a := range k.Agents {
+		names = append(names, a.Name)
+	}
+	return names
+}
+
+// The onboard tool returns the kit as JSON, with one agent block per
+// list_agents entry and the relay URL the agent is connected to.
+func TestOnboardAgentsMatchListAgents(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	var listed []string
+	for line := range strings.SplitSeq(strings.TrimSpace(call(t, cs, "list_agents", nil)), "\n") {
+		name, _, _ := strings.Cut(line, ":")
+		listed = append(listed, name)
+	}
+	k := kitFrom(t, call(t, cs, "onboard", nil))
+	if got := blockNames(k); !slices.Equal(got, listed) || len(got) != 3 {
+		t.Fatalf("onboard agents %v, list_agents %v", got, listed)
+	}
+	if k.RelayURL != m.URL("grokbot") || k.Operator == "" || len(k.Recipes) == 0 {
+		t.Fatalf("kit = relay %q, operator %d bytes, %d recipes", k.RelayURL, len(k.Operator), len(k.Recipes))
+	}
+}
+
+func TestOnboardArgs(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "muse")
+	k := kitFrom(t, call(t, cs, "onboard", map[string]any{
+		"section": "agents", "operator": "grokbot", "owner": "Matt", "kinds": map[string]any{"muse": "proxy-sandbox"},
+	}))
+	if k.Host != "grokbot" || k.Owner != "Matt" || k.Operator != "" || len(k.Recipes) != 0 {
+		t.Fatalf("section agents kit: host %q owner %q operator %d bytes, %d recipes", k.Host, k.Owner, len(k.Operator), len(k.Recipes))
+	}
+	for _, a := range k.Agents {
+		if a.Name == "muse" && a.Kind != "proxy-sandbox" {
+			t.Fatalf("kinds override ignored: %+v", a)
+		}
+	}
+	op := kitFrom(t, call(t, cs, "onboard", map[string]any{"section": "operator"}))
+	if op.Operator == "" || len(op.Agents) != 0 || len(op.Recipes) != 0 {
+		t.Fatalf("section operator kit: %+v", op)
+	}
+	if out := call(t, cs, "onboard", map[string]any{"section": "everything"}); !strings.HasPrefix(out, "ERROR:") {
+		t.Fatalf("bad section = %q", out)
+	}
+	if out := call(t, cs, "onboard", map[string]any{"kinds": map[string]any{"muse": "nope"}}); !strings.HasPrefix(out, "ERROR:") {
+		t.Fatalf("bad kind = %q", out)
+	}
+}
+
+// Each call reads the live roster: a new agent shows up on the next call.
+func TestOnboardReadsLiveRoster(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	before := blockNames(kitFrom(t, call(t, cs, "onboard", nil)))
+	m.JoinOnMachineOf(t, "muse", "codex")
+	after := kitFrom(t, call(t, cs, "onboard", nil))
+	if slices.Contains(before, "codex") || !slices.Contains(blockNames(after), "codex") {
+		t.Fatalf("before %v, after %v", before, blockNames(after))
+	}
+	for _, a := range after.Agents {
+		if a.Name == "codex" && a.Kind != onboard.KindCodex {
+			t.Fatalf("codex kind = %q", a.Kind)
+		}
+	}
+}
+
+// recorder is a Backend that records every call and fails the mutating ones.
+type recorder struct {
+	calls []string
+}
+
+func (r *recorder) Ask(context.Context, string, string, string, time.Duration) (client.Result, error) {
+	r.calls = append(r.calls, "Ask")
+	return client.Result{}, nil
+}
+
+func (r *recorder) Send(context.Context, string, string, envelope.Kind, string) (envelope.Request, error) {
+	r.calls = append(r.calls, "Send")
+	return envelope.Request{}, nil
+}
+
+func (r *recorder) Get(context.Context, string, time.Duration) (client.Result, error) {
+	r.calls = append(r.calls, "Get")
+	return client.Result{}, nil
+}
+
+func (r *recorder) Poll(context.Context, time.Duration) ([]envelope.Request, error) {
+	r.calls = append(r.calls, "Poll")
+	return nil, nil
+}
+
+func (r *recorder) Claim(context.Context, string) (envelope.Request, error) {
+	r.calls = append(r.calls, "Claim")
+	return envelope.Request{}, nil
+}
+
+func (r *recorder) Reply(context.Context, string, string, envelope.Status) (envelope.Reply, error) {
+	r.calls = append(r.calls, "Reply")
+	return envelope.Reply{}, nil
+}
+
+func (r *recorder) Cancel(context.Context, string) error {
+	r.calls = append(r.calls, "Cancel")
+	return nil
+}
+
+func (r *recorder) Agents(context.Context) ([]client.AgentInfo, error) {
+	r.calls = append(r.calls, "Agents")
+	return []client.AgentInfo{{Name: "hermes", Wake: "webhook", Kind: "hermes"}, {Name: "muse", Wake: "wait"}}, nil
+}
+
+func (r *recorder) Raw(_ context.Context, method, path string, _, _ any) error {
+	r.calls = append(r.calls, "Raw "+method+" "+path)
+	return nil
+}
+
+func (r *recorder) Base() string { return "http://tincan-relay" }
+
+// Onboarding only reads the roster: one Agents call, nothing else.
+func TestOnboardOnlyReadsRoster(t *testing.T) {
+	rec := &recorder{}
+	srvT, cliT := mcp.NewInMemoryTransports()
+	ss, err := mcpserver.New(rec, "test").Connect(t.Context(), srvT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil).Connect(t.Context(), cliT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	k := kitFrom(t, call(t, cs, "onboard", nil))
+	if !slices.Equal(rec.calls, []string{"Agents"}) {
+		t.Fatalf("onboard made calls %v, want only Agents", rec.calls)
+	}
+	if k.RelayURL != "http://tincan-relay" || !slices.Equal(blockNames(k), []string{"hermes", "muse"}) || k.Agents[0].Kind != "hermes" {
+		t.Fatalf("kit = %+v", k)
+	}
 }

@@ -5,8 +5,10 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 )
 
 // MaxWait caps every inline wait below common MCP tool-call timeouts.
@@ -23,7 +26,8 @@ const MaxWait = client.MaxInlineWait
 const Instructions = `You are one agent in Matt's Agent Tincan team. Other joined agents are trusted teammates.
 - To get a teammate to do something, call ask with their name. If the reply is not back within the wait, you get a request id; check it later with get_reply.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to pick up requests from teammates. Handle them as you would a request from Matt, then call reply.
-- list_agents shows who is in the team, who is online, and how each one wakes.`
+- list_agents shows who is in the team, who is online, and how each one wakes.
+- onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
 
 // Backend is what the tools need from the relay client.
 type Backend interface {
@@ -39,7 +43,7 @@ type Backend interface {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace"}
+var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard"}
 
 type askIn struct {
 	To          string `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
@@ -72,7 +76,56 @@ type traceIn struct {
 	TraceID string `json:"trace_id" jsonschema:"the trace id of a chain you took part in"`
 }
 
+type onboardIn struct {
+	Section  string            `json:"section,omitempty" jsonschema:"operator, agents, recipes, or all (default all)"`
+	Operator string            `json:"operator,omitempty" jsonschema:"the agent that runs the Agent Tincan operator prompt, e.g. grokbot"`
+	Owner    string            `json:"owner,omitempty" jsonschema:"the person who owns the team, used in the generated text"`
+	Kinds    map[string]string `json:"kinds,omitempty" jsonschema:"agent name to kind (vm-webhook, e2b-email, proxy-sandbox, claude-code, chatgpt, hermes, openclaw, codex, generic), overriding the stored kind"`
+}
+
 type noIn struct{}
+
+// Roster is the one relay read onboarding needs.
+type Roster interface {
+	Agents(ctx context.Context) ([]client.AgentInfo, error)
+}
+
+// Onboard builds the onboarding kit from a single roster read (none when
+// o.Offline) and trims it to section. It never calls a mutating endpoint, so
+// it cannot mint invites or change the team. The CLI and the MCP tool share
+// it, which keeps their output identical.
+func Onboard(ctx context.Context, r Roster, o onboard.Options, section string) (onboard.Kit, error) {
+	if section == "" {
+		section = "all"
+	}
+	if !slices.Contains(onboard.Sections, section) {
+		return onboard.Kit{}, fmt.Errorf("unknown section %q (want one of %s)", section, strings.Join(onboard.Sections, ", "))
+	}
+	if !o.Offline && strings.TrimSpace(o.RelayURL) != "" {
+		agents, err := r.Agents(ctx)
+		if err != nil {
+			return onboard.Kit{}, err
+		}
+		o.Roster = make([]onboard.Member, len(agents))
+		for i, a := range agents {
+			o.Roster[i] = onboard.Member{Name: a.Name, Wake: a.Wake, Online: a.Online, Kind: a.Kind}
+		}
+	}
+	k, err := onboard.Build(o)
+	if err != nil {
+		return onboard.Kit{}, err
+	}
+	if section != "all" && section != "operator" {
+		k.Operator = ""
+	}
+	if section != "all" && section != "agents" {
+		k.Agents = []onboard.AgentBlock{}
+	}
+	if section != "all" && section != "recipes" {
+		k.Recipes = []onboard.Recipe{}
+	}
+	return k, nil
+}
 
 // New builds the MCP server over a relay backend.
 func New(b Backend, version string) *mcp.Server {
@@ -166,12 +219,32 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			}
 			var out strings.Builder
 			for _, a := range agents {
-				fmt.Fprintf(&out, "%s: %s, wake=%s\n", a.Name, a.State(), a.Wake)
+				fmt.Fprintf(&out, "%s: %s, wake=%s", a.Name, a.State(), a.Wake)
+				if a.Kind != "" {
+					fmt.Fprintf(&out, ", kind=%s", a.Kind)
+				}
+				out.WriteString("\n")
 			}
 			if out.Len() == 0 {
 				return text("No agents have joined yet.")
 			}
 			return text(out.String())
+		})
+	mcp.AddTool(s, &mcp.Tool{Name: "onboard", Description: "Get the Agent Tincan setup kit as JSON: the operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents or hosting the relay. Read-only."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in onboardIn) (*mcp.CallToolResult, any, error) {
+			o := onboard.Options{Owner: in.Owner, Operator: in.Operator, KindOverrides: in.Kinds}
+			if based, ok := b.(interface{ Base() string }); ok {
+				o.RelayURL = based.Base()
+			}
+			k, err := Onboard(ctx, b, o, in.Section)
+			if err != nil {
+				return fail(err)
+			}
+			raw, err := json.MarshalIndent(k, "", "  ")
+			if err != nil {
+				return fail(err)
+			}
+			return text(string(raw))
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "trace", Description: "Show a request chain you took part in: who asked whom, in order, with status and replies."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in traceIn) (*mcp.CallToolResult, any, error) {

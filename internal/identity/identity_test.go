@@ -339,3 +339,63 @@ func TestProbeFailsWithoutTailscaled(t *testing.T) {
 		t.Fatal("probe should fail with no reachable tailscaled")
 	}
 }
+
+// An invite's kind is applied on join and wins over a kind the name already
+// had; an invite without a kind keeps the old one.
+func TestInviteKindAppliedOnJoin(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	code, err := f.dir.InviteKind(ctx, "100.0.0.1:1", "hermes", "hermes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.dir.Join(ctx, "100.0.0.3:1", code)
+	if a := agentNamed(t, f.dir, "hermes"); a.Kind != "hermes" {
+		t.Fatalf("kind after join = %q", a.Kind)
+	}
+	f.dir.Join(ctx, "100.0.0.4:1", f.invite(t, "hermes"))
+	if a := agentNamed(t, f.dir, "hermes"); a.Kind != "hermes" || a.NodeID != museNode.ID {
+		t.Fatalf("kindless re-invite: %+v", a)
+	}
+	code, _ = f.dir.InviteKind(ctx, "100.0.0.1:1", "hermes", "openclaw")
+	f.dir.Join(ctx, "100.0.0.3:1", code)
+	if a := agentNamed(t, f.dir, "hermes"); a.Kind != "openclaw" {
+		t.Fatalf("kind after re-invite with kind = %q", a.Kind)
+	}
+	if _, err := f.dir.InviteKind(ctx, "100.0.0.1:1", "x", "Bad Kind"); err == nil {
+		t.Fatal("malformed kind should be rejected")
+	}
+}
+
+func TestSetKindIsAdminOnly(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.dir.Join(ctx, "100.0.0.2:1", f.invite(t, "grokbot"))
+	if err := f.dir.SetKind(ctx, "100.0.0.2:1", "grokbot", "vm-webhook"); !errors.Is(err, identity.ErrNotAdmin) {
+		t.Fatalf("non-admin set kind: %v", err)
+	}
+	if err := f.dir.SetKind(ctx, "100.0.0.1:1", "grokbot", "vm-webhook"); err != nil {
+		t.Fatal(err)
+	}
+	if a := agentNamed(t, f.dir, "grokbot"); a.Kind != "vm-webhook" {
+		t.Fatalf("kind = %q", a.Kind)
+	}
+	if err := f.dir.SetKind(ctx, identity.LocalAdmin, "nobody", "codex"); !errors.Is(err, identity.ErrUnknownAgent) {
+		t.Fatalf("unknown agent: %v", err)
+	}
+}
+
+func agentNamed(t *testing.T, d *identity.Directory, name string) identity.Agent {
+	t.Helper()
+	agents, err := d.Agents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range agents {
+		if a.Name == name {
+			return a
+		}
+	}
+	t.Fatalf("no agent %s in %+v", name, agents)
+	return identity.Agent{}
+}

@@ -35,6 +35,7 @@ type AgentInfo struct {
 	Online   bool      `json:"online"`
 	LastPoll time.Time `json:"last_poll,omitzero"`
 	Wake     string    `json:"wake"`
+	Kind     string    `json:"kind,omitempty"` // agent runtime (hermes, codex, ...), empty when unknown
 }
 
 // State is "online" or "offline".
@@ -112,6 +113,9 @@ func NewRelaySocket(path string) *Relay {
 	c := &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	return &Relay{base: "http://tincan-admin", api: c, polls: c}
 }
+
+// Base is the relay URL this client talks to.
+func (r *Relay) Base() string { return r.base }
 
 // Send queues a request. parent is the request this one continues, or "".
 func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error) {
@@ -203,11 +207,26 @@ func (r *Relay) Join(ctx context.Context, code string) (string, error) {
 
 // Invite creates a one-time join code (admin devices only).
 func (r *Relay) Invite(ctx context.Context, name string) (string, error) {
+	return r.InviteKind(ctx, name, "")
+}
+
+// InviteKind creates a join code that also records the agent's kind (hermes,
+// codex, ...), applied when the code is used. An empty kind is Invite.
+func (r *Relay) InviteKind(ctx context.Context, name, kind string) (string, error) {
 	var out struct {
 		Code string `json:"code"`
 	}
-	err := r.call(ctx, r.api, "POST", "/v1/admin/invite", map[string]string{"name": name}, &out)
+	in := map[string]string{"name": name}
+	if kind != "" {
+		in["kind"] = kind
+	}
+	err := r.call(ctx, r.api, "POST", "/v1/admin/invite", in, &out)
 	return out.Code, err
+}
+
+// SetKind records a joined agent's kind; "" clears it (admin devices only).
+func (r *Relay) SetKind(ctx context.Context, name, kind string) error {
+	return r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/kind", map[string]string{"kind": kind}, nil)
 }
 
 // Remove unbinds an agent (admin devices only).
