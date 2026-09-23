@@ -3,21 +3,38 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/identity/identitytest"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
-const rebuiltAddr = "100.0.0.7:1"
+const (
+	rebuiltAddr = "100.0.0.7:1"
+	login       = "mvanhorn@gmail.com"
+)
+
+// recordInstinctLogin gives instinct's node an owning login and makes one
+// call from it. The harness joins agents with no login, like agents joined
+// before logins were recorded, and such an agent is re-admitted only after
+// that call records one.
+func (h *harness) recordInstinctLogin() {
+	h.t.Helper()
+	h.who.Set(instinctAddr, identity.Node{ID: "nINST", Name: "instinct", User: login})
+	h.do(instinctAddr, "GET", "/v1/whoami", "", http.StatusOK, nil)
+}
 
 // rebuildInstinct replaces instinct's machine with a new node of the same
 // name, as an e2b rebuild does. The old node leaves the tailnet.
 func (h *harness) rebuildInstinct(name string) {
+	h.t.Helper()
+	h.recordInstinctLogin()
 	h.who.Remove(instinctAddr)
-	h.who.Set(rebuiltAddr, identity.Node{ID: "nINST2", Name: name})
+	h.who.Set(rebuiltAddr, identity.Node{ID: "nINST2", Name: name, User: login})
 }
 
 func (h *harness) rebindEvents() []store.AuditEvent {
@@ -84,7 +101,8 @@ func TestRebuiltMachineWithSuffixOverHTTP(t *testing.T) {
 
 func TestOldNodeStillOnlineIsNotReplaced(t *testing.T) {
 	h := newHarness(t, Config{})
-	h.who.Set(rebuiltAddr, identity.Node{ID: "nINST2", Name: "instinct-1"})
+	h.recordInstinctLogin()
+	h.who.Set(rebuiltAddr, identity.Node{ID: "nINST2", Name: "instinct-1", User: login})
 	h.who.SetOnline("nINST", true)
 	rec := h.do(rebuiltAddr, "GET", "/v1/whoami", "", http.StatusForbidden, nil)
 	if !strings.Contains(rec.Body.String(), "online") {
@@ -95,6 +113,49 @@ func TestOldNodeStillOnlineIsNotReplaced(t *testing.T) {
 	if len(h.rebindEvents()) != 0 {
 		t.Fatal("no rebind should be audited")
 	}
+}
+
+// An agent with no recorded login is not re-admitted until it has made one
+// call from its own node.
+func TestAgentWithoutLoginIsNotReadmittedOverHTTP(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.who.Remove(instinctAddr)
+	h.who.Set(rebuiltAddr, identity.Node{ID: "nINST2", Name: "instinct", User: login})
+	h.do(rebuiltAddr, "GET", "/v1/whoami", "", http.StatusForbidden, nil)
+	if len(h.rebindEvents()) != 0 {
+		t.Fatal("no rebind should be audited")
+	}
+}
+
+// failingStatus answers WhoIs but cannot report whether a node is online.
+type failingStatus struct{ *identitytest.Resolver }
+
+func (failingStatus) NodeOnline(context.Context, string) (bool, bool, error) {
+	return false, false, errors.New("localapi: connection refused")
+}
+
+// A failed old-node check is a transient 503, not a 403 refusal.
+func TestRebindCheckFailureIsUnavailable(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	who := identitytest.New(map[string]identity.Node{instinctAddr: {ID: "nINST", Name: "instinct", User: login}})
+	dir := identity.NewDirectory(st, failingStatus{who}, identity.Config{})
+	h := &harness{t: t, srv: New(dir, st, Config{}), st: st, who: who}
+	h.h = h.srv.Handler()
+	ctx := context.Background()
+	code, err := dir.Invite(ctx, identity.LocalAdmin, "instinct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dir.Join(ctx, instinctAddr, code); err != nil {
+		t.Fatal(err)
+	}
+	who.Remove(instinctAddr)
+	who.Set(rebuiltAddr, identity.Node{ID: "nINST2", Name: "instinct", User: login})
+	h.do(rebuiltAddr, "GET", "/v1/whoami", "", http.StatusServiceUnavailable, nil)
 }
 
 func TestNoAutoRebindKeepsRebuiltMachineOut(t *testing.T) {

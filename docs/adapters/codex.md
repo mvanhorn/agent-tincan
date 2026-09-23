@@ -57,7 +57,9 @@ Set codex's wake to `command` in the relay's `wake.json`:
 { "codex": { "method": "command" } }
 ```
 
-codex-wake.sh runs `codex exec` with `--sandbox workspace-write --ask-for-approval never`. That lets an unattended run act without a human present to answer approval prompts (there is a real trade-off: model-generated commands execute without asking first), but it still confines them to the sandbox's workspace-write policy rather than full disk access. It does not use `--dangerously-bypass-approvals-and-sandbox`, which would remove the sandbox boundary entirely. If your requests need to write outside the working directory the script sets, add `--add-dir` to the script rather than reaching for the bypass flag.
+codex-wake.sh runs `codex exec` with `--sandbox workspace-write -c approval_policy=never`. `codex exec` has no `--ask-for-approval` flag (that flag is interactive-mode only); `-c approval_policy=never` is the non-interactive equivalent, set via a config override. This lets an unattended run act without a human present to answer approval prompts (there is a real trade-off: model-generated commands execute without asking first), but it still confines them to the sandbox's workspace-write policy rather than full disk access. It does not use `--dangerously-bypass-approvals-and-sandbox`, which would remove the sandbox boundary entirely.
+
+The run's working directory, and so its write scope under workspace-write, is `TINCAN_CODEX_WORKDIR` (default `$HOME/tincan-codex`, created if missing), not the whole home directory. If your requests need to write elsewhere, add `--add-dir` to the script rather than widening the working directory or reaching for the bypass flag.
 
 ## Limits
 

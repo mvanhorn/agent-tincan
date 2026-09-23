@@ -385,6 +385,55 @@ func TestSetKindIsAdminOnly(t *testing.T) {
 	}
 }
 
+// pausingStore runs pause after the first AgentByName read, which Join does
+// between taking the invite and writing the agent.
+type pausingStore struct {
+	*identity.MemoryStore
+	pause func()
+}
+
+func (p *pausingStore) AgentByName(ctx context.Context, name string) (identity.Agent, bool, error) {
+	a, ok, err := p.MemoryStore.AgentByName(ctx, name)
+	if p.pause != nil {
+		pause := p.pause
+		p.pause = nil
+		pause()
+	}
+	return a, ok, err
+}
+
+// SetKind waits for a Join in progress, so the kind it sets is not
+// overwritten by the kind Join read before it.
+func TestSetKindDuringJoinIsNotLost(t *testing.T) {
+	ctx := context.Background()
+	st := &pausingStore{MemoryStore: identity.NewMemoryStore()}
+	who := identitytest.New(map[string]identity.Node{"100.0.0.1:1": macNode, "100.0.0.2:1": grokNode})
+	dir := identity.NewDirectory(st, who, identity.Config{Admins: []string{"macbook-pro-44"}})
+	st.PutAgent(ctx, identity.Agent{Name: "grokbot", NodeID: "nOLD", NodeName: "old", Kind: "codex"})
+	code, err := dir.Invite(ctx, identity.LocalAdmin, "grokbot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	st.pause = func() {
+		go func() { done <- dir.SetKind(ctx, identity.LocalAdmin, "grokbot", "vm-webhook") }()
+		select {
+		case err := <-done:
+			done <- err // SetKind finished inside Join: the race this guards
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if _, err := dir.Join(ctx, "100.0.0.2:1", code); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if a := agentNamed(t, dir, "grokbot"); a.Kind != "vm-webhook" || a.NodeID != "nGROK" {
+		t.Fatalf("after join and set kind = %+v", a)
+	}
+}
+
 func agentNamed(t *testing.T, d *identity.Directory, name string) identity.Agent {
 	t.Helper()
 	a, ok, err := d.Agent(context.Background(), name)

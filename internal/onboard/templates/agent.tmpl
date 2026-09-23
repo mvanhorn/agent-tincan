@@ -7,9 +7,20 @@ title). Data: Name, Kind, Wake, RelayURL, Owner, OwnerPoss, Team.
 Never print a secret value. Name the wake.json field that holds a secret and
 say to set it in the file only. Wake messages carry only the waiting count.
 Fresh-session kinds (hermes, openclaw, codex) must carry instructions.fresh.
+They also commonly share a machine with another agent, so every tincan command
+in their join, setup and self-heal lines carries a per-agent TINCAN_CONFIG
+(template "cfg"), their MCP entries set that env, and their rejoin names the
+agent. claude-code and generic get one line saying when to add the prefix.
 */ -}}
 
-{{- define "join.default"}}tincan join <code> --relay {{.RelayURL}}{{end -}}
+{{- define "cfgpath"}}~/.config/tincan/{{.Name}}.json{{end -}}
+{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
+{{- define "mcpenv"}}env TINCAN_CONFIG set to the full path of {{template "cfgpath" .}} (MCP configs do not expand ~){{end -}}
+{{- define "setup.cfghint" -}}
+If another agent already runs on this machine, prefix every tincan command (join, mcp, listen, rejoin) with TINCAN_CONFIG={{template "cfgpath" .}}.
+{{- end -}}
+
+{{- define "join.default"}}{{template "cfg" .}}tincan join <code> --relay {{.RelayURL}}{{end -}}
 {{- define "join.proxy-sandbox"}}tincan join <code> --relay {{.RelayURL}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end -}}
 {{- define "join.chatgpt"}}tincan connect chatgpt (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
 
@@ -31,7 +42,7 @@ If tincan says not joined or no relay configured (for example after this machine
 {{- end -}}
 {{- end -}}
 
-{{- define "rejoin"}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{end -}}
+{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex")}} --name {{.Name}}{{end}}{{end -}}
 
 {{- define "setup.samename" -}}
 Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.
@@ -122,6 +133,7 @@ Add the MCP server: claude mcp add agent-tincan -- tincan mcp --channel
 Start the session with channels: claude --dangerously-load-development-channels server:agent-tincan (keep it open), and pre-approve mcp__agent-tincan__* in /permissions.
 On the relay host, in wake.json: set {{.Name}} to method "channel". No secret fields.
 Fallback without channels: tincan listen --exec <script that opens a Claude Code session>, and set method "command" instead.
+{{template "setup.cfghint" .}}
 {{- end -}}
 
 {{- define "setup.chatgpt" -}}
@@ -131,22 +143,22 @@ In ChatGPT, turn on Developer mode and create a connector with that URL. Its wak
 {{- end -}}
 
 {{- define "setup.hermes" -}}
-Add tincan to Hermes MCP config (~/.hermes/config.yaml, under mcp_servers): tincan with command "tincan" and args ["mcp"].
+Add tincan to Hermes MCP config (~/.hermes/config.yaml, under mcp_servers): tincan with command "tincan", args ["mcp"] and {{template "mcpenv" .}}.
 Create a Hermes webhook route for Agent Tincan with an HMAC secret; its prompt should pass through the incoming text (count only).
 On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the route URL) and hmac_secret (the route's secret) hold secrets; set them in the file only. The relay signs each wake with X-Hub-Signature-256.
 Paste the standing instructions into Hermes.
 {{- end -}}
 
 {{- define "setup.openclaw" -}}
-Add tincan to mcpServers in the OpenClaw config: "tincan" with command "tincan" and args ["mcp"].
-Enable gateway hooks (hooks.enabled and hooks.token) so a POST to /hooks/wake starts a turn.
-On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the gateway /hooks/wake URL) and bearer_token (the hooks token) hold secrets; set them in the file only.
+Add tincan to mcpServers in the OpenClaw config: "tincan" with command "tincan", args ["mcp"] and {{template "mcpenv" .}}.
+Enable gateway hooks (hooks.enabled and hooks.token) so a POST to /hooks/agent starts a turn (/hooks/wake only queues for the next heartbeat).
+On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the gateway /hooks/agent URL) and bearer_token (the hooks token) hold secrets; set them in the file only.
 Paste the standing instructions into OpenClaw.
 {{- end -}}
 
 {{- define "setup.codex" -}}
-Add tincan to ~/.codex/config.toml: a [mcp_servers.tincan] table with command = "tincan" and args = ["mcp"].
-Keep a listener running on that machine (launchd, systemd or a terminal): tincan listen --exec 'codex exec "Agent Tincan requests are waiting. Run check_inbox, handle and reply to every request, and repeat until the inbox is empty."'
+Add tincan to ~/.codex/config.toml: a [mcp_servers.tincan] table with command = "tincan", args = ["mcp"] and env = { TINCAN_CONFIG = "<full path of {{template "cfgpath" .}}>" } (MCP configs do not expand ~).
+Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec 'codex exec "Agent Tincan requests are waiting. Run check_inbox, handle and reply to every request, and repeat until the inbox is empty."'
 On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
 Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{- end -}}
@@ -155,6 +167,7 @@ Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{template "setup.tools" .}}
 On the relay host, in wake.json (chmod 600): set {{.Name}} to its wake method ({{.Wake}} now; one of webhook, email, wait, channel, command, none). Secret fields: url, bearer_token and hmac_secret for webhook; email_to, agentmail_inbox and agentmail_key for email. Set them in the file only.
 For wake=command, keep tincan listen --exec <command that starts the agent> running. For wake=wait, the agent keeps tincan wait & running.
+{{template "setup.cfghint" .}}
 Paste the standing instructions into {{.Name}}.
 {{- end -}}
 

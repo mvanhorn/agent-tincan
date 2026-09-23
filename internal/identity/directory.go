@@ -33,6 +33,10 @@ var (
 	// ErrAgentAmbiguous means several agents share the calling machine and the
 	// request did not say which one it comes from.
 	ErrAgentAmbiguous = errors.New("several agents share this machine; the client must name one (point TINCAN_CONFIG at that agent's config)")
+	// ErrRebindCheckFailed means re-admitting a rebuilt machine could not
+	// check whether the agent's old node is still online. It is a transient
+	// failure, not a refusal.
+	ErrRebindCheckFailed = errors.New("could not check the agent's old node; try again")
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -146,7 +150,7 @@ func (d *Directory) ResolveAgent(ctx context.Context, remoteAddr, claimed string
 	if claimed != "" {
 		for _, a := range agents {
 			if a.Name == claimed {
-				return Resolved{Name: a.Name}, nil
+				return d.resolved(ctx, n, a)
 			}
 		}
 		if res, ok, err := d.readmit(ctx, n, claimed); ok || err != nil {
@@ -161,9 +165,44 @@ func (d *Directory) ResolveAgent(ctx context.Context, remoteAddr, claimed string
 		}
 		return Resolved{}, fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
 	case 1:
-		return Resolved{Name: agents[0].Name}, nil
+		// Another agent from the same rebuilt machine may still be waiting to
+		// be re-admitted, and this nameless call may be its first.
+		waiting, err := d.awaitingReadmit(ctx, n)
+		if err != nil {
+			return Resolved{}, err
+		}
+		if len(waiting) > 0 {
+			return Resolved{}, fmt.Errorf("%s runs %s, and %s from its old machine has not rejoined; each agent must name itself (tincan rejoin --name <agent>): %w",
+				n.Name, agents[0].Name, strings.Join(agentNames(waiting), ", "), ErrAgentAmbiguous)
+		}
+		return d.resolved(ctx, n, agents[0])
 	}
 	return Resolved{}, fmt.Errorf("%s runs %s: %w", n.Name, strings.Join(agentNames(agents), ", "), ErrAgentAmbiguous)
+}
+
+// resolved returns a, which is bound to n. An agent joined before logins
+// were recorded gets n's login now, so that a later rebuild of its machine
+// can be re-admitted with the login check (see readmit).
+func (d *Directory) resolved(ctx context.Context, n Node, a Agent) (Resolved, error) {
+	if a.NodeUser == "" && n.User != "" && len(n.Tags) == 0 {
+		if err := d.recordLogin(ctx, n, a.Name); err != nil {
+			return Resolved{}, err
+		}
+	}
+	return Resolved{Name: a.Name}, nil
+}
+
+// recordLogin stores n's login on agent name, provided it is still bound to
+// n with no login recorded.
+func (d *Directory) recordLogin(ctx context.Context, n Node, name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	a, found, err := d.store.AgentByName(ctx, name)
+	if err != nil || !found || a.NodeID != n.ID || a.NodeUser != "" {
+		return err
+	}
+	a.NodeUser = n.User
+	return d.store.PutAgent(ctx, a)
 }
 
 // agentNames returns the names of agents, in order.
@@ -272,6 +311,10 @@ func (d *Directory) SetKind(ctx context.Context, remoteAddr, name, kind string) 
 	if err := checkKind(kind); err != nil {
 		return err
 	}
+	// Join rewrites the whole agent row, so a kind set while it runs would
+	// be lost.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	ok, err := d.store.SetAgentKind(ctx, name, kind)
 	if err != nil {
 		return err

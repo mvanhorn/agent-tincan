@@ -35,12 +35,14 @@ type NodeStatus interface {
 var dedupSuffix = regexp.MustCompile(`-[0-9]+$`)
 
 // readmit re-binds an agent to a rebuilt machine: a new node whose machine
-// name equals the agent's recorded one, or equals it after dropping a dedup
-// suffix. Every condition must hold: the caller is untagged, it is owned by
-// the login recorded at join (when one was recorded), the agent's old node
-// is offline or gone, and a claimed name must be the agent's. When several
-// agents match, the claim picks one. The agent keeps its name, kind and
-// requests, which are keyed by name. ok is false when nothing matched.
+// name equals the agent's recorded one, or matches it once a dedup suffix is
+// dropped from either (see sameMachine). Every condition must hold: the
+// caller is untagged, it is owned by the login recorded for the agent (an
+// agent with no recorded login is never re-admitted; it gains one on its
+// next call from its own node), the agent's old node is offline or gone, and
+// a claimed name must be the agent's. When several agents match, the claim
+// picks one. The agent keeps its name, kind and requests, which are keyed by
+// name. ok is false when nothing matched.
 //
 // The old node's status comes from the resolver (Tailscale LocalAPI IPC), so
 // it is checked without holding d.mu; the rebind is then committed under
@@ -48,7 +50,7 @@ var dedupSuffix = regexp.MustCompile(`-[0-9]+$`)
 // moved in between, the match is evaluated once more from the new state, and
 // a second move reports no match.
 func (d *Directory) readmit(ctx context.Context, n Node, claimed string) (Resolved, bool, error) {
-	if d.cfg.NoAutoRebind || len(n.Tags) > 0 || strings.HasPrefix(n.ID, VirtualPrefix) {
+	if !d.mayReadmit(n) {
 		return Resolved{}, false, nil
 	}
 	for range 2 {
@@ -64,6 +66,66 @@ func (d *Directory) readmit(ctx context.Context, n Node, claimed string) (Resolv
 	return Resolved{}, false, nil
 }
 
+// mayReadmit reports whether n may take over agents at all.
+func (d *Directory) mayReadmit(n Node) bool {
+	return !d.cfg.NoAutoRebind && len(n.Tags) == 0 && !strings.HasPrefix(n.ID, VirtualPrefix)
+}
+
+// sameMachine reports whether a node named name may be the rebuilt machine
+// recorded as recorded: the names are equal, or equal once a trailing
+// "-<digits>" is dropped from each, so instinct, instinct-1 and instinct-2
+// are one machine across rebuilds.
+func sameMachine(recorded, name string) bool {
+	return recorded == name || dedupSuffix.ReplaceAllString(recorded, "") == dedupSuffix.ReplaceAllString(name, "")
+}
+
+// eligible reports whether a, bound to some other node, may be re-admitted
+// by n, before the claim and the old node's status are considered.
+func eligible(a Agent, n Node) bool {
+	return a.NodeID != n.ID && !strings.HasPrefix(a.NodeID, VirtualPrefix) &&
+		a.NodeUser != "" && a.NodeUser == n.User && sameMachine(a.NodeName, n.Name)
+}
+
+// oldNodeOnline reports whether a's current node is online. A resolver
+// without NodeStatus counts every old node as offline.
+func (d *Directory) oldNodeOnline(ctx context.Context, a Agent) (bool, error) {
+	st, ok := d.who.(NodeStatus)
+	if !ok {
+		return false, nil
+	}
+	online, found, err := st.NodeOnline(ctx, a.NodeID)
+	if err != nil {
+		return false, fmt.Errorf("check old node of %s: %w: %w", a.Name, ErrRebindCheckFailed, err)
+	}
+	return online && found, nil
+}
+
+// awaitingReadmit returns the agents n could still re-admit: eligible, with
+// their old node offline or gone. It is empty when n may not re-admit.
+func (d *Directory) awaitingReadmit(ctx context.Context, n Node) ([]Agent, error) {
+	if !d.mayReadmit(n) {
+		return nil, nil
+	}
+	all, err := d.store.Agents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []Agent
+	for _, a := range all {
+		if !eligible(a, n) {
+			continue
+		}
+		online, err := d.oldNodeOnline(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		if !online {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
 // readmitCandidate finds the one agent n may take over and checks that its
 // old node is not online. A nil agent means the returned result is final.
 func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string) (*Agent, Resolved, bool, error) {
@@ -71,7 +133,6 @@ func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string
 	if err != nil {
 		return nil, Resolved{}, false, err
 	}
-	base := dedupSuffix.ReplaceAllString(n.Name, "")
 	var matches []Agent
 	for _, a := range all {
 		if a.NodeID == n.ID {
@@ -81,14 +142,9 @@ func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string
 			}
 			continue
 		}
-		switch {
-		case strings.HasPrefix(a.NodeID, VirtualPrefix),
-			a.NodeName != n.Name && a.NodeName != base,
-			a.NodeUser != "" && a.NodeUser != n.User,
-			claimed != "" && a.Name != claimed:
-			continue
+		if eligible(a, n) && (claimed == "" || a.Name == claimed) {
+			matches = append(matches, a)
 		}
-		matches = append(matches, a)
 	}
 	switch len(matches) {
 	case 0:
@@ -98,14 +154,12 @@ func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string
 		return nil, Resolved{}, false, fmt.Errorf("%s was rebuilt and ran %s; run tincan rejoin --name <agent> once per agent: %w", n.Name, strings.Join(agentNames(matches), ", "), ErrAgentAmbiguous)
 	}
 	a := matches[0]
-	if st, ok := d.who.(NodeStatus); ok {
-		online, found, err := st.NodeOnline(ctx, a.NodeID)
-		if err != nil {
-			return nil, Resolved{}, false, fmt.Errorf("check old node of %s: %w", a.Name, err)
-		}
-		if online && found {
-			return nil, Resolved{}, false, fmt.Errorf("%s: %q is still bound to %s, which is online: %w", n.Name, a.Name, a.NodeName, ErrNotJoined)
-		}
+	online, err := d.oldNodeOnline(ctx, a)
+	if err != nil {
+		return nil, Resolved{}, false, err
+	}
+	if online {
+		return nil, Resolved{}, false, fmt.Errorf("%s: %q is still bound to %s, which is online: %w", n.Name, a.Name, a.NodeName, ErrNotJoined)
 	}
 	return &a, Resolved{}, false, nil
 }

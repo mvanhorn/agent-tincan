@@ -15,9 +15,12 @@
 Rebuilding a sandbox or VM usually creates a new Tailscale node: a new stable node ID and IP under the same machine name, or that name with a `-1` style suffix if the old node has not expired yet. The relay re-admits such a machine as its old agent on its first call, with no new invite, when all of these hold:
 
 - the new node has no Tailscale tags;
-- it is owned by the same Tailscale login that owned the node when the agent joined (agents joined before logins were recorded match on name alone);
+- its machine name matches the agent's recorded one, ignoring a trailing `-<digits>` suffix on either side, so `instinct`, `instinct-1` and `instinct-2` count as the same machine across rebuilds;
+- it is owned by the same Tailscale login recorded for the agent. An agent with no recorded login is never re-admitted this way. Agents joined before logins were recorded get one on their first normal call from their own machine after the relay is upgraded; until an agent has made that call, a rebuilt machine needs a new invite for it;
 - the agent's old node is offline or no longer on the tailnet, so two live machines can never share one agent;
-- if the request names an agent (`X-Tincan-Agent`), it names that agent. When several agents lived on the old machine, each one moves only when it names itself.
+- if the request names an agent (`X-Tincan-Agent`), it names that agent. When several agents lived on the old machine, each one moves only when it names itself, and until they all have, a request from the new machine that names no agent is refused as ambiguous rather than attributed to the one agent already moved.
+
+If the relay cannot ask Tailscale whether the old node is online, the request fails with 503 and can be retried; it is not treated as a refusal.
 
 This adds no new trust boundary. Tailscale already is the boundary: anyone who can add an untagged node owned by your login to your tailnet controls your tailnet, and joined agents trust each other fully anyway. The agent keeps its name, kind, and queued and claimed requests. Every re-admission is logged by the relay and written to the audit log as a `rebind` event with the agent, old node, and new node. Tagged machines are never re-admitted this way; they need a new invite. Start the relay with `--no-auto-rebind` to require an invite for every rebuilt machine.
 

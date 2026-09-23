@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -103,5 +104,26 @@ func TestRelayNoAutoRebindFlag(t *testing.T) {
 	f.noRebind = true
 	if !f.directoryConfig().NoAutoRebind {
 		t.Fatal("--no-auto-rebind should reach the directory")
+	}
+}
+
+// The relay refuses a rebuilt machine while its old node is still online
+// (identity's rebind check). rejoin says to shut the old machine down, not to
+// get an invite. The message crosses HTTP, so it is matched by text.
+func TestRejoinErrorOldMachineStillOnline(t *testing.T) {
+	cfg := client.Config{Relay: "http://tincan-relay", Agent: "instinct"}
+	online := &client.APIError{Code: 403, Message: `instinct-2: "instinct" is still bound to instinct, which is online: not a joined agent`}
+	err := rejoinError(online, cfg)
+	if !strings.Contains(err.Error(), "old machine online") || strings.Contains(err.Error(), "first-time invite") {
+		t.Fatalf("online branch = %v", err)
+	}
+	if !errors.Is(err, online) {
+		t.Fatalf("online branch should wrap the relay error: %v", err)
+	}
+
+	// An agent or machine merely named "online" is not the online branch.
+	named := &client.APIError{Code: 403, Message: `online-box: not a joined agent`}
+	if err := rejoinError(named, cfg); !strings.Contains(err.Error(), "first-time invite") {
+		t.Fatalf("never-joined machine named online = %v", err)
 	}
 }

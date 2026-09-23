@@ -3,6 +3,8 @@ package identity_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,15 +133,139 @@ func TestOfflineOldNodeIsReplaced(t *testing.T) {
 	}
 }
 
-// Agents joined before logins were recorded still re-admit.
-func TestAgentWithoutRecordedLoginIsReadmitted(t *testing.T) {
+// clearLogin makes name look like an agent joined before logins were
+// recorded.
+func (f rebindFixture) clearLogin(t *testing.T, name string) {
+	t.Helper()
+	ctx := context.Background()
+	a, _, _ := f.store.AgentByName(ctx, name)
+	a.NodeUser = ""
+	if err := f.store.PutAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An agent joined before logins were recorded has no login to compare, so a
+// rebuilt machine cannot take it over on the machine name alone.
+func TestAgentWithoutRecordedLoginIsNotReadmitted(t *testing.T) {
+	f := newRebindFixture(t, identity.Config{}, newBox)
+	f.clearLogin(t, "instinct")
+	for _, claim := range []string{"", "instinct"} {
+		if _, err := f.dir.Resolve(context.Background(), rebuiltAddr, claim); !errors.Is(err, identity.ErrNotJoined) {
+			t.Fatalf("claim %q: want not joined, got %v", claim, err)
+		}
+	}
+	if a := agentNamed(t, f.dir, "instinct"); a.NodeID != "nBOX" {
+		t.Fatalf("instinct moved to %s", a.NodeID)
+	}
+}
+
+// One ordinary call from the agent's own node records its login, after
+// which a rebuild re-admits it.
+func TestAgentWithoutLoginGainsItOnNextCall(t *testing.T) {
+	for _, claim := range []string{"", "instinct"} {
+		t.Run("claim="+claim, func(t *testing.T) {
+			f := newRebindFixture(t, identity.Config{}, newBox)
+			ctx := context.Background()
+			f.clearLogin(t, "instinct")
+			f.who.Set(boxAddr, oldBox)
+			if got, err := f.dir.Resolve(ctx, boxAddr, claim); err != nil || got != "instinct" {
+				t.Fatalf("resolve from own node = %q, %v", got, err)
+			}
+			if a := agentNamed(t, f.dir, "instinct"); a.NodeUser != matt || a.NodeID != "nBOX" || a.Kind != "hermes" {
+				t.Fatalf("after own call = %+v, want login recorded", a)
+			}
+			f.who.Remove(boxAddr)
+			res, err := f.dir.ResolveAgent(ctx, rebuiltAddr, claim)
+			if err != nil || res.Name != "instinct" || res.Rebind == nil {
+				t.Fatalf("resolve rebuilt = %+v, %v", res, err)
+			}
+		})
+	}
+}
+
+// A node's own agent is not handed to a nameless call while another agent
+// from the same rebuilt machine still waits to be re-admitted: the call
+// could be that other agent's first.
+func TestNamelessCallIsAmbiguousWhileSiblingAwaitsReadmit(t *testing.T) {
 	f := newRebindFixture(t, identity.Config{}, newBox)
 	ctx := context.Background()
-	a, _, _ := f.store.AgentByName(ctx, "instinct")
-	a.NodeUser = ""
-	f.store.PutAgent(ctx, a)
-	if got, err := f.dir.Resolve(ctx, rebuiltAddr, ""); err != nil || got != "instinct" {
+	f.store.PutAgent(ctx, identity.Agent{Name: "codex", NodeID: "nBOX", NodeName: "instinct", NodeUser: matt, Kind: "codex"})
+
+	if res, err := f.dir.ResolveAgent(ctx, rebuiltAddr, "codex"); err != nil || res.Name != "codex" || res.Rebind == nil {
+		t.Fatalf("header codex = %+v, %v", res, err)
+	}
+	_, err := f.dir.Resolve(ctx, rebuiltAddr, "")
+	if !errors.Is(err, identity.ErrAgentAmbiguous) || !strings.Contains(err.Error(), "instinct") {
+		t.Fatalf("no header while instinct awaits: want ambiguous naming instinct, got %v", err)
+	}
+	if a := agentNamed(t, f.dir, "instinct"); a.NodeID != "nBOX" {
+		t.Fatalf("instinct should stay until it names itself, got %s", a.NodeID)
+	}
+	// codex naming itself is unaffected.
+	if got, err := f.dir.Resolve(ctx, rebuiltAddr, "codex"); err != nil || got != "codex" {
+		t.Fatalf("header codex again = %q, %v", got, err)
+	}
+	if res, err := f.dir.ResolveAgent(ctx, rebuiltAddr, "instinct"); err != nil || res.Name != "instinct" || res.Rebind == nil {
+		t.Fatalf("header instinct = %+v, %v", res, err)
+	}
+}
+
+// An agent on a live machine that only shares the base name does not make
+// the caller's own agent ambiguous.
+func TestNamelessCallIgnoresAgentOnLiveMachine(t *testing.T) {
+	f := newRebindFixture(t, identity.Config{}, identity.Node{ID: "nBOX2", Name: "instinct-1", User: matt})
+	ctx := context.Background()
+	f.who.Set(boxAddr, oldBox)
+	f.who.SetOnline("nBOX", true)
+	f.store.PutAgent(ctx, identity.Agent{Name: "codex", NodeID: "nBOX2", NodeName: "instinct-1", NodeUser: matt})
+	if got, err := f.dir.Resolve(ctx, rebuiltAddr, ""); err != nil || got != "codex" {
 		t.Fatalf("resolve = %q, %v", got, err)
+	}
+}
+
+// The recorded machine name is compared without its dedup suffix, so a
+// machine rebuilt twice re-admits whichever suffix Tailscale hands out.
+func TestReadmitAcrossDedupSuffixes(t *testing.T) {
+	f := newRebindFixture(t, identity.Config{}, identity.Node{ID: "nBOX2", Name: "instinct-1", User: matt})
+	ctx := context.Background()
+	if got, err := f.dir.Resolve(ctx, rebuiltAddr, ""); err != nil || got != "instinct" {
+		t.Fatalf("resolve instinct-1 = %q, %v", got, err)
+	}
+	prev := rebuiltAddr
+	for i, name := range []string{"instinct", "instinct-2"} {
+		addr := fmt.Sprintf("100.0.1.%d:1", i)
+		f.who.Remove(prev)
+		f.who.Set(addr, identity.Node{ID: "nBOX" + name, Name: name, User: matt})
+		res, err := f.dir.ResolveAgent(ctx, addr, "")
+		if err != nil || res.Name != "instinct" || res.Rebind == nil {
+			t.Fatalf("resolve %s = %+v, %v", name, res, err)
+		}
+		if a := agentNamed(t, f.dir, "instinct"); a.NodeName != name {
+			t.Fatalf("after rebind to %s = %+v", name, a)
+		}
+		prev = addr
+	}
+}
+
+// failingStatus stands in for a LocalAPI that cannot answer NodeOnline.
+type failingStatus struct{ *identitytest.Resolver }
+
+func (failingStatus) NodeOnline(context.Context, string) (bool, bool, error) {
+	return false, false, errors.New("localapi: connection refused")
+}
+
+// A failed old-node check is not a refusal: the caller may well be the
+// agent, so the error says the check failed rather than not joined.
+func TestReadmitNodeCheckFailure(t *testing.T) {
+	f := newRebindFixture(t, identity.Config{}, newBox)
+	dir := identity.NewDirectory(f.store, failingStatus{f.who}, identity.Config{})
+	_, err := dir.Resolve(context.Background(), rebuiltAddr, "")
+	if !errors.Is(err, identity.ErrRebindCheckFailed) || errors.Is(err, identity.ErrNotJoined) {
+		t.Fatalf("want rebind check failed, got %v", err)
+	}
+	if a := agentNamed(t, dir, "instinct"); a.NodeID != "nBOX" {
+		t.Fatalf("instinct moved to %s", a.NodeID)
 	}
 }
 

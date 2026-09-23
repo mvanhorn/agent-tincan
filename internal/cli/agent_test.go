@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -59,3 +60,74 @@ func TestSecondAgentJoinKeepsFirstConfig(t *testing.T) {
 type nopWriter struct{}
 
 func (*nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// A default config that already names an agent is not silently repointed by
+// a join for a different agent: the first agent would start acting as the
+// new one. The join is refused, the config is untouched, and the error says
+// how to give the second agent its own config.
+func TestJoinDifferentAgentOnSameConfigIsRefused(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	url := m.URL("muse")
+	useConfig(t, client.Config{Relay: url, Agent: "muse"})
+	path := client.ConfigPath()
+	before, _ := os.ReadFile(path)
+
+	_, err := run(t, joinCmd(), m.Invite(t, "codex"), "--relay", url)
+	if err == nil {
+		t.Fatal("join as codex over muse's config should be refused")
+	}
+	for _, want := range []string{`"muse"`, path, "TINCAN_CONFIG", "--replace"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %s", err, want)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatalf("config changed on refusal:\n%s\n->\n%s", before, after)
+	}
+
+	// The refused agent was admitted by the relay, so it can still get its
+	// own config without a new invite, as the error says.
+	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "codex.json"))
+	if _, err := run(t, Root(), "rejoin", "--relay", url, "--name", "codex"); err != nil {
+		t.Fatalf("rejoin codex into its own config: %v", err)
+	}
+	if cfg, _ := client.LoadConfig(); cfg.Agent != "codex" {
+		t.Fatalf("codex config = %+v", cfg)
+	}
+}
+
+func TestJoinReplaceRepointsConfig(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	url := m.URL("muse")
+	useConfig(t, client.Config{Relay: url, Agent: "muse"})
+	if _, err := run(t, joinCmd(), m.Invite(t, "codex"), "--relay", url, "--replace"); err != nil {
+		t.Fatalf("join --replace: %v", err)
+	}
+	if cfg, _ := client.LoadConfig(); cfg.Agent != "codex" {
+		t.Fatalf("config after --replace = %+v", cfg)
+	}
+}
+
+func TestJoinSameAgentAgainNeedsNoReplace(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	url := m.URL("muse")
+	useConfig(t, client.Config{Relay: url, Agent: "muse"})
+	if _, err := run(t, joinCmd(), m.Invite(t, "muse"), "--relay", url); err != nil {
+		t.Fatalf("rejoin same name: %v", err)
+	}
+	if cfg, _ := client.LoadConfig(); cfg.Agent != "muse" || cfg.Relay != url {
+		t.Fatalf("config = %+v", cfg)
+	}
+}
+
+func TestInviteNextStepMentionsSecondAgentConfig(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{})
+	out, err := run(t, inviteCmd(), "codex", "--relay", m.URL("admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>") {
+		t.Fatalf("invite output = %q", out)
+	}
+}

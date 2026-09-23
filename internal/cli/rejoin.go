@@ -66,13 +66,18 @@ Only a machine that was never joined needs a first-time invite from an admin.`,
 	return cmd
 }
 
+// oldNodeOnlineText is the part of the identity rebind refusal that says the
+// agent's old node is still online. It crosses HTTP as text, so there is no
+// sentinel to match with errors.Is.
+const oldNodeOnlineText = ", which is online: "
+
 // rejoinError explains a failed rejoin. Not joined is the one case that
 // needs a person, unless the relay says the old machine is still online.
 func rejoinError(err error, cfg client.Config) error {
 	if !client.IsNotJoined(err) {
 		return err
 	}
-	if strings.Contains(err.Error(), "online") {
+	if strings.Contains(err.Error(), oldNodeOnlineText) {
 		return fmt.Errorf("%w\nThe relay still sees this agent's old machine online. Shut the old machine down or wait for it to go offline, then run tincan rejoin again", err)
 	}
 	as := ""

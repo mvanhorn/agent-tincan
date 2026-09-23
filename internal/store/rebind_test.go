@@ -86,3 +86,37 @@ func TestAgentsTableGainsLoginColumn(t *testing.T) {
 		t.Fatalf("login after reopen = %+v", a)
 	}
 }
+
+// An invites table from before invites carried a kind gains the column on
+// open: a pending code survives with no kind, and a kind stored afterwards
+// reads back after reopening.
+func TestInvitesTableGainsKindColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE invites (code TEXT PRIMARY KEY, name TEXT NOT NULL, expires INTEGER NOT NULL)`,
+		`INSERT INTO invites VALUES ('OLDC-ODE2', 'instinct', 1790000600000)`,
+	} {
+		if _, err := old.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	old.Close()
+
+	s, c := open(t, path)
+	ctx := context.Background()
+	if inv, ok, err := s.TakeInvite(ctx, "OLDC-ODE2"); err != nil || !ok || inv.Name != "instinct" || inv.Kind != "" {
+		t.Fatalf("old invite after migration = %+v, %v, %v", inv, ok, err)
+	}
+	if err := s.PutInvite(ctx, identity.Invite{Code: "NEWC-ODE3", Name: "muse", Kind: "hermes", Expires: c.t.Add(identity.InviteTTL)}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, _ := open(t, path)
+	if inv, ok, err := s2.TakeInvite(ctx, "NEWC-ODE3"); err != nil || !ok || inv.Kind != "hermes" || inv.Name != "muse" {
+		t.Fatalf("invite after reopen = %+v, %v, %v", inv, ok, err)
+	}
+}

@@ -221,7 +221,11 @@ func (s *Server) remote(r *http.Request) string {
 func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 	res, err := s.dir.ResolveAgent(r.Context(), r.RemoteAddr, r.Header.Get(client.AgentHeader))
 	if err != nil {
-		writeErr(w, http.StatusForbidden, err)
+		code := http.StatusForbidden
+		if errors.Is(err, identity.ErrRebindCheckFailed) {
+			code = http.StatusServiceUnavailable
+		}
+		writeErr(w, code, err)
 		return ""
 	}
 	if rb := res.Rebind; rb != nil {
@@ -655,6 +659,8 @@ func statusFor(err error) int {
 	switch {
 	case errors.As(err, &se):
 		return se.Code
+	case errors.Is(err, identity.ErrRebindCheckFailed):
+		return http.StatusServiceUnavailable
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined),

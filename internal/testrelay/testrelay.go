@@ -42,11 +42,11 @@ func New(t *testing.T, cfg relay.Config) *Mesh {
 	}
 	t.Cleanup(func() { st.Close() })
 	who := identitytest.New(map[string]identity.Node{
-		addrs["admin"]:    {ID: "nMAC", Name: "macbook-pro-44"},
-		addrs["grokbot"]:  {ID: "nGROK", Name: "grok-bot"},
-		addrs["instinct"]: {ID: "nINST", Name: "instinct"},
-		addrs["muse"]:     {ID: "nMUSE", Name: "muse"},
-		addrs["stranger"]: {ID: "nLAPTOP", Name: "old-laptop"},
+		addrs["admin"]:    {ID: "nMAC", Name: "macbook-pro-44", User: Login},
+		addrs["grokbot"]:  {ID: "nGROK", Name: "grok-bot", User: Login},
+		addrs["instinct"]: {ID: "nINST", Name: "instinct", User: Login},
+		addrs["muse"]:     {ID: "nMUSE", Name: "muse", User: Login},
+		addrs["stranger"]: {ID: "nLAPTOP", Name: "old-laptop", User: Login},
 	})
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), identity.Config{Admins: []string{"macbook-pro-44"}})
 	srv := relay.New(dir, st, cfg)
@@ -74,6 +74,10 @@ func (m *Mesh) endpoint(t *testing.T, addr string) string {
 	return ts.URL
 }
 
+// Login is the tailnet owner every mesh machine belongs to, as on a
+// single-person tailnet.
+const Login = "owner@example.com"
+
 // Rebuild replaces agent's machine with a new tailnet node called
 // machineName, as rebuilding a sandbox does: the old node leaves the tailnet
 // and the new one has a new stable id and address. It returns the new
@@ -83,7 +87,7 @@ func (m *Mesh) Rebuild(t *testing.T, agent, machineName string) string {
 	old := m.addrs[agent]
 	addr := fmt.Sprintf("100.0.1.%d:1", len(m.addrs)+10)
 	m.Who.Remove(old)
-	m.Who.Set(addr, identity.Node{ID: "n" + machineName + "-rebuilt", Name: machineName})
+	m.Who.Set(addr, identity.Node{ID: "n" + machineName + "-rebuilt", Name: machineName, User: Login})
 	for name, a := range m.addrs {
 		if a == old {
 			m.addrs[name], m.urls[name] = addr, ""
