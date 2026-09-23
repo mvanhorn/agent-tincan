@@ -1,0 +1,51 @@
+{{- /*
+Recipes for agents not yet on the roster: invite from an admin device first,
+then join on the agent's machine, then the kind's setup.<kind> steps from
+agent.tmpl, then recipe.tail. One step per line. Onboarding never mints codes;
+it only tells the reader to run tincan invite.
+*/ -}}
+
+{{- define "recipe.invite" -}}
+On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
+On the agent's machine: {{template "join.default" .}}
+{{- end -}}
+{{- define "recipe.invite.vm-webhook"}}{{template "recipe.invite" .}}{{end -}}
+{{- define "recipe.invite.e2b-email"}}{{template "recipe.invite" .}}{{end -}}
+{{- define "recipe.invite.proxy-sandbox" -}}
+On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
+On the agent's machine: {{template "join.proxy-sandbox" .}}
+{{- end -}}
+{{- define "recipe.invite.claude-code"}}{{template "recipe.invite" .}}{{end -}}
+{{- define "recipe.invite.chatgpt" -}}
+No tincan invite: ChatGPT cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
+{{- end -}}
+{{- define "recipe.invite.hermes"}}{{template "recipe.invite" .}}{{end -}}
+{{- define "recipe.invite.openclaw"}}{{template "recipe.invite" .}}{{end -}}
+{{- define "recipe.invite.codex"}}{{template "recipe.invite" .}}{{end -}}
+{{- define "recipe.invite.generic"}}{{template "recipe.invite" .}}{{end -}}
+
+{{- define "recipe.tail" -}}
+Once <name> has joined, re-run tincan onboard: its agent block holds the standing instructions to paste, and the operator prompt then lists it.
+{{- end -}}
+
+{{- define "recipe.second-agent" -}}
+Second agent on this machine
+Each agent on one machine is its own invite and its own client config; the machine's Tailscale identity is shared. Example: codex beside claude-code, or openclaw beside hermes.
+On an admin device: tincan invite <second-name> --kind <kind>.
+On the machine: TINCAN_CONFIG=~/.config/tincan/<second-name>.json tincan join <code> --relay {{.RelayURL}}
+Set TINCAN_CONFIG=~/.config/tincan/<second-name>.json in that agent's MCP server entry (its env) and in its tincan listen command, so every call names the right agent.
+Leave the first agent on the default config; only the added agent needs TINCAN_CONFIG.
+Check with TINCAN_CONFIG=~/.config/tincan/<second-name>.json tincan agents, then re-run tincan onboard.
+{{- end -}}
+
+{{- define "recipe.relay-host" -}}
+Host the relay
+Pick one always-on machine on your tailnet: a VPS, Mac mini, Raspberry Pi, home server, or an always-on agent's VM. Every agent dials out to it; nothing is public.
+Run it as its own OS user so the relay database and wake.json stay out of any agent's reach. Keep it running under systemd, launchd or similar.
+Host tailscaled mode (the machine already runs Tailscale): tincan relay --listen <tailscale-ip> --port 8787 --admin <admin-machines>. Agents use --relay http://<tailscale-ip>:8787.
+tsnet mode (the relay joins the tailnet as its own node): TS_AUTHKEY=<auth key> tincan relay --hostname tincan-relay --admin <admin-machines> (or omit TS_AUTHKEY and follow the login URL it prints). Agents use --relay http://tincan-relay (port 80 unless --port is set).
+--admin lists the untagged machines allowed to invite and remove (your laptop, your phone); add --admin-login to also require your Tailscale login. Tag agent machines (for example tag:agent) so they can never be admins.
+State lives in --state-dir (default: the user config dir, tincan-relay). Put wake.json there with chmod 600; its secrets are never sent to agents.
+On the relay host itself, admin commands use the local socket: tincan invite <name> --kind <kind> --socket <state-dir>/admin.sock.
+Then add agents with the agent recipes and run tincan onboard --relay <relay-url>.
+{{- end -}}

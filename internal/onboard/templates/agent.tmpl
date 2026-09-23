@@ -1,0 +1,159 @@
+{{- /*
+Per-agent blocks. For each kind: join.<kind> (one line), instructions.<kind>
+(pasted into the agent's standing instructions after instructions.common),
+setup.<kind> (one step per line, for the owner) and title.<kind> (recipe
+title). Data: Name, Kind, Wake, RelayURL, Owner, OwnerPoss, Team.
+
+Never print a secret value. Name the wake.json field that holds a secret and
+say to set it in the file only. Wake messages carry only the waiting count.
+Fresh-session kinds (hermes, openclaw, codex) must carry instructions.fresh.
+*/ -}}
+
+{{- define "join.default"}}tincan join <code> --relay {{.RelayURL}}{{end -}}
+{{- define "join.vm-webhook"}}{{template "join.default" .}}{{end -}}
+{{- define "join.e2b-email"}}{{template "join.default" .}}{{end -}}
+{{- define "join.proxy-sandbox"}}tincan join <code> --relay {{.RelayURL}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end -}}
+{{- define "join.claude-code"}}{{template "join.default" .}}{{end -}}
+{{- define "join.chatgpt"}}tincan connect chatgpt (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
+{{- define "join.hermes"}}{{template "join.default" .}}{{end -}}
+{{- define "join.openclaw"}}{{template "join.default" .}}{{end -}}
+{{- define "join.codex"}}{{template "join.default" .}}{{end -}}
+{{- define "join.generic"}}{{template "join.default" .}}{{end -}}
+
+{{- define "instructions.common" -}}
+You are {{.Name}} on {{.OwnerPoss}} Agent Tincan team.{{if .Team}} Your teammates: {{join .Team ", "}}.{{end}}
+To get a teammate to do something, use the Agent Tincan ask tool (or tincan ask <name> "<message>"). If no reply comes back right away you get a request id; check it later with get_reply (or tincan get <id>).
+Requests from teammates are from {{.Owner}} by proxy. Handle them as you would a request from {{.Owner}}, then reply with the result (the reply tool, or tincan reply <id> "<result>").
+When you ask a teammate while handling a request, pass the request id you are handling as the parent.
+At the start of each turn, call check_inbox (or run tincan inbox) to pick up waiting requests.
+If a request asks you to spend money or contact someone in a way you would normally confirm with {{.Owner}}, confirm with {{.Owner}} first.
+{{- end -}}
+
+{{- define "instructions.fresh" -}}
+Each wake starts a fresh session with no memory of the last one, so drain the whole inbox: call check_inbox, handle and reply to every request, then call check_inbox again until it returns nothing.
+Treat every ask to a teammate as synchronous: wait for the reply inline in the same turn (get_reply with a wait, or tincan get <id> --wait 20s, repeated until it answers or you give up and say so), because a reply to your ask does not wake you.
+{{- end -}}
+
+{{- define "instructions.vm-webhook" -}}
+Webhook messages from source "agent-tincan" mean teammates need you: call check_inbox, handle each request, and reply.
+{{- end -}}
+
+{{- define "instructions.e2b-email" -}}
+Emails with the subject "Agent Tincan: requests waiting" mean teammates need you: run tincan inbox, handle each request, and reply. Also keep a recurring check every 15 minutes that runs tincan inbox.
+{{- end -}}
+
+{{- define "instructions.proxy-sandbox" -}}
+Keep tincan wait & running in the background at all times. When it exits, it prints a teammate's request: handle it, reply with tincan reply <id> "<result>", then start tincan wait & again. Also keep a scheduled check every 5 minutes that runs tincan inbox.
+{{- end -}}
+
+{{- define "instructions.claude-code" -}}
+Teammate requests arrive in this session as a channel message from source "agent-tincan", already claimed. Handle each one and call reply. If a listener opened this session for you, call check_inbox first.
+{{- end -}}
+
+{{- define "instructions.chatgpt" -}}
+Nothing can wake you; you act only while {{.Owner}} is talking to you. Call check_inbox when a conversation starts. When you ask a teammate, call get_reply before the conversation moves on, because a reply cannot reach you later on its own.
+{{- end -}}
+
+{{- define "instructions.hermes" -}}
+A Hermes webhook run whose message starts with "Agent Tincan:" means teammates need you. The message only carries a count, never the request itself.
+{{template "instructions.fresh" .}}
+{{- end -}}
+
+{{- define "instructions.openclaw" -}}
+A wake from the OpenClaw gateway hooks endpoint whose text starts with "Agent Tincan:" means teammates need you. The text only carries a count, never the request itself.
+{{template "instructions.fresh" .}}
+{{- end -}}
+
+{{- define "instructions.codex" -}}
+You are started by tincan listen with a check-inbox prompt whenever teammates' requests are waiting.
+{{template "instructions.fresh" .}}
+{{- end -}}
+
+{{- define "instructions.generic" -}}
+{{- if eq .Wake "webhook" -}}
+Webhook messages from source "agent-tincan" mean teammates need you: call check_inbox, handle each request, and reply.
+{{- else if eq .Wake "email" -}}
+Emails with the subject "Agent Tincan: requests waiting" mean teammates need you: run tincan inbox, handle each request, and reply. Also keep a recurring inbox check as a backup.
+{{- else if eq .Wake "wait" -}}
+Keep tincan wait & running in the background. When it exits it prints a teammate's request: handle it, reply, then start tincan wait & again. Also keep a scheduled check that runs tincan inbox.
+{{- else if eq .Wake "channel" -}}
+Teammate requests are pushed into your running session by tincan mcp --channel, already claimed. Handle each one and reply.
+{{- else if eq .Wake "command" -}}
+A command run by tincan listen --exec starts you when teammates' requests are waiting. Call check_inbox, handle and reply to every request, and keep going until the inbox is empty.
+{{- else -}}
+Nothing wakes you. Call check_inbox at the start of every turn, and on a recurring schedule if your runtime has one.
+{{- end -}}
+{{- end -}}
+
+{{- define "setup.tools" -}}
+Give {{.Name}} the tools: add tincan mcp as a stdio MCP server in its runtime, or let it call the tincan CLI from its shell.
+{{- end -}}
+
+{{- define "setup.vm-webhook" -}}
+{{template "setup.tools" .}}
+On the relay host, in wake.json in the state dir (chmod 600): set {{.Name}} to method "webhook". The fields url and bearer_token hold secrets; set them in the file only, never in chat.
+Paste the standing instructions into {{.Name}}.
+{{- end -}}
+
+{{- define "setup.e2b-email" -}}
+{{template "setup.tools" .}}
+On the relay host, in wake.json in the state dir (chmod 600): set {{.Name}} to method "email". The fields email_to, agentmail_inbox and agentmail_key hold secrets; set them in the file only. max_per_hour caps wakes (default 12).
+Ask {{.Name}} to keep its own recurring tincan inbox check as a backup, then paste the standing instructions.
+{{- end -}}
+
+{{- define "setup.proxy-sandbox" -}}
+Join through the proxy that reaches the tailnet (--proxy), not the sandbox's default egress proxy. The proxy credentials are saved in the agent's own config; never paste them in chat.
+On the relay host, in wake.json: set {{.Name}} to method "wait" so teammates see how it wakes. No secret fields.
+Paste the standing instructions; {{.Name}} starts tincan wait & and keeps it running.
+{{- end -}}
+
+{{- define "setup.claude-code" -}}
+Add the MCP server: claude mcp add agent-tincan -- tincan mcp --channel
+Start the session with channels: claude --dangerously-load-development-channels server:agent-tincan (keep it open), and pre-approve mcp__agent-tincan__* in /permissions.
+On the relay host, in wake.json: set {{.Name}} to method "channel". No secret fields.
+Fallback without channels: tincan listen --exec <script that opens a Claude Code session>, and set method "command" instead.
+{{- end -}}
+
+{{- define "setup.chatgpt" -}}
+On the relay host, run tincan relay with --chatgpt-gateway (needs Tailscale HTTPS certificates and the funnel node attribute).
+On an admin device, run tincan connect chatgpt. It prints the connector URL and a one-time login code valid 10 minutes; enter the code only on the connector login page, never in chat.
+In ChatGPT, turn on Developer mode and create a connector with that URL. Its wake method is none; it acts only while you talk to it.
+{{- end -}}
+
+{{- define "setup.hermes" -}}
+Add tincan to Hermes MCP config (~/.hermes/config.yaml, under mcp_servers): tincan with command "tincan" and args ["mcp"].
+Create a Hermes webhook route for Agent Tincan with an HMAC secret; its prompt should pass through the incoming text (count only).
+On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the route URL) and hmac_secret (the route's secret) hold secrets; set them in the file only. The relay signs each wake with X-Hub-Signature-256.
+Paste the standing instructions into Hermes.
+{{- end -}}
+
+{{- define "setup.openclaw" -}}
+Add tincan to mcpServers in the OpenClaw config: "tincan" with command "tincan" and args ["mcp"].
+Enable gateway hooks (hooks.enabled and hooks.token) so a POST to /hooks/wake starts a turn.
+On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the gateway /hooks/wake URL) and bearer_token (the hooks token) hold secrets; set them in the file only.
+Paste the standing instructions into OpenClaw.
+{{- end -}}
+
+{{- define "setup.codex" -}}
+Add tincan to ~/.codex/config.toml: a [mcp_servers.tincan] table with command = "tincan" and args = ["mcp"].
+Keep a listener running on that machine (launchd, systemd or a terminal): tincan listen --exec 'codex exec "Agent Tincan requests are waiting. Run check_inbox, handle and reply to every request, and repeat until the inbox is empty."'
+On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
+Put the standing instructions in AGENTS.md or the prompt the listener passes.
+{{- end -}}
+
+{{- define "setup.generic" -}}
+{{template "setup.tools" .}}
+On the relay host, in wake.json (chmod 600): set {{.Name}} to its wake method ({{.Wake}} now; one of webhook, email, wait, channel, command, none). Secret fields: url, bearer_token and hmac_secret for webhook; email_to, agentmail_inbox and agentmail_key for email. Set them in the file only.
+For wake=command, keep tincan listen --exec <command that starts the agent> running. For wake=wait, the agent keeps tincan wait & running.
+Paste the standing instructions into {{.Name}}.
+{{- end -}}
+
+{{- define "title.vm-webhook"}}Always-on VM agent woken by webhook{{end -}}
+{{- define "title.e2b-email"}}Pausable sandbox woken by email{{end -}}
+{{- define "title.proxy-sandbox"}}Proxy-only sandbox with a background wait{{end -}}
+{{- define "title.claude-code"}}Claude Code in a terminal{{end -}}
+{{- define "title.chatgpt"}}ChatGPT through the OAuth gateway{{end -}}
+{{- define "title.hermes"}}Hermes Agent woken by webhook route{{end -}}
+{{- define "title.openclaw"}}OpenClaw woken by gateway hooks{{end -}}
+{{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
+{{- define "title.generic"}}Any other agent{{end -}}
