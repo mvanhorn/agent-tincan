@@ -1,0 +1,12 @@
+# Agent Tincan MCP server for OpenAI Codex CLI.
+#
+# Paste this into ~/.codex/config.toml (create the file if it does not exist
+# yet). Set TINCAN_CONFIG to a path that is unique to the codex agent on this
+# machine, so it never collides with claude-code's or any other agent's
+# saved relay connection if they share the same box. Use the same path here,
+# in the join command, and in codex-wake.sh.
+
+[mcp_servers.agent-tincan]
+command = "tincan"
+args = ["mcp"]
+env = { TINCAN_CONFIG = "/Users/you/.config/tincan/codex.json" }
