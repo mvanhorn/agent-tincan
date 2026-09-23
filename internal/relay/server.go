@@ -198,6 +198,11 @@ func (s *Server) Sweep(ctx context.Context) {
 		s.hub.notify(requestKey(t.ID))
 		if t.Status == envelope.StatusQueued {
 			s.hub.notify(inboxKey(t.To))
+			// An agent woken by the relay has no poller to see the requeue,
+			// so wake it again; pollers are skipped by the waker itself.
+			if s.events != nil {
+				s.events.Queued(ctx, envelope.Request{ID: t.ID, TraceID: t.TraceID, From: t.From, To: t.To})
+			}
 		}
 	}
 }
