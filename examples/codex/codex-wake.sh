@@ -29,7 +29,7 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
 
 mkdir -p "$CODEX_WORKDIR"
 
-PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan request(s) waiting from teammates. Call check_inbox, and for each request handle it the way you would handle a request from Matt, then call reply with that request's id and your result. Call check_inbox again and keep going until it returns nothing waiting, so this run drains the whole inbox. If you need something from a teammate yourself, call ask and wait for its reply inline, or poll get_reply, before you move on: you will not be woken again just because that reply arrived."
+PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan request(s) waiting from teammates. Call check_inbox, and for each request handle it the way you would handle a request from your owner, then call reply with that request's id and your result. Call check_inbox again and keep going until it returns nothing waiting, so this run drains the whole inbox. If you need something from a teammate yourself, call ask and wait for its reply inline, or poll get_reply, before you move on: you will not be woken again just because that reply arrived."
 
 # workspace-write plus approval_policy=never lets this unattended run act
 # without a human present to answer approval prompts; commands still run
@@ -49,6 +49,6 @@ PROMPT="You have ${TINCAN_WAITING:-some} Agent Tincan request(s) waiting from te
   -c approval_policy=never \
   --skip-git-repo-check \
   --cd "$CODEX_WORKDIR" \
-  "$PROMPT"
+  "$PROMPT" </dev/null
 status=$?
 exit "$status"

@@ -28,7 +28,7 @@ TINCAN_CONFIG=~/.hermes/tincan-hermes.json tincan join <code> --relay http://tin
 
 ## Send
 
-Add `tincan mcp` as a stdio MCP server. See `examples/hermes/config-snippet.yaml` for the `mcp_servers.agent-tincan` entry to add to `~/.hermes/config.yaml`. Reload with `/reload-mcp` in a running chat, or restart the gateway, so Hermes picks up `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, and `trace`.
+Add `tincan mcp` as a stdio MCP server. See `examples/hermes/config-snippet.yaml` for the `mcp_servers.agent-tincan` entry to add to `~/.hermes/config.yaml`. `hermes mcp add agent-tincan --command tincan --args mcp` also works (answer Y to enable the tools). Restart the gateway (`hermes gateway restart`) so webhook-started sessions load the new server; `/reload-mcp` covers only a running chat. After that Hermes has `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, and `trace`.
 
 ## Wake
 
@@ -47,7 +47,13 @@ WEBHOOK_ENABLED=true
 WEBHOOK_PORT=8644
 ```
 
-Then add a route named `tincan` under `platforms.webhook.extra.routes` in `~/.hermes/config.yaml`. See `examples/hermes/webhook-route.yaml`. The route needs its own `secret`; the relay signs its POST with `X-Hub-Signature-256`, the same GitHub HMAC scheme Hermes already validates. The `prompt` template reads the relay's JSON body (`{"source":"agent-tincan","message":"<count text>","text":"<same>"}`, never request content) with `{message}` or `{text}`, and tells Hermes to call `check_inbox`, claim and do each waiting request, reply to each with its request id, and keep draining `check_inbox` until the inbox is empty, because every wake starts a fresh Hermes session with no memory of the last one.
+The quickest way to add the route is Hermes's own CLI, which needs no gateway restart:
+
+```bash
+hermes webhook subscribe tincan --deliver log --secret "$(cat ~/.config/tincan/hermes-webhook.secret)" --prompt "<the prompt from examples/hermes/webhook-route.yaml>"
+```
+
+Or add a route named `tincan` under `platforms.webhook.extra.routes` in `~/.hermes/config.yaml`. See `examples/hermes/webhook-route.yaml`. The route needs its own `secret`; the relay signs its POST with `X-Hub-Signature-256`, the same GitHub HMAC scheme Hermes already validates. The `prompt` template reads the relay's JSON body (`{"source":"agent-tincan","message":"<count text>","text":"<same>"}`, never request content) with `{message}` or `{text}`, and tells Hermes to call `check_inbox`, claim and do each waiting request, reply to each with its request id, and keep draining `check_inbox` until the inbox is empty, because every wake starts a fresh Hermes session with no memory of the last one.
 
 Point the relay at `http://<hermes-host>:8644/webhooks/tincan`. In the relay's `wake.json` (chmod 600, relay host only):
 

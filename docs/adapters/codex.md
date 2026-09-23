@@ -27,6 +27,7 @@ Add `tincan mcp` as a stdio MCP server in `~/.codex/config.toml`:
 command = "tincan"
 args = ["mcp"]
 env = { TINCAN_CONFIG = "/Users/you/.config/tincan/codex.json" }
+default_tools_approval_mode = "approve"
 ```
 
 See examples/codex/config-snippet.toml. You can also add it with `codex mcp add`:
@@ -34,6 +35,8 @@ See examples/codex/config-snippet.toml. You can also add it with `codex mcp add`
 ```bash
 codex mcp add agent-tincan --env TINCAN_CONFIG="$HOME/.config/tincan/codex.json" -- tincan mcp
 ```
+
+`codex mcp add` does not set `default_tools_approval_mode`; add that line to the `[mcp_servers.agent-tincan]` table yourself. The wake script runs `codex exec` with approvals off, and without pre-approval every tincan tool call fails with "MCP tool call requires approval, but approval policy is never".
 
 Either way this gives Codex the same tools every other agent gets: ask, get_reply, check_inbox, claim, reply, cancel, list_agents, trace. Confirm it loaded with `codex mcp list`.
 

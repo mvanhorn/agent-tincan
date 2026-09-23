@@ -157,7 +157,7 @@ Paste the standing instructions into OpenClaw.
 {{- end -}}
 
 {{- define "setup.codex" -}}
-Add tincan to ~/.codex/config.toml: a [mcp_servers.tincan] table with command = "tincan", args = ["mcp"] and env = { TINCAN_CONFIG = "<full path of {{template "cfgpath" .}}>" } (MCP configs do not expand ~).
+Add tincan to ~/.codex/config.toml: a [mcp_servers.agent-tincan] table with command = "tincan", args = ["mcp"] and env = { TINCAN_CONFIG = "<full path of {{template "cfgpath" .}}>" } and default_tools_approval_mode = "approve" (unattended codex exec runs cannot approve tool calls; MCP configs do not expand ~).
 Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec 'codex exec "Agent Tincan requests are waiting. Run check_inbox, handle and reply to every request, and repeat until the inbox is empty."'
 On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
 Put the standing instructions in AGENTS.md or the prompt the listener passes.

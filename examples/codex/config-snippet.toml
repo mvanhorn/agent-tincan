@@ -10,3 +10,7 @@
 command = "tincan"
 args = ["mcp"]
 env = { TINCAN_CONFIG = "/Users/you/.config/tincan/codex.json" }
+# codex exec runs with approvals off, and Codex asks before any MCP tool call
+# unless the server is pre-approved. Without this line every wake fails with
+# "MCP tool call requires approval, but approval policy is never".
+default_tools_approval_mode = "approve"
