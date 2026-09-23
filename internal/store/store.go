@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS agents (
   node_id   TEXT NOT NULL,
   node_name TEXT NOT NULL,
   joined_at INTEGER NOT NULL,
-  kind      TEXT
+  kind      TEXT,
+  node_user TEXT
 );
 CREATE TABLE IF NOT EXISTS invites (
   code    TEXT PRIMARY KEY,
@@ -103,6 +104,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agents: %w", err)
 	}
+	if err := s.migrateAgentLogin(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent login: %w", err)
+	}
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate invites: %w", err)
@@ -166,6 +171,22 @@ func (s *Store) migrateAgents() error {
 	return tx.Commit()
 }
 
+// migrateAgentLogin adds the node_user column to an agents table created
+// before the owning login was recorded at join. Existing agents keep NULL,
+// which re-admission treats as "no login recorded". It is a no-op on a
+// current table.
+func (s *Store) migrateAgentLogin() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'node_user')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN node_user TEXT`)
+	return err
+}
+
 // migrateInvites adds the kind column to an invites table created before
 // invites could carry the agent's kind. It is a no-op on a current table.
 func (s *Store) migrateInvites() error {
@@ -217,8 +238,8 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind) VALUES (?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user) VALUES (?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -260,7 +281,7 @@ func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, b
 }
 
 func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]identity.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, '') FROM agents WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, '') FROM agents WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +290,7 @@ func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]i
 	for rows.Next() {
 		var a identity.Agent
 		var joined int64
-		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind); err != nil {
+		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser); err != nil {
 			return nil, err
 		}
 		a.JoinedAt = time.UnixMilli(joined)

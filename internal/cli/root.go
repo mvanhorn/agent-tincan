@@ -3,6 +3,8 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 // Version is set by main at link time.
@@ -18,8 +20,31 @@ func Root() *cobra.Command {
 	}
 	root.AddCommand(relayCmd(), versionCmd())
 	root.AddCommand(agentCmds()...)
-	root.AddCommand(mcpCmd(), traceCmd(), auditCmd(), listenCmd(), connectCmd(), onboardCmd())
+	root.AddCommand(mcpCmd(), traceCmd(), auditCmd(), listenCmd(), connectCmd(), onboardCmd(), rejoinCmd())
+	withRejoinHints(root)
 	return root
+}
+
+// withRejoinHints makes every client command that fails with "not a joined
+// agent" or "no relay configured" suggest tincan rejoin, so an agent on a
+// rebuilt machine heals itself instead of asking a person. rejoin explains
+// its own failures and the relay is not a client.
+func withRejoinHints(cmd *cobra.Command) {
+	for _, c := range cmd.Commands() {
+		withRejoinHints(c)
+	}
+	if cmd.RunE == nil || cmd.Name() == "rejoin" || cmd.Name() == "relay" {
+		return
+	}
+	run := cmd.RunE
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		err := run(c, args)
+		if err == nil {
+			return nil
+		}
+		cfg, _ := client.LoadConfig()
+		return client.RejoinHint(err, cfg.Relay)
+	}
 }
 
 func versionCmd() *cobra.Command {

@@ -60,6 +60,25 @@ func (r *LocalResolver) WhoIs(ctx context.Context, remoteAddr string) (Node, err
 	return n, nil
 }
 
+// NodeOnline implements NodeStatus from the tailnet peer list: found when a
+// peer (or this node) has the stable id, online when it is connected to the
+// control plane.
+func (r *LocalResolver) NodeOnline(ctx context.Context, stableID string) (online, found bool, err error) {
+	st, err := r.lc.Status(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("tailnet status: %w", err)
+	}
+	if st.Self != nil && string(st.Self.ID) == stableID {
+		return st.Self.Online, true, nil
+	}
+	for _, p := range st.Peer {
+		if string(p.ID) == stableID {
+			return p.Online, true, nil
+		}
+	}
+	return false, false, nil
+}
+
 // Probe fails when the LocalAPI is unreachable. --listen mode calls it at
 // startup and refuses to run rather than skip attribution.
 func (r *LocalResolver) Probe(ctx context.Context) error {
@@ -74,3 +93,5 @@ func shortName(fqdn string) string {
 	name, _, _ := strings.Cut(strings.TrimSuffix(fqdn, "."), ".")
 	return name
 }
+
+var _ NodeStatus = (*LocalResolver)(nil)

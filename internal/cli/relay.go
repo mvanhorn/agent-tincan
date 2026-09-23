@@ -34,6 +34,7 @@ type relayFlags struct {
 	port        int
 	admins      []string
 	adminLogins []string
+	noRebind    bool
 
 	gateway         bool
 	gatewayHostname string
@@ -56,7 +57,13 @@ the state dir and from machines named in --admin that carry no Tailscale tags
 (e.g. tag:agent) so they can never be admins.
 
 Wake settings (webhook URLs, email addresses, keys) live in wake.json in the
-state dir, chmod 600. They are never sent to agents.`,
+state dir, chmod 600. They are never sent to agents.
+
+A rebuilt machine (a new Tailscale node with the same machine name, or that
+name plus a "-1" style suffix) is re-admitted as its old agent on its first
+call when it is untagged, owned by the login recorded at join, and the old
+node is offline or gone. Each one is audited as a "rebind" event. Turn this
+off with --no-auto-rebind.`,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runRelay(cmd.Context(), f) },
 	}
 	cmd.Flags().StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
@@ -65,11 +72,17 @@ state dir, chmod 600. They are never sent to agents.`,
 	cmd.Flags().IntVar(&f.port, "port", 80, "port to serve the agent API on")
 	cmd.Flags().StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
 	cmd.Flags().StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
+	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
 	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
 	cmd.Flags().StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
 	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
 	cmd.Flags().StringVar(&f.gatewayURL, "gateway-url", "", "public https URL of the gateway when using --gateway-listen")
 	return cmd
+}
+
+// directoryConfig maps the relay flags onto the identity directory.
+func (f relayFlags) directoryConfig() identity.Config {
+	return identity.Config{Admins: f.admins, AdminLogins: f.adminLogins, NoAutoRebind: f.noRebind}
 }
 
 func defaultStateDir() string {
@@ -125,7 +138,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		log.Printf("no --admin machines set: invites only work from the local admin socket")
 	}
 
-	dir := identity.NewDirectory(st, identity.WithVirtual(who), identity.Config{Admins: f.admins, AdminLogins: f.adminLogins})
+	dir := identity.NewDirectory(st, identity.WithVirtual(who), f.directoryConfig())
 	srv := relay.New(dir, st, relay.Config{})
 	srv.SetPreparer(policy.New(st, policy.Config{}))
 	wakeCfg, err := wake.LoadConfig(filepath.Join(f.stateDir, "wake.json"))

@@ -131,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/requests/{id}", s.handleGet)
 	mux.HandleFunc("POST /v1/requests/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
+	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
 	s.adminRoutes(mux)
 	return limitBodies(mux)
@@ -215,14 +216,36 @@ func (s *Server) remote(r *http.Request) string {
 
 // agent attributes the request or writes an error and returns "". WhoIs
 // picks the node; the client's X-Tincan-Agent header picks among that node's
-// agents and is refused for a name bound elsewhere.
+// agents and is refused for a name bound elsewhere. A rebuilt machine that the
+// directory re-admits on the way is audited as a "rebind".
 func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
-	name, err := s.dir.Resolve(r.Context(), r.RemoteAddr, r.Header.Get(client.AgentHeader))
+	res, err := s.dir.ResolveAgent(r.Context(), r.RemoteAddr, r.Header.Get(client.AgentHeader))
 	if err != nil {
 		writeErr(w, http.StatusForbidden, err)
 		return ""
 	}
-	return name
+	if rb := res.Rebind; rb != nil {
+		log.Printf("rebind: %s moved from %s (%s) to %s (%s)", rb.Agent, rb.OldNodeName, rb.OldNode, rb.NewNodeName, rb.NewNode)
+		s.record(r.Context(), "rebind", "", "", rb.Agent, store.DetailJSON(map[string]any{
+			"agent": rb.Agent, "old_node": rb.OldNode, "old_node_name": rb.OldNodeName, "new_node": rb.NewNode, "new_node_name": rb.NewNodeName,
+		}))
+	}
+	return res.Name
+}
+
+// handleWhoAmI tells the calling agent who the relay thinks it is. tincan
+// rejoin calls it to confirm a rebuilt machine was re-admitted.
+func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	name := s.agent(w, r)
+	if name == "" {
+		return
+	}
+	a, _, err := s.dir.Agent(r.Context(), name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": a.Kind})
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {

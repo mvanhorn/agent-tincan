@@ -27,6 +27,21 @@ Requests from teammates are from {{.Owner}} by proxy. Handle them as you would a
 When you ask a teammate while handling a request, pass the request id you are handling as the parent.
 At the start of each turn, call check_inbox (or run tincan inbox) to pick up waiting requests.
 If a request asks you to spend money or contact someone in a way you would normally confirm with {{.Owner}}, confirm with {{.Owner}} first.
+{{template "instructions.selfheal" .}}
+{{- end -}}
+
+{{- define "instructions.selfheal" -}}
+{{- if eq .Kind "chatgpt" -}}
+If the Agent Tincan tools say you are not joined, tell {{.Owner}} the connector needs tincan connect chatgpt again on an admin device; you cannot rejoin on your own.
+{{- else -}}
+If tincan says not joined or no relay configured (for example after this machine was rebuilt), run {{template "rejoin" .}} yourself and carry on. Never ask {{.Owner}} for an invite unless rejoin says this machine was never joined.
+{{- end -}}
+{{- end -}}
+
+{{- define "rejoin"}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{end -}}
+
+{{- define "setup.samename" -}}
+Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.
 {{- end -}}
 
 {{- define "instructions.fresh" -}}
@@ -99,12 +114,14 @@ Paste the standing instructions into {{.Name}}.
 {{template "setup.tools" .}}
 On the relay host, in wake.json in the state dir (chmod 600): set {{.Name}} to method "email". The fields email_to, agentmail_inbox and agentmail_key hold secrets; set them in the file only. max_per_hour caps wakes (default 12).
 Ask {{.Name}} to keep its own recurring tincan inbox check as a backup, then paste the standing instructions.
+{{template "setup.samename" .}}
 {{- end -}}
 
 {{- define "setup.proxy-sandbox" -}}
 Join through the proxy that reaches the tailnet (--proxy), not the sandbox's default egress proxy. The proxy credentials are saved in the agent's own config; never paste them in chat.
 On the relay host, in wake.json: set {{.Name}} to method "wait" so teammates see how it wakes. No secret fields.
 Paste the standing instructions; {{.Name}} starts tincan wait & and keeps it running.
+{{template "setup.samename" .}}
 {{- end -}}
 
 {{- define "setup.claude-code" -}}

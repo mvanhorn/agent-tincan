@@ -41,3 +41,12 @@ func (d *Directory) BindVirtual(ctx context.Context, name string) error {
 	}
 	return d.store.PutAgent(ctx, Agent{Name: name, NodeID: VirtualAddr(name), NodeName: VirtualAddr(name), JoinedAt: d.cfg.Now(), Kind: prev.Kind})
 }
+
+// NodeOnline forwards to the wrapped resolver when it implements NodeStatus,
+// so wrapping never hides a still-online old node from re-admission.
+func (v virtualResolver) NodeOnline(ctx context.Context, stableID string) (online, found bool, err error) {
+	if st, ok := v.Resolver.(NodeStatus); ok {
+		return st.NodeOnline(ctx, stableID)
+	}
+	return false, false, nil
+}

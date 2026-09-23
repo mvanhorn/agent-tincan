@@ -31,11 +31,18 @@ type harness struct {
 	srv *Server
 	h   http.Handler
 	st  *store.Store
+	who *identitytest.Resolver
 }
 
 // newHarness starts a relay with grokbot, instinct, and muse joined, using a
 // fake WhoIs so tests pick each caller's tailnet identity directly.
 func newHarness(t *testing.T, cfg Config) *harness {
+	t.Helper()
+	return newHarnessDir(t, cfg, identity.Config{})
+}
+
+// newHarnessDir is newHarness with directory settings (admins are set here).
+func newHarnessDir(t *testing.T, cfg Config, dcfg identity.Config) *harness {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -49,9 +56,10 @@ func newHarness(t *testing.T, cfg Config) *harness {
 		museAddr:     {ID: "nMUSE", Name: "muse"},
 		strangerAddr: {ID: "nLAPTOP", Name: "old-laptop"},
 	})
-	dir := identity.NewDirectory(st, who, identity.Config{Admins: []string{"macbook-pro-44"}})
+	dcfg.Admins = []string{"macbook-pro-44"}
+	dir := identity.NewDirectory(st, who, dcfg)
 	srv := New(dir, st, cfg)
-	h := &harness{t: t, srv: srv, h: srv.Handler(), st: st}
+	h := &harness{t: t, srv: srv, h: srv.Handler(), st: st, who: who}
 	for name, addr := range map[string]string{"grokbot": grokAddr, "instinct": instinctAddr, "muse": museAddr} {
 		var inv struct{ Code string }
 		h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"`+name+`"}`, http.StatusOK, &inv)

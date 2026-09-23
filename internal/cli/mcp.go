@@ -57,7 +57,7 @@ func pushRequests(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTran
 		reqs, err := waitForRequests(ctx, r, client.DefaultPollHold)
 		if err != nil {
 			if ctx.Err() == nil {
-				log.Printf("tincan channel: %v", err)
+				log.Printf("tincan channel: %v", client.RejoinHint(err, r.Base()))
 				time.Sleep(30 * time.Second)
 			}
 			continue

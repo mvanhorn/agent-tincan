@@ -44,7 +44,7 @@ Pick one always-on machine on your tailnet: a VPS, Mac mini, Raspberry Pi, home 
 Run it as its own OS user so the relay database and wake.json stay out of any agent's reach. Keep it running under systemd, launchd or similar.
 Host tailscaled mode (the machine already runs Tailscale): tincan relay --listen <tailscale-ip> --port 8787 --admin <admin-machines>. Agents use --relay http://<tailscale-ip>:8787.
 tsnet mode (the relay joins the tailnet as its own node): TS_AUTHKEY=<auth key> tincan relay --hostname tincan-relay --admin <admin-machines> (or omit TS_AUTHKEY and follow the login URL it prints). Agents use --relay http://tincan-relay (port 80 unless --port is set).
---admin lists the untagged machines allowed to invite and remove (your laptop, your phone); add --admin-login to also require your Tailscale login. Tag agent machines (for example tag:agent) so they can never be admins.
+--admin lists the untagged machines allowed to invite and remove (your laptop, your phone); add --admin-login to also require your Tailscale login. Tag agent machines (for example tag:agent) so they can never be admins. Untagged agent machines that are rebuilt with the same machine name are re-admitted automatically (tagged ones need a new invite); start the relay with --no-auto-rebind to turn that off.
 State lives in --state-dir (default: the user config dir, tincan-relay). Put wake.json there with chmod 600; its secrets are never sent to agents.
 On the relay host itself, admin commands use the local socket: tincan invite <name> --kind <kind> --socket <state-dir>/admin.sock.
 Then add agents with the agent recipes and run tincan onboard --relay <relay-url>.

@@ -53,6 +53,9 @@ type Agent struct {
 	JoinedAt time.Time `json:"joined_at"`
 	// Kind is the agent runtime (hermes, codex, ...), empty when unknown.
 	Kind string `json:"kind,omitempty"`
+	// NodeUser is the Tailscale login that owned the node at join, empty for
+	// agents joined before it was recorded.
+	NodeUser string `json:"node_user,omitempty"`
 }
 
 // Invite is a pending one-time code.
@@ -89,6 +92,8 @@ type Config struct {
 	// login to be listed. Every node on a single-user tailnet shares one login,
 	// so this narrows admin rights but cannot replace the machine list.
 	AdminLogins []string
+	// NoAutoRebind turns off re-admitting rebuilt machines (see ResolveAgent).
+	NoAutoRebind bool
 	// Now overrides the clock in tests.
 	Now func() time.Time
 }
@@ -119,35 +124,55 @@ func (d *Directory) Attribute(ctx context.Context, remoteAddr string) (string, e
 // Resolve returns the agent behind remoteAddr. WhoIs authenticates the node;
 // claimed, when set, picks one of the node's agents and is accepted only if
 // that name is bound to the node. With no claim, a node with one agent
-// resolves to it and a node with several fails with the choices.
+// resolves to it and a node with several fails with the choices. A rebuilt
+// machine is re-admitted on the way (see ResolveAgent).
 func (d *Directory) Resolve(ctx context.Context, remoteAddr, claimed string) (string, error) {
+	res, err := d.ResolveAgent(ctx, remoteAddr, claimed)
+	return res.Name, err
+}
+
+// ResolveAgent is Resolve that also reports a rebind. When the caller's node
+// carries no agent, or not the claimed one, it tries to re-admit the node as
+// a rebuilt machine before refusing.
+func (d *Directory) ResolveAgent(ctx context.Context, remoteAddr, claimed string) (Resolved, error) {
 	n, err := d.who.WhoIs(ctx, remoteAddr)
 	if err != nil {
-		return "", err
+		return Resolved{}, err
 	}
 	agents, err := d.store.AgentsByNode(ctx, n.ID)
 	if err != nil {
-		return "", err
+		return Resolved{}, err
 	}
 	if claimed != "" {
 		for _, a := range agents {
 			if a.Name == claimed {
-				return a.Name, nil
+				return Resolved{Name: a.Name}, nil
 			}
 		}
-		return "", fmt.Errorf("%s is not %q: %w", n.Name, claimed, ErrNotJoined)
+		if res, ok, err := d.readmit(ctx, n, claimed); ok || err != nil {
+			return res, err
+		}
+		return Resolved{}, fmt.Errorf("%s is not %q: %w", n.Name, claimed, ErrNotJoined)
 	}
 	switch len(agents) {
 	case 0:
-		return "", fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
+		if res, ok, err := d.readmit(ctx, n, ""); ok || err != nil {
+			return res, err
+		}
+		return Resolved{}, fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
 	case 1:
-		return agents[0].Name, nil
+		return Resolved{Name: agents[0].Name}, nil
 	}
 	names := make([]string, len(agents))
 	for i, a := range agents {
 		names[i] = a.Name
 	}
-	return "", fmt.Errorf("%s runs %s: %w", n.Name, strings.Join(names, ", "), ErrAgentAmbiguous)
+	return Resolved{}, fmt.Errorf("%s runs %s: %w", n.Name, strings.Join(names, ", "), ErrAgentAmbiguous)
+}
+
+// Agent returns a joined agent by name.
+func (d *Directory) Agent(ctx context.Context, name string) (Agent, bool, error) {
+	return d.store.AgentByName(ctx, name)
 }
 
 // Has reports whether name is a joined agent.
@@ -211,7 +236,7 @@ func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, 
 	if inv.Kind != "" {
 		kind = inv.Kind
 	}
-	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, JoinedAt: d.cfg.Now(), Kind: kind}
+	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, NodeUser: n.User, JoinedAt: d.cfg.Now(), Kind: kind}
 	if err := d.store.PutAgent(ctx, a); err != nil {
 		return "", err
 	}

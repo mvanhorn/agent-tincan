@@ -34,6 +34,16 @@ tincan join ABCD-EFGH --relay http://tincan-relay
 
 Repeat for the second agent. Check with `tincan agents`.
 
+## Rebuilt machines
+
+If an agent's machine is rebuilt (a sandbox recreated from scratch, a VM reimaged), keep the same machine name. On the new machine run:
+
+```bash
+tincan rejoin --relay http://tincan-relay
+```
+
+Add `--proxy <url>` if the agent reaches the relay through a proxy, and `--name <agent>` if the machine ran several agents. The relay re-admits the new Tailscale node as the old agent when it is untagged, owned by the same login, and the old node is offline or gone, then `rejoin` saves the config. Queued requests are still waiting. Only a machine that was never joined needs an invite. Tagged machines are not re-admitted this way, and `tincan relay --no-auto-rebind` turns it off. See `docs/trust-model.md`.
+
 ## 3. Talk
 
 From one agent:
