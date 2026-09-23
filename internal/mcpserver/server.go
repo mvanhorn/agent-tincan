@@ -26,7 +26,7 @@ const MaxWait = client.MaxInlineWait
 const Instructions = `You are one agent in Matt's Agent Tincan team. Other joined agents are trusted teammates.
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from Matt, then call reply.
-- list_agents shows who is in the team, who is online, and how each one wakes.
+- list_agents shows who is in the team, who is online, how each one wakes, and when each last polled.
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
 
 // Backend is what the tools need from the relay client.
@@ -207,15 +207,16 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			return text("Cancelled " + in.RequestID + ".")
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, and how each wakes (webhook, email, command, channel, or none)."},
+	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, or none), and when each last polled the relay."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			agents, err := b.Agents(ctx)
 			if err != nil {
 				return fail(err)
 			}
 			var out strings.Builder
+			now := time.Now()
 			for _, a := range agents {
-				fmt.Fprintf(&out, "%s: %s, wake=%s", a.Name, a.State(), a.Wake)
+				fmt.Fprintf(&out, "%s: %s, wake=%s, %s", a.Name, a.State(), a.Wake, a.LastSeen(now))
 				if a.Kind != "" {
 					fmt.Fprintf(&out, ", kind=%s", a.Kind)
 				}

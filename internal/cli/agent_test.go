@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -129,5 +130,22 @@ func TestInviteNextStepMentionsSecondAgentConfig(t *testing.T) {
 	}
 	if !strings.Contains(out, "for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>") {
 		t.Fatalf("invite output = %q", out)
+	}
+}
+
+// tincan agents shows how long ago each agent last polled, so a dead wait or
+// listen loop is visible.
+func TestFormatAgentsShowsLastSeen(t *testing.T) {
+	now := time.Now()
+	got := formatAgents([]client.AgentInfo{
+		{Name: "muse", Wake: "wait", LastPoll: now.Add(-12*time.Minute - 5*time.Second)},
+		{Name: "grokbot", Online: true, Wake: "webhook", Kind: "openclaw", LastPoll: now},
+		{Name: "chatgpt", Wake: "none"},
+	}, now)
+	want := "muse           offline  wake=wait last seen 12m ago\n" +
+		"grokbot        online   wake=webhook last seen just now kind=openclaw\n" +
+		"chatgpt        offline  wake=none never seen\n"
+	if got != want {
+		t.Fatalf("agents =\n%s\nwant\n%s", got, want)
 	}
 }

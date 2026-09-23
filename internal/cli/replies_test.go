@@ -255,7 +255,7 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	var h hooks
 	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: h.server(t)}}, m.Store,
-		wake.Options{Debounce: time.Millisecond, ReplyGrace: 50 * time.Millisecond, Online: m.Server.Online, UnseenReplies: m.Server.UnseenReplies})
+		wake.Options{Debounce: time.Millisecond, ReplyGrace: 50 * time.Millisecond, Online: m.Server.Online, UnseenReplies: m.Server.UnseenReplies, ReplyRetries: []time.Duration{}})
 	m.Server.SetEvents(w)
 	ctx := context.Background()
 	grok, muse := m.Client(t, "grokbot"), m.Client(t, "muse")
@@ -451,7 +451,7 @@ func TestResumeReplyWakesAfterRestart(t *testing.T) {
 	var h hooks
 	// The restarted relay's waker has no pending timers.
 	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: h.server(t)}, "instinct": {Method: wake.Wait}}, m.Store,
-		wake.Options{ReplyGrace: 50 * time.Millisecond, UnseenReplies: m.Server.UnseenReplies})
+		wake.Options{ReplyGrace: 50 * time.Millisecond, UnseenReplies: m.Server.UnseenReplies, ReplyRetries: []time.Duration{}})
 	if err := resumeReplyWakes(ctx, m.Store, w); err != nil {
 		t.Fatal(err)
 	}

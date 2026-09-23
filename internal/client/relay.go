@@ -46,6 +46,48 @@ func (a AgentInfo) State() string {
 	return "offline"
 }
 
+// LastSeen says how long before now the agent last polled the relay, as
+// "last seen 12m ago", or "never seen" for an agent that has not polled since
+// the relay started. A wait or listen loop that died shows up here as a
+// growing age.
+func (a AgentInfo) LastSeen(now time.Time) string {
+	if a.LastPoll.IsZero() {
+		return "never seen"
+	}
+	d := now.Sub(a.LastPoll)
+	switch {
+	case d < time.Minute:
+		return "last seen just now"
+	case d < time.Hour:
+		return fmt.Sprintf("last seen %dm ago", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("last seen %dh ago", int(d/time.Hour))
+	}
+	return fmt.Sprintf("last seen %dd ago", int(d/(24*time.Hour)))
+}
+
+// DistManifest lists the release binaries a relay serves for tincan upgrade.
+type DistManifest struct {
+	Version string     `json:"version"`
+	Files   []DistFile `json:"files"`
+}
+
+// DistFile is one release binary and its sha256, hex-encoded.
+type DistFile struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
+// SHA256Of returns the checksum the manifest lists for name, or "".
+func (m DistManifest) SHA256Of(name string) string {
+	for _, f := range m.Files {
+		if f.Name == name {
+			return f.SHA256
+		}
+	}
+	return ""
+}
+
 // APIError is a non-2xx response from the relay.
 type APIError struct {
 	Code    int
@@ -289,6 +331,55 @@ func (r *Relay) SetKind(ctx context.Context, name, kind string) error {
 // Remove unbinds an agent (admin devices only).
 func (r *Relay) Remove(ctx context.Context, name string) error {
 	return r.call(ctx, r.api, "POST", "/v1/admin/remove", map[string]string{"name": name}, nil)
+}
+
+// Dist fetches the relay's release manifest.
+func (r *Relay) Dist(ctx context.Context) (DistManifest, error) {
+	var m DistManifest
+	err := r.call(ctx, r.api, "GET", "/v1/dist", nil, &m)
+	return m, err
+}
+
+// MaxDistBytes caps a release download.
+const MaxDistBytes = 512 << 20
+
+// DistDownloadTimeout bounds one release download.
+const DistDownloadTimeout = 10 * time.Minute
+
+// DownloadDist streams the named release file from the relay into w.
+func (r *Relay) DownloadDist(ctx context.Context, name string, w io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", r.base+"/v1/dist/"+url.PathEscape(name), nil)
+	if err != nil {
+		return err
+	}
+	if r.agent != "" {
+		req.Header.Set(AgentHeader, r.agent)
+	}
+	c := *r.api // same transport and proxy, longer timeout
+	c.Timeout = DistDownloadTimeout
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &e) != nil || e.Error == "" {
+			e.Error = strings.TrimSpace(string(raw))
+		}
+		return &APIError{Code: resp.StatusCode, Message: e.Error}
+	}
+	n, err := io.Copy(w, io.LimitReader(resp.Body, MaxDistBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > MaxDistBytes {
+		return fmt.Errorf("%s is larger than %d bytes", name, MaxDistBytes)
+	}
+	return nil
 }
 
 // Raw performs an arbitrary JSON call; used by commands that add endpoints

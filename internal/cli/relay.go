@@ -36,6 +36,7 @@ type relayFlags struct {
 	adminLogins []string
 	noRebind    bool
 	replyGrace  time.Duration
+	dist        string
 
 	gateway         bool
 	gatewayHostname string
@@ -66,7 +67,12 @@ A rebuilt machine (a new Tailscale node with the same machine name, or that
 name plus a "-1" style suffix) is re-admitted as its old agent on its first
 call when it is untagged, owned by the login recorded at join, and the old
 node is offline or gone. Each one is audited as a "rebind" event. Turn this
-off with --no-auto-rebind.`,
+off with --no-auto-rebind.
+
+With --dist <dir>, the relay serves tincan release binaries from dir to joined
+agents and admins, so tincan upgrade works on machines without GitHub access.
+Put the raw binaries there as tincan_<os>_<arch> (linux or darwin, amd64 or
+arm64), plus checksums.txt and a VERSION file naming the release.`,
 		RunE: func(cmd *cobra.Command, _ []string) error { return runRelay(cmd.Context(), f) },
 	}
 	cmd.Flags().StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
@@ -77,6 +83,7 @@ off with --no-auto-rebind.`,
 	cmd.Flags().StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
 	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
+	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
 	cmd.Flags().StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
 	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
@@ -145,6 +152,12 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), f.directoryConfig())
 	srv := relay.New(dir, st, relay.Config{})
 	srv.SetPreparer(policy.New(st, policy.Config{}))
+	if f.dist != "" {
+		if fi, err := os.Stat(f.dist); err != nil || !fi.IsDir() {
+			return fmt.Errorf("--dist %s: not a directory", f.dist)
+		}
+		srv.SetDist(f.dist)
+	}
 	wakeCfg, err := wake.LoadConfig(filepath.Join(f.stateDir, "wake.json"))
 	if err != nil {
 		return err

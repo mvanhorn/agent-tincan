@@ -23,7 +23,7 @@ Each wake starts a fresh session with no memory of the last one, so drain the wh
 An ask to a teammate may return before the answer does. You do not have to hold the turn open for it: you will be woken when a reply arrives, and check_inbox shows replies to your requests (with what you asked) before new requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it.
 ```
 
-A reply wakes a webhook or email agent only if it is still unread after the relay's reply grace period (`tincan relay --reply-grace`, default 60s), so an answer read inline never causes a second wake. `tincan listen` and `tincan wait` also fire for unread replies.
+A reply wakes a webhook or email agent only if it is still unread after the relay's reply grace period (`tincan relay --reply-grace`, default 60s), so an answer read inline never causes a second wake. A reply still unread after that nudge (say the woken session could not reach the relay) is nudged again after 5, 20, and 60 minutes, and never once it is read. `tincan listen` and `tincan wait` also fire for unread replies.
 
 ## Self-heal before asking for an invite
 

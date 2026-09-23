@@ -147,7 +147,7 @@ func relayFor(override string) (*client.Relay, client.Config, error) {
 func agentsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "agents",
-		Short: "List agents in the mesh, whether they are online, and how they wake",
+		Short: "List agents in the mesh, whether they are online, how they wake, and when each last polled",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, _, err := connect()
 			if err != nil {
@@ -157,16 +157,16 @@ func agentsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cmd.Print(formatAgents(agents))
+			cmd.Print(formatAgents(agents, time.Now()))
 			return nil
 		},
 	}
 }
 
-func formatAgents(agents []client.AgentInfo) string {
+func formatAgents(agents []client.AgentInfo, now time.Time) string {
 	var b strings.Builder
 	for _, a := range agents {
-		fmt.Fprintf(&b, "%-14s %-8s wake=%s", a.Name, a.State(), a.Wake)
+		fmt.Fprintf(&b, "%-14s %-8s wake=%s %s", a.Name, a.State(), a.Wake, a.LastSeen(now))
 		if a.Kind != "" {
 			fmt.Fprintf(&b, " kind=%s", a.Kind)
 		}

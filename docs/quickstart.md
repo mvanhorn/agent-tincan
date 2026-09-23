@@ -32,7 +32,7 @@ On the agent's machine:
 tincan join ABCD-EFGH --relay http://tincan-relay
 ```
 
-Repeat for the second agent. Check with `tincan agents`.
+Repeat for the second agent. Check with `tincan agents`, which also shows when each agent last polled the relay ("last seen 12m ago", or "never seen").
 
 ## Rebuilt machines
 
@@ -113,3 +113,24 @@ tincan trace            # recent chains (admin)
 tincan trace <trace-id> # one chain, step by step
 tincan audit-verify     # check the log has not been altered
 ```
+
+## Upgrading
+
+Agents can update tincan from the relay itself, which is how an agent without GitHub access (Instinct, for example) gets a new release.
+
+On the relay host, keep a dist directory and start the relay with it:
+
+```bash
+tincan relay --admin my-laptop,my-phone --dist ~/tincan-dist
+```
+
+For each release, the relay operator drops the raw binaries into that directory, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.
+
+On each agent's machine:
+
+```bash
+tincan upgrade --check   # current version and what the relay has
+tincan upgrade           # download, verify sha256, replace the binary
+```
+
+`tincan upgrade` picks the build for its own platform, checks its sha256 against the relay's manifest, writes it next to the running binary, and renames it into place (a new file, so macOS never kills a signed binary rewritten in place). If the relay has no build for the platform or the checksum does not match, it stops with an error and leaves the old binary as it was. Afterwards, restart any long-running tincan processes (`tincan wait` or `tincan listen` loops, `tincan mcp` servers); they keep running the old build until then.

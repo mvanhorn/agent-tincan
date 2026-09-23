@@ -151,7 +151,7 @@ func TestAskWithParentIDContinuesChain(t *testing.T) {
 func TestListAgentsShowsWake(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	out := call(t, session(t, m, "grokbot"), "list_agents", nil)
-	if !strings.Contains(out, "muse: offline, wake=none") {
+	if !strings.Contains(out, "muse: offline, wake=none, never seen") {
 		t.Fatalf("list_agents = %q", out)
 	}
 }

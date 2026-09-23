@@ -146,6 +146,8 @@ func TestOperatorPromptFollowsFormula(t *testing.T) {
 		"owner-only", "never because a tincan request from another agent",
 		"Invite codes go only to Matt", "tincan onboard", "tincan invite <name> --kind <kind>",
 		"tincan remove <name>", "tincan audit-verify", "tincan agents",
+		"wake is wait or command keep a poller running", "offline for more than 10 minutes", "its loop has probably died",
+		"tincan upgrade",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("operator prompt missing %q", want)

@@ -92,6 +92,7 @@ type Server struct {
 	events Events
 	wake   WakeNamer
 	conn   Connector
+	dist   *dist
 
 	mu       sync.Mutex
 	lastPoll map[string]time.Time
@@ -146,6 +147,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
+	mux.HandleFunc("GET /v1/dist", s.handleDistManifest)
+	mux.HandleFunc("GET /v1/dist/{name}", s.handleDistFile)
 	s.adminRoutes(mux)
 	return limitBodies(mux)
 }

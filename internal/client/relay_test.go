@@ -224,3 +224,22 @@ func TestBaseIsTheRelayURL(t *testing.T) {
 		t.Fatalf("base = %q", r.Base())
 	}
 }
+
+func TestAgentLastSeen(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	for _, tc := range []struct {
+		last time.Time
+		want string
+	}{
+		{time.Time{}, "never seen"},
+		{now.Add(-20 * time.Second), "last seen just now"},
+		{now.Add(-12 * time.Minute), "last seen 12m ago"},
+		{now.Add(-3*time.Hour - 10*time.Minute), "last seen 3h ago"},
+		{now.Add(-50 * time.Hour), "last seen 2d ago"},
+		{now.Add(time.Minute), "last seen just now"}, // clock skew
+	} {
+		if got := (client.AgentInfo{LastPoll: tc.last}).LastSeen(now); got != tc.want {
+			t.Errorf("LastSeen(%v) = %q, want %q", now.Sub(tc.last), got, tc.want)
+		}
+	}
+}
