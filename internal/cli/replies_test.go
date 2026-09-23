@@ -227,16 +227,15 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 		t.Fatalf("wakes = %q, want one reply nudge", msgs)
 	}
 
-	first, err := checkInbox(ctx, grok, 0)
-	if err != nil {
+	var first, second bytes.Buffer
+	if err := checkInbox(ctx, grok, 0, &first, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(first, "booked Tue 3pm") != 1 || !strings.Contains(first, res.Request.ID) {
-		t.Fatalf("first inbox = %q", first)
+	if strings.Count(first.String(), "booked Tue 3pm") != 1 || !strings.Contains(first.String(), res.Request.ID) {
+		t.Fatalf("first inbox = %q", first.String())
 	}
-	second, err := checkInbox(ctx, grok, 0)
-	if err != nil || strings.Contains(second, "booked Tue 3pm") {
-		t.Fatalf("second inbox = %q, %v", second, err)
+	if err := checkInbox(ctx, grok, 0, &second, io.Discard); err != nil || strings.Contains(second.String(), "booked Tue 3pm") {
+		t.Fatalf("second inbox = %q, %v", second.String(), err)
 	}
 
 	// A reply read inside the inline wait: no wake.
@@ -255,5 +254,161 @@ func TestSlowReplyWakesAskerAndShowsOnce(t *testing.T) {
 	w.Flush()
 	if msgs := h.got(); len(msgs) != 1 {
 		t.Fatalf("wakes = %q; a reply read inline must not wake the asker", msgs)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// tincan inbox acknowledges replies only after printing them: when the
+// output cannot be written, the reply stays unseen for the next inbox.
+func TestInboxAcksRepliesOnlyAfterPrinting(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	answered(t, m, "call the garage", "Tue 3pm works")
+	grok := m.Client(t, "grokbot")
+	if err := checkInbox(ctx, grok, 0, failWriter{}, io.Discard); err == nil {
+		t.Fatal("want the write error")
+	}
+	if n := m.Server.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("an unprinted reply must stay unseen: unseen = %d", n)
+	}
+	var out bytes.Buffer
+	if err := checkInbox(ctx, grok, 0, &out, io.Discard); err != nil || !strings.Contains(out.String(), "Tue 3pm works") {
+		t.Fatalf("retry inbox = %q, %v", out.String(), err)
+	}
+	if n := m.Server.UnseenReplies("grokbot"); n != 0 {
+		t.Fatalf("a printed reply is acked: unseen = %d", n)
+	}
+}
+
+// A poll that takes replies but never acks them (the client died) leaves
+// them for the next poll.
+func TestTakeWithoutAckLeavesRepliesUnseen(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	req := answered(t, m, "call the garage", "Tue 3pm works")
+	grok := m.Client(t, "grokbot")
+	for range 2 {
+		in, err := grok.Poll(ctx, 0)
+		if err != nil || len(in.Replies) != 1 || in.Replies[0].Request.ID != req.ID {
+			t.Fatalf("poll = %+v, %v", in, err)
+		}
+	}
+	in, _ := grok.Poll(ctx, 0)
+	if err := grok.AckReplies(ctx, in.ReplyIDs()); err != nil {
+		t.Fatal(err)
+	}
+	if in, err := grok.Poll(ctx, 0); err != nil || !in.Empty() {
+		t.Fatalf("poll after ack = %+v, %v", in, err)
+	}
+}
+
+// A wait that ends with a request and a reply together prints the claimed
+// request and a count of the reply, without the reply text.
+func TestFormatWaitWithRequestAndReply(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	answered(t, m, "call the garage", "Tue 3pm works")
+	incoming, _ := m.Client(t, "instinct").Send(ctx, "grokbot", "summarize the report", envelope.KindAsk, "")
+	grok := m.Client(t, "grokbot")
+	in, err := grok.PollReplies(ctx, 0, client.RepliesKeep)
+	if err != nil || len(in.Requests) != 1 || len(in.Replies) != 1 {
+		t.Fatalf("poll = %+v, %v", in, err)
+	}
+	got := formatWait(ctx, grok, in)
+	for _, want := range []string{incoming.ID, "summarize the report", wake.WaitingMessage(0, 1)} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatWait missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Tue 3pm works") || strings.Contains(got, "Replies to your requests") {
+		t.Fatalf("formatWait must leave the reply text for check_inbox:\n%s", got)
+	}
+	if n := m.Server.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("unseen = %d, want 1", n)
+	}
+}
+
+// flakyPusher fails its first push and records the rest.
+type flakyPusher struct {
+	ready chan struct{}
+	mu    sync.Mutex
+	tries int
+	ok    []map[string]string
+}
+
+func (f *flakyPusher) Ready() <-chan struct{} { return f.ready }
+
+func (f *flakyPusher) Push(_ context.Context, _ string, meta map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tries++
+	if f.tries == 1 {
+		return io.ErrClosedPipe
+	}
+	f.ok = append(f.ok, meta)
+	return nil
+}
+
+func (f *flakyPusher) pushed() []map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]string(nil), f.ok...)
+}
+
+// A reply notice that fails to reach the session is pushed again later,
+// rather than being remembered as pushed.
+func TestChannelRetriesFailedReplyPush(t *testing.T) {
+	old := replyRecheck
+	replyRecheck = 50 * time.Millisecond
+	t.Cleanup(func() { replyRecheck = old })
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	req := answered(t, m, "call the garage", "Tue 3pm works")
+	f := &flakyPusher{ready: make(chan struct{})}
+	close(f.ready)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); pushReplies(ctx, m.Client(t, "grokbot"), f) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(f.pushed()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if got := f.pushed(); len(got) == 0 || got[0]["request_ids"] != req.ID {
+		t.Fatalf("pushes after a failed one = %v, want the reply %s again", got, req.ID)
+	}
+}
+
+// A relay restart drops the waker's in-memory timers. On start the relay
+// reschedules a reply wake for every agent still holding an unseen reply, so
+// a restart inside the grace window still wakes the asker. Agents whose
+// replies were read, or that do not wake relay-side, get nothing.
+func TestResumeReplyWakesAfterRestart(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	answered(t, m, "call the garage", "Tue 3pm works") // grokbot's, unseen
+	read := answered(t, m, "check the calendar", "free")
+	if err := m.Client(t, "grokbot").AckReplies(ctx, []string{read.ID}); err != nil {
+		t.Fatal(err)
+	}
+	inst, _ := m.Client(t, "instinct").Send(ctx, "muse", "book a table", envelope.KindAsk, "")
+	muse := m.Client(t, "muse")
+	muse.Claim(ctx, inst.ID)
+	muse.Reply(ctx, inst.ID, "7pm", envelope.StatusAnswered) // instinct's, unseen, but wait-method
+
+	var h hooks
+	// The restarted relay's waker has no pending timers.
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: h.server(t)}, "instinct": {Method: wake.Wait}}, m.Store,
+		wake.Options{ReplyGrace: 50 * time.Millisecond, UnseenReplies: m.Server.UnseenReplies})
+	if err := resumeReplyWakes(ctx, m.Store, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Flush()
+	if msgs := h.got(); len(msgs) != 1 || msgs[0] != wake.WaitingMessage(0, 1) {
+		t.Fatalf("wakes after restart = %q, want one reply nudge for grokbot", msgs)
 	}
 }

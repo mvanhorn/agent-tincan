@@ -205,13 +205,20 @@ func (w *Waker) Requeued(_ context.Context, req envelope.Request) {
 // because the asker's session may have ended seconds before the reply; the
 // unseen count at fire time decides instead.
 func (w *Waker) Replied(_ context.Context, req envelope.Request) {
-	if !w.relaySide(req.From) {
+	w.ReplyWaiting(req.From)
+}
+
+// ReplyWaiting schedules a reply nudge for agent once the reply grace period
+// ends, like Replied. A restarted relay calls it for each agent that still
+// holds unseen replies, since the old process kept its timers in memory.
+func (w *Waker) ReplyWaiting(agent string) {
+	if !w.relaySide(agent) {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.nudgeFor(req.From).replies++
-	w.arm(req.From, w.opts.ReplyGrace)
+	w.nudgeFor(agent).replies++
+	w.arm(agent, w.opts.ReplyGrace)
 }
 
 // schedule debounces a relay-side nudge for agent. checkOnline skips agents

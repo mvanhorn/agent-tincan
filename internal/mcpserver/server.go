@@ -35,6 +35,7 @@ type Backend interface {
 	Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error)
 	Get(ctx context.Context, id string, wait time.Duration) (client.Result, error)
 	Poll(ctx context.Context, hold time.Duration) (client.Inbox, error)
+	AckReplies(ctx context.Context, ids []string) error
 	Claim(ctx context.Context, id string) (envelope.Request, error)
 	Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error)
 	Cancel(ctx context.Context, id string) error
@@ -171,7 +172,13 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			if err != nil {
 				return fail(err)
 			}
-			return text(client.FormatInbox(ctx, b, inbox))
+			out := client.FormatInbox(ctx, b, inbox)
+			// Replies count as seen only once the result is built for the
+			// agent; a poll that never gets this far leaves them unseen.
+			if err := b.AckReplies(ctx, inbox.ReplyIDs()); err != nil {
+				out += fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)
+			}
+			return text(out)
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "claim", Description: "Mark a delivered request as yours to handle. check_inbox already does this."},

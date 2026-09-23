@@ -83,6 +83,26 @@ func (s *Store) CountUnseenReplies(ctx context.Context, agent string) (int, erro
 	return n, err
 }
 
+// AgentsWithUnseenReplies returns every agent that has at least one unseen
+// reply to its own requests, in name order. A restarted relay uses it to
+// reschedule the reply wakes its old process held only in memory.
+func (s *Store) AgentsWithUnseenReplies(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT from_agent FROM requests WHERE reply_seen_at = 0 AND `+replyStatusIn+` ORDER BY from_agent`, replyStatuses...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // MarkRepliesSeen records that agent has seen the replies to the requests in
 // ids. Ids agent did not send, or that have no reply yet, are left alone.
 func (s *Store) MarkRepliesSeen(ctx context.Context, agent string, ids []string) error {

@@ -77,6 +77,7 @@ func TestUnseenRepliesAndMarkSeen(t *testing.T) {
 		t.Fatalf("empty mark: %v", err)
 	}
 	// A reply to a request marked before it was answered still starts unseen.
+	c.advance(time.Second) // order after first's reply, not by random id
 	reply(t, s, pending, envelope.StatusFailed, "gave up")
 	if ids := unseenIDs(t, s, "hermes"); len(ids) != 2 || ids[1] != pending.ID {
 		t.Fatalf("unseen after late reply = %v", ids)
@@ -180,5 +181,29 @@ func TestOldRequestsTableMigratesReplySeen(t *testing.T) {
 	s2, _ := open(t, path)
 	if ids := unseenIDs(t, s2, "hermes"); len(ids) != 1 || ids[0] != "old2" {
 		t.Fatalf("unseen after reopen = %v", ids)
+	}
+}
+
+// AgentsWithUnseenReplies names each asker holding an unseen reply once,
+// so a restarted relay can reschedule their reply wakes.
+func TestAgentsWithUnseenReplies(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	a := ask(t, s, "hermes", "muse", "one")
+	b := ask(t, s, "hermes", "muse", "two")
+	c := ask(t, s, "grokbot", "muse", "three")
+	ask(t, s, "instinct", "muse", "no reply yet")
+	for _, r := range []envelope.Request{a, b, c} {
+		reply(t, s, r, envelope.StatusAnswered, "ok")
+	}
+	if err := s.MarkRepliesSeen(ctx, "grokbot", []string{c.ID}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.AgentsWithUnseenReplies(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "hermes" {
+		t.Fatalf("agents = %v, want [hermes]", got)
 	}
 }

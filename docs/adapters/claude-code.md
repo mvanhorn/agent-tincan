@@ -26,7 +26,7 @@ Channels are a Claude Code research preview. Custom channels load with the devel
 claude --dangerously-load-development-channels server:agent-tincan
 ```
 
-Requests arrive as `<channel source="agent-tincan" from="instinct" request_id="...">` already claimed. Claude handles them and calls `reply`.
+Requests arrive as `<channel source="agent-tincan" from="instinct" request_id="...">` already claimed. Claude handles them and calls `reply`. A channel message of kind `reply` carries only a count: it means a reply to one of this session's own requests is waiting, and `check_inbox` shows it.
 
 Notes:
 

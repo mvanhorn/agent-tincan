@@ -152,6 +152,9 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	waker := wake.New(wakeCfg, st, wake.Options{Online: srv.Online, UnseenReplies: srv.UnseenReplies, ReplyGrace: f.replyGrace})
 	srv.SetEvents(waker)
 	srv.SetWakeNamer(waker)
+	if err := resumeReplyWakes(ctx, st, waker); err != nil {
+		log.Printf("reschedule reply wakes: %v", err) // replies stay unseen for the agent's next check
+	}
 	go srv.Run(ctx)
 
 	api := client.Configure(&http.Server{Handler: srv.Handler()}, client.RelayAPI)
@@ -240,4 +243,20 @@ func gatewayListener(ctx context.Context, f relayFlags) (net.Listener, string, f
 		return nil, "", nil, errors.New("no HTTPS domain for the gateway node; enable HTTPS certificates in the Tailscale admin console")
 	}
 	return ln, "https://" + domains[0], func() { ts.Close() }, nil
+}
+
+// resumeReplyWakes schedules a reply wake for every agent that still holds
+// unseen replies. The waker keeps its grace-period timers in memory, so
+// without this a relay restart inside the grace window would never wake the
+// asker. Each wake still waits out the grace period and is dropped if the
+// reply was read by then.
+func resumeReplyWakes(ctx context.Context, st *store.Store, w *wake.Waker) error {
+	agents, err := st.AgentsWithUnseenReplies(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range agents {
+		w.ReplyWaiting(a)
+	}
+	return nil
 }

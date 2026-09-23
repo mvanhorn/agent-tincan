@@ -80,6 +80,12 @@ func pushRequests(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTran
 	}
 }
 
+// channelPusher is the part of the channel transport pushReplies uses.
+type channelPusher interface {
+	Ready() <-chan struct{}
+	Push(ctx context.Context, content string, meta map[string]string) error
+}
+
 // replyRecheck is how long pushReplies waits before looking again while
 // something is still waiting, since a peek returns at once until the agent
 // reads it.
@@ -87,37 +93,51 @@ var replyRecheck = 15 * time.Second
 
 // pushReplies pushes a short count-only channel event when replies to this
 // agent's own requests arrive. It only peeks, so the replies stay unseen
-// until the agent calls check_inbox, and it pushes each reply once.
-func pushReplies(ctx context.Context, r *client.Relay, t *mcpserver.ChannelTransport) {
+// until the agent calls check_inbox, and it pushes each reply once: an id
+// counts as pushed only after a push carrying it succeeds, so a failed push
+// is tried again on a later look. Relay errors back off with jitter, as the
+// request loop does.
+func pushReplies(ctx context.Context, r *client.Relay, t channelPusher) {
 	select {
 	case <-ctx.Done():
 		return
 	case <-t.Ready():
 	}
 	pushed := map[string]bool{}
+	backoff := time.Second
 	for ctx.Err() == nil {
 		w, err := r.Peek(ctx, client.DefaultPollHold)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("tincan channel: %v", client.RejoinHint(err, r.Base()))
-				sleepCtx(ctx, 30*time.Second)
+				sleepCtx(ctx, jitter(backoff))
+				backoff = min(backoff*2, 30*time.Second)
 			}
 			continue
 		}
-		waiting := map[string]bool{}
+		backoff = time.Second
 		var fresh []string
 		for _, rep := range w.Replies {
-			id := rep.Request.ID
-			waiting[id] = true
-			if !pushed[id] {
+			if id := rep.Request.ID; !pushed[id] {
 				fresh = append(fresh, id)
 			}
 		}
-		pushed = waiting // forget replies check_inbox has since marked seen
+		// Forget replies check_inbox has since marked seen.
+		still := map[string]bool{}
+		for _, rep := range w.Replies {
+			if pushed[rep.Request.ID] {
+				still[rep.Request.ID] = true
+			}
+		}
+		pushed = still
 		if len(fresh) > 0 {
 			meta := map[string]string{"kind": "reply", "request_ids": strings.Join(fresh, ",")}
 			if err := t.Push(ctx, wake.WaitingMessage(0, len(fresh)), meta); err != nil {
 				log.Printf("tincan channel: push replies: %v", err)
+			} else {
+				for _, id := range fresh {
+					pushed[id] = true
+				}
 			}
 		}
 		if w.Total > 0 {

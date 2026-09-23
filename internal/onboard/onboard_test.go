@@ -319,3 +319,34 @@ func TestRenderSections(t *testing.T) {
 		t.Error("all should contain every section")
 	}
 }
+
+// tincan wait also exits for a reply to the agent's own request, printing a
+// count rather than a request, so wait-method instructions must say what to
+// do then. Relay-side wakes carry replies too, so their blocks say so.
+func TestWakeBlocksMentionReplies(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Roster: []Member{
+		{Name: "muse", Wake: "wait", Kind: "proxy-sandbox"},
+		{Name: "zed", Wake: "wait"},
+		{Name: "grokbot", Wake: "webhook", Kind: "vm-webhook"},
+		{Name: "instinct", Wake: "email", Kind: "e2b-email"},
+		{Name: "hook", Wake: "webhook"},
+		{Name: "mail", Wake: "email"},
+		{Name: "claude-code", Wake: "channel", Kind: "claude-code"},
+	}})
+	for _, n := range []string{"muse", "zed"} {
+		txt := block(t, k, n).Instructions
+		for _, want := range []string{"a count of replies to your own requests", "tincan inbox", "finish the work that was waiting", "start tincan wait & again"} {
+			if !strings.Contains(txt, want) {
+				t.Errorf("%s wait block missing %q:\n%s", n, want, txt)
+			}
+		}
+		if strings.Contains(txt, "it prints a teammate's request:") {
+			t.Errorf("%s wait block still says the wait only ends with a request:\n%s", n, txt)
+		}
+	}
+	for _, n := range []string{"grokbot", "instinct", "hook", "mail", "claude-code"} {
+		if txt := block(t, k, n).Instructions; !strings.Contains(txt, "reply to your own request") {
+			t.Errorf("%s block should say a wake can mean a reply to its own request:\n%s", n, txt)
+		}
+	}
+}

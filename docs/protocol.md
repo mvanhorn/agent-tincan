@@ -33,15 +33,22 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 
 ## Replies the asker has not seen
 
-A reply starts unseen by the agent that sent the request. It counts as seen once that agent reads it: through `GET /v1/requests/{id}` (get_reply, or an inline ask wait) or through a poll that takes it.
+A reply starts unseen by the agent that sent the request. It counts as seen once that agent reads it through `GET /v1/requests/{id}` (get_reply, or an inline ask wait), or once the agent acknowledges it after a poll. No poll marks a reply seen on its own, so a reply lost on the way (a dropped connection, a client crash, a response the client could not read) comes back on the next poll.
 
-`GET /v1/poll` holds until requests for the caller or unseen replies to its own requests are waiting, and returns both: `{"requests": [...], "replies": [...]}`, where each reply is a request with its status and reply (the same shape as get_reply). The `replies` field is additive; it is left out when there are none.
+`GET /v1/poll` holds until requests for the caller, or unseen replies to its own requests that it asked for, are waiting, and returns both: `{"requests": [...], "replies": [...]}`, where each reply is a request with its status and reply (the same shape as get_reply). The `replies` field is additive; it is left out when there are none.
 
 | Query | Effect on unseen replies |
 |---|---|
-| (none) | Returned and marked seen. check_inbox and `tincan inbox` use this. |
-| `replies=keep` | Returned, left unseen. `tincan wait` uses this. |
+| (no `replies` param) | Left out, and they do not end the hold, the same as `replies=none`. Clients that predate replies send this and decode only `requests`, so they must not be handed replies. |
+| `replies=take` | Returned, left unseen until the client acknowledges them (below). check_inbox and `tincan inbox` use this. |
+| `replies=keep` | Returned, left unseen, never acknowledged. `tincan wait` uses this to end the wait and print a count. |
 | `replies=none` | Left out, and they do not end the hold. The Claude Code channel's request loop uses this. |
-| `peek=1` | Nothing is taken or marked. The response is `{"waiting": <requests plus replies>, "queued": <requests>, "replies": [...]}`. `tincan listen` uses this. |
+| `peek=1` | Nothing is taken. The response is `{"waiting": <total>, "queued": <requests>}`. With `replies=keep` (or `take`) it also carries `"replies": [...]` and `waiting` counts them; without, replies are not counted. `tincan listen` and the channel's reply notices send `peek=1&replies=keep`. |
 
-When a reply lands, the relay also tells the waker, which nudges a webhook or email asker if the reply is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60s). The nudge carries only counts.
+Any other `replies` value is a 400.
+
+`POST /v1/replies/ack` with `{"ids": ["<request id>", ...]}` marks those replies seen and returns 204. Ids that are not the caller's own requests, or that have no reply yet, are ignored, so an agent can only acknowledge its own replies. At most 500 ids per call. `tincan inbox` acknowledges after it prints the replies, and check_inbox after it builds its result; if the ack fails, the replies simply show again next time.
+
+One poll returns at most 50 unseen replies, oldest first, and stops adding replies once their request and reply bodies pass 1 MiB (it always returns at least one), so a response stays well under the client's 4 MiB read limit. Bodies are not cut. When replies were left out, the response carries `"replies_remaining": <n>`; they come with a later poll once this batch is acknowledged.
+
+When a reply lands, the relay also tells the waker, which nudges a webhook or email asker if the reply is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60s). The nudge carries only counts. The grace timers live in memory, so a relay that restarts schedules a fresh reply nudge for every webhook or email agent that still holds unseen replies.

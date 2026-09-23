@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,9 +62,9 @@ func TestReplyWithoutReplierIsFine(t *testing.T) {
 	h.answer(museAddr, h.send(grokAddr, "muse", "x"), "y")
 }
 
-// Peek and replies=keep report an unseen reply without marking it; a plain
-// poll returns it once and marks it seen.
-func TestPollReturnsRepliesAndMarksSeenOnlyWhenTaking(t *testing.T) {
+// No poll marks a reply seen. Peek and replies=keep report an unseen reply;
+// replies=take returns it until the caller acknowledges it.
+func TestPollReturnsRepliesWithoutMarkingThem(t *testing.T) {
 	h := newHarness(t, Config{})
 	sent := h.send(grokAddr, "muse", "call the garage")
 	h.answer(museAddr, sent, "Tue 3pm")
@@ -72,7 +73,7 @@ func TestPollReturnsRepliesAndMarksSeenOnlyWhenTaking(t *testing.T) {
 	}
 
 	var pk peekResult
-	h.do(grokAddr, "GET", "/v1/poll?peek=1&hold=0", "", http.StatusOK, &pk)
+	h.do(grokAddr, "GET", "/v1/poll?peek=1&replies=keep&hold=0", "", http.StatusOK, &pk)
 	if pk.Waiting != 1 || pk.Queued != 0 || len(pk.Replies) != 1 || pk.Replies[0].Request.ID != sent.ID || pk.Replies[0].Reply.Body != "Tue 3pm" {
 		t.Fatalf("peek = %+v", pk)
 	}
@@ -83,15 +84,103 @@ func TestPollReturnsRepliesAndMarksSeenOnlyWhenTaking(t *testing.T) {
 	}
 	h.do(grokAddr, "GET", "/v1/poll?replies=none&hold=0", "", http.StatusNoContent, nil)
 
-	var took repliesPoll
-	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, &took)
-	if len(took.Replies) != 1 || took.Replies[0].Reply.From != "muse" || took.Replies[0].Status != envelope.StatusAnswered {
-		t.Fatalf("poll = %+v", took)
+	for range 2 { // taking without an ack leaves the reply for the next poll
+		var took repliesPoll
+		h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &took)
+		if len(took.Replies) != 1 || took.Replies[0].Reply.From != "muse" || took.Replies[0].Status != envelope.StatusAnswered {
+			t.Fatalf("take poll = %+v", took)
+		}
 	}
+	if n := h.srv.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("unseen count after unacked take = %d, want 1", n)
+	}
+	h.do(grokAddr, "POST", "/v1/replies/ack", `{"ids":["`+sent.ID+`"]}`, http.StatusNoContent, nil)
+	h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusNoContent, nil)
+	h.do(grokAddr, "GET", "/v1/poll?peek=1&replies=keep&hold=0", "", http.StatusNoContent, nil)
+	if n := h.srv.UnseenReplies("grokbot"); n != 0 {
+		t.Fatalf("unseen count after ack = %d, want 0", n)
+	}
+}
+
+// A client that predates replies polls with no replies param and decodes
+// only requests. It must not be handed (and lose) replies: they stay unseen
+// and out of its response, and a plain peek does not count them either, so
+// an old listener does not nudge for something the old inbox never shows.
+func TestPollWithoutRepliesParamLeavesRepliesAlone(t *testing.T) {
+	h := newHarness(t, Config{})
+	sent := h.send(grokAddr, "muse", "call the garage")
+	h.answer(museAddr, sent, "Tue 3pm")
 	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
 	h.do(grokAddr, "GET", "/v1/poll?peek=1&hold=0", "", http.StatusNoContent, nil)
+
+	incoming := h.send(instinctAddr, "grokbot", "summarize the report")
+	var old struct {
+		Requests []envelope.Request `json:"requests"`
+	}
+	rec := h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, &old)
+	if len(old.Requests) != 1 || old.Requests[0].ID != incoming.ID {
+		t.Fatalf("old-style poll = %+v", old)
+	}
+	if strings.Contains(rec.Body.String(), `"replies"`) {
+		t.Fatalf("old-style poll carried replies: %s", rec.Body.String())
+	}
+	if n := h.srv.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("unseen count after old-style poll = %d, want 1", n)
+	}
+}
+
+func TestPollRejectsUnknownRepliesMode(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.do(grokAddr, "GET", "/v1/poll?replies=all&hold=0", "", http.StatusBadRequest, nil)
+	h.do(grokAddr, "GET", "/v1/poll?peek=1&replies=all&hold=0", "", http.StatusBadRequest, nil)
+}
+
+// An ack marks only the caller's own replies: ids it did not send, or that
+// have no reply yet, are ignored.
+func TestAckMarksOnlyCallersReplies(t *testing.T) {
+	h := newHarness(t, Config{})
+	mine := h.send(grokAddr, "muse", "call the garage")
+	h.answer(museAddr, mine, "Tue 3pm")
+	theirs := h.send(instinctAddr, "muse", "book a table")
+	h.answer(museAddr, theirs, "7pm")
+	pending := h.send(grokAddr, "muse", "still thinking")
+	body := `{"ids":["` + mine.ID + `","` + theirs.ID + `","` + pending.ID + `","nope"]}`
+	h.do(grokAddr, "POST", "/v1/replies/ack", body, http.StatusNoContent, nil)
 	if n := h.srv.UnseenReplies("grokbot"); n != 0 {
-		t.Fatalf("unseen count after poll = %d, want 0", n)
+		t.Fatalf("grokbot unseen = %d, want 0", n)
+	}
+	if n := h.srv.UnseenReplies("instinct"); n != 1 {
+		t.Fatalf("instinct unseen = %d, want 1 (grokbot cannot ack its reply)", n)
+	}
+	h.answer(museAddr, pending, "done")
+	if n := h.srv.UnseenReplies("grokbot"); n != 1 {
+		t.Fatalf("grokbot unseen after late reply = %d, want 1 (an early ack does not count)", n)
+	}
+	h.do(grokAddr, "POST", "/v1/replies/ack", `{"ids":[]}`, http.StatusNoContent, nil)
+	h.do(grokAddr, "POST", "/v1/replies/ack", `not json`, http.StatusBadRequest, nil)
+	h.do(strangerAddr, "POST", "/v1/replies/ack", body, http.StatusForbidden, nil)
+}
+
+// A poll returns replies up to a byte budget, so a batch of large replies
+// stays well under the client's response limit, and says how many are left.
+func TestPollBoundsRepliesByBytes(t *testing.T) {
+	h := newHarness(t, Config{})
+	big := strings.Repeat("x", envelope.DefaultMaxBody-1024)
+	const n = 8
+	for range n {
+		sent := h.send(grokAddr, "muse", big)
+		h.answer(museAddr, sent, big)
+	}
+	var got struct {
+		repliesPoll
+		Remaining int `json:"replies_remaining"`
+	}
+	rec := h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &got)
+	if len(got.Replies) == 0 || len(got.Replies) >= n || got.Remaining != n-len(got.Replies) {
+		t.Fatalf("got %d replies, %d remaining; want a bounded batch", len(got.Replies), got.Remaining)
+	}
+	if rec.Body.Len() > MaxRepliesBytes+256<<10 {
+		t.Fatalf("response is %d bytes", rec.Body.Len())
 	}
 }
 
@@ -102,7 +191,7 @@ func TestPollReturnsRequestsAndReplies(t *testing.T) {
 	h.answer(museAddr, sent, "Tue 3pm")
 	incoming := h.send(instinctAddr, "grokbot", "summarize the report")
 	var got repliesPoll
-	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, &got)
+	h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &got)
 	if len(got.Requests) != 1 || got.Requests[0].ID != incoming.ID || len(got.Replies) != 1 || got.Replies[0].Request.ID != sent.ID {
 		t.Fatalf("poll = %+v", got)
 	}
@@ -111,7 +200,7 @@ func TestPollReturnsRequestsAndReplies(t *testing.T) {
 // A poll held open for the asker returns as soon as a reply lands, in both
 // taking and peek mode.
 func TestPollHoldReturnsEarlyOnNewReply(t *testing.T) {
-	for _, path := range []string{"/v1/poll", "/v1/poll?peek=1"} {
+	for _, path := range []string{"/v1/poll?replies=take", "/v1/poll?peek=1&replies=keep"} {
 		t.Run(path, func(t *testing.T) {
 			h := newHarness(t, Config{PollHold: 5 * time.Second})
 			sent := h.send(grokAddr, "muse", "call the garage")
@@ -148,5 +237,5 @@ func TestGetReplyMarksReplySeen(t *testing.T) {
 		t.Fatalf("unseen after target get = %d, want 1", n)
 	}
 	h.do(grokAddr, "GET", "/v1/requests/"+sent.ID, "", http.StatusOK, nil)
-	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusNoContent, nil)
 }

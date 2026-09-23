@@ -66,7 +66,8 @@ type Claimer interface {
 
 // FormatInbox renders what a poll picked up: replies to this agent's own
 // requests first, under RepliesHeading, then the new requests, each claimed
-// through c so no one else handles it.
+// through c so no one else handles it. The caller acknowledges the replies
+// (AckReplies) once the text has reached its agent.
 func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 	if in.Empty() {
 		return "No requests waiting.\n"
@@ -76,6 +77,10 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		b.WriteString(RepliesHeading)
 		for _, r := range in.Replies {
 			b.WriteString(FormatReply(r))
+		}
+		if in.RepliesRemaining > 0 {
+			fmt.Fprintf(&b, "%d more %s waiting. Run check_inbox (or `tincan inbox`) again to read %s.\n",
+				in.RepliesRemaining, plural(in.RepliesRemaining, "reply is", "replies are"), plural(in.RepliesRemaining, "it", "them"))
 		}
 		if len(in.Requests) > 0 {
 			b.WriteString("\nRequests from teammates:\n")
@@ -89,6 +94,13 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		b.WriteString(FormatRequest(req))
 	}
 	return b.String()
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // truncate shortens s to at most n bytes on a rune boundary, on one line.

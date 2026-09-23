@@ -299,6 +299,11 @@ func (r *recorder) Poll(context.Context, time.Duration) (client.Inbox, error) {
 	return client.Inbox{}, nil
 }
 
+func (r *recorder) AckReplies(context.Context, []string) error {
+	r.calls = append(r.calls, "AckReplies")
+	return nil
+}
+
 func (r *recorder) Claim(context.Context, string) (envelope.Request, error) {
 	r.calls = append(r.calls, "Claim")
 	return envelope.Request{}, nil

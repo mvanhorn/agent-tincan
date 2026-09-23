@@ -16,6 +16,8 @@ Instinct wakes on email. The relay sends a short email through an AgentMail inbo
 { "instinct": { "method": "email", "email_to": "<instinct inbox>", "agentmail_inbox": "<sending inbox>", "agentmail_key": "<AgentMail API key>", "max_per_hour": 12 } }
 ```
 
+The same email can also mean a reply to one of Instinct's own requests is waiting; `tincan inbox` (or `check_inbox`) shows it.
+
 Also ask the agent to set its own recurring check (for example every 15 minutes) that runs `tincan inbox`, as a backup.
 
 ## Flaky paths

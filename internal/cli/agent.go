@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -246,25 +247,29 @@ func inboxCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			out, err := checkInbox(cmd.Context(), r, client.ClampWait(wait))
-			if err != nil {
-				return err
-			}
-			cmd.Print(out)
-			return nil
+			return checkInbox(cmd.Context(), r, client.ClampWait(wait), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().DurationVar(&wait, "wait", 0, "wait up to this long for a request (max 20s)")
 	return cmd
 }
 
-// checkInbox polls once, claims what arrived, and renders it.
-func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration) (string, error) {
+// checkInbox polls once, claims what arrived, prints it to out, and only
+// then acknowledges the replies it printed, so a reply lost on the way (a
+// dropped connection, a crash before printing) shows again next time. A
+// failed ack is reported on errOut; the replies may show again.
+func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, errOut io.Writer) error {
 	in, err := r.Poll(ctx, wait)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return client.FormatInbox(ctx, r, in), nil
+	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
+		return err
+	}
+	if err := r.AckReplies(ctx, in.ReplyIDs()); err != nil {
+		fmt.Fprintf(errOut, "tincan inbox: could not mark replies read (they may show again): %v\n", err)
+	}
+	return nil
 }
 
 // formatWait renders what ended a wait: the requests, claimed, and a count of

@@ -55,18 +55,21 @@ An ask to a teammate may return before the answer does. You do not have to hold 
 
 {{- define "instructions.vm-webhook" -}}
 Webhook messages from source "agent-tincan" mean teammates need you: call check_inbox, handle each request, and reply.
+The same wake can also mean a reply to your own request is waiting; check_inbox shows it, so finish the work that was waiting on it.
 {{- end -}}
 
 {{- define "instructions.e2b-email" -}}
 Emails with the subject "Agent Tincan: requests waiting" mean teammates need you: run tincan inbox, handle each request, and reply. Also keep a recurring check every 15 minutes that runs tincan inbox.
+The same email can also mean a reply to your own request is waiting; tincan inbox (or check_inbox) shows it, so finish the work that was waiting on it.
 {{- end -}}
 
 {{- define "instructions.proxy-sandbox" -}}
-Keep tincan wait & running in the background at all times. When it exits, it prints a teammate's request: handle it, reply with tincan reply <id> "<result>", then start tincan wait & again. Also keep a scheduled check every 5 minutes that runs tincan inbox.
+Keep tincan wait & running in the background at all times. When it exits, it prints either a teammate's request (handle it and reply with tincan reply <id> "<result>") or a count of replies to your own requests (run tincan inbox to read them and finish the work that was waiting on them). Then start tincan wait & again. Also keep a scheduled check every 5 minutes that runs tincan inbox.
 {{- end -}}
 
 {{- define "instructions.claude-code" -}}
 Teammate requests arrive in this session as a channel message from source "agent-tincan", already claimed. Handle each one and call reply. If a listener opened this session for you, call check_inbox first.
+A channel message of kind "reply" means a reply to your own request is waiting; check_inbox shows it, so finish the work that was waiting on it.
 {{- end -}}
 
 {{- define "instructions.chatgpt" -}}
@@ -91,10 +94,12 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{- define "instructions.generic" -}}
 {{- if eq .Wake "webhook" -}}
 Webhook messages from source "agent-tincan" mean teammates need you: call check_inbox, handle each request, and reply.
+The same wake can also mean a reply to your own request is waiting; check_inbox shows it, so finish the work that was waiting on it.
 {{- else if eq .Wake "email" -}}
 Emails with the subject "Agent Tincan: requests waiting" mean teammates need you: run tincan inbox, handle each request, and reply. Also keep a recurring inbox check as a backup.
+The same email can also mean a reply to your own request is waiting; tincan inbox (or check_inbox) shows it, so finish the work that was waiting on it.
 {{- else if eq .Wake "wait" -}}
-Keep tincan wait & running in the background. When it exits it prints a teammate's request: handle it, reply, then start tincan wait & again. Also keep a scheduled check that runs tincan inbox.
+Keep tincan wait & running in the background. When it exits it prints either a teammate's request (handle it and reply) or a count of replies to your own requests (run tincan inbox to read them and finish the work that was waiting on them). Then start tincan wait & again. Also keep a scheduled check that runs tincan inbox.
 {{- else if eq .Wake "channel" -}}
 Teammate requests are pushed into your running session by tincan mcp --channel, already claimed. Handle each one and reply.
 {{- else if eq .Wake "command" -}}
