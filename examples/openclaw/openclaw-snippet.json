@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agent-tincan": {
+      "command": "tincan",
+      "args": ["mcp"]
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "token": "<hook token, matches wake.json bearer_token for openclaw>",
+    "path": "/hooks",
+    "allowedAgentIds": ["main"]
+  }
+}
