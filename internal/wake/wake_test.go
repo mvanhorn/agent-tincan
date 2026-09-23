@@ -2,6 +2,9 @@ package wake
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -23,6 +26,7 @@ type recorder struct {
 	bodies []string
 	paths  []string
 	auth   []string
+	sigs   []string
 	fail   atomic.Int32 // fail this many requests first
 }
 
@@ -33,6 +37,7 @@ func (rc *recorder) server(t *testing.T) *httptest.Server {
 		rc.bodies = append(rc.bodies, string(raw))
 		rc.paths = append(rc.paths, r.URL.Path)
 		rc.auth = append(rc.auth, r.Header.Get("Authorization"))
+		rc.sigs = append(rc.sigs, r.Header.Get("X-Hub-Signature-256"))
 		rc.mu.Unlock()
 		if rc.fail.Load() > 0 {
 			rc.fail.Add(-1)
@@ -120,6 +125,57 @@ func TestWebhookRetriesOnceThenAuditsFailure(t *testing.T) {
 	}
 }
 
+// OpenClaw reads text, Grok Bot reads message; both carry the same count.
+func TestWebhookBodyMirrorsTextWithBearerOnly(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"openclaw": {Method: Webhook, URL: ts.URL, BearerToken: "tok"}}, nil, Options{Debounce: time.Millisecond})
+	queued(w, "openclaw", 2)
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("webhook calls = %d, want 1", rc.count())
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(rc.bodies[0]), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["source"] != "agent-tincan" || body["message"] != Message(2) || body["text"] != body["message"] {
+		t.Fatalf("wake body = %s", rc.bodies[0])
+	}
+	if rc.auth[0] != "Bearer tok" || rc.sigs[0] != "" {
+		t.Fatalf("auth = %q sig = %q", rc.auth[0], rc.sigs[0])
+	}
+}
+
+// Hermes verifies webhooks with the GitHub HMAC scheme.
+func TestWebhookHMACSignsExactBody(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"hermes": {Method: Webhook, URL: ts.URL, HMACSecret: "hush"}}, nil, Options{Debounce: time.Millisecond})
+	queued(w, "hermes", 1)
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("webhook calls = %d, want 1", rc.count())
+	}
+	sign := func(secret string) string {
+		m := hmac.New(sha256.New, []byte(secret))
+		m.Write([]byte(rc.bodies[0]))
+		return "sha256=" + hex.EncodeToString(m.Sum(nil))
+	}
+	if rc.sigs[0] != sign("hush") {
+		t.Fatalf("sig = %q, want %q", rc.sigs[0], sign("hush"))
+	}
+	if hmac.Equal([]byte(rc.sigs[0]), []byte(sign("wrong"))) {
+		t.Fatal("signature verified with the wrong secret")
+	}
+	if rc.auth[0] != "" {
+		t.Fatalf("auth = %q, want none", rc.auth[0])
+	}
+	if strings.Contains(rc.bodies[0], "SECRET") || strings.Contains(rc.bodies[0], "555") || strings.Contains(rc.bodies[0], "hush") {
+		t.Fatalf("wake body leaks: %s", rc.bodies[0])
+	}
+}
+
 // Instinct wakes on email; the relay sends it through Grok Bot's AgentMail.
 func TestEmailWakeUsesAgentMail(t *testing.T) {
 	var rc recorder
@@ -198,6 +254,10 @@ func TestLoadConfig(t *testing.T) {
 	os.Chmod(p, 0o600)
 	if c, err := LoadConfig(p); err != nil || c["grokbot"].Method != Webhook {
 		t.Fatalf("load: %v %v", c, err)
+	}
+	os.WriteFile(p, []byte(`{"hermes":{"method":"webhook","url":"http://x","hmac_secret":"hush"}}`), 0o600)
+	if c, err := LoadConfig(p); err != nil || c["hermes"].HMACSecret != "hush" {
+		t.Fatalf("hmac_secret: %v %v", c, err)
 	}
 	for _, bad := range []string{`{"a":{"method":"webhook"}}`, `{"a":{"method":"email","email_to":"x"}}`, `{"a":{"method":"smoke-signal"}}`} {
 		os.WriteFile(p, []byte(bad), 0o600)

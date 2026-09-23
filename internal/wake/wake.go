@@ -4,7 +4,8 @@
 // Wake only prompts an agent to go look. Findings from the live spike decide
 // the methods:
 //
-//   - webhook (relay-side): POST a short prompt to a URL. Grok Bot.
+//   - webhook (relay-side): POST a short prompt to a URL, with an optional
+//     bearer token or HMAC signature. Grok Bot, Hermes, OpenClaw.
 //   - email (relay-side): send a short email through AgentMail. Instinct,
 //     which wakes on email but cannot keep a background listener alive.
 //   - wait (agent-side): the agent keeps `tincan wait` running in the
@@ -22,6 +23,9 @@ package wake
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +59,8 @@ type Target struct {
 	// webhook
 	URL         string `json:"url,omitempty"`
 	BearerToken string `json:"bearer_token,omitempty"`
+	// HMACSecret signs the body as X-Hub-Signature-256 (GitHub scheme). Hermes.
+	HMACSecret string `json:"hmac_secret,omitempty"`
 
 	// email (AgentMail)
 	EmailTo       string `json:"email_to,omitempty"`
@@ -244,7 +250,9 @@ func (w *Waker) send(ctx context.Context, agent string, n int) error {
 	t := w.cfg[agent]
 	switch t.Method {
 	case Webhook:
-		body, _ := json.Marshal(map[string]string{"source": "agent-tincan", "message": Message(n)})
+		// text mirrors message for runtimes that read text (OpenClaw /hooks/wake).
+		msg := Message(n)
+		body, _ := json.Marshal(map[string]string{"source": "agent-tincan", "message": msg, "text": msg})
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -252,6 +260,11 @@ func (w *Waker) send(ctx context.Context, agent string, n int) error {
 		req.Header.Set("Content-Type", "application/json")
 		if t.BearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+t.BearerToken)
+		}
+		if t.HMACSecret != "" {
+			m := hmac.New(sha256.New, []byte(t.HMACSecret))
+			m.Write(body)
+			req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(m.Sum(nil)))
 		}
 		return w.do(req)
 	case Email:
