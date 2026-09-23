@@ -52,11 +52,24 @@ func FormatReply(r Result) string {
 	}
 	fmt.Fprintf(&b, "Request %s to %s: %s replied (%s).\n", r.Request.ID, r.Request.To, from, status)
 	fmt.Fprintf(&b, "You asked: %s\n", truncate(r.Request.Body, 300))
+	if p := r.Parent; p != nil {
+		fmt.Fprintf(&b, "This answers the question you asked while handling request %s from %s: %s.", p.ID, p.From, truncate(p.Body, 300))
+		if parentOpen(p.Status) {
+			fmt.Fprintf(&b, " That request is still open (status %s). When you have what you need, reply to it with `tincan reply %s \"...\"` (or the reply tool).\n", p.Status, p.ID)
+		} else {
+			fmt.Fprintf(&b, " That request is already closed (status %s), so there is nothing left to reply to.\n", p.Status)
+		}
+	}
 	b.WriteString("Finish the work that was waiting on this reply.\n")
 	b.WriteString("---\n")
 	b.WriteString(body)
 	b.WriteString("\n---\n")
 	return b.String()
+}
+
+// parentOpen reports whether a parent request still expects a reply.
+func parentOpen(s envelope.Status) bool {
+	return s == envelope.StatusQueued || s == envelope.StatusDelivered || s == envelope.StatusClaimed
 }
 
 // Claimer claims a delivered request for this agent.

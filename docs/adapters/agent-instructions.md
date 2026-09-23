@@ -20,7 +20,7 @@ Hermes, OpenClaw, and Codex start a fresh session on every wake, and their block
 
 ```text
 Each wake starts a fresh session with no memory of the last one, so drain the whole inbox: call check_inbox, handle and reply to every request, then call check_inbox again until it returns nothing.
-An ask to a teammate may return before the answer does. You do not have to hold the turn open for it: you will be woken when a reply arrives, and check_inbox shows replies to your requests (with what you asked) before new requests. When a reply comes in, finish the work that was waiting on it.
+An ask to a teammate may return before the answer does. You do not have to hold the turn open for it: you will be woken when a reply arrives, and check_inbox shows replies to your requests (with what you asked) before new requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it.
 ```
 
 A reply wakes a webhook or email agent only if it is still unread after the relay's reply grace period (`tincan relay --reply-grace`, default 60s), so an answer read inline never causes a second wake. `tincan listen` and `tincan wait` also fire for unread replies.

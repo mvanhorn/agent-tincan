@@ -76,6 +76,19 @@ type Result struct {
 	Request Request `json:"request"`
 	Status  Status  `json:"status"`
 	Reply   *Reply  `json:"reply,omitempty"`
+	// Parent is set on an unseen reply whose request was asked while the
+	// asker was handling another request addressed to it, so a fresh session
+	// woken by the reply knows which request to finish.
+	Parent *Parent `json:"parent,omitempty"`
+}
+
+// Parent summarizes the request an ask was made while handling: who sent
+// it, a preview of its body, and its current status.
+type Parent struct {
+	ID     string `json:"id"`
+	From   string `json:"from"`
+	Body   string `json:"body"`
+	Status Status `json:"status"`
 }
 
 // Done reports whether the request has reached a final state.

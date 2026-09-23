@@ -77,6 +77,9 @@ func TestToolListIsExactlyTheAgentTools(t *testing.T) {
 	if !strings.Contains(mcpserver.Instructions, "onboard") {
 		t.Fatal("Instructions should mention the onboard tool")
 	}
+	if !strings.Contains(mcpserver.Instructions, "When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it.") {
+		t.Fatal("Instructions should tell the agent to finish and reply to the open request a reply is tied to")
+	}
 	for _, n := range names {
 		if strings.Contains(n, "invite") || strings.Contains(n, "remove") {
 			t.Fatalf("admin action exposed as tool: %s", n)

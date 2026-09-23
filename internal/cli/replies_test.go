@@ -81,6 +81,54 @@ func TestInboxPrintsRepliesThenRequests(t *testing.T) {
 	}
 }
 
+// A fresh session woken by a reply learns which request it was handling:
+// codex (grokbot) asks hermes (instinct), hermes, holding the claim, asks
+// claude-code (muse) without naming a parent, claude-code replies later, and
+// hermes's next inbox shows the reply with the instruction to reply to
+// codex's request.
+func TestInboxReplyTellsAgentToFinishParent(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	codex, hermes, claude := m.Client(t, "grokbot"), m.Client(t, "instinct"), m.Client(t, "muse")
+	parent, err := codex.Send(ctx, "instinct", "book the flight to Tokyo", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hermes.Claim(ctx, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	child, err := hermes.Send(ctx, "muse", "which airline does Matt prefer?", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.Claim(ctx, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claude.Reply(ctx, child.ID, "ANA, aisle seat", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+
+	useConfig(t, client.Config{Relay: m.URL("instinct"), Agent: "instinct"})
+	cmd := inboxCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"ANA, aisle seat",
+		"You asked: which airline does Matt prefer?",
+		"while handling request " + parent.ID + " from grokbot: book the flight to Tokyo.",
+		"That request is still open (status claimed).",
+		"`tincan reply " + parent.ID + " \"...\"`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("inbox missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // tincan wait exits when a reply to the agent's own request lands, tells it
 // to run check_inbox, and leaves the reply for that check.
 func TestWaitExitsOnUnseenReplyWithoutTakingIt(t *testing.T) {

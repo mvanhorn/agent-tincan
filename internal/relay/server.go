@@ -417,7 +417,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// MaxRepliesBytes bounds the request and reply bodies of the unseen replies
+// MaxRepliesBytes bounds the request, reply, and parent bodies of the unseen replies
 // one poll returns, so a response stays well under the client's 4 MiB read
 // limit. A poll always returns at least one waiting reply; the rest wait for
 // the next poll, after the caller acknowledges this batch.
@@ -436,6 +436,9 @@ func (s *Server) unseenReplies(ctx context.Context, agent string) ([]envelope.Re
 		n := len(rep.Request.Body)
 		if rep.Reply != nil {
 			n += len(rep.Reply.Body)
+		}
+		if rep.Parent != nil {
+			n += len(rep.Parent.Body)
 		}
 		if i > 0 && size+n > MaxRepliesBytes {
 			reps, cut = reps[:i], true

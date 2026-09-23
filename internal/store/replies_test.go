@@ -207,3 +207,49 @@ func TestAgentsWithUnseenReplies(t *testing.T) {
 		t.Fatalf("agents = %v, want [hermes]", got)
 	}
 }
+
+// An unseen reply to an ask made while handling another request carries a
+// summary of that parent, with its live status, but only when the parent
+// was addressed to the asker.
+func TestUnseenReplyCarriesParent(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	parent := ask(t, s, "grokbot", "instinct", "book the\nflight to Tokyo")
+	if _, err := s.Claim(ctx, parent.ID, "instinct", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.Enqueue(ctx, envelope.Request{From: "instinct", To: "muse", Kind: envelope.KindAsk, Body: "which airline?", ParentID: parent.ID, Hop: 2, Chain: []string{"grokbot"}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := ask(t, s, "instinct", "muse", "no parent here")
+	foreign := ask(t, s, "grokbot", "muse", "not addressed to instinct")
+	stray, err := s.Enqueue(ctx, envelope.Request{From: "instinct", To: "muse", Kind: envelope.KindAsk, Body: "names a parent that is not mine", ParentID: foreign.ID, Hop: 2, Chain: []string{}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply(t, s, child, envelope.StatusAnswered, "ANA")
+	c.advance(time.Second)
+	reply(t, s, plain, envelope.StatusAnswered, "ok")
+	c.advance(time.Second)
+	reply(t, s, stray, envelope.StatusAnswered, "ok")
+
+	got, err := s.UnseenReplies(ctx, "instinct")
+	if err != nil || len(got) != 3 {
+		t.Fatalf("unseen = %+v, %v", got, err)
+	}
+	p := got[0].Parent
+	if p == nil || p.ID != parent.ID || p.From != "grokbot" || p.Body != "book the\nflight to Tokyo" || p.Status != envelope.StatusClaimed {
+		t.Fatalf("parent = %+v", p)
+	}
+	if got[1].Parent != nil || got[2].Parent != nil {
+		t.Fatalf("parent should be omitted: plain %+v, stray %+v", got[1].Parent, got[2].Parent)
+	}
+
+	// Once instinct answers the parent, the summary reports it closed.
+	reply(t, s, parent, envelope.StatusAnswered, "booked")
+	got, err = s.UnseenReplies(ctx, "instinct")
+	if err != nil || got[0].Parent == nil || got[0].Parent.Status != envelope.StatusAnswered {
+		t.Fatalf("after answering parent: %+v, %v", got, err)
+	}
+}

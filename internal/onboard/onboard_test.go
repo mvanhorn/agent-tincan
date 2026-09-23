@@ -251,7 +251,7 @@ func TestFreshSessionReplyWakeGuidance(t *testing.T) {
 	}})
 	for _, n := range []string{"hermes", "openclaw", "codex"} {
 		txt := block(t, k, n).Instructions
-		for _, want := range []string{"may return before", "woken when a reply arrives", "check_inbox shows replies to your requests", "finish the work that was waiting on it"} {
+		for _, want := range []string{"may return before", "woken when a reply arrives", "check_inbox shows replies to your requests", "finish the work that was waiting on it", "When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it."} {
 			if !strings.Contains(txt, want) {
 				t.Errorf("%s block missing %q:\n%s", n, want, txt)
 			}

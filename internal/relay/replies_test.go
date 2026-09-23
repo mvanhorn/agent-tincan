@@ -239,3 +239,34 @@ func TestGetReplyMarksReplySeen(t *testing.T) {
 	h.do(grokAddr, "GET", "/v1/requests/"+sent.ID, "", http.StatusOK, nil)
 	h.do(grokAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusNoContent, nil)
 }
+
+// A reply to an ask made with parent_id while holding that claim comes back
+// from replies=take with a summary of the claimed parent. A reply to an ask
+// with no parent carries none. (The implicit single-open-claim parent is
+// covered end to end through testrelay in the cli package.)
+func TestPollReplyCarriesClaimedParent(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.srv.SetPreparer(chainPrep{h.st})
+	parent := h.send(grokAddr, "instinct", "book the flight")
+	h.do(instinctAddr, "POST", "/v1/requests/"+parent.ID+"/claim", "", http.StatusOK, nil)
+	var child envelope.Request
+	h.do(instinctAddr, "POST", "/v1/send", `{"to":"muse","body":"which airline?","parent_id":"`+parent.ID+`"}`, http.StatusCreated, &child)
+	h.answer(museAddr, child, "ANA")
+	plain := h.send(museAddr, "grokbot", "unrelated")
+	h.answer(grokAddr, plain, "fine")
+
+	var took repliesPoll
+	h.do(instinctAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &took)
+	if len(took.Replies) != 1 {
+		t.Fatalf("replies = %+v", took.Replies)
+	}
+	p := took.Replies[0].Parent
+	if p == nil || p.ID != parent.ID || p.From != "grokbot" || p.Body != "book the flight" || p.Status != envelope.StatusClaimed {
+		t.Fatalf("parent = %+v", p)
+	}
+	var other repliesPoll
+	h.do(museAddr, "GET", "/v1/poll?replies=take&hold=0", "", http.StatusOK, &other)
+	if len(other.Replies) != 1 || other.Replies[0].Parent != nil {
+		t.Fatalf("reply without a parent = %+v", other.Replies)
+	}
+}

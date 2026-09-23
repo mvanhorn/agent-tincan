@@ -46,13 +46,21 @@ func (s *Store) migrateReplySeen() error {
 	return err
 }
 
+// ParentPreviewChars bounds the parent body an unseen reply carries; the
+// client shows a shorter preview still.
+const ParentPreviewChars = 1000
+
 // UnseenReplies returns up to MaxUnseenReplies of agent's own requests that
-// have a reply agent has not seen yet, oldest reply first.
+// have a reply agent has not seen yet, oldest reply first. A request asked
+// while agent was handling a request addressed to it carries that parent's
+// id, sender, body preview, and current status.
 func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
-	args := append([]any{agent}, replyStatuses...)
+	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
 	args = append(args, MaxUnseenReplies)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at,
+		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), COALESCE(substr(par.body, 1, ?), ''), COALESCE(par.status, '')
 		FROM requests q JOIN replies p ON p.request_id = q.id
+		LEFT JOIN requests par ON q.parent_id != '' AND par.id = q.parent_id AND par.to_agent = q.from_agent
 		WHERE q.from_agent = ? AND q.reply_seen_at = 0 AND q.`+replyStatusIn+`
 		ORDER BY p.created_at, q.id LIMIT ?`, args...)
 	if err != nil {
@@ -64,12 +72,19 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 		var rep envelope.Reply
 		var repStatus string
 		var repCreated int64
-		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated}})
+		var par envelope.Parent
+		var parStatus string
+		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &par.ID, &par.From, &par.Body, &parStatus}})
 		if err != nil {
 			return nil, err
 		}
 		rep.RequestID, rep.Status, rep.CreatedAt = req.ID, envelope.Status(repStatus), time.UnixMilli(repCreated).UTC()
-		out = append(out, envelope.Result{Request: req, Status: st, Reply: &rep})
+		res := envelope.Result{Request: req, Status: st, Reply: &rep}
+		if par.ID != "" {
+			par.Status = envelope.Status(parStatus)
+			res.Parent = &par
+		}
+		out = append(out, res)
 	}
 	return out, rows.Err()
 }

@@ -57,3 +57,48 @@ func between(s, a, b string) string {
 	out, _, _ := strings.Cut(rest, b)
 	return out
 }
+
+// A reply to an ask made while handling another request names that request
+// and, while it is still open, tells the agent to finish and reply to it.
+func TestFormatReplyNamesOpenParent(t *testing.T) {
+	r := client.Result{
+		Request: envelope.Request{ID: "r2", From: "instinct", To: "muse", Body: "which airline?"},
+		Status:  envelope.StatusAnswered,
+		Reply:   &envelope.Reply{From: "muse", Status: envelope.StatusAnswered, Body: "ANA"},
+		Parent:  &envelope.Parent{ID: "r1", From: "grokbot", Body: "book the\nflight " + strings.Repeat("x", 400), Status: envelope.StatusClaimed},
+	}
+	got := client.FormatReply(r)
+	want := "This answers the question you asked while handling request r1 from grokbot: book the flight "
+	if !strings.Contains(got, want) {
+		t.Fatalf("reply missing parent line %q:\n%s", want, got)
+	}
+	if preview := between(got, "from grokbot: ", ". That request"); len(preview) > 303 || !strings.HasSuffix(preview, "...") {
+		t.Fatalf("parent preview not truncated: %q", preview)
+	}
+	for _, s := range []string{"That request is still open (status claimed).", "reply to it with `tincan reply r1 \"...\"` (or the reply tool)", "You asked: which airline?"} {
+		if !strings.Contains(got, s) {
+			t.Fatalf("reply missing %q:\n%s", s, got)
+		}
+	}
+}
+
+// When the parent is already closed, the reply says so instead of telling
+// the agent to reply to it; with no parent there is no parent line at all.
+func TestFormatReplyNamesClosedParent(t *testing.T) {
+	r := client.Result{
+		Request: envelope.Request{ID: "r2", To: "muse", Body: "which airline?"},
+		Status:  envelope.StatusAnswered,
+		Reply:   &envelope.Reply{From: "muse", Status: envelope.StatusAnswered, Body: "ANA"},
+		Parent:  &envelope.Parent{ID: "r1", From: "grokbot", Body: "book the flight", Status: envelope.StatusAnswered},
+	}
+	got := client.FormatReply(r)
+	if !strings.Contains(got, "while handling request r1 from grokbot: book the flight.") ||
+		!strings.Contains(got, "That request is already closed (status answered)") ||
+		strings.Contains(got, "tincan reply r1") {
+		t.Fatalf("closed parent reply:\n%s", got)
+	}
+	r.Parent = nil
+	if got := client.FormatReply(r); strings.Contains(got, "while handling request") {
+		t.Fatalf("reply without parent mentions one:\n%s", got)
+	}
+}
