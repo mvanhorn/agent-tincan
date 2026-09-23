@@ -3,6 +3,8 @@ package wake
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -333,5 +335,61 @@ func TestDefaultReplyRetries(t *testing.T) {
 		if w.opts.ReplyRetries[i] != want[i] {
 			t.Fatalf("retries = %v, want %v", w.opts.ReplyRetries, want)
 		}
+	}
+}
+
+// A fresh reply that lands while an earlier nudge is still being sent earns
+// the full follow-up schedule: the earlier nudge's stale follow-up must not
+// push it past its first step.
+func TestFreshReplyDuringSlowSendKeepsFirstFollowUp(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release // the first send is slow
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(ts.Close)
+	var n atomic.Int32
+	n.Store(1)
+	w := New(Config{"hermes": {Method: Webhook, URL: ts.URL}}, nil,
+		Options{ReplyGrace: 100 * time.Millisecond, ReplyRetries: []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}, UnseenReplies: unseen(&n)})
+	replied(w, "hermes")
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first nudge never sent")
+	}
+	n.Store(2)
+	replied(w, "hermes") // a fresh reply while the first send is in flight
+	close(release)
+	w.Flush()
+	// First nudge, the fresh reply's nudge, then both of its follow-ups.
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("wakes = %d, want 4: the fresh reply lost a follow-up step", got)
+	}
+}
+
+// A nudge whose webhook send fails still schedules the follow-up, which
+// reaches the agent once the webhook recovers.
+func TestFailedReplyNudgeStillFollowsUp(t *testing.T) {
+	var rc recorder
+	rc.fail.Store(2) // the send and its single retry both fail
+	ts := rc.server(t)
+	st := auditStore(t)
+	var n atomic.Int32
+	n.Store(1)
+	w := New(Config{"hermes": {Method: Webhook, URL: ts.URL}}, st,
+		Options{ReplyGrace: time.Millisecond, RetryDelay: time.Millisecond, ReplyRetries: []time.Duration{10 * time.Millisecond}, UnseenReplies: unseen(&n)})
+	replied(w, "hermes")
+	w.Flush()
+	if rc.count() != 3 {
+		t.Fatalf("webhook calls = %d, want 2 failed attempts plus the follow-up", rc.count())
+	}
+	if got := strings.Join(events(t, st), ","); got != "wake_failed,woke" {
+		t.Fatalf("audit = %s", got)
 	}
 }

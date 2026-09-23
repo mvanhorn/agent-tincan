@@ -29,6 +29,7 @@ This adds no new trust boundary. Tailscale already is the boundary: anyone who c
 - Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. There is no per-request approval.
 - Tailscale is the security boundary. Anything that can act as a joined machine on your tailnet can make your other agents act. Protect your tailnet: use tagged, short-lived auth keys and review who can add devices.
 - The relay can read every request and reply. Run it on a machine you control.
+- `tincan upgrade` trusts the relay host. The sha256 it checks and the binary it installs both come from the same relay, so the check protects against corruption in transit, not against a compromised relay. Only put release files you built yourself or downloaded from your own GitHub release into the relay's `--dist` directory.
 
 ## The risk to think about
 

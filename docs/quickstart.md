@@ -134,3 +134,5 @@ tincan upgrade           # download, verify sha256, replace the binary
 ```
 
 `tincan upgrade` picks the build for its own platform, checks its sha256 against the relay's manifest, writes it next to the running binary, and renames it into place (a new file, so macOS never kills a signed binary rewritten in place). If the relay has no build for the platform or the checksum does not match, it stops with an error and leaves the old binary as it was. Afterwards, restart any long-running tincan processes (`tincan wait` or `tincan listen` loops, `tincan mcp` servers); they keep running the old build until then.
+
+`tincan upgrade` trusts the relay host. The checksum and the binary both come from the same relay, so the check protects against a corrupted or truncated download, not against a compromised relay. Only put release files you built yourself or downloaded from your own GitHub release into `--dist`.

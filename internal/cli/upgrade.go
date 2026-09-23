@@ -115,6 +115,11 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check bool, out i
 	if err := tmp.Chmod(0o755); err != nil {
 		return err
 	}
+	// Flush to disk before the rename, so a crash cannot leave exe
+	// pointing at a partly written binary.
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("write %s: %w", tmp.Name(), err)
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}

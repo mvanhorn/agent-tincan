@@ -90,3 +90,35 @@ func TestDistOffWithoutFlag(t *testing.T) {
 	h.do(museAddr, "GET", "/v1/dist", "", http.StatusNotFound, nil)
 	h.do(museAddr, "GET", "/v1/dist/tincan_linux_amd64", "", http.StatusNotFound, nil)
 }
+
+// A binary symlinked into the dist directory (say, to a build output) is
+// listed in the manifest and downloads, since both paths follow symlinks. A
+// symlink to a directory is neither.
+func TestDistFollowsSymlinkedBinary(t *testing.T) {
+	h := newHarness(t, Config{})
+	dir := distDir(t)
+	build := t.TempDir()
+	if err := os.WriteFile(filepath.Join(build, "tincan"), []byte("arm linux binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(build, "tincan"), filepath.Join(dir, "tincan_linux_arm64")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(build, filepath.Join(dir, "tincan_darwin_amd64")); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.SetDist(dir)
+	var m client.DistManifest
+	h.do(instinctAddr, "GET", "/v1/dist", "", http.StatusOK, &m)
+	if got := m.SHA256Of("tincan_linux_arm64"); got != sum([]byte("arm linux binary")) {
+		t.Fatalf("symlinked binary sha256 = %q, manifest = %+v", got, m)
+	}
+	if m.SHA256Of("tincan_darwin_amd64") != "" || len(m.Files) != 3 {
+		t.Fatalf("manifest = %+v, want the two regular binaries and the symlinked one", m)
+	}
+	rec := h.do(museAddr, "GET", "/v1/dist/tincan_linux_arm64", "", http.StatusOK, nil)
+	if rec.Body.String() != "arm linux binary" {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+	h.do(museAddr, "GET", "/v1/dist/tincan_darwin_amd64", "", http.StatusNotFound, nil)
+}

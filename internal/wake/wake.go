@@ -121,7 +121,7 @@ const DefaultReplyGrace = time.Minute
 
 // DefaultReplyRetries is the follow-up schedule for a reply that stays unseen
 // after its nudge. A woken session may fail to read it (Hermes once woke
-// while its MCP connection was still coming back), so the relay tries again.
+// while its MCP connection was still coming back), so the relay tries again. Each delay counts from the previous nudge.
 var DefaultReplyRetries = []time.Duration{5 * time.Minute, 20 * time.Minute, time.Hour}
 
 // Options tunes a Waker.
@@ -166,7 +166,12 @@ type Waker struct {
 	mu      sync.Mutex
 	pending map[string]*nudge      // agents with a nudge scheduled
 	sent    map[string][]time.Time // relay-side wakes in the last hour
-	wg      sync.WaitGroup
+	// replyGen counts each agent's fresh replies. A nudge in flight
+	// captures it, and its follow-up is dropped if a fresh reply arrived
+	// meanwhile, since that reply restarted the schedule. It lives on the
+	// Waker, not the nudge, because fire removes the nudge it sends.
+	replyGen map[string]uint64
+	wg       sync.WaitGroup
 }
 
 // New builds a Waker. audit may be nil.
@@ -192,7 +197,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}}
+	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{}}
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -236,6 +241,7 @@ func (w *Waker) ReplyWaiting(agent string) {
 	p := w.nudgeFor(agent)
 	p.replies++
 	p.retry = 0 // a fresh reply earns the full follow-up schedule
+	w.replyGen[agent]++
 	w.arm(agent, w.opts.ReplyGrace)
 }
 
@@ -301,6 +307,7 @@ func (w *Waker) fire(agent string) {
 	w.mu.Lock()
 	p := w.pending[agent]
 	delete(w.pending, agent)
+	gen := w.replyGen[agent]
 	w.mu.Unlock()
 	if p == nil {
 		return
@@ -315,7 +322,7 @@ func (w *Waker) fire(agent string) {
 	if replies > 0 {
 		// Whatever this nudge does, check back later in case the woken
 		// session cannot read the replies.
-		defer w.retryLater(agent, p.retry)
+		defer w.retryLater(agent, p.retry, gen)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -346,13 +353,18 @@ func (w *Waker) fire(agent string) {
 
 // retryLater schedules step of the reply follow-up schedule for agent, which
 // re-checks UnseenReplies when it fires. Without UnseenReplies the waker
-// cannot tell a read reply from an unread one, so it never follows up.
-func (w *Waker) retryLater(agent string, step int) {
+// cannot tell a read reply from an unread one, so it never follows up. gen is
+// agent's reply generation when the nudge fired; if a fresh reply has arrived
+// since, it already restarted the schedule, so this stale step does nothing.
+func (w *Waker) retryLater(agent string, step int, gen uint64) {
 	if w.opts.UnseenReplies == nil || step >= len(w.opts.ReplyRetries) {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.replyGen[agent] != gen {
+		return
+	}
 	p := w.nudgeFor(agent)
 	p.retry = max(p.retry, step+1)
 	w.arm(agent, w.opts.ReplyRetries[step])

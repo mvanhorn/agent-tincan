@@ -84,7 +84,12 @@ func (s *Server) handleDistManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !distBinary.MatchString(e.Name()) {
+		if !distBinary.MatchString(e.Name()) {
+			continue
+		}
+		// Follow symlinks and require a regular file, as handleDistFile
+		// does, so the manifest lists exactly what downloads.
+		if fi, err := os.Stat(filepath.Join(d.dir, e.Name())); err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
 		sum, err := d.sum(e.Name())

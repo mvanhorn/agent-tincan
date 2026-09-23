@@ -340,8 +340,8 @@ func (r *Relay) Dist(ctx context.Context) (DistManifest, error) {
 	return m, err
 }
 
-// MaxDistBytes caps a release download.
-const MaxDistBytes = 512 << 20
+// MaxDistBytes caps a release download. A var so tests can lower it.
+var MaxDistBytes int64 = 512 << 20
 
 // DistDownloadTimeout bounds one release download.
 const DistDownloadTimeout = 10 * time.Minute
