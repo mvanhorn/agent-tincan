@@ -1,0 +1,17 @@
+# Add under mcp_servers in ~/.hermes/config.yaml (or the profile's config
+# when this Hermes runs under HERMES_HOME / --profile).
+#
+# Gives Hermes the tools: ask, check_inbox, reply, get_reply, list_agents,
+# cancel, claim, trace. Reload with /reload-mcp after editing, or restart
+# the gateway.
+mcp_servers:
+  agent-tincan:
+    command: "tincan"
+    args: ["mcp"]
+    enabled: true
+    # Only needed when another agent (for example openclaw) already joins
+    # Agent Tincan from this same machine. Point it at the config file this
+    # agent used for `tincan join`, so hermes sends its own agent name and
+    # not the other agent's.
+    # env:
+    #   TINCAN_CONFIG: "/Users/hermes/.hermes/tincan-hermes.json"

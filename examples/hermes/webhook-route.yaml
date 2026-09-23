@@ -1,0 +1,30 @@
+# Add under platforms.webhook.extra.routes in ~/.hermes/config.yaml.
+# Requires the webhook platform enabled first (hermes gateway setup, or
+# WEBHOOK_ENABLED=true / WEBHOOK_PORT=8644 in ~/.hermes/.env).
+#
+# The relay POSTs to http://<this-host>:8644/webhooks/tincan with body
+# {"source":"agent-tincan","message":"<count text>","text":"<same>"} and,
+# when wake.json sets hmac_secret for this agent, signs it with
+# X-Hub-Signature-256 using the secret below.
+platforms:
+  webhook:
+    enabled: true
+    extra:
+      port: 8644
+      routes:
+        tincan:
+          secret: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
+          prompt: |
+            Agent Tincan: {message}
+
+            Call check_inbox now. This is a fresh session with no memory of
+            any earlier wake, so do not assume you already saw this request.
+            Claim and do each waiting request, then reply to each one with
+            its request id. Keep calling check_inbox until it reports the
+            inbox empty before you stop.
+
+            If finishing a request means asking a teammate something first,
+            send that ask and wait for the reply inline, in this same turn.
+            A reply to your own ask does not trigger another wake, only a
+            new request from a teammate does.
+          deliver: "log"
