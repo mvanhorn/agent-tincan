@@ -97,12 +97,21 @@ type Server struct {
 	mu       sync.Mutex
 	lastPoll map[string]time.Time
 	polling  map[string]int // long-polls currently held open, per agent
+	// lastSeen is each agent's last call of any kind; persisted is when it
+	// was last written to the store, which happens at most once per
+	// persistEvery per agent.
+	lastSeen  map[string]time.Time
+	persisted map[string]time.Time
 }
+
+// persistEvery bounds how often an agent's activity is written to the store.
+const persistEvery = time.Minute
 
 // New builds a relay server.
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
-	return &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{}}
+	return &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
+		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}}
 }
 
 // SetPreparer installs the chain and policy step.
@@ -258,7 +267,34 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 			"agent": rb.Agent, "old_node": rb.OldNode, "old_node_name": rb.OldNodeName, "new_node": rb.NewNode, "new_node_name": rb.NewNodeName,
 		}))
 	}
+	s.seen(r.Context(), res.Name)
 	return res.Name
+}
+
+// seen records that agent called the relay. The in-memory time moves on
+// every call; the store is written at most once per persistEvery so that
+// activity survives a restart without a write per request. A failed write is
+// logged and never fails the request.
+func (s *Server) seen(ctx context.Context, agent string) {
+	now := s.cfg.Now()
+	s.mu.Lock()
+	if now.After(s.lastSeen[agent]) {
+		s.lastSeen[agent] = now
+	}
+	last, ok := s.persisted[agent]
+	write := !ok || now.Sub(last) >= persistEvery
+	if write {
+		s.persisted[agent] = now
+	}
+	s.mu.Unlock()
+	if !write {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.store.TouchAgent(ctx, agent, now); err != nil {
+		log.Printf("last seen for %s: %v", agent, err)
+	}
 }
 
 // handleWhoAmI tells the calling agent who the relay thinks it is. tincan
@@ -610,12 +646,21 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	persisted, err := s.store.AgentsLastSeen(r.Context())
+	if err != nil {
+		// The in-memory times still answer for this run of the relay.
+		log.Printf("agents last seen: %v", err)
+	}
 	now := s.cfg.Now()
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
 		last := s.lastPoll[a.Name]
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind}
+		active := s.lastSeen[a.Name]
+		if p := persisted[a.Name]; p.After(active) {
+			active = p
+		}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind}
 		if s.wake != nil {
 			info.Wake = s.wake.WakeMethod(a.Name)
 		}
@@ -788,8 +833,12 @@ func (s *Server) UnseenReplies(agent string) int {
 }
 
 func (s *Server) touch(agent string) {
+	now := s.cfg.Now()
 	s.mu.Lock()
-	s.lastPoll[agent] = s.cfg.Now()
+	s.lastPoll[agent] = now
+	if now.After(s.lastSeen[agent]) {
+		s.lastSeen[agent] = now
+	}
 	s.mu.Unlock()
 }
 

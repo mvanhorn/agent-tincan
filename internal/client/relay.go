@@ -33,9 +33,12 @@ func ClampWait(d time.Duration) time.Duration { return min(max(d, 0), MaxInlineW
 type AgentInfo struct {
 	Name     string    `json:"name"`
 	Online   bool      `json:"online"`
-	LastPoll time.Time `json:"last_poll,omitzero"`
-	Wake     string    `json:"wake"`
-	Kind     string    `json:"kind,omitempty"` // agent runtime (hermes, codex, ...), empty when unknown
+	LastPoll time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
+	// LastActive is the agent's last call of any kind (send, reply, get,
+	// poll), kept across relay restarts.
+	LastActive time.Time `json:"last_active,omitzero"`
+	Wake       string    `json:"wake"`
+	Kind       string    `json:"kind,omitempty"` // agent runtime (hermes, codex, ...), empty when unknown
 }
 
 // State is "online" or "offline".
@@ -46,15 +49,19 @@ func (a AgentInfo) State() string {
 	return "offline"
 }
 
-// LastSeen says how long before now the agent last polled the relay, as
-// "last seen 12m ago", or "never seen" for an agent that has not polled since
-// the relay started. A wait or listen loop that died shows up here as a
-// growing age.
+// LastSeen says how long before now the agent last called the relay (the
+// newer of LastPoll and LastActive), as "last seen 12m ago", or "never seen"
+// for an agent that has not called the relay. A wait or listen loop that died
+// shows up here as a growing age.
 func (a AgentInfo) LastSeen(now time.Time) string {
-	if a.LastPoll.IsZero() {
+	last := a.LastPoll
+	if a.LastActive.After(last) {
+		last = a.LastActive
+	}
+	if last.IsZero() {
 		return "never seen"
 	}
-	d := now.Sub(a.LastPoll)
+	d := now.Sub(last)
 	switch {
 	case d < time.Minute:
 		return "last seen just now"

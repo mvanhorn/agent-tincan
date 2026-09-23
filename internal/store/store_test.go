@@ -499,3 +499,80 @@ func TestSweepExpiresClaimPastTTLInsteadOfRequeueing(t *testing.T) {
 		t.Fatalf("sweep = %+v, %v; want one expiry and no requeue", tr, err)
 	}
 }
+
+// An agents table from before last-seen tracking gains last_seen_at on open,
+// with NULL for existing agents, and then records activity. This covers both
+// the rebuild path (UNIQUE node_id) and a current-shape table missing only
+// the new column.
+func TestAgentsTableGainsLastSeenOnOpen(t *testing.T) {
+	for name, stmts := range map[string][]string{
+		"rebuild": {
+			`CREATE TABLE agents (name TEXT PRIMARY KEY, node_id TEXT NOT NULL UNIQUE, node_name TEXT NOT NULL, joined_at INTEGER NOT NULL)`,
+			`INSERT INTO agents VALUES ('grokbot', 'nGROK', 'grok-bot', 1790000000000)`,
+		},
+		"alter": {
+			`CREATE TABLE agents (name TEXT PRIMARY KEY, node_id TEXT NOT NULL, node_name TEXT NOT NULL, joined_at INTEGER NOT NULL, kind TEXT, node_user TEXT)`,
+			`INSERT INTO agents VALUES ('grokbot', 'nGROK', 'grok-bot', 1790000000000, 'webhook', NULL)`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "old.db")
+			old, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stmt := range stmts {
+				if _, err := old.Exec(stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
+			old.Close()
+
+			s, c := open(t, path)
+			ctx := context.Background()
+			seen, err := s.AgentsLastSeen(ctx)
+			if err != nil || len(seen) != 0 {
+				t.Fatalf("last seen after migration = %v, %v", seen, err)
+			}
+			if err := s.TouchAgent(ctx, "grokbot", c.t); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			s2, _ := open(t, path)
+			seen, err = s2.AgentsLastSeen(ctx)
+			if err != nil || !seen["grokbot"].Equal(c.t) {
+				t.Fatalf("last seen after reopen = %v, %v", seen, err)
+			}
+		})
+	}
+}
+
+// TouchAgent only moves last_seen_at forward, ignores unknown names, and
+// survives a rejoin that rewrites the agent row.
+func TestTouchAgentNeverMovesBackwards(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	if err := s.PutAgent(ctx, identity.Agent{Name: "hermes", NodeID: "nH", NodeName: "hermes-box", JoinedAt: c.t}); err != nil {
+		t.Fatal(err)
+	}
+	later := c.t.Add(5 * time.Minute)
+	if err := s.TouchAgent(ctx, "hermes", later); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TouchAgent(ctx, "hermes", c.t); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TouchAgent(ctx, "nobody", later); err != nil {
+		t.Fatalf("unknown agent: %v", err)
+	}
+	seen, err := s.AgentsLastSeen(ctx)
+	if err != nil || len(seen) != 1 || !seen["hermes"].Equal(later) {
+		t.Fatalf("last seen = %v, %v", seen, err)
+	}
+	if err := s.PutAgent(ctx, identity.Agent{Name: "hermes", NodeID: "nH2", NodeName: "hermes-new", JoinedAt: later}); err != nil {
+		t.Fatal(err)
+	}
+	if seen, _ := s.AgentsLastSeen(ctx); !seen["hermes"].Equal(later) {
+		t.Fatalf("last seen after rejoin = %v", seen)
+	}
+}

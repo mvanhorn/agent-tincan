@@ -32,7 +32,7 @@ On the agent's machine:
 tincan join ABCD-EFGH --relay http://tincan-relay
 ```
 
-Repeat for the second agent. Check with `tincan agents`, which also shows when each agent last polled the relay ("last seen 12m ago", or "never seen").
+Repeat for the second agent. Check with `tincan agents`, which also shows when each agent last called the relay, by polling or by any send, reply, or get ("last seen 12m ago", or "never seen").
 
 ## Rebuilt machines
 

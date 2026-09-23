@@ -147,7 +147,7 @@ func relayFor(override string) (*client.Relay, client.Config, error) {
 func agentsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "agents",
-		Short: "List agents in the mesh, whether they are online, how they wake, and when each last polled",
+		Short: "List agents in the mesh, whether they are online, how they wake, and when each last called the relay",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, _, err := connect()
 			if err != nil {

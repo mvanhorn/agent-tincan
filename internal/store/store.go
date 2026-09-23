@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS agents (
   node_name TEXT NOT NULL,
   joined_at INTEGER NOT NULL,
   kind      TEXT,
-  node_user TEXT
+  node_user TEXT,
+  last_seen_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS invites (
   code    TEXT PRIMARY KEY,
@@ -108,6 +109,12 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateAgentLogin(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent login: %w", err)
+	}
+	// After migrateAgents: its rebuild copies only the older columns, so the
+	// column is added to the rebuilt table here.
+	if err := s.migrateAgentLastSeen(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent last seen: %w", err)
 	}
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
@@ -192,6 +199,21 @@ func (s *Store) migrateAgentLogin() error {
 	return err
 }
 
+// migrateAgentLastSeen adds the last_seen_at column (unix millis, NULL until
+// the agent first calls the relay) to an agents table created before activity
+// was persisted. It is a no-op on a current table.
+func (s *Store) migrateAgentLastSeen() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'last_seen_at')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN last_seen_at INTEGER`)
+	return err
+}
+
 // migrateInvites adds the kind column to an invites table created before
 // invites could carry the agent's kind. It is a no-op on a current table.
 func (s *Store) migrateInvites() error {
@@ -239,12 +261,18 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	}
 	defer tx.Rollback()
 	// A name moving to a new machine replaces its old binding. Other agents
-	// on either machine are untouched: a node may carry several names.
+	// on either machine are untouched: a node may carry several names. The
+	// name's last activity carries over.
+	var lastSeen sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user) VALUES (?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -267,6 +295,34 @@ func (s *Store) SetAgentKind(ctx context.Context, name, kind string) (bool, erro
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// TouchAgent records that name called the relay at t. It only moves the
+// stored time forward and ignores names not in the directory.
+func (s *Store) TouchAgent(ctx context.Context, name string, t time.Time) error {
+	ms := t.UnixMilli()
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET last_seen_at = ? WHERE name = ? AND (last_seen_at IS NULL OR last_seen_at < ?)`, ms, name, ms)
+	return err
+}
+
+// AgentsLastSeen returns the persisted last activity of every agent that has
+// called the relay at least once.
+func (s *Store) AgentsLastSeen(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, last_seen_at FROM agents WHERE last_seen_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var name string
+		var ms int64
+		if err := rows.Scan(&name, &ms); err != nil {
+			return nil, err
+		}
+		out[name] = time.UnixMilli(ms)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Agents(ctx context.Context) ([]identity.Agent, error) {

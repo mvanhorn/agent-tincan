@@ -243,3 +243,22 @@ func TestAgentLastSeen(t *testing.T) {
 		}
 	}
 }
+
+// LastSeen counts any call to the relay, so it reports the newer of the last
+// poll and the last activity. A webhook agent never polls but still shows up.
+func TestAgentLastSeenUsesNewerOfPollAndActivity(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	for _, tc := range []struct {
+		poll, active time.Time
+		want         string
+	}{
+		{time.Time{}, now.Add(-3 * time.Minute), "last seen 3m ago"},
+		{now.Add(-3 * time.Hour), now.Add(-5 * time.Minute), "last seen 5m ago"},
+		{now.Add(-7 * time.Minute), now.Add(-2 * time.Hour), "last seen 7m ago"},
+		{time.Time{}, time.Time{}, "never seen"},
+	} {
+		if got := (client.AgentInfo{LastPoll: tc.poll, LastActive: tc.active}).LastSeen(now); got != tc.want {
+			t.Errorf("LastSeen(poll %v, active %v) = %q, want %q", tc.poll, tc.active, got, tc.want)
+		}
+	}
+}
