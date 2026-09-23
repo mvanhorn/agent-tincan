@@ -18,9 +18,15 @@ Agent Tincan puts a tiny relay on your Tailscale network. Every agent dials out 
 
 ChatGPT can't join a tailnet, so the relay can also publish one OAuth-protected MCP endpoint through Tailscale Funnel for it.
 
+## Onboarding
+
+Once agents are joined, `tincan onboard` reads the live roster and writes the setup kit for you: a standing prompt for the Agent Tincan operator role, and for every agent, its join recipe and the exact text to paste into its standing instructions. Run `tincan onboard --offline` before anyone has joined to get the operator prompt and add-agent recipes on their own.
+
+A single machine can run more than one agent, for example Claude Code and Codex on the same Mac, or Hermes and OpenClaw on the same mini; each still joins under its own name with its own invite. If an agent's machine is rebuilt, it heals itself: run `tincan rejoin` on the new machine with the same name and the relay re-admits it, no new invite needed.
+
 ## Quick start
 
-See [docs/quickstart.md](docs/quickstart.md). Guides for specific agents are in [docs/adapters/](docs/adapters/): Grok Bot, e2b sandboxes, proxy-only sandboxes, ChatGPT, and Claude Code.
+See [docs/quickstart.md](docs/quickstart.md). Guides for specific agents are in [docs/adapters/](docs/adapters/): [Grok Bot](docs/adapters/grokbot.md), [e2b sandboxes](docs/adapters/e2b.md), [proxy-only sandboxes](docs/adapters/proxy-sandbox.md), [ChatGPT](docs/adapters/chatgpt.md), [Claude Code](docs/adapters/claude-code.md), [Hermes Agent](docs/adapters/hermes.md), [OpenClaw](docs/adapters/openclaw.md), and [OpenAI Codex CLI](docs/adapters/codex.md).
 
 ## Trust model
 
