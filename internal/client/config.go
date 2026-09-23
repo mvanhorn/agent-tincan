@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config is an agent's saved connection to its relay.
@@ -15,9 +16,15 @@ type Config struct {
 }
 
 // ConfigPath is where the agent config lives. A second agent on the same
-// machine sets TINCAN_CONFIG to its own file for join, MCP, and listen.
+// machine sets TINCAN_CONFIG to its own file for join, MCP, and listen. A
+// leading ~ is expanded, since MCP config files pass the value unexpanded.
 func ConfigPath() string {
 	if p := os.Getenv("TINCAN_CONFIG"); p != "" {
+		if rest, ok := strings.CutPrefix(p, "~/"); ok {
+			if home, err := os.UserHomeDir(); err == nil {
+				return filepath.Join(home, rest)
+			}
+		}
 		return p
 	}
 	dir, err := os.UserConfigDir()
