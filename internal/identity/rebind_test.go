@@ -180,3 +180,59 @@ func TestVirtualWrapperForwardsNodeStatus(t *testing.T) {
 		t.Fatalf("NodeOnline = %v, %v, %v", online, found, err)
 	}
 }
+
+// hookResolver runs hook inside NodeOnline, standing in for a request that
+// changes the directory while readmit waits on the resolver.
+type hookResolver struct {
+	*identitytest.Resolver
+	hook func()
+}
+
+func (h *hookResolver) NodeOnline(ctx context.Context, id string) (bool, bool, error) {
+	if h.hook != nil {
+		hook := h.hook
+		h.hook = nil
+		hook()
+	}
+	return h.Resolver.NodeOnline(ctx, id)
+}
+
+// readmit checks the old node without holding the directory lock, so it
+// commits only if the agent is still where it was checked.
+func TestReadmitRechecksBindingAfterNodeCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		moveTo   identity.Node
+		wantErr  error
+		wantName string
+		wantNode string
+	}{
+		// Another request re-admitted the same new node first.
+		{name: "readmitted concurrently", moveTo: newBox, wantName: "instinct", wantNode: "nBOX2"},
+		// The agent was re-joined on some other machine meanwhile.
+		{name: "moved elsewhere", moveTo: identity.Node{ID: "nOTHER", Name: "other-box", User: matt}, wantErr: identity.ErrNotJoined, wantNode: "nOTHER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newRebindFixture(t, identity.Config{}, newBox)
+			h := &hookResolver{Resolver: f.who}
+			dir := identity.NewDirectory(f.store, h, identity.Config{})
+			h.hook = func() {
+				a, _, _ := f.store.AgentByName(ctx, "instinct")
+				a.NodeID, a.NodeName, a.NodeUser = tc.moveTo.ID, tc.moveTo.Name, tc.moveTo.User
+				f.store.PutAgent(ctx, a)
+			}
+			res, err := dir.ResolveAgent(ctx, rebuiltAddr, "")
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("want %v, got %+v, %v", tc.wantErr, res, err)
+				}
+			} else if err != nil || res.Name != tc.wantName || res.Rebind != nil {
+				t.Fatalf("resolve = %+v, %v; want %s with no rebind of its own", res, err, tc.wantName)
+			}
+			if a := agentNamed(t, dir, "instinct"); a.NodeID != tc.wantNode {
+				t.Fatalf("instinct on %s, want %s", a.NodeID, tc.wantNode)
+			}
+		})
+	}
+}

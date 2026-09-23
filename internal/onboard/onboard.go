@@ -38,6 +38,9 @@ const (
 // Kinds lists every agent kind in recipe order.
 var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeneric}
 
+// KnownKind reports whether kind is empty (no kind) or one of Kinds.
+func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
+
 // Extra recipe kinds that are not agent kinds.
 const (
 	RecipeSecondAgent = "second-agent"
@@ -92,8 +95,8 @@ type Options struct {
 type Kit struct {
 	RelayURL string       `json:"relay_url"`
 	Owner    string       `json:"owner"`
-	Operator string       `json:"operator"`
-	Host     string       `json:"operator_host,omitempty"`
+	Operator string       `json:"operator"`                // rendered operator prompt text
+	Host     string       `json:"operator_host,omitempty"` // operator agent's name
 	Agents   []AgentBlock `json:"agents"`
 	Recipes  []Recipe     `json:"recipes"`
 }
@@ -150,7 +153,8 @@ func Build(o Options) (Kit, error) {
 		owner = "the owner"
 	}
 	for name, kind := range o.KindOverrides {
-		if !slices.Contains(Kinds, kind) {
+		// An empty override names no kind, so it is refused here.
+		if kind == "" || !KnownKind(kind) {
 			return Kit{}, fmt.Errorf("unknown kind %q for %s (want one of %s)", kind, name, strings.Join(Kinds, ", "))
 		}
 	}
@@ -232,7 +236,7 @@ func expectOnline(kind, wake string) bool {
 }
 
 func agentBlock(d agentData) (AgentBlock, error) {
-	join, err := execute("join."+d.Kind, d)
+	join, err := execute(templateFor("join."+d.Kind, "join.default"), d)
 	if err != nil {
 		return AgentBlock{}, err
 	}
@@ -262,7 +266,7 @@ func recipes(relay, owner string) ([]Recipe, error) {
 		if err != nil {
 			return nil, err
 		}
-		steps, err := lines("recipe.invite."+kind, d)
+		steps, err := lines(templateFor("recipe.invite."+kind, "recipe.invite"), d)
 		if err != nil {
 			return nil, err
 		}
@@ -286,6 +290,15 @@ func recipes(relay, owner string) ([]Recipe, error) {
 		out = append(out, Recipe{Kind: kind, Title: ls[0], Steps: ls[1:]})
 	}
 	return out, nil
+}
+
+// templateFor returns name when that template exists, else fallback, so a
+// kind only defines the templates it overrides.
+func templateFor(name, fallback string) string {
+	if tmpl.Lookup(name) != nil {
+		return name
+	}
+	return fallback
 }
 
 func execute(name string, data any) (string, error) {

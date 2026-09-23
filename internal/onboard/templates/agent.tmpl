@@ -10,15 +10,8 @@ Fresh-session kinds (hermes, openclaw, codex) must carry instructions.fresh.
 */ -}}
 
 {{- define "join.default"}}tincan join <code> --relay {{.RelayURL}}{{end -}}
-{{- define "join.vm-webhook"}}{{template "join.default" .}}{{end -}}
-{{- define "join.e2b-email"}}{{template "join.default" .}}{{end -}}
 {{- define "join.proxy-sandbox"}}tincan join <code> --relay {{.RelayURL}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end -}}
-{{- define "join.claude-code"}}{{template "join.default" .}}{{end -}}
 {{- define "join.chatgpt"}}tincan connect chatgpt (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
-{{- define "join.hermes"}}{{template "join.default" .}}{{end -}}
-{{- define "join.openclaw"}}{{template "join.default" .}}{{end -}}
-{{- define "join.codex"}}{{template "join.default" .}}{{end -}}
-{{- define "join.generic"}}{{template "join.default" .}}{{end -}}
 
 {{- define "instructions.common" -}}
 You are {{.Name}} on {{.OwnerPoss}} Agent Tincan team.{{if .Team}} Your teammates: {{join .Team ", "}}.{{end}}

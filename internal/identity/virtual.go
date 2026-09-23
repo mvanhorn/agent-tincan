@@ -35,7 +35,7 @@ func (d *Directory) BindVirtual(ctx context.Context, name string) error {
 	if !nameRE.MatchString(name) {
 		return ErrUnknownAgent
 	}
-	prev, _, err := d.store.AgentByName(ctx, name)
+	prev, _, err := d.Agent(ctx, name)
 	if err != nil {
 		return err
 	}

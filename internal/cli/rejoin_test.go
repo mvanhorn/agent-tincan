@@ -9,10 +9,10 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
 
-// Tonight's case: instinct's sandbox is rebuilt and comes back as a new
-// Tailscale node with no config. tincan rejoin re-admits it without an
-// invite, saves the config, and the next command works and still sees the
-// request queued during the rebuild.
+// Instinct's sandbox is rebuilt and comes back as a new Tailscale node with
+// no config. tincan rejoin re-admits it without an invite, saves the config,
+// and the next command works and still sees the request queued during the
+// rebuild.
 func TestRejoinSavesConfigAndNextCommandWorks(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	if _, err := m.Client(t, "grokbot").Ask(t.Context(), "instinct", "summarize the report", "", 0); err != nil {

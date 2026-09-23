@@ -41,15 +41,35 @@ var dedupSuffix = regexp.MustCompile(`-[0-9]+$`)
 // is offline or gone, and a claimed name must be the agent's. When several
 // agents match, the claim picks one. The agent keeps its name, kind and
 // requests, which are keyed by name. ok is false when nothing matched.
+//
+// The old node's status comes from the resolver (Tailscale LocalAPI IPC), so
+// it is checked without holding d.mu; the rebind is then committed under
+// d.mu only if the agent is still bound to the node that was checked. If it
+// moved in between, the match is evaluated once more from the new state, and
+// a second move reports no match.
 func (d *Directory) readmit(ctx context.Context, n Node, claimed string) (Resolved, bool, error) {
 	if d.cfg.NoAutoRebind || len(n.Tags) > 0 || strings.HasPrefix(n.ID, VirtualPrefix) {
 		return Resolved{}, false, nil
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	for range 2 {
+		a, res, ok, err := d.readmitCandidate(ctx, n, claimed)
+		if a == nil || err != nil {
+			return res, ok, err
+		}
+		res, committed, err := d.commitRebind(ctx, n, *a)
+		if committed || err != nil {
+			return res, committed, err
+		}
+	}
+	return Resolved{}, false, nil
+}
+
+// readmitCandidate finds the one agent n may take over and checks that its
+// old node is not online. A nil agent means the returned result is final.
+func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string) (*Agent, Resolved, bool, error) {
 	all, err := d.store.Agents(ctx)
 	if err != nil {
-		return Resolved{}, false, err
+		return nil, Resolved{}, false, err
 	}
 	base := dedupSuffix.ReplaceAllString(n.Name, "")
 	var matches []Agent
@@ -57,7 +77,7 @@ func (d *Directory) readmit(ctx context.Context, n Node, claimed string) (Resolv
 		if a.NodeID == n.ID {
 			// A concurrent request re-admitted this node first.
 			if claimed == "" || a.Name == claimed {
-				return Resolved{Name: a.Name}, true, nil
+				return nil, Resolved{Name: a.Name}, true, nil
 			}
 			continue
 		}
@@ -72,24 +92,35 @@ func (d *Directory) readmit(ctx context.Context, n Node, claimed string) (Resolv
 	}
 	switch len(matches) {
 	case 0:
-		return Resolved{}, false, nil
+		return nil, Resolved{}, false, nil
 	case 1:
 	default:
-		names := make([]string, len(matches))
-		for i, a := range matches {
-			names[i] = a.Name
-		}
-		return Resolved{}, false, fmt.Errorf("%s was rebuilt and ran %s; run tincan rejoin --name <agent> once per agent: %w", n.Name, strings.Join(names, ", "), ErrAgentAmbiguous)
+		return nil, Resolved{}, false, fmt.Errorf("%s was rebuilt and ran %s; run tincan rejoin --name <agent> once per agent: %w", n.Name, strings.Join(agentNames(matches), ", "), ErrAgentAmbiguous)
 	}
 	a := matches[0]
 	if st, ok := d.who.(NodeStatus); ok {
 		online, found, err := st.NodeOnline(ctx, a.NodeID)
 		if err != nil {
-			return Resolved{}, false, fmt.Errorf("check old node of %s: %w", a.Name, err)
+			return nil, Resolved{}, false, fmt.Errorf("check old node of %s: %w", a.Name, err)
 		}
 		if online && found {
-			return Resolved{}, false, fmt.Errorf("%s: %q is still bound to %s, which is online: %w", n.Name, a.Name, a.NodeName, ErrNotJoined)
+			return nil, Resolved{}, false, fmt.Errorf("%s: %q is still bound to %s, which is online: %w", n.Name, a.Name, a.NodeName, ErrNotJoined)
 		}
+	}
+	return &a, Resolved{}, false, nil
+}
+
+// commitRebind moves checked to n under d.mu, provided it is still bound to
+// the node readmitCandidate checked. committed is false when it moved.
+func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Resolved, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	a, found, err := d.store.AgentByName(ctx, checked.Name)
+	if err != nil {
+		return Resolved{}, false, err
+	}
+	if !found || a.NodeID != checked.NodeID {
+		return Resolved{}, false, nil
 	}
 	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name}
 	a.NodeID, a.NodeName, a.NodeUser = n.ID, n.Name, n.User

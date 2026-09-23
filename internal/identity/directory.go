@@ -163,11 +163,16 @@ func (d *Directory) ResolveAgent(ctx context.Context, remoteAddr, claimed string
 	case 1:
 		return Resolved{Name: agents[0].Name}, nil
 	}
+	return Resolved{}, fmt.Errorf("%s runs %s: %w", n.Name, strings.Join(agentNames(agents), ", "), ErrAgentAmbiguous)
+}
+
+// agentNames returns the names of agents, in order.
+func agentNames(agents []Agent) []string {
 	names := make([]string, len(agents))
 	for i, a := range agents {
 		names[i] = a.Name
 	}
-	return Resolved{}, fmt.Errorf("%s runs %s: %w", n.Name, strings.Join(names, ", "), ErrAgentAmbiguous)
+	return names
 }
 
 // Agent returns a joined agent by name.
@@ -228,7 +233,7 @@ func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, 
 	if !ok || d.cfg.Now().After(inv.Expires) {
 		return "", ErrBadInvite
 	}
-	prev, _, err := d.store.AgentByName(ctx, inv.Name)
+	prev, _, err := d.Agent(ctx, inv.Name)
 	if err != nil {
 		return "", err
 	}

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -45,14 +46,7 @@ func RejoinHint(err error, relayURL string) error {
 	if relayURL == "" {
 		relayURL = "<relay url>"
 	}
-	return &hintError{err: err, hint: "If this machine was rebuilt or lost its config, run `tincan rejoin --relay " + relayURL +
-		"` yourself (add --proxy <url> if you reach the relay through a proxy). Only a machine that was never joined needs an invite from an admin."}
+	hint := "If this machine was rebuilt or lost its config, run `tincan rejoin --relay " + relayURL +
+		"` yourself (add --proxy <url> if you reach the relay through a proxy). Only a machine that was never joined needs an invite from an admin."
+	return fmt.Errorf("%w\n%s", err, hint)
 }
-
-type hintError struct {
-	err  error
-	hint string
-}
-
-func (e *hintError) Error() string { return e.err.Error() + "\n" + e.hint }
-func (e *hintError) Unwrap() error { return e.err }

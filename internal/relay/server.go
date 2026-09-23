@@ -539,7 +539,7 @@ func (s *Server) handleSetKind(w http.ResponseWriter, r *http.Request) {
 // knownKind accepts "" and the kinds onboarding can tailor a block to, so a
 // typo is caught when it is set rather than silently ignored later.
 func knownKind(kind string) error {
-	if kind == "" || slices.Contains(onboard.Kinds, kind) {
+	if onboard.KnownKind(kind) {
 		return nil
 	}
 	return fmt.Errorf("unknown kind %q (want one of %s)", kind, strings.Join(onboard.Kinds, ", "))

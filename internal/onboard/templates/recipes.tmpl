@@ -9,20 +9,13 @@ it only tells the reader to run tincan invite.
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
 On the agent's machine: {{template "join.default" .}}
 {{- end -}}
-{{- define "recipe.invite.vm-webhook"}}{{template "recipe.invite" .}}{{end -}}
-{{- define "recipe.invite.e2b-email"}}{{template "recipe.invite" .}}{{end -}}
 {{- define "recipe.invite.proxy-sandbox" -}}
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
 On the agent's machine: {{template "join.proxy-sandbox" .}}
 {{- end -}}
-{{- define "recipe.invite.claude-code"}}{{template "recipe.invite" .}}{{end -}}
 {{- define "recipe.invite.chatgpt" -}}
 No tincan invite: ChatGPT cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
 {{- end -}}
-{{- define "recipe.invite.hermes"}}{{template "recipe.invite" .}}{{end -}}
-{{- define "recipe.invite.openclaw"}}{{template "recipe.invite" .}}{{end -}}
-{{- define "recipe.invite.codex"}}{{template "recipe.invite" .}}{{end -}}
-{{- define "recipe.invite.generic"}}{{template "recipe.invite" .}}{{end -}}
 
 {{- define "recipe.tail" -}}
 Once <name> has joined, re-run tincan onboard: its agent block holds the standing instructions to paste, and the operator prompt then lists it.

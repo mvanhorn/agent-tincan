@@ -387,15 +387,12 @@ func TestSetKindIsAdminOnly(t *testing.T) {
 
 func agentNamed(t *testing.T, d *identity.Directory, name string) identity.Agent {
 	t.Helper()
-	agents, err := d.Agents(context.Background())
+	a, ok, err := d.Agent(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range agents {
-		if a.Name == name {
-			return a
-		}
+	if !ok {
+		t.Fatalf("no agent %s", name)
 	}
-	t.Fatalf("no agent %s in %+v", name, agents)
-	return identity.Agent{}
+	return a
 }
