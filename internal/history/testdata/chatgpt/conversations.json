@@ -1,0 +1,38 @@
+{
+  "items": [
+    {
+      "id": "6a1f0c2e-1111-4a2b-9c3d-000000000001",
+      "title": "Fox logo sketch",
+      "create_time": "2026-09-22T09:00:00.000000Z",
+      "update_time": "2026-09-22T10:05:00.000000Z",
+      "mapping": null,
+      "current_node": null,
+      "conversation_template_id": null,
+      "gizmo_id": null,
+      "is_archived": false,
+      "workspace_id": null
+    },
+    {
+      "id": "6a1f0c2e-1111-4a2b-9c3d-000000000002",
+      "title": "Sourdough starter",
+      "create_time": 1789977600.0,
+      "update_time": 1789979400.0,
+      "mapping": null,
+      "current_node": null,
+      "is_archived": false
+    },
+    {
+      "id": "6a1f0c2e-1111-4a2b-9c3d-000000000003",
+      "title": "Very old chat",
+      "create_time": "2026-07-01T00:00:00.000000Z",
+      "update_time": "2026-07-01T00:10:00.000000Z",
+      "mapping": null,
+      "current_node": null,
+      "is_archived": false
+    }
+  ],
+  "total": 3,
+  "limit": 28,
+  "offset": 0,
+  "has_missing_conversations": false
+}

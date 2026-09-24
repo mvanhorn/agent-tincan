@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Agent Tincan History",
+  "version": "0.1.0",
+  "description": "Lets your Agent Tincan history agent read your ChatGPT and claude.ai conversations through your own logged-in browser.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA10KTb9kcHfBfMcXsuRXHrc6HPJwv2lIBC8TKgmnMYH5ewTHD/7bzHHU1GmDjDACBPohw/cAh7nHdfDE5aZxvrigiuT/czR01yEQpboz70u87ti3h3IAGLNXs6LhoY6MRaMjHVAQ0GQv6yZrLZyPtJRrCtVLPlQ9+i0UX484VtRGU7qGztifgYYOZuaBscvp3eg38hz6XM3qgfzmLQn5/WNNIoqUuTseYjoOpnqQ0dH4kx/lhTwePmXKU2x1IImIHQO3XLV3bJFbUjKP00eO1N8rIyW1siF3VBtp6JWztfwse+8V9hWGGM5WrvrY7uW2N7zm9vZKuJNbvEaKsSdc2WQIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": ["nativeMessaging", "alarms"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://*.oaiusercontent.com/*",
+    "https://claude.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}

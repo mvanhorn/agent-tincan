@@ -1,0 +1,171 @@
+{
+  "title": "Fox logo sketch",
+  "create_time": 1790067600.0,
+  "update_time": 1790071500.0,
+  "conversation_id": "6a1f0c2e-1111-4a2b-9c3d-000000000001",
+  "current_node": "node-a2",
+  "moderation_results": [],
+  "is_archived": false,
+  "mapping": {
+    "client-created-root": {
+      "id": "client-created-root",
+      "message": null,
+      "parent": null,
+      "children": ["node-sys"]
+    },
+    "node-sys": {
+      "id": "node-sys",
+      "message": {
+        "id": "node-sys",
+        "author": {"role": "system", "name": null, "metadata": {}},
+        "create_time": null,
+        "update_time": null,
+        "content": {"content_type": "text", "parts": [""]},
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 0.0,
+        "metadata": {"is_visually_hidden_from_conversation": true},
+        "recipient": "all"
+      },
+      "parent": "client-created-root",
+      "children": ["node-u0"]
+    },
+    "node-u0": {
+      "id": "node-u0",
+      "message": {
+        "id": "node-u0",
+        "author": {"role": "user", "name": null, "metadata": {}},
+        "create_time": 1790067600.0,
+        "content": {"content_type": "text", "parts": ["draw a fox logo for my landing page"]},
+        "status": "finished_successfully",
+        "weight": 1.0,
+        "metadata": {},
+        "recipient": "all"
+      },
+      "parent": "node-sys",
+      "children": ["node-a0"]
+    },
+    "node-a0": {
+      "id": "node-a0",
+      "message": {
+        "id": "node-a0",
+        "author": {"role": "assistant", "name": null, "metadata": {}},
+        "create_time": 1790067660.0,
+        "content": {"content_type": "text", "parts": ["Here is a first fox logo concept."]},
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {"model_slug": "gpt-5"},
+        "recipient": "all"
+      },
+      "parent": "node-u0",
+      "children": ["node-u1", "node-u1b"]
+    },
+    "node-u1b": {
+      "id": "node-u1b",
+      "message": {
+        "id": "node-u1b",
+        "author": {"role": "user", "name": null, "metadata": {}},
+        "create_time": 1790071100.0,
+        "content": {"content_type": "text", "parts": ["ABANDONED BRANCH prompt"]},
+        "metadata": {},
+        "recipient": "all"
+      },
+      "parent": "node-a0",
+      "children": []
+    },
+    "node-u1": {
+      "id": "node-u1",
+      "message": {
+        "id": "node-u1",
+        "author": {"role": "user", "name": null, "metadata": {}},
+        "create_time": 1790071200.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "image_asset_pointer",
+              "asset_pointer": "file-service://file-Sk3tchAbc123",
+              "size_bytes": 1234,
+              "width": 512,
+              "height": 512,
+              "fovea": 512,
+              "metadata": null
+            },
+            "make the fox ears bigger like this sketch"
+          ]
+        },
+        "status": "finished_successfully",
+        "weight": 1.0,
+        "metadata": {
+          "attachments": [
+            {"id": "file-Sk3tchAbc123", "name": "sketch.png", "mime_type": "image/png", "size": 1234, "width": 512, "height": 512},
+            {"id": "file-Br1efDoc789", "name": "brief.pdf", "mime_type": "application/pdf", "size": 5000}
+          ]
+        },
+        "recipient": "all"
+      },
+      "parent": "node-a0",
+      "children": ["node-a1"]
+    },
+    "node-a1": {
+      "id": "node-a1",
+      "message": {
+        "id": "node-a1",
+        "author": {"role": "assistant", "name": null, "metadata": {}},
+        "create_time": 1790071210.0,
+        "content": {"content_type": "code", "language": "json", "text": "{\"prompt\": \"fox logo with bigger ears\", \"size\": \"1024x1024\"}"},
+        "status": "finished_successfully",
+        "weight": 1.0,
+        "metadata": {},
+        "recipient": "dalle.text2im"
+      },
+      "parent": "node-u1",
+      "children": ["node-t1"]
+    },
+    "node-t1": {
+      "id": "node-t1",
+      "message": {
+        "id": "node-t1",
+        "author": {"role": "tool", "name": "dalle.text2im", "metadata": {}},
+        "create_time": 1790071230.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "image_asset_pointer",
+              "asset_pointer": "file-service://file-Gen3rated456",
+              "size_bytes": 2048,
+              "width": 1024,
+              "height": 1024,
+              "fovea": 512,
+              "metadata": {"dalle": {"gen_id": "gen-fake-1", "prompt": "fox logo with bigger ears", "seed": 1, "serialization_title": "DALL-E generation metadata"}}
+            }
+          ]
+        },
+        "status": "finished_successfully",
+        "weight": 1.0,
+        "metadata": {},
+        "recipient": "all"
+      },
+      "parent": "node-a1",
+      "children": ["node-a2"]
+    },
+    "node-a2": {
+      "id": "node-a2",
+      "message": {
+        "id": "node-a2",
+        "author": {"role": "assistant", "name": null, "metadata": {}},
+        "create_time": 1790071260.0,
+        "content": {"content_type": "text", "parts": ["Here is the fox with bigger ears."]},
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {"model_slug": "gpt-5"},
+        "recipient": "all"
+      },
+      "parent": "node-t1",
+      "children": []
+    }
+  }
+}

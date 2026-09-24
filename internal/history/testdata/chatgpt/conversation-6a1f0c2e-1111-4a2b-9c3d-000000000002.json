@@ -1,0 +1,42 @@
+{
+  "title": "Sourdough starter",
+  "create_time": 1789977600.0,
+  "update_time": 1789979400.0,
+  "conversation_id": "6a1f0c2e-1111-4a2b-9c3d-000000000002",
+  "current_node": "s-a1",
+  "mapping": {
+    "s-root": {"id": "s-root", "message": null, "parent": null, "children": ["s-u1"]},
+    "s-u1": {
+      "id": "s-u1",
+      "message": {
+        "id": "s-u1",
+        "author": {"role": "user"},
+        "create_time": 1789977600.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            "how do I revive a sourdough starter that smells like nail polish",
+            {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_00000000abcd1234", "size_bytes": 900, "width": 300, "height": 300}
+          ]
+        },
+        "metadata": {},
+        "recipient": "all"
+      },
+      "parent": "s-root",
+      "children": ["s-a1"]
+    },
+    "s-a1": {
+      "id": "s-a1",
+      "message": {
+        "id": "s-a1",
+        "author": {"role": "assistant"},
+        "create_time": 1789977620.0,
+        "content": {"content_type": "text", "parts": ["Discard most of it and feed it twice a day."]},
+        "metadata": {},
+        "recipient": "all"
+      },
+      "parent": "s-u1",
+      "children": []
+    }
+  }
+}

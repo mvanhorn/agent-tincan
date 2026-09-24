@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -142,6 +143,50 @@ func TestHistoryBadArgs(t *testing.T) {
 	for _, args := range cases {
 		if out, err := run(t, Root(), args...); err == nil {
 			t.Errorf("%v: want error, got output:\n%s", args, out)
+		}
+	}
+}
+
+func TestHistoryInstallWritesManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", filepath.Join(home, "native"))
+	out, err := run(t, Root(), "history", "install", "--binary", "/opt/tincan/tincan")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	dir, err := history.NativeManifestDir(runtime.GOOS, home)
+	if err != nil {
+		t.Skip(err)
+	}
+	path := filepath.Join(dir, history.NativeHostName+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("manifest not written: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(b), "chrome-extension://"+history.DefaultExtensionID+"/") || !strings.Contains(out, path) {
+		t.Fatalf("manifest:\n%s\noutput:\n%s", b, out)
+	}
+	out, err = run(t, Root(), "history", "install", "--binary", "/opt/tincan/tincan", "--extension-id", "abcdefghijklmnopabcdefghijklmnop")
+	if err != nil {
+		t.Fatalf("install with id: %v\n%s", err, out)
+	}
+	b, _ = os.ReadFile(path)
+	if !strings.Contains(string(b), "chrome-extension://abcdefghijklmnopabcdefghijklmnop/") {
+		t.Fatalf("custom id not used:\n%s", b)
+	}
+	if _, err := run(t, Root(), "history", "install", "--extension-id", "NOT-AN-ID"); err == nil {
+		t.Fatal("bad extension id accepted")
+	}
+}
+
+func TestHistoryLiveSourceUnavailable(t *testing.T) {
+	historyEnv(t)
+	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", t.TempDir())
+	for _, src := range []string{"chatgpt", "claude-ai"} {
+		out, err := run(t, Root(), "history", src)
+		if err == nil || !strings.Contains(err.Error(), "source unavailable: "+src+": ") {
+			t.Fatalf("%s: want source unavailable, got %v\n%s", src, err, out)
 		}
 	}
 }

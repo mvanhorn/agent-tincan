@@ -1,0 +1,9 @@
+{
+  "name": "agent-tincan-history-extension",
+  "private": true,
+  "type": "module",
+  "description": "Test harness metadata only (node --test). Not packaged.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

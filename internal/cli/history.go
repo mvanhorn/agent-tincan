@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,9 +18,18 @@ import (
 // historyNow is the clock for history reads; tests pin it.
 var historyNow = time.Now
 
-// historyReader returns the local reader for a source name.
+// historyReader returns the reader for a source name. The live sources go
+// through the Tincan Chrome extension's native host.
 func historyReader(source string) (history.Reader, error) {
 	switch history.Source(source) {
+	case history.SourceChatGPT:
+		r := history.NewChatGPT(history.NewClient())
+		r.Now = historyNow
+		return r, nil
+	case history.SourceClaudeAI:
+		r := history.NewClaudeAI(history.NewClient())
+		r.Now = historyNow
+		return r, nil
 	case history.SourceCodex:
 		r := history.NewCodex()
 		r.Now = historyNow
@@ -27,7 +39,7 @@ func historyReader(source string) (history.Reader, error) {
 		r.Now = historyNow
 		return r, nil
 	}
-	return nil, fmt.Errorf("unknown history source %q (want codex or claude-code)", source)
+	return nil, fmt.Errorf("unknown history source %q (want chatgpt, claude-ai, codex or claude-code)", source)
 }
 
 func historyCmd() *cobra.Command {
@@ -35,10 +47,11 @@ func historyCmd() *cobra.Command {
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
-		Use:   "history <codex|claude-code>",
-		Short: "Read Matt's local Codex or Claude Code history",
-		Long: "Read Matt's local Codex or Claude Code history. With no mode flag it shows the latest prompt Matt typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions) are left out unless --all is given.",
+		Use:   "history <chatgpt|claude-ai|codex|claude-code>",
+		Short: "Read Matt's ChatGPT, claude.ai, Codex or Claude Code history",
+		Long: "Read Matt's ChatGPT, claude.ai, Codex or Claude Code history. With no mode flag it shows the latest prompt Matt typed.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions) are left out unless --all is given.\n" +
+			"chatgpt and claude-ai are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			modes := 0
@@ -105,7 +118,53 @@ func historyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "show one conversation by id")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	cmd.Flags().StringVar(&imagesDir, "images-dir", "", "save the selected turn's images here (created 0700, files 0600)")
+	cmd.AddCommand(historyInstallCmd(), historyNativeHostCmd())
 	return cmd
+}
+
+func historyInstallCmd() *cobra.Command {
+	var extID, binary string
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Register the native messaging host the Tincan Chrome extension talks to",
+		Long: "Writes the Chrome native messaging host manifest for " + history.NativeHostName + " into this user's Chrome\n" +
+			"NativeMessagingHosts directory (no admin rights), allowed only for the Tincan extension, pointing at a\n" +
+			"wrapper that runs tincan history native-host. On Windows it also prints the registry entry to add.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := history.InstallNativeHost(history.InstallOptions{ExtensionID: extID, Binary: binary})
+			if err != nil {
+				return err
+			}
+			cmd.Printf("native host manifest: %s\n", res.ManifestPath)
+			cmd.Printf("native host wrapper: %s\n", res.WrapperPath)
+			if res.Note != "" {
+				cmd.Println(res.Note)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&extID, "extension-id", history.DefaultExtensionID, "Chrome extension id allowed to start the host")
+	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the host runs (default: this executable)")
+	return cmd
+}
+
+func historyNativeHostCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "native-host",
+		Short:  "The native messaging host Chrome starts for the Tincan extension (not run by hand)",
+		Hidden: true,
+		// Chrome passes the extension origin (and on Windows a
+		// --parent-window flag); none of it is a tincan flag, and stdout
+		// belongs to the native messaging protocol.
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			host := &history.NativeHost{SocketPath: history.DefaultSocketPath(), In: os.Stdin, Out: os.Stdout}
+			return host.Run(ctx)
+		},
+	}
 }
 
 func printHistory(cmd *cobra.Command, convs []history.Conversation, listing bool) {

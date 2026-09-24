@@ -1,0 +1,26 @@
+{
+  "uuid": "c1a0d000-0000-4000-8000-000000000002",
+  "name": "Trip packing list",
+  "created_at": "2026-09-20T09:00:00.000000Z",
+  "updated_at": "2026-09-20T09:10:00.000000Z",
+  "chat_messages": [
+    {
+      "uuid": "p0000000-0000-4000-8000-000000000001",
+      "text": "make me a packing list for a rainy weekend in Portland",
+      "sender": "human",
+      "index": 0,
+      "created_at": "2026-09-20T09:00:00.000000Z",
+      "attachments": [],
+      "files": []
+    },
+    {
+      "uuid": "p0000000-0000-4000-8000-000000000002",
+      "text": "Rain jacket, boots, umbrella.",
+      "sender": "assistant",
+      "index": 1,
+      "created_at": "2026-09-20T09:00:05.000000Z",
+      "attachments": [],
+      "files": []
+    }
+  ]
+}
