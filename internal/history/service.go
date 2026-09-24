@@ -182,3 +182,129 @@ func xmlEscape(s string) string {
 	_ = xml.EscapeText(&b, []byte(s))
 	return b.String()
 }
+
+// webLaunchdTemplate is the launchd agent for a web agent. Placeholders:
+// __TINCAN_BINARY__, __HOME__, __PATH__, __SITE__, __AGENT__, each
+// XML-escaped when filled.
+const webLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Agent Tincan web agent (__AGENT__): runs "tincan web serve" for the
+  __SITE__ site under launchd (no double hyphen may appear in an XML comment). "tincan web install" writes this file into
+  ~/Library/LaunchAgents. It does not load it; start it with:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.__SITE__.plist
+  See docs/adapters/web-agents.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agenttincan.web.__SITE__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__TINCAN_BINARY__</string>
+    <string>web</string>
+    <string>serve</string>
+    <string>--site</string>
+    <string>__SITE__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TINCAN_CONFIG</key>
+    <string>__HOME__/.config/tincan/__AGENT__.json</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/tincan-__AGENT__.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/tincan-__AGENT__.log</string>
+</dict>
+</plist>
+`
+
+// webSystemdTemplate is the Linux user unit for a web agent.
+const webSystemdTemplate = `[Unit]
+Description=Agent Tincan web agent (__AGENT__)
+After=network-online.target
+
+[Service]
+ExecStart="__TINCAN_BINARY__" web serve --site __SITE__
+Environment=TINCAN_CONFIG=%h/.config/tincan/__AGENT__.json
+Environment=PATH=__PATH__
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+`
+
+// WebServiceLabel is the launchd label of a site's web agent.
+func WebServiceLabel(site Source) string { return "com.agenttincan.web." + string(site) }
+
+// InstallWebService writes the service definition for a site's web agent
+// (a launchd agent on macOS, a systemd user unit on Linux). Like
+// InstallService it never loads or starts it. o.CodexDir is ignored.
+func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
+	if _, err := ParseWebSite(string(site)); err != nil {
+		return ServiceResult{}, err
+	}
+	if o.GOOS == "" {
+		o.GOOS = runtime.GOOS
+	}
+	if o.Home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return ServiceResult{}, err
+		}
+		o.Home = h
+	}
+	if o.Binary == "" {
+		b, err := os.Executable()
+		if err != nil {
+			return ServiceResult{}, err
+		}
+		o.Binary = b
+	}
+	if !filepath.IsAbs(o.Binary) || strings.ContainsAny(o.Binary, "\"\n\r\x00%") {
+		return ServiceResult{}, fmt.Errorf("service binary %q must be an absolute path without quotes, %% or newlines", o.Binary)
+	}
+	if o.UID == 0 {
+		o.UID = os.Getuid()
+	}
+	agent := WebAgentName(site)
+	switch o.GOOS {
+	case "darwin":
+		dst := filepath.Join(o.Home, "Library", "LaunchAgents", WebServiceLabel(site)+".plist")
+		body := strings.NewReplacer(
+			"__TINCAN_BINARY__", xmlEscape(o.Binary),
+			"__HOME__", xmlEscape(o.Home),
+			"__PATH__", xmlEscape(basePath),
+			"__SITE__", xmlEscape(string(site)),
+			"__AGENT__", xmlEscape(agent),
+		).Replace(webLaunchdTemplate)
+		if err := os.MkdirAll(filepath.Join(o.Home, "Library", "Logs"), 0o755); err != nil {
+			return ServiceResult{}, err
+		}
+		if err := writeService(dst, body); err != nil {
+			return ServiceResult{}, err
+		}
+		return ServiceResult{Path: dst, Next: fmt.Sprintf("launchctl bootstrap gui/%d %s", o.UID, dst)}, nil
+	case "linux":
+		unit := "tincan-" + agent + ".service"
+		dst := filepath.Join(o.Home, ".config", "systemd", "user", unit)
+		body := strings.NewReplacer("__TINCAN_BINARY__", o.Binary, "__PATH__", basePath, "__SITE__", string(site), "__AGENT__", agent).Replace(webSystemdTemplate)
+		if err := writeService(dst, body); err != nil {
+			return ServiceResult{}, err
+		}
+		return ServiceResult{Path: dst, Next: "systemctl --user daemon-reload && systemctl --user enable --now " + unit}, nil
+	}
+	return ServiceResult{}, errors.New("no web agent service definition for " + o.GOOS + "; run tincan web serve under your own service manager")
+}

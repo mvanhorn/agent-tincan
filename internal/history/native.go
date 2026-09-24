@@ -13,7 +13,15 @@ package history
 // extension. The host listens on a unix socket (0600, in a 0700 directory)
 // for the history service and relays each validated request to the
 // extension. The extension accepts only the fixed operation set below and
-// runs its own fixed fetch code for each.
+// runs its own fixed fetch code for each (the send operations type the
+// message into a background tab the extension opens; see extension/send.js).
+//
+// When the extension connects it says hello with its version and the
+// sha256 of its files. If the host knows the unpacked extension directory
+// (TINCAN_EXTENSION_DIR, set by the wrapper `tincan history install
+// --extension-dir` writes) and the files there differ, it sends the fixed
+// extension.reload operation so Chrome re-reads them: an update never needs
+// a manual Reload click.
 //
 // Extension id: extension/manifest.json carries a "key" (an RSA public key,
 // base64 DER SubjectPublicKeyInfo). Chrome derives the id from it (sha256 of
@@ -43,6 +51,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // NativeHostName is the native messaging host name the extension connects
@@ -58,10 +67,23 @@ const DefaultExtensionID = "ciejooalclcpgpapboofdbbddphldhnh"
 const (
 	MaxHostMessage   = 1 << 20
 	MaxChromeMessage = 64 << 20
-	// maxServiceRequest caps a request from the history service to the host.
-	maxServiceRequest = 64 << 10
+	// maxServiceRequest caps a request from the history service to the
+	// host: room for a MaxSendMessage message even when JSON escaping
+	// grows every byte sixfold.
+	maxServiceRequest = 256 << 10
 	// MaxListCount caps a list operation, matching the extension.
 	MaxListCount = 100
+	// MaxSendMessage caps a send operation's message in UTF-8 bytes,
+	// matching the extension.
+	MaxSendMessage = 32 << 10
+)
+
+// Send timeouts, nested so each layer hears the inner one's answer: the
+// extension gives up on a reply after 5 minutes, the host after
+// SendHostTimeout, and the client after SendClientTimeout.
+const (
+	SendHostTimeout   = 5*time.Minute + 30*time.Second
+	SendClientTimeout = 6 * time.Minute
 )
 
 // ErrMessageTooLarge is returned for a native message over its limit.
@@ -120,14 +142,23 @@ const (
 	OpClaudeAIList   Op = "claudeai.list"
 	OpClaudeAIDetail Op = "claudeai.detail"
 	OpClaudeAIFile   Op = "claudeai.file"
+	OpChatGPTSend    Op = "chatgpt.send"
+	OpClaudeAISend   Op = "claudeai.send"
+	// OpExtensionReload is sent only by the native host itself, never
+	// relayed from the socket.
+	OpExtensionReload Op = "extension.reload"
 )
 
-// OpArgs are an operation's arguments: only validated ids and integers.
+// OpArgs are an operation's arguments: validated ids and integers, a
+// boolean, and for the send operations one capped message that the
+// extension treats as text only.
 type OpArgs struct {
 	Count          int    `json:"count,omitempty"`
 	ID             string `json:"id,omitempty"`
 	FileID         string `json:"file_id,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
+	Message        string `json:"message,omitempty"`
+	NewChat        bool   `json:"new_chat,omitempty"`
 }
 
 // nativeIDPattern is the id shape the extension accepts: letters, digits,
@@ -140,6 +171,32 @@ func validNativeID(s string) bool { return nativeIDPattern.MatchString(s) }
 // ValidateOp checks op against the fixed set and its arguments against
 // their exact shape: required fields present, others empty.
 func ValidateOp(op Op, a OpArgs) error {
+	switch op {
+	case OpChatGPTSend, OpClaudeAISend:
+		switch {
+		case a.Count != 0 || a.ID != "" || a.FileID != "":
+			return fmt.Errorf("%s: unexpected argument", op)
+		case strings.TrimSpace(a.Message) == "":
+			return fmt.Errorf("%s: empty message", op)
+		case len(a.Message) > MaxSendMessage:
+			return fmt.Errorf("%s: message over %d bytes", op, MaxSendMessage)
+		case !utf8.ValidString(a.Message):
+			return fmt.Errorf("%s: message is not UTF-8", op)
+		case a.ConversationID != "" && !validNativeID(a.ConversationID):
+			return fmt.Errorf("%s: invalid conversation id", op)
+		case a.ConversationID != "" && a.NewChat:
+			return fmt.Errorf("%s: new chat and a conversation id together", op)
+		}
+		return nil
+	case OpExtensionReload:
+		if a != (OpArgs{}) {
+			return fmt.Errorf("%s: takes no arguments", op)
+		}
+		return nil
+	}
+	if a.Message != "" || a.NewChat {
+		return fmt.Errorf("%s: unexpected argument", op)
+	}
 	needCount, needID, needFile, allowConv := false, false, false, false
 	switch op {
 	case OpChatGPTList, OpClaudeAIList:
@@ -176,6 +233,8 @@ func (op Op) source() Source {
 }
 
 func (op Op) file() bool { return op == OpChatGPTFile || op == OpClaudeAIFile }
+
+func (op Op) send() bool { return op == OpChatGPTSend || op == OpClaudeAISend }
 
 // NativeRequest is one request to the extension.
 type NativeRequest struct {
@@ -224,6 +283,9 @@ var (
 	ErrTimeout               = errors.New("timeout")
 	ErrRejected              = errors.New("request rejected")
 	ErrSourceFailed          = errors.New("request failed")
+	// The send operations' page failures.
+	ErrComposerNotFound = errors.New("message box not found")
+	ErrSendFailed       = errors.New("send failed")
 )
 
 // errHostClosed means the host ended a request without a final frame.
@@ -259,6 +321,10 @@ func (e *UnavailableError) Error() string {
 		reason = "Chrome did not answer in time"
 	case ErrRejected:
 		reason = "the extension rejected the request"
+	case ErrComposerNotFound:
+		reason = "no message box on the " + site + " page (the page may have changed)"
+	case ErrSendFailed:
+		reason = "the message could not be sent on " + site
 	default:
 		reason = site + " request failed"
 	}
@@ -287,9 +353,18 @@ func fromNativeError(s Source, ne *NativeError) error {
 	case "blocked":
 		return unavailable(s, ErrEndpointChanged, "blocked: "+detail)
 	case "bad_request":
+		if detail == "unknown operation" {
+			detail = "unknown operation; the loaded extension is older than this tincan, reload it once from chrome://extensions"
+		}
 		return unavailable(s, ErrRejected, detail)
 	case "timeout":
 		return unavailable(s, ErrTimeout, detail)
+	case "composer_not_found":
+		return unavailable(s, ErrComposerNotFound, detail)
+	case "send_failed":
+		return unavailable(s, ErrSendFailed, detail)
+	case "unsupported":
+		return unavailable(s, ErrRejected, "the extension needs an update: "+detail)
 	}
 	return unavailable(s, ErrSourceFailed, detail)
 }
@@ -311,8 +386,8 @@ type Channel interface {
 // Client is the history service's side of the bridge.
 type Client struct {
 	Channel Channel
-	// Timeout bounds one request; zero means 30s for JSON and 90s for
-	// files.
+	// Timeout bounds one request; zero means 30s for JSON, 90s for files
+	// and SendClientTimeout for sends.
 	Timeout time.Duration
 	// MaxJSON caps a JSON result; zero means 32 MiB.
 	MaxJSON int
@@ -327,11 +402,13 @@ func NewClient() *Client {
 
 var requestSeq atomic.Int64
 
-func (c *Client) timeout(file bool) time.Duration {
+func (c *Client) timeout(op Op) time.Duration {
 	switch {
 	case c.Timeout > 0:
 		return c.Timeout
-	case file:
+	case op.send():
+		return SendClientTimeout
+	case op.file():
 		return 90 * time.Second
 	}
 	return 30 * time.Second
@@ -345,7 +422,7 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 	if c.Channel == nil {
 		return unavailable(src, ErrExtensionNotConnected, "")
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout(op.file()))
+	ctx, cancel := context.WithTimeout(ctx, c.timeout(op))
 	defer cancel()
 	req := NativeRequest{ID: requestSeq.Add(1), Op: op, Args: args}
 	err := c.Channel.Exchange(ctx, req, recv)
@@ -400,6 +477,33 @@ func (c *Client) Request(ctx context.Context, op Op, args OpArgs) (json.RawMessa
 		return true, nil
 	})
 	return out, err
+}
+
+// SendResult is what a send operation reports: the conversation the
+// message went to and the reply as the page showed it.
+type SendResult struct {
+	ConversationID string `json:"conversation_id"`
+	URL            string `json:"url"`
+	ReplyText      string `json:"reply_text"`
+}
+
+// Send types message into src's page (a new chat, or conversation convID)
+// in a background tab the extension opens, waits for the reply and returns
+// where it went.
+func (c *Client) Send(ctx context.Context, src Source, message, convID string, newChat bool) (SendResult, error) {
+	op := OpChatGPTSend
+	if src == SourceClaudeAI {
+		op = OpClaudeAISend
+	}
+	raw, err := c.Request(ctx, op, OpArgs{Message: message, ConversationID: convID, NewChat: newChat})
+	if err != nil {
+		return SendResult{}, err
+	}
+	var r SendResult
+	if err := json.Unmarshal(raw, &r); err != nil || !validNativeID(r.ConversationID) {
+		return SendResult{}, unavailable(src, ErrEndpointChanged, "unexpected send answer")
+	}
+	return r, nil
 }
 
 // File runs a file operation and reassembles its chunks, enforcing the
@@ -601,6 +705,18 @@ type NativeHost struct {
 	Out        io.Writer
 	// RequestTimeout bounds one relayed request; zero means 2 minutes.
 	RequestTimeout time.Duration
+	// SendTimeout bounds one relayed send; zero means SendHostTimeout.
+	SendTimeout time.Duration
+	// ExtensionDir is the unpacked extension's directory on disk. When set,
+	// a hello from an unpacked extension whose files differ from it gets
+	// a reload request. ReloadStatePath (default reload-state.json beside
+	// the socket) remembers the last request so a reload that does not
+	// help is not repeated in a loop.
+	ExtensionDir    string
+	ReloadStatePath string
+	// Log receives one line per reload decision (discarded when nil;
+	// stdout belongs to Chrome).
+	Log io.Writer
 
 	outMu   sync.Mutex
 	mu      sync.Mutex
@@ -612,6 +728,9 @@ type NativeHost struct {
 func (h *NativeHost) Run(ctx context.Context) error {
 	if h.RequestTimeout <= 0 {
 		h.RequestTimeout = 2 * time.Minute
+	}
+	if h.SendTimeout <= 0 {
+		h.SendTimeout = SendHostTimeout
 	}
 	h.pending = map[int64]chan []byte{}
 	ln, err := ListenSocket(h.SocketPath)
@@ -656,9 +775,14 @@ func (h *NativeHost) readChrome() error {
 			return err
 		}
 		var head struct {
-			ID int64 `json:"id"`
+			ID    int64  `json:"id"`
+			Hello *Hello `json:"hello"`
 		}
 		if json.Unmarshal(body, &head) != nil {
+			continue
+		}
+		if head.Hello != nil {
+			h.onHello(*head.Hello)
 			continue
 		}
 		h.mu.Lock()
@@ -696,8 +820,12 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 		_ = WriteMessage(conn, NativeResponse{Error: &NativeError{Code: "bad_request", Message: "malformed request"}}, MaxHostMessage)
 		return
 	}
-	if err := ValidateOp(req.Op, req.Args); err != nil {
-		_ = WriteMessage(conn, NativeResponse{ID: req.ID, Error: &NativeError{Code: "bad_request", Message: err.Error()}}, MaxHostMessage)
+	if err := ValidateOp(req.Op, req.Args); err != nil || req.Op == OpExtensionReload {
+		msg := "extension.reload is not relayed"
+		if err != nil {
+			msg = err.Error()
+		}
+		_ = WriteMessage(conn, NativeResponse{ID: req.ID, Error: &NativeError{Code: "bad_request", Message: msg}}, MaxHostMessage)
 		return
 	}
 	clientID := req.ID
@@ -723,7 +851,11 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 		_, _ = conn.Read(b[:])
 		close(gone)
 	}()
-	timer := time.NewTimer(h.RequestTimeout)
+	limit := h.RequestTimeout
+	if req.Op.send() {
+		limit = max(limit, h.SendTimeout)
+	}
+	timer := time.NewTimer(limit)
 	defer timer.Stop()
 	for {
 		select {
@@ -807,6 +939,10 @@ type InstallOptions struct {
 	Binary      string
 	ExtensionID string
 	NativeDir   string
+	// ExtensionDir is the unpacked extension directory. When set, the
+	// wrapper passes it to the host, which then reloads the extension
+	// whenever the files there change.
+	ExtensionDir string
 }
 
 // InstallResult says what InstallNativeHost wrote.
@@ -849,6 +985,14 @@ func InstallNativeHost(o InstallOptions) (InstallResult, error) {
 	if o.NativeDir == "" {
 		o.NativeDir = NativeDir()
 	}
+	if o.ExtensionDir != "" {
+		if !filepath.IsAbs(o.ExtensionDir) || strings.ContainsAny(o.ExtensionDir, "\"'\n\r\x00%") {
+			return InstallResult{}, fmt.Errorf("extension dir %q must be an absolute path without quotes, %% or newlines", o.ExtensionDir)
+		}
+		if _, err := os.Stat(filepath.Join(o.ExtensionDir, "manifest.json")); err != nil {
+			return InstallResult{}, fmt.Errorf("extension dir %s has no manifest.json", o.ExtensionDir)
+		}
+	}
 	mdir, err := NativeManifestDir(o.GOOS, o.Home)
 	if err != nil {
 		return InstallResult{}, err
@@ -863,10 +1007,18 @@ func InstallNativeHost(o InstallOptions) (InstallResult, error) {
 	var script string
 	if o.GOOS == "windows" {
 		res.WrapperPath = filepath.Join(o.NativeDir, "native-host.bat")
-		script = "@echo off\r\n\"" + o.Binary + "\" history native-host %*\r\n"
+		script = "@echo off\r\n"
+		if o.ExtensionDir != "" {
+			script += "set \"" + ExtensionDirEnv + "=" + o.ExtensionDir + "\"\r\n"
+		}
+		script += "\"" + o.Binary + "\" history native-host %*\r\n"
 	} else {
 		res.WrapperPath = filepath.Join(o.NativeDir, "native-host")
-		script = "#!/bin/sh\nexec " + shellQuote(o.Binary) + " history native-host \"$@\"\n"
+		env := ""
+		if o.ExtensionDir != "" {
+			env = "export " + ExtensionDirEnv + "=" + shellQuote(o.ExtensionDir) + "\n"
+		}
+		script = "#!/bin/sh\n" + env + "exec " + shellQuote(o.Binary) + " history native-host \"$@\"\n"
 	}
 	if err := writeFileAtomic(res.WrapperPath, []byte(script), 0o700); err != nil {
 		return InstallResult{}, err

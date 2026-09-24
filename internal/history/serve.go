@@ -123,19 +123,25 @@ func (s *Service) logf(format string, args ...any) {
 // RequestTimeout. Poll errors back off and retry; only a 403 (this agent
 // is not joined) stops the loop.
 func (s *Service) Run(ctx context.Context) error {
+	return runPolling(ctx, s.PollOnce, s.logf)
+}
+
+// runPolling calls pollOnce until ctx is cancelled, backing off on errors.
+// Only a 403 (the agent is not joined) stops it.
+func runPolling(ctx context.Context, pollOnce func(context.Context) (int, error), logf func(string, ...any)) error {
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_, err := s.PollOnce(ctx)
+		_, err := pollOnce(ctx)
 		switch {
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case client.IsStatus(err, http.StatusForbidden):
 			return err
 		case err != nil:
-			s.logf("poll failed: %v (retrying in %s)", err, backoff)
+			logf("poll failed: %v (retrying in %s)", err, backoff)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -151,17 +157,22 @@ func (s *Service) Run(ctx context.Context) error {
 // PollOnce waits up to Hold for requests, then handles each one serially.
 // It returns how many requests it handled.
 func (s *Service) PollOnce(ctx context.Context) (int, error) {
-	hold := s.Hold
+	return pollAndHandle(ctx, s.Relay, s.Hold, s.handleSafely)
+}
+
+// pollAndHandle waits up to hold (client.DefaultPollHold when zero) for
+// requests, then handles each one serially.
+func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration, handle func(context.Context, envelope.Request)) (int, error) {
 	if hold == 0 {
 		hold = client.DefaultPollHold
 	}
-	in, err := s.Relay.PollReplies(ctx, hold, client.RepliesNone)
+	in, err := relay.PollReplies(ctx, hold, client.RepliesNone)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
 	for _, req := range in.Requests {
-		s.handleSafely(ctx, req)
+		handle(ctx, req)
 		n++
 	}
 	return n, nil
@@ -286,23 +297,35 @@ const replyTimeout = 30 * time.Second
 // reply sends on its own context, detached from ctx's deadline, so a request
 // that ran out of time (or panicked after it did) still gets its answer.
 func (s *Service) reply(ctx context.Context, req envelope.Request, body string, status envelope.Status, ids []string) {
+	replyDetached(ctx, s.Relay, req, body, status, ids, s.logf)
+}
+
+func replyDetached(ctx context.Context, relay *client.Relay, req envelope.Request, body string, status envelope.Status, ids []string, logf func(string, ...any)) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
-	if _, err := s.Relay.ReplyAttached(rctx, req.ID, body, status, ids); err != nil {
-		s.logf("request %s: reply failed: %v", req.ID, err)
+	if _, err := relay.ReplyAttached(rctx, req.ID, body, status, ids); err != nil {
+		logf("request %s: reply failed: %v", req.ID, err)
 	}
 }
 
 // denied returns why req may not read history, or "" when every agent in
 // its relay-set chain, and its sender, is on the allowlist.
 func (s *Service) denied(req envelope.Request) string {
-	if s.Allowlist == nil {
-		return "Declined: the history agent has no allowlist configured."
+	return chainDenied(s.Allowlist, req, "history", "read Matt's conversation history", s.logf)
+}
+
+// chainDenied returns why req may not use agent, or "" when every agent in
+// its relay-set chain, and its sender, is on the allowlist. Only relay-set
+// fields are consulted, never the body. what says what access grants, for
+// the reply.
+func chainDenied(allowlist func() ([]string, error), req envelope.Request, agent, what string, logf func(string, ...any)) string {
+	if allowlist == nil {
+		return fmt.Sprintf("Declined: the %s agent has no allowlist configured.", agent)
 	}
-	allowed, err := s.Allowlist()
+	allowed, err := allowlist()
 	if err != nil {
-		s.logf("allowlist: %v", err)
-		return "Declined: the history agent could not read its allowlist, so it is not answering anyone until that is fixed."
+		logf("allowlist: %v", err)
+		return fmt.Sprintf("Declined: the %s agent could not read its allowlist, so it is not answering anyone until that is fixed.", agent)
 	}
 	chain := slices.Clone(req.Chain)
 	if req.From != "" && !slices.Contains(chain, req.From) {
@@ -314,9 +337,9 @@ func (s *Service) denied(req envelope.Request) string {
 	for _, a := range chain {
 		if !slices.Contains(allowed, a) {
 			if a == req.From {
-				return fmt.Sprintf("Declined: %s is not on the history allowlist, so it cannot read Matt's conversation history. Matt can add it to the allowlist.", a)
+				return fmt.Sprintf("Declined: %s is not on the %s allowlist, so it cannot %s. Matt can add it to the allowlist.", a, agent, what)
 			}
-			return fmt.Sprintf("Declined: this request came through %s, which is not on the history allowlist, so it cannot read Matt's conversation history. Every agent in the chain must be allowed.", a)
+			return fmt.Sprintf("Declined: this request came through %s, which is not on the %s allowlist, so it cannot %s. Every agent in the chain must be allowed.", a, agent, what)
 		}
 	}
 	return ""

@@ -8,7 +8,8 @@ import (
 // Every agent heals itself after a rebuild instead of asking the owner for
 // an invite. Tailnet agents run tincan rejoin; the proxy sandbox adds its
 // proxy; ChatGPT, which is not a tailnet machine, is told it cannot; the
-// history service, which is not a model, carries the rejoin in its setup.
+// history and web agent services, which are not models, carry the rejoin in
+// their setup.
 func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 	var roster []Member
 	for _, kind := range Kinds {
@@ -28,6 +29,14 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")
 			if want := "TINCAN_CONFIG=~/.config/tincan/history.json tincan rejoin --relay " + relayURL + " --name a-history"; !strings.Contains(setup, "not joined") || !strings.Contains(setup, want) {
 				t.Errorf("history setup lacks its rejoin line %q:\n%s", want, setup)
+			}
+			continue
+		}
+		if kind == KindChatGPTWeb || kind == KindClaudeWeb {
+			// Services too, with the fixed config path their service sets.
+			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")
+			if want := "TINCAN_CONFIG=~/.config/tincan/" + kind + ".json tincan rejoin --relay " + relayURL + " --name a-" + kind; !strings.Contains(setup, "not joined") || !strings.Contains(setup, want) {
+				t.Errorf("%s setup lacks its rejoin line %q:\n%s", kind, want, setup)
 			}
 			continue
 		}

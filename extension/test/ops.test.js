@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, OPS, CHUNK_BYTES, MAX_FILE_BYTES } from '../ops.js';
+import { validate, createRunner, OPS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -36,10 +36,14 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'claudeai.detail', 'claudeai.file', 'claudeai.list']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload']);
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
   validate({ id: 2, op: 'chatgpt.file', args: { file_id: 'file_00000000abcd1234', conversation_id: 'abc-1' } });
   validate({ id: 3, op: 'claudeai.detail', args: { id: 'c1a0d000-0000-4000-8000-000000000001' } });
+  assert.deepEqual(validate({ id: 4, op: 'chatgpt.send', args: { message: 'hello' } }).args, { message: 'hello' });
+  assert.deepEqual(validate({ id: 5, op: 'claudeai.send', args: { message: 'x'.repeat(MAX_MESSAGE_BYTES), conversation_id: 'abc-1', new_chat: false } }).args.conversation_id, 'abc-1');
+  assert.deepEqual(validate({ id: 6, op: 'chatgpt.send', args: { message: 'hi', new_chat: true } }).args, { message: 'hi', new_chat: true });
+  assert.deepEqual(validate({ id: 7, op: 'extension.reload', args: {} }), { id: 7, op: 'extension.reload', args: {} });
   const bad = [
     null,
     'chatgpt.list',
@@ -60,6 +64,19 @@ test('validate accepts only the fixed operation set with exact args', () => {
     { id: 1, op: 'claudeai.detail', args: {} },
     { id: 1, op: 'chatgpt.list' },
     { id: 1, op: 'chatgpt.list', args: { count: 1 }, extra: true },
+    { id: 1, op: 'chatgpt.send', args: {} },
+    { id: 1, op: 'chatgpt.send', args: { message: '' } },
+    { id: 1, op: 'chatgpt.send', args: { message: '  \n ' } },
+    { id: 1, op: 'chatgpt.send', args: { message: 42 } },
+    { id: 1, op: 'chatgpt.send', args: { message: 'x'.repeat(MAX_MESSAGE_BYTES + 1) } },
+    { id: 1, op: 'chatgpt.send', args: { message: '\u00e9'.repeat(MAX_MESSAGE_BYTES / 2 + 1) } },
+    { id: 1, op: 'chatgpt.send', args: { message: 'hi', conversation_id: '../c/x' } },
+    { id: 1, op: 'chatgpt.send', args: { message: 'hi', new_chat: 'yes' } },
+    { id: 1, op: 'chatgpt.send', args: { message: 'hi', new_chat: true, conversation_id: 'abc' } },
+    { id: 1, op: 'claudeai.send', args: { message: 'hi', code: 'alert(1)' } },
+    { id: 1, op: 'claudeai.send', args: { message: 'hi', url: 'https://evil.example/' } },
+    { id: 1, op: 'extension.reload', args: { now: true } },
+    { id: 1, op: 'extension.reload' },
   ];
   for (const m of bad) {
     assert.throws(() => validate(m), (e) => e.code === 'bad_request', JSON.stringify(m));
@@ -294,10 +311,26 @@ test('message content is data: a detail containing script text is returned untou
 });
 
 test('worker code has no dynamic code execution', () => {
-  for (const f of ['../ops.js', '../background.js']) {
-    const src = readFileSync(new URL(f, import.meta.url), 'utf8');
-    for (const banned of [/\beval\s*\(/, /new\s+Function\s*\(/, /importScripts\s*\(/, /set(Timeout|Interval)\s*\(\s*['"`]/, /chrome\.scripting/, /chrome\.tabs/]) {
-      assert.ok(!banned.test(src), `${f} matches ${banned}`);
+  const src = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
+  for (const f of ['../ops.js', '../background.js', '../send.js']) {
+    for (const banned of [/\beval\s*\(/, /new\s+Function\s*\(/, /importScripts\s*\(/, /set(Timeout|Interval)\s*\(\s*['"`]/, /chrome\.(debugger|webRequest|cookies|downloads)/]) {
+      assert.ok(!banned.test(src(f)), `${f} matches ${banned}`);
     }
+  }
+  // ops.js stays fetch-only; tabs and scripting are reached only through
+  // the sender background.js builds.
+  const code = (f) => src(f).replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(!/chrome\./.test(code('../ops.js')), 'ops.js uses no chrome API');
+  assert.ok(!/chrome\./.test(code('../send.js')), 'send.js gets tabs and scripting injected');
+  const bg = src('../background.js');
+  assert.deepEqual(bg.match(/chrome\.(tabs|scripting)\b/g), ['chrome.tabs', 'chrome.scripting']);
+  // Every injection is a fixed function with its data as args, and only
+  // send.js injects.
+  assert.ok(!/executeScript/.test(bg) && !/executeScript/.test(src('../ops.js')));
+  const send = src('../send.js');
+  const calls = send.match(/executeScript\([^)]*\)/g);
+  assert.deepEqual(calls, ['executeScript({ target: { tabId }, world: \'ISOLATED\', func, args })']);
+  for (const m of send.matchAll(/inject\(tab\.id, (\w+),/g)) {
+    assert.ok(['pageProbe', 'pageFill', 'pageSubmit'].includes(m[1]), m[1]);
   }
 });

@@ -33,11 +33,13 @@ const (
 	KindOpenClaw     = "openclaw"
 	KindCodex        = "codex"
 	KindHistory      = "history"
+	KindChatGPTWeb   = "chatgpt-web"
+	KindClaudeWeb    = "claude-web"
 	KindGeneric      = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindHistory, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindHistory, KindChatGPTWeb, KindClaudeWeb, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -61,6 +63,8 @@ var runtimeNames = map[string]string{
 	"openclaw":    KindOpenClaw,
 	"codex":       KindCodex,
 	"history":     KindHistory,
+	"chatgpt-web": KindChatGPTWeb,
+	"claude-web":  KindClaudeWeb,
 }
 
 // defaultWake is the wake method a kind normally uses.
@@ -74,6 +78,8 @@ var defaultWake = map[string]string{
 	KindOpenClaw:     "webhook",
 	KindCodex:        "command",
 	KindHistory:      "wait",
+	KindChatGPTWeb:   "wait",
+	KindClaudeWeb:    "wait",
 	KindGeneric:      "none",
 }
 
@@ -243,6 +249,12 @@ func expectOnline(kind, wake string) bool {
 	return false
 }
 
+// isService reports whether kind is a Tincan Go service rather than a
+// model: history and the web agents.
+func isService(kind string) bool {
+	return kind == KindHistory || kind == KindChatGPTWeb || kind == KindClaudeWeb
+}
+
 func agentBlock(d agentData) (AgentBlock, error) {
 	join, err := execute(templateFor("join."+d.Kind, "join.default"), d)
 	if err != nil {
@@ -257,7 +269,7 @@ func agentBlock(d agentData) (AgentBlock, error) {
 		return AgentBlock{}, err
 	}
 	instructions := strings.TrimSpace(common) + "\n" + strings.TrimSpace(specific)
-	if d.Kind == KindHistory {
+	if isService(d.Kind) {
 		// A Go service, not a model: there are no standing instructions.
 		instructions = strings.TrimSpace(specific)
 	}

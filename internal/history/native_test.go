@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -81,6 +82,10 @@ func TestValidateOp(t *testing.T) {
 		{OpChatGPTFile, OpArgs{FileID: "file-Sk3tchAbc123", ConversationID: "6a1f0c2e-1111-4a2b-9c3d-000000000001"}},
 		{OpChatGPTFile, OpArgs{FileID: "file_00000000abcd1234"}},
 		{OpClaudeAIFile, OpArgs{FileID: "f11e0000-0000-4000-8000-0000000000aa"}},
+		{OpChatGPTSend, OpArgs{Message: "hello"}},
+		{OpChatGPTSend, OpArgs{Message: "hi", NewChat: true}},
+		{OpClaudeAISend, OpArgs{Message: strings.Repeat("x", MaxSendMessage), ConversationID: "c1a0d000-0000-4000-8000-000000000001"}},
+		{OpExtensionReload, OpArgs{}},
 	}
 	for _, c := range ok {
 		if err := ValidateOp(c.op, c.a); err != nil {
@@ -104,6 +109,18 @@ func TestValidateOp(t *testing.T) {
 		{OpClaudeAIFile, OpArgs{FileID: "x/y"}},
 		{OpClaudeAIFile, OpArgs{FileID: "f1", ConversationID: "c1"}},
 		{OpChatGPTFile, OpArgs{}},
+		{OpChatGPTList, OpArgs{Count: 1, Message: "hi"}},
+		{OpChatGPTDetail, OpArgs{ID: "abc", NewChat: true}},
+		{OpChatGPTSend, OpArgs{}},
+		{OpChatGPTSend, OpArgs{Message: " \n\t"}},
+		{OpChatGPTSend, OpArgs{Message: strings.Repeat("x", MaxSendMessage+1)}},
+		{OpChatGPTSend, OpArgs{Message: "bad \xff utf8"}},
+		{OpChatGPTSend, OpArgs{Message: "hi", ConversationID: "../c/x"}},
+		{OpChatGPTSend, OpArgs{Message: "hi", ConversationID: "abc", NewChat: true}},
+		{OpClaudeAISend, OpArgs{Message: "hi", ID: "abc"}},
+		{OpClaudeAISend, OpArgs{Message: "hi", Count: 1}},
+		{OpExtensionReload, OpArgs{Count: 1}},
+		{OpExtensionReload, OpArgs{Message: "x"}},
 	}
 	for _, c := range bad {
 		if err := ValidateOp(c.op, c.a); err == nil {
@@ -416,5 +433,288 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestClientTimeouts(t *testing.T) {
+	c := &Client{}
+	if c.timeout(OpChatGPTSend) != SendClientTimeout || c.timeout(OpClaudeAISend) != SendClientTimeout {
+		t.Fatal("send ops do not get the send timeout")
+	}
+	if c.timeout(OpChatGPTFile) != 90*time.Second || c.timeout(OpChatGPTList) != 30*time.Second {
+		t.Fatal("read timeouts changed")
+	}
+	if SendHostTimeout <= 5*time.Minute || SendClientTimeout <= SendHostTimeout {
+		t.Fatal("timeouts must nest: extension 5m < host < client")
+	}
+}
+
+// A send goes through the host with its message intact and gets the long
+// send timeout; extension.reload is never relayed from the socket.
+func TestNativeHostRelaysSendRefusesReload(t *testing.T) {
+	dir := filepath.Join(shortDir(t), "n")
+	sock := filepath.Join(dir, "host.sock")
+	chromeToHostR, chromeToHostW := io.Pipe()
+	hostToChromeR, hostToChromeW := io.Pipe()
+	seen := make(chan NativeRequest, 16)
+	message := "line one\n<script>alert(1)</script> \"quoted\" " + strings.Repeat("<", 20000)
+	fakeExtension(t, hostToChromeR, chromeToHostW, seen, func(req NativeRequest) []NativeResponse {
+		if req.Op == OpChatGPTSend {
+			// Answer after the plain request timeout, inside the send one.
+			time.Sleep(300 * time.Millisecond)
+			return []NativeResponse{{OK: true, Result: json.RawMessage(`{"conversation_id":"conv-9","url":"https://chatgpt.com/c/conv-9","reply_text":"hi"}`)}}
+		}
+		return []NativeResponse{{Error: &NativeError{Code: "bad_request", Message: "unknown op"}}}
+	})
+	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, RequestTimeout: 100 * time.Millisecond, SendTimeout: 5 * time.Second}
+	go func() { _ = host.Run(context.Background()) }()
+	defer chromeToHostW.Close()
+	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
+
+	c := &Client{Channel: &SocketChannel{Path: sock, ChromeRunning: func() bool { return true }}, Timeout: 5 * time.Second}
+	res, err := c.Send(context.Background(), SourceChatGPT, message, "", true)
+	if err != nil || res.ConversationID != "conv-9" || res.ReplyText != "hi" {
+		t.Fatalf("send via host: %+v %v", res, err)
+	}
+	if r := <-seen; r.Op != OpChatGPTSend || r.Args.Message != message || !r.Args.NewChat {
+		t.Fatalf("extension saw %+v", r.Args.NewChat)
+	}
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = WriteMessage(conn, NativeRequest{ID: 3, Op: OpExtensionReload, Args: OpArgs{}}, MaxHostMessage)
+	b, err := ReadMessage(conn, MaxChromeMessage)
+	conn.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp NativeResponse
+	_ = json.Unmarshal(b, &resp)
+	if resp.OK || resp.Error == nil || resp.Error.Code != "bad_request" {
+		t.Fatalf("reload from the socket: %s", b)
+	}
+	select {
+	case r := <-seen:
+		t.Fatalf("reload from the socket reached the extension: %+v", r)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSendErrorCodes(t *testing.T) {
+	for code, want := range map[string]error{
+		"not_logged_in":      ErrNotLoggedIn,
+		"composer_not_found": ErrComposerNotFound,
+		"send_failed":        ErrSendFailed,
+		"timeout":            ErrTimeout,
+		"not_found":          ErrNotFound,
+		"unsupported":        ErrRejected,
+		"bad_request":        ErrRejected,
+	} {
+		ch := channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+			_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: code, Message: "detail"}})
+			return err
+		})
+		_, err := (&Client{Channel: ch}).Send(context.Background(), SourceClaudeAI, "hi", "", false)
+		if !errors.Is(err, want) {
+			t.Errorf("%s: got %v, want %v", code, err, want)
+		}
+	}
+	ch := channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: json.RawMessage(`{"conversation_id":"../x"}`)})
+		return err
+	})
+	if _, err := (&Client{Channel: ch}).Send(context.Background(), SourceChatGPT, "hi", "", false); !errors.Is(err, ErrEndpointChanged) {
+		t.Fatalf("bad conversation id in the answer: %v", err)
+	}
+}
+
+// channelFunc adapts a function to Channel.
+type channelFunc func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error
+
+func (f channelFunc) Exchange(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+	return f(ctx, req, recv)
+}
+
+// writeExtensionDir writes a fake unpacked extension and returns the hello
+// the loaded copy of exactly these files would send.
+func writeExtensionDir(t *testing.T, dir, version string, files map[string]string) Hello {
+	t.Helper()
+	files["manifest.json"] = `{"manifest_version":3,"version":"` + version + `"}`
+	h := Hello{Version: version, Unpacked: true, Files: map[string]string{}}
+	for name, body := range files {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sum, err := fileSHA256(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Files[name] = sum
+	}
+	return h
+}
+
+func TestExtensionDrift(t *testing.T) {
+	dir := t.TempDir()
+	h := writeExtensionDir(t, dir, "0.2.0", map[string]string{"ops.js": "a", "send.js": "b"})
+	reason, fp, err := ExtensionDrift(dir, h)
+	if err != nil || reason != "" || fp == "" {
+		t.Fatalf("same files: %q %q %v", reason, fp, err)
+	}
+	old := h
+	old.Version = "0.1.0"
+	if r, _, _ := ExtensionDrift(dir, old); !strings.Contains(r, "0.1.0 is loaded, 0.2.0 is on disk") {
+		t.Fatalf("version drift: %q", r)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "send.js"), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, fp2, _ := ExtensionDrift(dir, h)
+	if r != "send.js changed on disk" || fp2 == fp {
+		t.Fatalf("content drift: %q (fingerprint changed: %v)", r, fp2 != fp)
+	}
+	// A reported name that is not a plain file name is ignored, never read.
+	evil := Hello{Version: "0.2.0", Unpacked: true, Files: map[string]string{"../../etc/passwd": "x", "manifest.json": h.Files["manifest.json"]}}
+	if r, _, err := ExtensionDrift(dir, evil); err != nil || r != "" {
+		t.Fatalf("path in a hello: %q %v", r, err)
+	}
+	if _, _, err := ExtensionDrift(t.TempDir(), h); err == nil {
+		t.Fatal("dir without a manifest accepted")
+	}
+}
+
+// The host asks for a reload when the unpacked files on disk differ from
+// the loaded ones, never for a store install or matching files, and only
+// once per cooldown for the same files.
+func TestNativeHostHelloTriggersReload(t *testing.T) {
+	extDir := t.TempDir()
+	loaded := writeExtensionDir(t, extDir, "0.1.0", map[string]string{"ops.js": "old"})
+	onDisk := writeExtensionDir(t, extDir, "0.2.0", map[string]string{"ops.js": "new", "send.js": "new file"})
+
+	sock := filepath.Join(shortDir(t), "n", "host.sock")
+	chromeToHostR, chromeToHostW := io.Pipe()
+	hostToChromeR, hostToChromeW := io.Pipe()
+	var logBuf lockedBuffer
+	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, ExtensionDir: extDir, Log: &logBuf}
+	go func() { _ = host.Run(context.Background()) }()
+	defer chromeToHostW.Close()
+	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
+
+	fromHost := make(chan NativeRequest, 8)
+	go func() {
+		for {
+			b, err := ReadMessage(hostToChromeR, MaxHostMessage)
+			if err != nil {
+				return
+			}
+			var r NativeRequest
+			_ = json.Unmarshal(b, &r)
+			fromHost <- r
+		}
+	}()
+	hello := func(h Hello) {
+		if err := WriteMessage(chromeToHostW, map[string]any{"id": 0, "hello": h}, MaxChromeMessage); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expect := func(want bool, what string) {
+		t.Helper()
+		select {
+		case r := <-fromHost:
+			if !want || r.Op != OpExtensionReload || r.Args != (OpArgs{}) {
+				t.Fatalf("%s: host sent %+v", what, r)
+			}
+		case <-time.After(300 * time.Millisecond):
+			if want {
+				t.Fatalf("%s: no reload request", what)
+			}
+		}
+	}
+
+	hello(onDisk)
+	expect(false, "matching files")
+	store := loaded
+	store.Unpacked = false
+	hello(store)
+	expect(false, "store install")
+	hello(loaded)
+	expect(true, "old version loaded")
+	// The reload did not take (say the loaded copy lives elsewhere): the
+	// same hello again is not answered with another reload.
+	hello(loaded)
+	expect(false, "second hello toward the same files")
+	if !strings.Contains(logBuf.String(), "already asked") {
+		t.Fatalf("log: %s", logBuf.String())
+	}
+	// Once the cooldown has passed, it asks again.
+	statePath := filepath.Join(filepath.Dir(sock), "reload-state.json")
+	b, _ := os.ReadFile(statePath)
+	var st reloadState
+	_ = json.Unmarshal(b, &st)
+	st.At = st.At.Add(-reloadCooldown - time.Minute)
+	b, _ = json.Marshal(st)
+	if err := os.WriteFile(statePath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hello(loaded)
+	expect(true, "after the cooldown")
+	if fi, err := os.Stat(statePath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("state file: %v %v", fi, err)
+	}
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func TestInstallNativeHostExtensionDir(t *testing.T) {
+	home := t.TempDir()
+	ext := filepath.Join(home, "agent tincan", "extension")
+	if err := os.MkdirAll(ext, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ext, "manifest.json"), []byte(`{"version":"0.2.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := InstallNativeHost(InstallOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", NativeDir: filepath.Join(home, "n"), ExtensionDir: ext})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, _ := os.ReadFile(res.WrapperPath)
+	want := "#!/bin/sh\nexport " + ExtensionDirEnv + "='" + ext + "'\nexec '/opt/tincan' history native-host \"$@\"\n"
+	if string(w) != want {
+		t.Fatalf("wrapper:\n%s\nwant:\n%s", w, want)
+	}
+	for _, bad := range []string{"relative/extension", filepath.Join(home, "missing"), ext + "'; rm -rf ~"} {
+		if _, err := InstallNativeHost(InstallOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", NativeDir: filepath.Join(home, "n"), ExtensionDir: bad}); err == nil {
+			t.Errorf("extension dir %q accepted", bad)
+		}
+	}
+}
+
+func TestOldExtensionUnknownOpSaysReload(t *testing.T) {
+	ch := channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: "bad_request", Message: "unknown operation"}})
+		return err
+	})
+	_, err := (&Client{Channel: ch}).Send(context.Background(), SourceChatGPT, "hi", "", false)
+	if err == nil || !strings.Contains(err.Error(), "reload it once from chrome://extensions") {
+		t.Fatalf("err = %v", err)
 	}
 }

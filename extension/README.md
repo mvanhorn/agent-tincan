@@ -1,12 +1,27 @@
 # Agent Tincan History extension
 
 Manifest V3 extension that lets the `history` agent read ChatGPT and claude.ai
-conversations through the user's own logged-in Chrome. Its service worker runs
-a fixed set of read operations (`ops.js`) for the native host
-`com.agenttincan.history` (`tincan history native-host`) and returns JSON,
-with images as base64 in chunks of at most 384 KiB. It accepts nothing else and
-never runs code from a message or a page. The ChatGPT access token is read from
-`/api/auth/session` inside the worker and never leaves it.
+conversations, and the `chatgpt-web` and `claude-web` agents send to them,
+through the user's own logged-in Chrome. Its service worker runs a fixed set of
+operations (`ops.js`) for the native host `com.agenttincan.history`
+(`tincan history native-host`) and returns JSON, with images as base64 in
+chunks of at most 384 KiB. It accepts nothing else and never runs code from a
+message or a page. The ChatGPT access token is read from `/api/auth/session`
+inside the worker and never leaves it.
+
+The send operations (`chatgpt.send`, `claudeai.send`, in `send.js`) open a
+background tab of their own, fill the message box through fixed page functions
+injected with `chrome.scripting` (message as an argument, isolated world),
+click send, wait for the answer to finish (5 minute limit), and close the tab.
+All page selectors are in the `SELECTORS` table in `send.js`; see
+docs/adapters/web-agents.md.
+
+On connect the worker sends the host a hello with its version and the sha256
+of each file. When `tincan history install --extension-dir` (or a run from the
+repo checkout) told the host where the unpacked files are, and they differ,
+the host sends `extension.reload` and the worker calls
+`chrome.runtime.reload()`, so updates need no Reload click after the first
+load.
 
 ## Extension id
 

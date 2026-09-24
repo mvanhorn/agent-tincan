@@ -100,3 +100,81 @@ func TestInstallServiceRejectsUnsafeBinary(t *testing.T) {
 		t.Error("windows accepted; there is no service definition for it")
 	}
 }
+
+func TestInstallWebServiceDarwinWritesPlistNotLoaded(t *testing.T) {
+	for _, site := range WebSites {
+		home := t.TempDir()
+		res, err := InstallWebService(site, ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin <can>/tincan", UID: 501})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.web."+string(site)+".plist")
+		if res.Path != want {
+			t.Fatalf("path = %s, want %s", res.Path, want)
+		}
+		b, err := os.ReadFile(res.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		if strings.Contains(s, "__") {
+			t.Fatalf("placeholder left:\n%s", s)
+		}
+		var strs []string
+		dec := xml.NewDecoder(strings.NewReader(s))
+		for {
+			tok, err := dec.Token()
+			if err != nil {
+				break
+			}
+			if cd, ok := tok.(xml.CharData); ok && strings.TrimSpace(string(cd)) != "" {
+				strs = append(strs, string(cd))
+			}
+		}
+		joined := strings.Join(strs, "|")
+		agent := WebAgentName(site)
+		for _, want := range []string{
+			"com.agenttincan.web." + string(site),
+			"/opt/tin <can>/tincan|web|serve|--site|" + string(site),
+			home + "/.config/tincan/" + agent + ".json",
+			home + "/Library/Logs/tincan-" + agent + ".log",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("plist missing %q:\n%s", want, joined)
+			}
+		}
+		// Written, never loaded: the caller gets the command to run.
+		if res.Next != "launchctl bootstrap gui/501 "+res.Path {
+			t.Fatalf("next = %q", res.Next)
+		}
+		if st, _ := os.Stat(res.Path); st.Mode().Perm() != 0o644 {
+			t.Fatalf("mode %v", st.Mode())
+		}
+	}
+	if WebAgentName(SourceChatGPT) != "chatgpt-web" || WebAgentName(SourceClaudeAI) != "claude-web" {
+		t.Fatal("default agent names changed")
+	}
+}
+
+func TestInstallWebServiceLinuxAndBadInput(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallWebService(SourceClaudeAI, ServiceOptions{GOOS: "linux", Home: home, Binary: "/opt/tincan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	for _, want := range []string{`ExecStart="/opt/tincan" web serve --site claude-ai`, "TINCAN_CONFIG=%h/.config/tincan/claude-web.json"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("unit missing %q:\n%s", want, b)
+		}
+	}
+	if !strings.HasSuffix(res.Next, "tincan-claude-web.service") {
+		t.Fatalf("next = %q", res.Next)
+	}
+	if _, err := InstallWebService("codex", ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan"}); err == nil {
+		t.Fatal("site codex accepted")
+	}
+	if _, err := InstallWebService(SourceChatGPT, ServiceOptions{GOOS: "darwin", Home: home, Binary: "rel/tincan"}); err == nil {
+		t.Fatal("relative binary accepted")
+	}
+}

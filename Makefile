@@ -34,7 +34,7 @@ spike:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o spike/bin/spike-poller-darwin-arm64 ./spike/poller
 
 # The zip holds only what Chrome loads; tests and package.json stay out.
-EXTENSION_FILES := manifest.json background.js ops.js
+EXTENSION_FILES := manifest.json background.js ops.js send.js
 
 extension:
 	mkdir -p dist

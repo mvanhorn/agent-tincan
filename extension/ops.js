@@ -1,10 +1,14 @@
-// Fixed read operations for the Agent Tincan history bridge.
+// Fixed operations for the Agent Tincan history bridge and web agents.
 //
 // The native host sends {id, op, args}. Only the operations in SPEC exist,
-// and their arguments are only validated ids and integer counts. Each
-// operation runs the fixed fetch code below with the user's own session
-// (credentials: 'include'). Nothing in a message or a response is ever
-// executed; responses are returned as data.
+// and their arguments are only validated ids, integer counts, booleans and
+// one capped message string. The read operations run the fixed fetch code
+// below with the user's own session (credentials: 'include'). The send
+// operations hand the message, as data, to the sender (send.js), which
+// types it into a background tab the extension opens itself.
+// extension.reload asks the worker to reload itself so Chrome re-reads the
+// unpacked files after an update. Nothing in a message or a response is
+// ever executed; responses are returned as data.
 //
 // ChatGPT's access token is read from /api/auth/session inside this worker
 // and used only for the Authorization header of the next requests. It is
@@ -16,13 +20,20 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 // A multiple of 3 so every chunk is whole base64; 512 KiB encoded per
 // message.
 export const CHUNK_BYTES = 384 * 1024;
+// MAX_MESSAGE_BYTES caps a send op's message (UTF-8 bytes).
+export const MAX_MESSAGE_BYTES = 32 * 1024;
+// EXTENSION_FILES are the files the hello message reports hashes of, so the
+// native host can tell when the unpacked files on disk have changed.
+export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js']);
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CHATGPT = 'https://chatgpt.com';
 const CLAUDE = 'https://claude.ai';
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
-// required id, 'id?' an optional id.
+// required id, 'id?' an optional id, 'bool?' an optional boolean and
+// 'message' a required non-blank string of at most MAX_MESSAGE_BYTES.
+const SEND_SPEC = Object.freeze({ message: 'message', conversation_id: 'id?', new_chat: 'bool?' });
 const SPEC = Object.freeze({
   'chatgpt.list': Object.freeze({ count: 'count' }),
   'chatgpt.detail': Object.freeze({ id: 'id' }),
@@ -30,6 +41,9 @@ const SPEC = Object.freeze({
   'claudeai.list': Object.freeze({ count: 'count' }),
   'claudeai.detail': Object.freeze({ id: 'id' }),
   'claudeai.file': Object.freeze({ file_id: 'id' }),
+  'chatgpt.send': SEND_SPEC,
+  'claudeai.send': SEND_SPEC,
+  'extension.reload': Object.freeze({}),
 });
 
 export const OPS = new Set(Object.keys(SPEC));
@@ -68,14 +82,45 @@ export function validate(msg) {
     if (kind === 'count') {
       if (!Number.isInteger(v) || v < 1 || v > MAX_COUNT) throw bad(`${k} must be an integer from 1 to ${MAX_COUNT}`);
       out[k] = v;
-    } else if (v === undefined && kind === 'id?') {
+    } else if (v === undefined && (kind === 'id?' || kind === 'bool?')) {
       continue;
+    } else if (kind === 'bool?') {
+      if (typeof v !== 'boolean') throw bad(`${k} must be a boolean`);
+      out[k] = v;
+    } else if (kind === 'message') {
+      if (typeof v !== 'string' || v.trim() === '') throw bad(`${k} must be a non-empty string`);
+      if (new TextEncoder().encode(v).length > MAX_MESSAGE_BYTES) throw bad(`${k} is over ${MAX_MESSAGE_BYTES} bytes`);
+      out[k] = v;
     } else {
       if (typeof v !== 'string' || !ID_RE.test(v)) throw bad(`invalid ${k}`);
       out[k] = v;
     }
   }
+  if (out.new_chat === true && out.conversation_id !== undefined) throw bad('new_chat and conversation_id together');
   return { id, op, args: out };
+}
+
+async function sha256Hex(bytes) {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  return Array.from(d, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// helloMessage is what the worker tells the native host when it connects:
+// its version, whether it is unpacked (only an unpacked extension picks up
+// new files on reload), and the sha256 of each of its files as Chrome
+// loaded them. A file that cannot be read is reported as ''.
+export async function helloMessage({ manifest, getURL, fetch }) {
+  const files = {};
+  for (const name of EXTENSION_FILES) {
+    try {
+      const res = await fetch(getURL(name), { cache: 'no-store' });
+      files[name] = res.ok ? await sha256Hex(new Uint8Array(await res.arrayBuffer())) : '';
+    } catch {
+      files[name] = '';
+    }
+  }
+  const m = manifest && typeof manifest === 'object' ? manifest : {};
+  return { id: 0, hello: { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files } };
 }
 
 function pathOf(url) {
@@ -113,7 +158,10 @@ function b64(bytes) {
   return btoa(s);
 }
 
-export function createRunner({ fetch }) {
+// createRunner returns the operation runner. sender (send.js) carries out
+// the send operations; reload reloads the extension. Either may be absent,
+// and its operations then fail as unsupported.
+export function createRunner({ fetch, sender = null, reload = null }) {
   let claudeOrg = null;
 
   async function send(url, init) {
@@ -259,6 +307,25 @@ export function createRunner({ fetch }) {
     async 'claudeai.file'(a, emit) {
       const org = await claudeOrgId();
       await emitFile(`${CLAUDE}/api/${org}/files/${encodeURIComponent(a.file_id)}/preview`, { credentials: 'include' }, emit);
+      return undefined;
+    },
+    // The session check runs first, so a logged-out browser never gets a
+    // tab and never sends anonymously.
+    async 'chatgpt.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      await chatgptAuth();
+      return sender.send('chatgpt', a);
+    },
+    async 'claudeai.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      await claudeOrgId();
+      return sender.send('claudeai', a);
+    },
+    // The answer goes out first; the reload follows a moment later.
+    async 'extension.reload'(_a, emit) {
+      if (!reload) throw new OpError('unsupported', 'reload is not available');
+      emit({ ok: true, result: { reloading: true } });
+      setTimeout(reload, 200);
       return undefined;
     },
   };

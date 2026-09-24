@@ -56,6 +56,8 @@ On Linux:
 systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service
 ```
 
+Run from the repo checkout (or with `--extension-dir <path to extension/>`), install also tells the native host where the unpacked extension lives; the host then reloads the extension whenever those files change, so updates need no Reload click in `chrome://extensions` after the first load (see [web-agents.md](web-agents.md#extension-updates)).
+
 Pass `--no-service` to skip the service definition. To run it by hand instead: `tincan history serve` (flags: `--config`, default `$TINCAN_CONFIG` or `~/.config/tincan/history.json`; `--allowlist`; `--codex`, the codex binary for the query step). It stops cleanly on SIGINT or SIGTERM, finishing the request it is on. It refuses to start unless the relay confirms it is the `history` agent, so a config for another agent (say `$TINCAN_CONFIG` pointing at `codex.json`) can never claim that agent's requests.
 
 The service needs `codex` logged in on the Mac for the query step. The plist puts the directory where `codex` was found at install time first on `PATH`.

@@ -32,6 +32,10 @@ Add a `history` agent on your Mac and any allowed agent can ask what you last as
 
 `history` is a small service (`tincan history serve`), not another model. It reads Codex and Claude Code from their local logs, and ChatGPT and claude.ai through the Tincan Chrome extension in your already logged-in Chrome: a one-click Chrome Web Store install once the listing is live (load it unpacked until then); no cookies or tokens ever leave the browser, and Chrome is never restarted. Only agents on its allowlist (`~/.config/tincan/history-allow.txt`) can ask, and every agent in the request's chain must be on it. `tincan onboard` prints the setup. Details in [docs/adapters/history.md](docs/adapters/history.md).
 
+## ChatGPT and Claude as teammates
+
+Add a `chatgpt-web` or `claude-web` agent and your other agents can ask ChatGPT or Claude directly: `tincan ask chatgpt-web "..."` comes back with ChatGPT's answer and any images it generated attached. It is a small service (`tincan web serve`) that has the Tincan Chrome extension type the message into your logged-in chatgpt.com or claude.ai in a background tab it opens and closes, so it acts as you there and the chats show up in your history. A first line `new chat` or `conversation: <id>` picks the conversation; otherwise each asker continues its own last one. The same kind of allowlist as `history` applies to the whole chain. Details in [docs/adapters/web-agents.md](docs/adapters/web-agents.md).
+
 ## Keeping it running
 
 - `tincan agents` shows every agent, how it wakes, and when it last called the relay. A wait or listen loop that died shows up as a growing "last seen".
@@ -40,7 +44,7 @@ Add a `history` agent on your Mac and any allowed agent can ask what you last as
 
 ## Quick start
 
-See [docs/quickstart.md](docs/quickstart.md). Guides for specific agents are in [docs/adapters/](docs/adapters/): [Grok Bot](docs/adapters/grokbot.md), [e2b sandboxes](docs/adapters/e2b.md), [proxy-only sandboxes](docs/adapters/proxy-sandbox.md), [ChatGPT](docs/adapters/chatgpt.md), [Claude Code](docs/adapters/claude-code.md), [Hermes Agent](docs/adapters/hermes.md), [OpenClaw](docs/adapters/openclaw.md), [OpenAI Codex CLI](docs/adapters/codex.md), and the [history agent](docs/adapters/history.md).
+See [docs/quickstart.md](docs/quickstart.md). Guides for specific agents are in [docs/adapters/](docs/adapters/): [Grok Bot](docs/adapters/grokbot.md), [e2b sandboxes](docs/adapters/e2b.md), [proxy-only sandboxes](docs/adapters/proxy-sandbox.md), [ChatGPT](docs/adapters/chatgpt.md), [Claude Code](docs/adapters/claude-code.md), [Hermes Agent](docs/adapters/hermes.md), [OpenClaw](docs/adapters/openclaw.md), [OpenAI Codex CLI](docs/adapters/codex.md), the [history agent](docs/adapters/history.md), and the [ChatGPT and Claude web agents](docs/adapters/web-agents.md).
 
 ## Trust model
 

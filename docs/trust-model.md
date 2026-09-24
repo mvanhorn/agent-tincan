@@ -38,10 +38,20 @@ The `history` agent reads the owner's own conversations in ChatGPT, claude.ai, C
 - The allowlist (`~/.config/tincan/history-allow.txt`) covers the whole request chain as the relay recorded it, not just the sender. If muse asks codex and codex asks history while handling muse's request, the request is declined because of muse. The chain and sender come from the relay, never from the request body. An unreadable allowlist or a bad name in it declines everyone.
 - The access check runs in Go before any model sees the request. The only model step turns the question text into a structured query; it sees nothing else, runs with no tools, no MCP servers and a read-only sandbox, and its output is checked against a schema in Go.
 - Retrieved chat content is never sent to a model. Replies are filled in from a fixed template, so text inside the owner's chats cannot steer the service or anyone it answers.
-- Live reads go through the Tincan Chrome extension with the owner's existing session. The extension runs only its own fixed read operations and accepts nothing else; no cookie or token leaves the browser, and Chrome is never quit or restarted.
+- Live reads go through the Tincan Chrome extension with the owner's existing session. The extension runs only its own fixed operations and accepts nothing else; no cookie or token leaves the browser, and Chrome is never quit or restarted.
 - Images it returns are relay attachments and follow the retention above.
 
 Anyone on the allowlist can read the owner's chat history. Keep the list to agents you would trust with it, and remember that an allowed agent that reads untrusted content can still be talked into asking. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on the owner's machine (for example the Codex wake, which looks up prior threads with `tincan history codex`) can read local Codex and Claude Code history directly, consistent with the full trust between joined agents.
+
+## The web agents
+
+The `chatgpt-web` and `claude-web` agents act as the owner in ChatGPT and Claude: whatever an allowed agent asks is typed into the owner's logged-in account, uses the owner's plan, lands in the owner's chat history, and can draw on that account's memory and custom instructions ([docs/adapters/web-agents.md](adapters/web-agents.md)). The answer goes back to the asker, and that answer can include what the site remembers about the owner.
+
+- The allowlist (`~/.config/tincan/chatgpt-web-allow.txt`, `claude-web-allow.txt`) covers the whole relay-recorded chain, as for history. Relaying through an allowed agent never widens access. An unreadable allowlist or a bad name in it declines everyone.
+- The message is data. The extension passes it as an argument to a fixed function in an isolated content script and inserts it as text; nothing in a message or a page is executed. The extension still accepts only its fixed operation set, and the send operations take only a capped message, an optional validated conversation id and a boolean.
+- The extension opens and closes its own background tab and never scripts a tab the owner opened. It checks the site session before opening a tab, so a logged-out browser never sends anonymously.
+- The state file keeps only which conversation each asker used last (0600), never message text.
+- The site's answer is untrusted content: the web agents reply with it as is. An agent that acts on a web agent's answer is reading model output, with the risk described below.
 
 ## What it deliberately does not do
 

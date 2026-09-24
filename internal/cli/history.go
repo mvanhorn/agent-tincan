@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -119,7 +120,7 @@ func historyCmd() *cobra.Command {
 }
 
 func historyInstallCmd() *cobra.Command {
-	var extID, binary string
+	var extID, binary, extDir string
 	var noService bool
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -128,15 +129,25 @@ func historyInstallCmd() *cobra.Command {
 			"NativeMessagingHosts directory (no admin rights), allowed only for the Tincan extension, pointing at a\n" +
 			"wrapper that runs tincan history native-host. On Windows it also prints the registry entry to add.\n" +
 			"It also writes the history service definition (a launchd agent on macOS, a systemd user unit on Linux)\n" +
-			"that runs tincan history serve, and prints the command that starts it. It never starts it itself.",
+			"that runs tincan history serve, and prints the command that starts it. It never starts it itself.\n" +
+			"With --extension-dir (the unpacked extension folder; default ./extension when it is the Tincan extension),\n" +
+			"the host reloads the extension whenever the files there change, so updates need no Reload click.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			res, err := history.InstallNativeHost(history.InstallOptions{ExtensionID: extID, Binary: binary})
+			if extDir == "" {
+				extDir = detectExtensionDir(extID)
+			} else if abs, err := filepath.Abs(extDir); err == nil {
+				extDir = abs
+			}
+			res, err := history.InstallNativeHost(history.InstallOptions{ExtensionID: extID, Binary: binary, ExtensionDir: extDir})
 			if err != nil {
 				return err
 			}
 			cmd.Printf("native host manifest: %s\n", res.ManifestPath)
 			cmd.Printf("native host wrapper: %s\n", res.WrapperPath)
+			if extDir != "" {
+				cmd.Printf("unpacked extension: %s (the extension reloads itself when these files change)\n", extDir)
+			}
 			if res.Note != "" {
 				cmd.Println(res.Note)
 			}
@@ -156,7 +167,32 @@ func historyInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&extID, "extension-id", history.DefaultExtensionID, "Chrome extension id allowed to start the host")
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the host and the service run (default: this executable)")
 	cmd.Flags().BoolVar(&noService, "no-service", false, "do not write the history service definition")
+	cmd.Flags().StringVar(&extDir, "extension-dir", "", "the unpacked extension folder to keep Chrome in sync with (default ./extension when it holds the Tincan extension)")
 	return cmd
+}
+
+// detectExtensionDir returns ./extension, absolute, when its manifest key
+// gives extID, so running install from a repo checkout wires up automatic
+// reloads. Anything else returns "".
+func detectExtensionDir(extID string) string {
+	b, err := os.ReadFile(filepath.Join("extension", "manifest.json"))
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal(b, &m) != nil || m.Key == "" {
+		return ""
+	}
+	if id, err := history.ExtensionIDFromKey(m.Key); err != nil || id != extID {
+		return ""
+	}
+	abs, err := filepath.Abs("extension")
+	if err != nil {
+		return ""
+	}
+	return abs
 }
 
 // defaultHistoryConfig is the history agent's own client config:
@@ -278,7 +314,13 @@ func historyNativeHostCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			host := &history.NativeHost{SocketPath: history.DefaultSocketPath(), In: os.Stdin, Out: os.Stdout}
+			host := &history.NativeHost{
+				SocketPath:   history.DefaultSocketPath(),
+				In:           os.Stdin,
+				Out:          os.Stdout,
+				ExtensionDir: os.Getenv(history.ExtensionDirEnv),
+				Log:          os.Stderr,
+			}
 			return host.Run(ctx)
 		},
 	}
