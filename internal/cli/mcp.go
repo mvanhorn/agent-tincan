@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -39,9 +38,9 @@ for another session or a later check. Start Claude Code with:
 			}
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			if !channel {
-				return mcpserver.New(r, Version, files).Run(cmd.Context(), &mcp.StdioTransport{})
+				return mcpserver.New(r, Version, files).Run(cmd.Context(), mcpserver.Stdio())
 			}
-			t := mcpserver.NewChannelTransport(&mcp.StdioTransport{})
+			t := mcpserver.NewChannelTransport(mcpserver.Stdio())
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			go pushWaiting(ctx, r, t)
