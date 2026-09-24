@@ -46,7 +46,16 @@ func TestRejoinHint(t *testing.T) {
 	if !client.IsStatus(err, 403) {
 		t.Fatal("hinted error must still unwrap to the relay error")
 	}
-	if got := client.RejoinHint(errors.New("no relay configured"), ""); !strings.Contains(got.Error(), "tincan rejoin --relay <relay url>") {
+	// The two branches say different things: only the no-relay hint
+	// speaks to an admin device that never joined, and only the
+	// not-joined hint says a never-joined machine needs an invite.
+	const adminLine = "An admin device that never joined does not need this"
+	const inviteLine = "Only a machine that was never joined needs an invite from an admin"
+	if msg := err.Error(); strings.Contains(msg, adminLine) || !strings.Contains(msg, inviteLine) {
+		t.Fatalf("not-joined hint = %v", err)
+	}
+	got := client.RejoinHint(errors.New("no relay configured"), "")
+	if msg := got.Error(); !strings.Contains(msg, "tincan rejoin --relay <relay url>") || !strings.Contains(msg, adminLine) || strings.Contains(msg, inviteLine) {
 		t.Fatalf("hint without relay = %v", got)
 	}
 	other := errors.New("no such agent: bob")

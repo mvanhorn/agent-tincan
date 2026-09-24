@@ -73,7 +73,7 @@ After=network-online.target
 [Service]
 ExecStart="__TINCAN_BINARY__" history serve
 Environment=TINCAN_CONFIG=%h/.config/tincan/history.json
-Environment=PATH=__PATH__
+Environment="PATH=__PATH__"
 Restart=always
 RestartSec=10
 
@@ -221,7 +221,14 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 		return ServiceResult{Path: dst, Next: fmt.Sprintf("launchctl bootstrap gui/%d %s", o.UID, dst)}, nil
 	case "linux":
 		dst := filepath.Join(o.Home, ".config", "systemd", "user", d.unit)
-		body := strings.NewReplacer(d.vars...).Replace(d.systemd)
+		esc := make([]string, len(d.vars))
+		for i, v := range d.vars {
+			if i%2 == 1 {
+				v = systemdEscape(v)
+			}
+			esc[i] = v
+		}
+		body := strings.NewReplacer(esc...).Replace(d.systemd)
 		if err := writeService(dst, body); err != nil {
 			return ServiceResult{}, err
 		}
@@ -232,8 +239,11 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 
 // servicePath is the PATH a service runs with on goos: the tool
 // directories found at install time, then the per-user bins under home,
-// then the OS default bins. Directories that cannot be written safely into
-// a plist or a systemd Environment line are skipped, and none repeats.
+// then the OS default bins. The result is raw; installServiceDef escapes it
+// for the plist (XML) or the quoted systemd Environment line, so spaces,
+// %, $ and backslashes are kept. Only directories that cannot be written
+// at all are skipped: relative ones, and those holding a colon (the PATH
+// separator), a newline, a NUL or a double quote. None repeats.
 func servicePath(goos, home string, toolDirs ...string) string {
 	var dirs []string
 	dirs = append(dirs, toolDirs...)
@@ -249,7 +259,7 @@ func servicePath(goos, home string, toolDirs ...string) string {
 	dirs = append(dirs, base...)
 	var parts []string
 	for _, d := range dirs {
-		if d == "" || !filepath.IsAbs(d) || strings.ContainsAny(d, ":\n\r\x00\"\\%$ ") || slices.Contains(parts, d) {
+		if d == "" || !filepath.IsAbs(d) || strings.ContainsAny(d, ":\n\r\x00\"") || slices.Contains(parts, d) {
 			continue
 		}
 		parts = append(parts, d)
@@ -262,6 +272,14 @@ func writeService(dst, body string) error {
 		return err
 	}
 	return writeFileAtomic(dst, []byte(body), 0o644)
+}
+
+// systemdEscape makes s safe inside a double-quoted systemd value (the
+// ExecStart binary, the Environment="PATH=..." assignment): backslashes
+// and quotes are escaped and % is doubled so it is not read as a
+// specifier.
+func systemdEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%").Replace(s)
 }
 
 func xmlEscape(s string) string {
@@ -325,7 +343,7 @@ After=network-online.target
 [Service]
 ExecStart="__TINCAN_BINARY__" web serve --site __SITE__
 Environment=TINCAN_CONFIG=%h/.config/tincan/__AGENT__.json
-Environment=PATH=__PATH__
+Environment="PATH=__PATH__"
 Restart=always
 RestartSec=10
 

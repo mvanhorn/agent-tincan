@@ -389,6 +389,13 @@ var serverStatus = regexp.MustCompile(`^HTTP 5\d\d\b`)
 // maxRetryAfter caps a Retry-After the site (or the extension) reports.
 const maxRetryAfter = time.Hour
 
+// clampRetryAfterSeconds turns a reported Retry-After in seconds into a
+// wait between zero and maxRetryAfter. The client's error mapping and the
+// native host's cooldown both use it, so the two layers agree.
+func clampRetryAfterSeconds(secs int) time.Duration {
+	return time.Duration(min(max(secs, 0), int(maxRetryAfter/time.Second))) * time.Second
+}
+
 // DefaultRateLimitCooldown is how long every request to a site is refused
 // locally after a 429 that carried no Retry-After.
 const DefaultRateLimitCooldown = 30 * time.Second
@@ -460,7 +467,7 @@ func fromNativeError(s Source, ne *NativeError) error {
 	case "unsupported":
 		return unavailable(s, ErrRejected, "the extension needs an update: "+detail)
 	case "rate_limited", "http_429":
-		after := time.Duration(min(max(ne.RetryAfter, 0), int(maxRetryAfter/time.Second))) * time.Second
+		after := clampRetryAfterSeconds(ne.RetryAfter)
 		return &UnavailableError{Source: s, Kind: ErrRateLimited, Detail: detail, RetryAfter: after}
 	}
 	return unavailable(s, ErrSourceFailed, detail)
@@ -1050,7 +1057,7 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 			}
 			r.ID = clientID
 			if r.Error != nil && (r.Error.Code == "rate_limited" || r.Error.Code == "http_429") {
-				after := time.Duration(min(max(r.Error.RetryAfter, 0), int(maxRetryAfter/time.Second))) * time.Second
+				after := clampRetryAfterSeconds(r.Error.RetryAfter)
 				if after <= 0 {
 					after = DefaultRateLimitCooldown
 				}

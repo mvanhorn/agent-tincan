@@ -87,14 +87,44 @@ func TestInvitePrintsRelayURL(t *testing.T) {
 		t.Fatalf("invite over socket output = %q", out)
 	}
 
-	// A saved relay (an admin device that is also a joined agent) is known.
-	useConfig(t, client.Config{Relay: "http://tincan-relay"})
+	// Over the socket a saved relay is not trusted: it may name a
+	// different relay than the one the socket serves, so the placeholder
+	// stays unless --relay says which.
+	useConfig(t, client.Config{Relay: "http://other-relay"})
 	out, err = run(t, inviteCmd(), "codex", "--socket", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(out, "--relay <relay URL>") || strings.Contains(out, "other-relay") {
+		t.Fatalf("invite over socket with a saved relay output = %q", out)
+	}
+	out, err = run(t, inviteCmd(), "codex", "--socket", sock, "--relay", "http://tincan-relay")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out, "--relay http://tincan-relay\n") {
-		t.Fatalf("invite with saved relay output = %q", out)
+		t.Fatalf("invite over socket with --relay output = %q", out)
+	}
+
+	// Without --socket the invite went to the saved relay, so that one is
+	// printed.
+	useConfig(t, client.Config{Relay: url})
+	out, err = run(t, inviteCmd(), "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "--relay "+url+"\n") {
+		t.Fatalf("invite through the saved relay output = %q", out)
+	}
+}
+
+// With no saved relay and neither --relay nor --socket, tincan agents says
+// how to point it at the relay instead of failing somewhere deeper.
+func TestAgentsWithoutRelayExplains(t *testing.T) {
+	useConfig(t, client.Config{})
+	_, err := run(t, Root(), "agents")
+	if err == nil || !strings.Contains(err.Error(), "no relay configured: on an admin device pass --relay") {
+		t.Fatalf("agents with no relay: %v", err)
 	}
 }
 
@@ -152,14 +182,31 @@ func TestOnboardWithNoConfigHasNoRejoinHint(t *testing.T) {
 	}
 }
 
-// --listen is checked before the relay creates its database.
+// --listen is fully parsed before the relay creates its state dir or
+// database.
 func TestRelayRejectsBadListenBeforeCreatingState(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "state")
-	err := runRelay(context.Background(), relayFlags{listen: "127.0.0.1", stateDir: dir, port: 8787})
-	if err == nil || !strings.Contains(err.Error(), "--listen must be a tailnet 100.x address") {
-		t.Fatalf("err = %v", err)
+	for _, listen := range []string{"127.0.0.1", "100.not-an-ip", "100.64.1", "100.64.1.2.3", "100.64.1.2:notaport", "100.64.1.2:0", "100.64.1.2:70000", "[::1]:80", "::1", "tincan-relay"} {
+		dir := filepath.Join(t.TempDir(), "state")
+		err := runRelay(context.Background(), relayFlags{listen: listen, stateDir: dir, port: 8787})
+		if err == nil || !strings.Contains(err.Error(), "--listen must be a tailnet 100.x address") {
+			t.Fatalf("%q: err = %v", listen, err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("%q: the state dir was created before --listen was checked: %v", listen, err)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "relay.db")); !os.IsNotExist(err) {
-		t.Fatalf("relay.db was created before --listen was checked: %v", err)
+}
+
+func TestListenAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"100.64.1.2":      "100.64.1.2:8787",
+		" 100.64.1.2 ":    "100.64.1.2:8787",
+		"100.101.102.103": "100.101.102.103:8787",
+		"100.64.1.2:9000": "100.64.1.2:9000",
+	} {
+		got, err := listenAddr(in, 8787)
+		if err != nil || got != want {
+			t.Errorf("listenAddr(%q) = %q, %v; want %q", in, got, err, want)
+		}
 	}
 }

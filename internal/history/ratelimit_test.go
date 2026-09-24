@@ -208,10 +208,14 @@ func TestWebRateLimitBudgetAndCooldown(t *testing.T) {
 		})
 		rig.agent.RequestTimeout = 3 * time.Minute
 		res := rig.ask(t, "grokbot", "new chat\nhi")
-		want := siteLabel(site) + " is rate-limiting this account right now; try again later"
-		if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, want) {
-			t.Fatalf("%s: %s %q", site, res.Status, res.Reply.Body)
+		// The message was already sent: the reply says so, names the
+		// conversation, and does not invite sending it again.
+		sent := "Sorry, " + siteLabel(site) + " is rate-limiting this account right now. The message was sent to " +
+			siteLabel(site) + " (conversation " + scriptConv + "); ask for the reply later instead of sending it again."
+		if res.Status != envelope.StatusFailed || res.Reply.Body != sent {
+			t.Fatalf("%s: %s %q\nwant %q", site, res.Status, res.Reply.Body, sent)
 		}
+		want := siteLabel(site) + " is rate-limiting this account right now; try again later"
 		// Reads at 5s, 35s, 95s; the next (at 215s) is past the budget.
 		if _, gaps := rig.gaps(); len(gaps) != 2 {
 			t.Fatalf("%s: gaps = %v", site, gaps)
@@ -564,4 +568,114 @@ func TestNativeHostRechecksExtensionFiles(t *testing.T) {
 		t.Fatalf("asked again inside the cooldown: %+v", r)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// Before anything is sent, a rate limit keeps the bare message: nothing
+// went through, so trying again later is the right advice.
+func TestSendFailureRateLimitKeepsBareMessage(t *testing.T) {
+	w := &WebAgent{Site: SourceChatGPT}
+	err := fromNativeError(SourceChatGPT, rateLimitedErr(30))
+	if got := w.sendFailure(err, scriptConv); got != "ChatGPT is rate-limiting this account right now; try again later." {
+		t.Fatalf("sendFailure = %q", got)
+	}
+	if got := w.waitFailure(err, scriptConv); !strings.Contains(got, "The message was sent to ChatGPT (conversation "+scriptConv+")") || strings.Contains(got, "try again later") {
+		t.Fatalf("waitFailure = %q", got)
+	}
+}
+
+func TestClampRetryAfterSeconds(t *testing.T) {
+	for _, c := range []struct {
+		in   int
+		want time.Duration
+	}{{-5, 0}, {0, 0}, {42, 42 * time.Second}, {3600, time.Hour}, {1 << 30, maxRetryAfter}, {int(^uint(0) >> 1), maxRetryAfter}} {
+		if got := clampRetryAfterSeconds(c.in); got != c.want {
+			t.Errorf("clampRetryAfterSeconds(%d) = %s, want %s", c.in, got, c.want)
+		}
+	}
+}
+
+// A drift that a reload cannot clear (the loaded copy lives elsewhere) is
+// not re-requested by the periodic recheck, however old the record: only
+// the files changing again (a new fingerprint) or a reconnect asks again.
+func TestNativeHostRecheckDoesNotRepeatRecordedDrift(t *testing.T) {
+	extDir := t.TempDir()
+	loaded := writeExtensionDir(t, extDir, "0.2.0", map[string]string{"ops.js": "same"})
+	// The loaded copy never matches the disk.
+	loaded.Files["ops.js"] = "elsewhere"
+	statePath := filepath.Join(t.TempDir(), "reload-state.json")
+	sock := filepath.Join(shortDir(t), "n", "host.sock")
+	chromeToHostR, chromeToHostW := io.Pipe()
+	hostToChromeR, hostToChromeW := io.Pipe()
+	var logBuf lockedBuffer
+	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, ExtensionDir: extDir, ReloadStatePath: statePath, Log: &logBuf, RecheckInterval: 20 * time.Millisecond}
+	go func() { _ = host.Run(context.Background()) }()
+	defer chromeToHostW.Close()
+	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
+	fromHost := make(chan NativeRequest, 64)
+	go func() {
+		for {
+			b, err := ReadMessage(hostToChromeR, MaxHostMessage)
+			if err != nil {
+				return
+			}
+			var r NativeRequest
+			_ = json.Unmarshal(b, &r)
+			fromHost <- r
+		}
+	}()
+	expectReload := func(what string) {
+		t.Helper()
+		select {
+		case r := <-fromHost:
+			if r.Op != OpExtensionReload {
+				t.Fatalf("%s: host sent %+v", what, r)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: no reload (log: %s)", what, logBuf.String())
+		}
+	}
+	expectQuiet := func(what string) {
+		t.Helper()
+		select {
+		case r := <-fromHost:
+			t.Fatalf("%s: host asked again: %+v (log: %s)", what, r, logBuf.String())
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	// age moves the recorded reload hours into the past, past every
+	// cooldown, as if the drift had persisted that long.
+	age := func() {
+		t.Helper()
+		b, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st reloadState
+		if err := json.Unmarshal(b, &st); err != nil {
+			t.Fatal(err)
+		}
+		st.At = st.At.Add(-7 * time.Hour)
+		b, _ = json.Marshal(st)
+		if err := os.WriteFile(statePath, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := WriteMessage(chromeToHostW, map[string]any{"id": 0, "hello": loaded}, MaxChromeMessage); err != nil {
+		t.Fatal(err)
+	}
+	expectReload("first hello with drift")
+	age()
+	expectQuiet("recheck, same drift")
+	// The files change again: a new fingerprint, so one more reload.
+	if err := os.WriteFile(filepath.Join(extDir, "ops.js"), []byte("updated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectReload("files changed")
+	age()
+	expectQuiet("recheck, new drift already asked for")
+	// A real reconnect hello still gets its once-per-cooldown reload.
+	if err := WriteMessage(chromeToHostW, map[string]any{"id": 0, "hello": loaded}, MaxChromeMessage); err != nil {
+		t.Fatal(err)
+	}
+	expectReload("reconnect past the cooldown")
 }

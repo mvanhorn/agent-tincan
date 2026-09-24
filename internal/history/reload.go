@@ -105,9 +105,9 @@ func (h *NativeHost) logf(format string, args ...any) {
 
 // recheck compares the last hello with the files on disk every
 // RecheckInterval until ctx ends, so an update that lands while the
-// extension stays connected still gets a reload. onHello's cooldown keeps
-// a reload that does not help from repeating, and the extension itself
-// defers the reload while a send has a tab open.
+// extension stays connected still gets a reload. A recheck never repeats a
+// reload already asked for toward the same files (see checkDrift), and
+// the extension itself defers the reload while a send has a tab open.
 func (h *NativeHost) recheck(ctx context.Context) {
 	every := h.RecheckInterval
 	if every <= 0 {
@@ -125,7 +125,7 @@ func (h *NativeHost) recheck(ctx context.Context) {
 		hello := h.hello
 		h.mu.Unlock()
 		if hello != nil {
-			h.onHello(*hello)
+			h.checkDrift(*hello, true)
 		}
 	}
 }
@@ -133,7 +133,15 @@ func (h *NativeHost) recheck(ctx context.Context) {
 // onHello asks the extension to reload when the unpacked files on disk
 // differ from the ones it loaded, at most once per cooldown for the same
 // files.
-func (h *NativeHost) onHello(hello Hello) {
+func (h *NativeHost) onHello(hello Hello) { h.checkDrift(hello, false) }
+
+// checkDrift is onHello's decision. A recheck (fromRecheck) never asks
+// again for the files a reload was already asked for, however long ago:
+// if that reload did not clear the drift (the loaded copy lives somewhere
+// else), asking every RecheckInterval would only restart the extension
+// over and over. Only the files changing again (a new fingerprint) or a
+// real reconnect hello past the cooldown asks again.
+func (h *NativeHost) checkDrift(hello Hello, fromRecheck bool) {
 	if h.ExtensionDir == "" {
 		return
 	}
@@ -160,8 +168,10 @@ func (h *NativeHost) onHello(hello Hello) {
 	if readErr == nil {
 		_ = json.Unmarshal(prev, &st)
 	}
-	if st.Fingerprint == fp && time.Since(st.At) < reloadCooldown {
-		h.logf("%s, but a reload toward these files was already asked for at %s; not asking again", reason, st.At.Format(time.RFC3339))
+	if st.Fingerprint == fp && (fromRecheck || time.Since(st.At) < reloadCooldown) {
+		if !fromRecheck {
+			h.logf("%s, but a reload toward these files was already asked for at %s; not asking again", reason, st.At.Format(time.RFC3339))
+		}
 		return
 	}
 	// The cooldown is recorded before asking, so a reload that cannot be

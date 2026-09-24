@@ -101,7 +101,7 @@ func inviteCmd() *cobra.Command {
 				valid = "kind " + kind + ", " + valid
 			}
 			cmd.Printf("Invite code for %q (%s): %s\nOn that machine run:\n  tincan join %s --relay %s\n"+
-				"(for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>)\n", args[0], valid, code, code, inviteRelayURL(relayURL))
+				"(for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>)\n", args[0], valid, code, code, inviteRelayURL(relayURL, socket))
 			return nil
 		},
 	}
@@ -112,11 +112,16 @@ func inviteCmd() *cobra.Command {
 }
 
 // inviteRelayURL is the relay URL to print in an invite's join line: the
-// --relay flag, else the saved config (or TINCAN_RELAY), else a placeholder
-// when the invite went over the admin socket with no URL known.
-func inviteRelayURL(flag string) string {
+// --relay flag, else the saved config (or TINCAN_RELAY) when the invite
+// went through it, else a placeholder. An invite over the admin socket
+// never falls back to the saved relay, which may name a different relay
+// than the one the socket serves.
+func inviteRelayURL(flag, socket string) string {
 	if flag != "" {
 		return flag
+	}
+	if socket != "" {
+		return "<relay URL>"
 	}
 	if cfg, _ := client.LoadConfig(); cfg.Relay != "" {
 		return cfg.Relay

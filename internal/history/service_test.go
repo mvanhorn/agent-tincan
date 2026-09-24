@@ -182,3 +182,45 @@ func TestInstallWebServiceLinuxAndBadInput(t *testing.T) {
 		t.Fatal("relative binary accepted")
 	}
 }
+
+// Tool directories with spaces stay on the service PATH; a repeat is
+// dropped, and so is a directory that cannot be written into a PATH or a
+// systemd line at all (a colon, a newline, a NUL, a double quote).
+func TestServicePathKeepsSpacesDropsUnsafe(t *testing.T) {
+	got := servicePath("linux", "", "/opt/my tools/bin", "/opt/my tools/bin", "/usr/bin", "/a:b", "/bad\ndir", "/bad\x00dir", `/q"d`, "relative/bin", "", "/opt/100%/bin", `/opt/back\slash`, "/opt/$HOME/bin")
+	want := "/opt/my tools/bin:/usr/bin:/opt/100%/bin:/opt/back\\slash:/opt/$HOME/bin:/usr/local/bin:/bin"
+	if got != want {
+		t.Fatalf("servicePath = %q\nwant %q", got, want)
+	}
+}
+
+func TestInstallServiceToolDirWithSpace(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	home := t.TempDir()
+	res, err := InstallService(ServiceOptions{GOOS: "linux", Home: home, Binary: "/opt/tincan", CodexDir: "/opt/my tools/bin", ClaudeDir: "/opt/50% & more"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	// The whole assignment is quoted so the space stays in the value, and
+	// % is doubled so systemd does not read it as a specifier.
+	if want := `Environment="PATH=/opt/my tools/bin:/opt/50%% & more:` + home + `/.local/bin:`; !strings.Contains(string(b), want) {
+		t.Fatalf("unit missing %q:\n%s", want, b)
+	}
+	res, err = InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", CodexDir: "/opt/my tools/bin", ClaudeDir: "/opt/50% & more", UID: 501})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(res.Path)
+	if want := "<string>/opt/my tools/bin:/opt/50% &amp; more:" + home + "/.local/bin:"; !strings.Contains(string(b), want) {
+		t.Fatalf("plist missing %q:\n%s", want, b)
+	}
+}
+
+// systemdEscape makes a value safe inside a double-quoted systemd
+// assignment.
+func TestSystemdEscape(t *testing.T) {
+	if got := systemdEscape(`/a b\c%d`); got != `/a b\\c%%d` {
+		t.Fatalf("systemdEscape = %q", got)
+	}
+}
