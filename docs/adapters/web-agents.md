@@ -6,8 +6,8 @@ It is a Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`), r
 
 1. Checks access. Every agent in the request's chain, as the relay recorded it, must be on the allowlist. Otherwise it declines and names the agent.
 2. Reads the optional threading line (below). The rest of the body is the message, sent as is.
-3. Has the Tincan Chrome extension type the message into the site, in a background tab the extension opens itself, and wait for the reply to finish (at most 5 minutes).
-4. Reads the finished turn back through the same conversation detail and file operations the history agent uses, and replies with the answer text and the generated images as attachments.
+3. Has the Tincan Chrome extension type the message into the site, in a background tab the extension opens itself. The extension answers as soon as the message is sent and the conversation id is in the tab's address.
+4. Reads the conversation every 2 seconds through the same detail operation the history agent uses until the reply is finished (bounded by the request timeout, 8 minutes), then replies with the answer text and the generated images, fetched through the file operation, as attachments. Then it has the extension close the tab.
 
 It handles one request at a time. The extension also runs one send per site at a time.
 
@@ -15,7 +15,7 @@ It handles one request at a time. The extension also runs one send per site at a
 
 This types into your logged-in ChatGPT or Claude account, as you. The messages and answers show up in your ChatGPT or Claude history like any chat you had yourself, count against your plan's usage, and follow the site's own settings (memory, custom instructions, model choice).
 
-The extension opens a new background tab (`chrome.tabs.create` with `active: false`), fills the message box, clicks send, watches for the answer to stop streaming, reads the conversation id from the tab's address, and closes the tab. It never touches a tab you opened. Chrome is never quit or restarted. The message is passed to a fixed function in the extension as data and inserted as text; nothing in it is ever run as code.
+The extension opens a new background tab (`chrome.tabs.create` with `active: false`), fills the message box, clicks send, and reads the conversation id from the tab's address (at most 60 seconds). It does not watch the page for the answer: Chrome throttles background tabs, so page signals are unreliable there. The tab stays open while the site writes the answer, because closing it may stop claude.ai from finishing, and the web agent closes it with the fixed `chatgpt.close` or `claudeai.close` operation once the answer is read or the wait gives up. That operation closes only a tab a send opened for that conversation. A tab nobody closes is closed after 10 minutes; a send that fails closes its tab at once. It never touches a tab you opened. Chrome is never quit or restarted. The message is passed to a fixed function in the extension as data and inserted as text; nothing in it is ever run as code.
 
 Why a tab and not an API call: both sites protect their send endpoints with anti-bot tokens that only the real page can produce. Driving the page is what survives that.
 
@@ -72,7 +72,7 @@ Set its wake method to `wait` in the relay's `wake.json`; the service long-polls
 
 ### Extension updates
 
-The send operations need extension version 0.2.0 or later. Load `extension/` unpacked once from `chrome://extensions`. After that, updates need no Reload click: run `tincan history install` from the repo checkout (or pass `--extension-dir <path to extension/>`), and whenever the extension connects, the native host compares its version and file hashes with the files on disk and, if they differ, sends the fixed `extension.reload` operation. The extension then calls `chrome.runtime.reload()` and Chrome re-reads the files. The host asks at most once per 10 minutes for the same files, so a copy loaded from somewhere else cannot cause a reload loop. A store install is never reloaded this way.
+The send operations need extension version 0.3.0 or later (0.2.0 waited for the answer on the page). Load `extension/` unpacked once from `chrome://extensions`. After that, updates need no Reload click: run `tincan history install` from the repo checkout (or pass `--extension-dir <path to extension/>`), and whenever the extension connects, the native host compares its version and file hashes with the files on disk and, if they differ, sends the fixed `extension.reload` operation. The extension then calls `chrome.runtime.reload()` and Chrome re-reads the files. The host asks at most once per 10 minutes for the same files, so a copy loaded from somewhere else cannot cause a reload loop. A store install is never reloaded this way.
 
 ## Troubleshooting
 
@@ -83,9 +83,10 @@ The send operations need extension version 0.2.0 or later. Load `extension/` unp
 - "source unavailable: ...: the extension rejected the request (unknown operation; the loaded extension is older than this tincan ...)": the loaded extension predates the send operations. Reload it once from `chrome://extensions`; later updates reload themselves.
 - "no message box on the chatgpt.com page (the page may have changed)": the site changed its page, or showed an interstitial (a consent or upgrade dialog). Open the site in Chrome, dismiss anything in the way, and ask again. If it persists, the selectors in `extension/send.js` need an update.
 - "the message could not be sent on chatgpt.com": the text did not land in the message box, the send button stayed disabled, or the page ignored the click (for example a usage limit). Open the site and look.
-- "ChatGPT did not finish answering in time": no finished answer within 5 minutes. The message may still have been sent; look in the conversation and ask again with `conversation: <id>`.
+- "ChatGPT did not finish answering in time": no finished answer before the request timeout. The reply names the conversation when the message was sent; look in it and ask again with `conversation: <id>`.
+- "... The message was sent to ChatGPT (conversation X), but the reply could not be read": the send worked but the detail read failed for good (logged out, API changed). The answer is in the conversation on the site.
 - "No ChatGPT conversation with id X was found": the id is wrong or the conversation was deleted. Use `new chat`.
-- Background tabs: Chrome throttles hidden tabs. The extension polls from its own worker, not the page, but if answers keep timing out, keep Chrome's window open (not minimized).
+- Background tabs: Chrome throttles hidden tabs. Nothing waits on the page after the send; the answer is read through the site's API.
 - No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.web.chatgpt`) and read its log. A "403" there means the config is not joined.
 
 ### Selectors
@@ -96,9 +97,18 @@ All page selectors live in one table, `SELECTORS` in `extension/send.js`, each w
 | --- | --- | --- |
 | message box | `#prompt-textarea`, `div[contenteditable="true"][id="prompt-textarea"]`, `textarea[data-id="root"]`, `form div[contenteditable="true"]` | `div[contenteditable="true"].ProseMirror`, `fieldset div[contenteditable="true"]`, `[contenteditable="true"][aria-label*="prompt" i]`, `div[contenteditable="true"]` |
 | send button | `[data-testid="send-button"]`, `#composer-submit-button`, `button[aria-label*="Send"]` (else Enter) | `button[aria-label="Send message"]`, `button[aria-label*="Send"]`, `fieldset button[type="submit"]` (else Enter) |
-| still answering | `[data-testid="stop-button"]`, `button[aria-label*="Stop"]`, `.result-streaming` | `button[aria-label="Stop response"]`, `button[aria-label*="Stop"]`, `[data-is-streaming="true"]` |
+| answering (confirms the send only) | `[data-testid="stop-button"]`, `button[aria-label*="Stop"]`, `.result-streaming` | `button[aria-label="Stop response"]`, `button[aria-label*="Stop"]`, `[data-is-streaming="true"]` |
 | assistant messages | `[data-message-author-role="assistant"]` | `[data-is-streaming]`, `.font-claude-response`, `.font-claude-message`, `[data-testid="assistant-message"]` |
 | user messages | `[data-message-author-role="user"]` | `[data-testid="user-message"]` |
 | logged out | `[data-testid="login-button"]`, `a[href*="/auth/login"]`, paths `/auth/login`, `/log-in` | `a[href="/login"]`, `input[type="email"]`, paths `/login`, `/logout` |
 
-The text is entered by typing (`document.execCommand('insertText')`), then a paste event, then setting it directly, and checked after each attempt. An answer counts as finished when nothing is streaming, the last assistant message is new, and its text is the same on two probes a second apart.
+The text is entered by typing (`document.execCommand('insertText')`), then a paste event, then setting it directly, and checked after each attempt. The send counts as taken when a new chat's address gains a conversation id, or a new user or assistant message or an answering marker appears. The page is never used to decide that an answer is finished.
+
+### When an answer is finished
+
+The web agent decides from the conversation detail, never from the page:
+
+- ChatGPT: the last message on the `current_node` branch is an assistant message to everyone, after this request's user message, with status `finished_successfully`, `finish_details`, or `end_turn: true` (and `end_turn` not `false`).
+- claude.ai: the last message on the current branch is from the assistant, after this request's human message, and has a `stop_reason`, or else its text is the same on two reads in a row.
+
+"This request's user message" is the last user message on the branch, as long as it is not the one that was last before the send (read just before sending into an existing conversation) and is not dated more than 2 minutes before the extension's `submitted_at`. So a finished answer to an earlier message, even with the same text, is never taken for the new one.

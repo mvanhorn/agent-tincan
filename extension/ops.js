@@ -5,7 +5,8 @@
 // one capped message string. The read operations run the fixed fetch code
 // below with the user's own session (credentials: 'include'). The send
 // operations hand the message, as data, to the sender (send.js), which
-// types it into a background tab the extension opens itself.
+// types it into a background tab the extension opens itself; the close
+// operations close that tab once the reply is finished.
 // extension.reload asks the worker to reload itself so Chrome re-reads the
 // unpacked files after an update. Nothing in a message or a response is
 // ever executed; responses are returned as data.
@@ -34,6 +35,7 @@ const CLAUDE = 'https://claude.ai';
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
 // 'message' a required non-blank string of at most MAX_MESSAGE_BYTES.
 const SEND_SPEC = Object.freeze({ message: 'message', conversation_id: 'id?', new_chat: 'bool?' });
+const CLOSE_SPEC = Object.freeze({ conversation_id: 'id' });
 const SPEC = Object.freeze({
   'chatgpt.list': Object.freeze({ count: 'count' }),
   'chatgpt.detail': Object.freeze({ id: 'id' }),
@@ -43,6 +45,8 @@ const SPEC = Object.freeze({
   'claudeai.file': Object.freeze({ file_id: 'id' }),
   'chatgpt.send': SEND_SPEC,
   'claudeai.send': SEND_SPEC,
+  'chatgpt.close': CLOSE_SPEC,
+  'claudeai.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -320,6 +324,15 @@ export function createRunner({ fetch, sender = null, reload = null }) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       await claudeOrgId();
       return sender.send('claudeai', a);
+    },
+    // close touches only tabs a send opened and left open.
+    async 'chatgpt.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('chatgpt', a.conversation_id);
+    },
+    async 'claudeai.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('claudeai', a.conversation_id);
     },
     // The answer goes out first; the reload follows a moment later.
     async 'extension.reload'(_a, emit) {

@@ -71,6 +71,9 @@ type caMessage struct {
 	} `json:"content"`
 	Files   []caFile `json:"files"`
 	FilesV2 []caFile `json:"files_v2"`
+	// StopReason is set on a finished assistant message when the site
+	// reports it; the web agent otherwise waits for the text to settle.
+	StopReason string `json:"stop_reason"`
 }
 
 type caFile struct {

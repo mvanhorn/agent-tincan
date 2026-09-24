@@ -12,7 +12,11 @@ inside the worker and never leaves it.
 The send operations (`chatgpt.send`, `claudeai.send`, in `send.js`) open a
 background tab of their own, fill the message box through fixed page functions
 injected with `chrome.scripting` (message as an argument, isolated world),
-click send, wait for the answer to finish (5 minute limit), and close the tab.
+click send, and return once the conversation id is in the tab's address. They
+never watch the page for the answer: the Go side reads the conversation until
+the answer is finished, then calls `chatgpt.close` or `claudeai.close`, which
+close only the tab a send left open for that conversation (any such tab is
+closed after 10 minutes regardless).
 All page selectors are in the `SELECTORS` table in `send.js`; see
 docs/adapters/web-agents.md.
 

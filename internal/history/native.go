@@ -79,7 +79,7 @@ const (
 )
 
 // Send timeouts, nested so each layer hears the inner one's answer: the
-// extension gives up on a reply after 5 minutes, the host after
+// extension gives up on a send after 5 minutes, the host after
 // SendHostTimeout, and the client after SendClientTimeout.
 const (
 	SendHostTimeout   = 5*time.Minute + 30*time.Second
@@ -144,6 +144,10 @@ const (
 	OpClaudeAIFile   Op = "claudeai.file"
 	OpChatGPTSend    Op = "chatgpt.send"
 	OpClaudeAISend   Op = "claudeai.send"
+	// The close operations close the tab a send left open for a
+	// conversation, once its reply is finished.
+	OpChatGPTClose  Op = "chatgpt.close"
+	OpClaudeAIClose Op = "claudeai.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -186,6 +190,11 @@ func ValidateOp(op Op, a OpArgs) error {
 			return fmt.Errorf("%s: invalid conversation id", op)
 		case a.ConversationID != "" && a.NewChat:
 			return fmt.Errorf("%s: new chat and a conversation id together", op)
+		}
+		return nil
+	case OpChatGPTClose, OpClaudeAIClose:
+		if a != (OpArgs{ConversationID: a.ConversationID}) || !validNativeID(a.ConversationID) {
+			return fmt.Errorf("%s: takes only a valid conversation id", op)
 		}
 		return nil
 	case OpExtensionReload:
@@ -484,12 +493,23 @@ func (c *Client) Request(ctx context.Context, op Op, args OpArgs) (json.RawMessa
 type SendResult struct {
 	ConversationID string `json:"conversation_id"`
 	URL            string `json:"url"`
-	ReplyText      string `json:"reply_text"`
+	// SubmittedAt is when the extension clicked send, in Unix
+	// milliseconds (zero if the extension did not say).
+	SubmittedAt int64 `json:"submitted_at"`
+}
+
+// Submitted returns SubmittedAt as a time, zero when unknown.
+func (r SendResult) Submitted() time.Time {
+	if r.SubmittedAt <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(r.SubmittedAt).UTC()
 }
 
 // Send types message into src's page (a new chat, or conversation convID)
-// in a background tab the extension opens, waits for the reply and returns
-// where it went.
+// in a background tab the extension opens and returns as soon as the
+// message is submitted and the conversation id is known. It does not wait
+// for the reply: read it with the detail operation, then call Close.
 func (c *Client) Send(ctx context.Context, src Source, message, convID string, newChat bool) (SendResult, error) {
 	op := OpChatGPTSend
 	if src == SourceClaudeAI {
@@ -504,6 +524,17 @@ func (c *Client) Send(ctx context.Context, src Source, message, convID string, n
 		return SendResult{}, unavailable(src, ErrEndpointChanged, "unexpected send answer")
 	}
 	return r, nil
+}
+
+// Close closes the tab a send to src's conversation convID left open. It
+// never touches a tab the extension did not open for a send.
+func (c *Client) Close(ctx context.Context, src Source, convID string) error {
+	op := OpChatGPTClose
+	if src == SourceClaudeAI {
+		op = OpClaudeAIClose
+	}
+	_, err := c.Request(ctx, op, OpArgs{ConversationID: convID})
+	return err
 }
 
 // File runs a file operation and reassembles its chunks, enforcing the

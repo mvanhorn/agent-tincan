@@ -158,7 +158,8 @@ class FakeSite {
   tick() {
     if (this.loadLeft > 0) this.loadLeft--;
     if (!this.generating) return;
-    if (!/\/(?:c|chat)\//.test(this.href)) {
+    this.ticksSinceSubmit = (this.ticksSinceSubmit || 0) + 1;
+    if (!/\/(?:c|chat)\//.test(this.href) && !this.opts.noId && this.ticksSinceSubmit > (this.opts.idDelayTicks || 0)) {
       const id = `new-conv-${++convSeq}`;
       this.newID = id;
       this.href = this.site === 'chatgpt' ? `https://chatgpt.com/c/${id}` : `https://claude.ai/chat/${id}`;
@@ -239,8 +240,30 @@ function fakeChrome(makeSite) {
   return { chrome, log, tabs, userTab, sleep, now: () => clock, pageFor: (id) => tabs.get(id) };
 }
 
+// fakeTimers stands in for setTimeout: timers fire only when a test says.
+function fakeTimers() {
+  const timers = new Map();
+  let seq = 0;
+  return {
+    setTimer: (fn, ms) => {
+      const t = ++seq;
+      timers.set(t, { fn, ms });
+      return t;
+    },
+    clearTimer: (t) => timers.delete(t),
+    pending: () => [...timers.values()],
+    fireAll: () => {
+      for (const [t, v] of [...timers]) {
+        timers.delete(t);
+        v.fn();
+      }
+    },
+  };
+}
+
 function sender(fc, extra = {}) {
-  return createSender({ tabs: fc.chrome.tabs, scripting: fc.chrome.scripting, sleep: fc.sleep, now: fc.now, pollMs: 1000, ...extra });
+  const timers = extra.timers || fakeTimers();
+  return createSender({ tabs: fc.chrome.tabs, scripting: fc.chrome.scripting, sleep: fc.sleep, now: fc.now, pollMs: 1000, setTimer: timers.setTimer, clearTimer: timers.clearTimer, ...extra });
 }
 
 // Every injection is one of the fixed page functions, in the isolated
@@ -255,34 +278,89 @@ function assertOnlyFixedScripts(log) {
   }
 }
 
-test('chatgpt new chat: fills the composer, clicks send, waits for a stable reply, returns the id from the URL', async () => {
+test('chatgpt new chat: fills the composer, clicks send, returns the id from the URL without waiting for the reply', async () => {
   let page;
-  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url)));
-  const r = await sender(fc).send('chatgpt', { message: 'Write a haiku about tin cans', new_chat: true });
+  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { neverFinish: true })));
+  const s = sender(fc);
+  const r = await s.send('chatgpt', { message: 'Write a haiku about tin cans', new_chat: true });
   assert.equal(fc.log.created.length, 1);
   assert.deepEqual(fc.log.created[0].url, 'https://chatgpt.com/');
   assert.equal(fc.log.created[0].active, false, 'background tab');
   assert.deepEqual(page.submitted, ['Write a haiku about tin cans']);
   assert.equal(r.conversation_id, page.newID);
   assert.equal(r.url, `https://chatgpt.com/c/${page.newID}`);
-  assert.equal(r.reply_text, 'Part more more final.');
-  assert.deepEqual(fc.log.removed, [100], 'own tab closed');
+  assert.ok(Number.isSafeInteger(r.submitted_at) && r.submitted_at <= fc.now(), `submitted_at ${r.submitted_at}`);
+  assert.equal(r.reply_text, undefined, 'the reply is read by the Go side, not the page');
+  assert.equal(page.generating, true, 'returned while the page still shows a stop button');
+  assert.ok(fc.now() <= 5000, `returned after ${fc.now()}ms`);
+  assert.deepEqual(fc.log.removed, [], 'tab kept open until close');
   assert.ok(fc.tabs.has(1), "user's tab left open");
   assertOnlyFixedScripts(fc.log);
-  const fills = fc.log.scripts.filter((s) => s.func === pageFill);
+  const fills = fc.log.scripts.filter((x) => x.func === pageFill);
   assert.equal(fills.length, 1);
   assert.deepEqual(fills[0].args[1], 'Write a haiku about tin cans');
+
+  assert.deepEqual(await s.close('chatgpt', 'some-other-id'), { closed: 0 });
+  assert.deepEqual(await s.close('claudeai', r.conversation_id), { closed: 0 }, 'close is per site');
+  assert.deepEqual(fc.log.removed, []);
+  assert.deepEqual(await s.close('chatgpt', r.conversation_id), { closed: 1 });
+  assert.deepEqual(fc.log.removed, [100]);
+  assert.deepEqual(await s.close('chatgpt', r.conversation_id), { closed: 0 }, 'closed once');
+  assert.deepEqual(await s.close('chatgpt', 'users-own-chat'), { closed: 0 }, "never the user's tab");
+  assert.ok(fc.tabs.has(1));
 });
 
-test('chatgpt continues a conversation and returns the new reply, not the old one', async () => {
+test('the id may show up in the URL a while after the send; the wait is bounded', async () => {
   let page;
-  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { streamTicks: 2 })));
+  const fc = fakeChrome((url) => (page = new FakeSite('claudeai', url, { idDelayTicks: 8, neverFinish: true })));
+  const r = await sender(fc).send('claudeai', { message: 'slow id' });
+  assert.equal(r.conversation_id, page.newID);
+  assert.ok(fc.now() >= 8000, `returned at ${fc.now()}ms, before the id existed`);
+
+  const fc2 = fakeChrome((url) => new FakeSite('chatgpt', url, { noId: true, neverFinish: true }));
+  await assert.rejects(sender(fc2, { idWaitMs: 60000 }).send('chatgpt', { message: 'x' }), (e) => e.code === 'timeout' && /no conversation id/.test(e.message));
+  assert.ok(fc2.now() >= 60000 && fc2.now() < 80000, `gave up at ${fc2.now()}ms`);
+  assert.deepEqual(fc2.log.removed, [100], 'a failed send closes its tab');
+});
+
+test('chatgpt continues a conversation: the id is known, so it returns once the page took the message', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { neverFinish: true })));
   const r = await sender(fc).send('chatgpt', { message: 'and a second verse', conversation_id: 'abc-123' });
   assert.equal(fc.log.created[0].url, 'https://chatgpt.com/c/abc-123');
   assert.equal(r.conversation_id, 'abc-123');
-  assert.notEqual(r.reply_text, 'old answer');
-  assert.match(r.reply_text, /final\.$/);
+  assert.equal(r.url, 'https://chatgpt.com/c/abc-123');
   assert.equal(page.messages.filter((m) => m.role === 'user').length, 2);
+  assert.ok(fc.now() <= 3000, `returned after ${fc.now()}ms`);
+  assert.deepEqual(fc.log.removed, []);
+});
+
+test('never waits on stop buttons or streaming markers', async () => {
+  // Pages that stream forever, with either signal, still return promptly.
+  for (const opts of [{ stopButton: true }, { stopButton: false, streamingMarker: true }]) {
+    const fc = fakeChrome((url) => new FakeSite('claudeai', url, { neverFinish: true, ...opts }));
+    const r = await sender(fc, { timeoutMs: 60000 }).send('claudeai', { message: 'x' });
+    assert.match(r.conversation_id, /^new-conv-/);
+    assert.ok(fc.now() < 10000, `waited ${fc.now()}ms`);
+  }
+});
+
+test('an unclosed tab is closed after keepMs', async () => {
+  const fc = fakeChrome((url) => new FakeSite('claudeai', url, { neverFinish: true }));
+  const timers = fakeTimers();
+  const s = sender(fc, { timers, keepMs: 600000 });
+  const r = await s.send('claudeai', { message: 'x' });
+  assert.deepEqual(timers.pending().map((t) => t.ms), [600000]);
+  timers.fireAll();
+  await null;
+  assert.deepEqual(fc.log.removed, [100]);
+  assert.deepEqual(await s.close('claudeai', r.conversation_id), { closed: 0 });
+
+  // Closing first cancels the timer.
+  const s2 = sender(fc, { timers });
+  const r2 = await s2.send('claudeai', { message: 'y' });
+  assert.deepEqual(await s2.close('claudeai', r2.conversation_id), { closed: 1 });
+  assert.equal(timers.pending().length, 0);
 });
 
 test('claude.ai through fallback selectors, paste fallback, streaming marker', async () => {
@@ -302,8 +380,6 @@ test('claude.ai through fallback selectors, paste fallback, streaming marker', a
   assert.deepEqual(page.submitted, ['line one\n\nline two']);
   assert.equal(r.conversation_id, page.newID);
   assert.equal(r.url, `https://claude.ai/chat/${page.newID}`);
-  assert.match(r.reply_text, /final\.$/);
-  assert.deepEqual(fc.log.removed, [100]);
 });
 
 test('claude.ai continues /chat/<id>; ChatGPT textarea composer and Enter when there is no send button', async () => {
@@ -335,13 +411,6 @@ test('logged out page: not_logged_in, nothing typed', async () => {
   const fc2 = fakeChrome((url) => new FakeSite('claudeai', url, { redirectTo: 'https://claude.ai/login' }));
   await assert.rejects(sender(fc2).send('claudeai', { message: 'x' }), (e) => e.code === 'not_logged_in');
   assert.deepEqual(fc2.log.removed, [100]);
-});
-
-test('a reply that never finishes times out at the hard limit and closes the tab', async () => {
-  const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { neverFinish: true }));
-  await assert.rejects(sender(fc, { timeoutMs: 60000 }).send('chatgpt', { message: 'x' }), (e) => e.code === 'timeout');
-  assert.ok(fc.now() >= 60000 && fc.now() < 70000, `gave up at ${fc.now()}ms`);
-  assert.deepEqual(fc.log.removed, [100]);
 });
 
 test('text that does not land, a send button that stays disabled, a page that ignores the click: send_failed', async () => {
@@ -379,7 +448,9 @@ test('sends to one site run one at a time, each in its own tab', async () => {
   const s = sender(fc);
   const [a, b] = await Promise.all([s.send('chatgpt', { message: 'one' }), s.send('chatgpt', { message: 'two' })]);
   assert.notEqual(a.conversation_id, b.conversation_id);
-  assert.equal(fc.log.maxLive, 1, 'never two worker tabs at once');
+  assert.deepEqual(fc.log.created.map((c) => c.id), [100, 101]);
+  await s.close('chatgpt', a.conversation_id);
+  await s.close('chatgpt', b.conversation_id);
   assert.deepEqual(fc.log.removed, [100, 101]);
 });
 
@@ -413,6 +484,23 @@ test('runner: claudeai.send needs an organization; without a sender send is unsu
   assert.equal(fc.log.created.length, 0);
   const none = createRunner({ fetch: async () => jsonResponse({ accessToken: 't' }) });
   await assert.rejects(none.run('chatgpt.send', { message: 'x' }, () => {}), (e) => e.code === 'unsupported');
+});
+
+test('runner: chatgpt.close and claudeai.close close only the tab a send left open', async () => {
+  const fc = fakeChrome((url) => new FakeSite('claudeai', url, { neverFinish: true }));
+  const s = sender(fc);
+  const r = createRunner({ fetch: async () => jsonResponse([{ uuid: 'org-1' }]), sender: s });
+  const frames = [];
+  await r.run('claudeai.send', { message: 'x' }, (f) => frames.push(f));
+  const id = frames[0].result.conversation_id;
+  const closed = [];
+  await r.run('chatgpt.close', { conversation_id: id }, (f) => closed.push(f));
+  assert.deepEqual(closed, [{ ok: true, result: { closed: 0 } }]);
+  await r.run('claudeai.close', { conversation_id: id }, (f) => closed.push(f));
+  assert.deepEqual(closed[1], { ok: true, result: { closed: 1 } });
+  assert.deepEqual(fc.log.removed, [100]);
+  const none = createRunner({ fetch: async () => jsonResponse({}) });
+  await assert.rejects(none.run('claudeai.close', { conversation_id: id }, () => {}), (e) => e.code === 'unsupported');
 });
 
 test('runner: extension.reload answers, then reloads', async () => {

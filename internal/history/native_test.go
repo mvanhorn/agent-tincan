@@ -85,6 +85,8 @@ func TestValidateOp(t *testing.T) {
 		{OpChatGPTSend, OpArgs{Message: "hello"}},
 		{OpChatGPTSend, OpArgs{Message: "hi", NewChat: true}},
 		{OpClaudeAISend, OpArgs{Message: strings.Repeat("x", MaxSendMessage), ConversationID: "c1a0d000-0000-4000-8000-000000000001"}},
+		{OpChatGPTClose, OpArgs{ConversationID: "6a1f0c2e-1111-4a2b-9c3d-000000000001"}},
+		{OpClaudeAIClose, OpArgs{ConversationID: "c1a0d000-0000-4000-8000-000000000001"}},
 		{OpExtensionReload, OpArgs{}},
 	}
 	for _, c := range ok {
@@ -119,6 +121,10 @@ func TestValidateOp(t *testing.T) {
 		{OpChatGPTSend, OpArgs{Message: "hi", ConversationID: "abc", NewChat: true}},
 		{OpClaudeAISend, OpArgs{Message: "hi", ID: "abc"}},
 		{OpClaudeAISend, OpArgs{Message: "hi", Count: 1}},
+		{OpChatGPTClose, OpArgs{}},
+		{OpChatGPTClose, OpArgs{ConversationID: "../c/x"}},
+		{OpClaudeAIClose, OpArgs{ConversationID: "abc", ID: "abc"}},
+		{OpClaudeAIClose, OpArgs{ConversationID: "abc", Message: "hi"}},
 		{OpExtensionReload, OpArgs{Count: 1}},
 		{OpExtensionReload, OpArgs{Message: "x"}},
 	}
@@ -462,7 +468,7 @@ func TestNativeHostRelaysSendRefusesReload(t *testing.T) {
 		if req.Op == OpChatGPTSend {
 			// Answer after the plain request timeout, inside the send one.
 			time.Sleep(300 * time.Millisecond)
-			return []NativeResponse{{OK: true, Result: json.RawMessage(`{"conversation_id":"conv-9","url":"https://chatgpt.com/c/conv-9","reply_text":"hi"}`)}}
+			return []NativeResponse{{OK: true, Result: json.RawMessage(`{"conversation_id":"conv-9","url":"https://chatgpt.com/c/conv-9","submitted_at":1790000000123}`)}}
 		}
 		return []NativeResponse{{Error: &NativeError{Code: "bad_request", Message: "unknown op"}}}
 	})
@@ -473,7 +479,7 @@ func TestNativeHostRelaysSendRefusesReload(t *testing.T) {
 
 	c := &Client{Channel: &SocketChannel{Path: sock, ChromeRunning: func() bool { return true }}, Timeout: 5 * time.Second}
 	res, err := c.Send(context.Background(), SourceChatGPT, message, "", true)
-	if err != nil || res.ConversationID != "conv-9" || res.ReplyText != "hi" {
+	if err != nil || res.ConversationID != "conv-9" || !res.Submitted().Equal(time.UnixMilli(1790000000123)) {
 		t.Fatalf("send via host: %+v %v", res, err)
 	}
 	if r := <-seen; r.Op != OpChatGPTSend || r.Args.Message != message || !r.Args.NewChat {

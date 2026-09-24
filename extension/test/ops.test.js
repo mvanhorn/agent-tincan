@@ -36,13 +36,14 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload']);
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'extension.reload']);
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
   validate({ id: 2, op: 'chatgpt.file', args: { file_id: 'file_00000000abcd1234', conversation_id: 'abc-1' } });
   validate({ id: 3, op: 'claudeai.detail', args: { id: 'c1a0d000-0000-4000-8000-000000000001' } });
   assert.deepEqual(validate({ id: 4, op: 'chatgpt.send', args: { message: 'hello' } }).args, { message: 'hello' });
   assert.deepEqual(validate({ id: 5, op: 'claudeai.send', args: { message: 'x'.repeat(MAX_MESSAGE_BYTES), conversation_id: 'abc-1', new_chat: false } }).args.conversation_id, 'abc-1');
   assert.deepEqual(validate({ id: 6, op: 'chatgpt.send', args: { message: 'hi', new_chat: true } }).args, { message: 'hi', new_chat: true });
+  assert.deepEqual(validate({ id: 7, op: 'claudeai.close', args: { conversation_id: 'abc-1' } }).args, { conversation_id: 'abc-1' });
   assert.deepEqual(validate({ id: 7, op: 'extension.reload', args: {} }), { id: 7, op: 'extension.reload', args: {} });
   const bad = [
     null,
@@ -75,6 +76,9 @@ test('validate accepts only the fixed operation set with exact args', () => {
     { id: 1, op: 'chatgpt.send', args: { message: 'hi', new_chat: true, conversation_id: 'abc' } },
     { id: 1, op: 'claudeai.send', args: { message: 'hi', code: 'alert(1)' } },
     { id: 1, op: 'claudeai.send', args: { message: 'hi', url: 'https://evil.example/' } },
+    { id: 1, op: 'chatgpt.close', args: {} },
+    { id: 1, op: 'chatgpt.close', args: { conversation_id: '../c/x' } },
+    { id: 1, op: 'claudeai.close', args: { conversation_id: 'abc', tab_id: 5 } },
     { id: 1, op: 'extension.reload', args: { now: true } },
     { id: 1, op: 'extension.reload' },
   ];

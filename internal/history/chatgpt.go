@@ -94,6 +94,7 @@ type cgNode struct {
 }
 
 type cgMessage struct {
+	ID     string `json:"id"`
 	Author struct {
 		Role string `json:"role"`
 		Name string `json:"name"`
@@ -109,9 +110,15 @@ type cgMessage struct {
 			Name     string `json:"name"`
 			MimeType string `json:"mime_type"`
 		} `json:"attachments"`
-		Hidden bool `json:"is_visually_hidden_from_conversation"`
+		Hidden        bool            `json:"is_visually_hidden_from_conversation"`
+		FinishDetails json.RawMessage `json:"finish_details"`
 	} `json:"metadata"`
 	Recipient string `json:"recipient"`
+	// Status is "in_progress" while a reply is written and
+	// "finished_successfully" after; EndTurn is true on a turn's last
+	// assistant message. The web agent uses them to tell a finished reply.
+	Status  string `json:"status"`
+	EndTurn *bool  `json:"end_turn"`
 }
 
 type cgPart struct {

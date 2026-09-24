@@ -1,5 +1,6 @@
 // Send operations for the Agent Tincan web agents (chatgpt.send,
-// claudeai.send).
+// claudeai.send) and the matching close operations (chatgpt.close,
+// claudeai.close).
 //
 // ChatGPT and claude.ai guard their send endpoints with anti-bot tokens, so
 // instead of calling them this module drives the real page UI in a
@@ -10,11 +11,17 @@
 //   2. inject the fixed page functions below with chrome.scripting
 //      (isolated world, func + args only) to fill the composer, verify the
 //      text landed, and click send;
-//   3. probe the page until the reply stops streaming and is stable, with a
-//      hard timeout;
-//   4. read the conversation id from the tab URL, close the tab, and return
-//      it with the reply text as the page shows it. The Go side then reads
-//      the conversation through the existing detail and file operations.
+//   3. once the page took the message, wait only for the conversation id in
+//      the tab URL (already known when continuing a conversation) and
+//      return {conversation_id, url, submitted_at}.
+//
+// The send does not watch the page for the reply: a background tab is
+// throttled, so page-side signals are unreliable. The Go side reads the
+// conversation through the existing detail operation until the reply is
+// finished, then calls the close operation with the conversation id. The
+// tab stays open until then because closing it may stop claude.ai from
+// finishing the reply. A tab nobody closes is closed after keepMs anyway.
+// A send that fails closes its tab at once.
 //
 // The message is data only: it is passed as an argument to a fixed function
 // and inserted as text. Nothing from a message or a page is ever executed.
@@ -23,11 +30,16 @@
 import { OpError } from './ops.js';
 
 export const SEND_TIMEOUT_MS = 5 * 60 * 1000;
-export const MAX_REPLY_CHARS = 64 * 1024;
+// ID_WAIT_MS bounds the wait for the conversation id after the send.
+export const ID_WAIT_MS = 60 * 1000;
+// KEEP_TAB_MS is how long a finished send's tab may stay open waiting for
+// its close operation.
+export const KEEP_TAB_MS = 10 * 60 * 1000;
 
 // SELECTORS is the one table of page selectors, tried in order. login and
-// loginPaths mean the page is logged out; stop and streaming mean a reply
-// is still being written.
+// loginPaths mean the page is logged out. stop, streaming, assistant and
+// user only help confirm that the page took the message; they are never
+// used to decide that a reply is finished.
 export const SELECTORS = Object.freeze({
   chatgpt: Object.freeze({
     composer: ['#prompt-textarea', 'div[contenteditable="true"][id="prompt-textarea"]', 'textarea[data-id="root"]', 'form div[contenteditable="true"]'],
@@ -38,7 +50,6 @@ export const SELECTORS = Object.freeze({
     user: ['[data-message-author-role="user"]'],
     login: ['[data-testid="login-button"]', 'a[href*="/auth/login"]'],
     loginPaths: ['/auth/login', '/log-in'],
-    maxChars: MAX_REPLY_CHARS,
   }),
   claudeai: Object.freeze({
     composer: ['div[contenteditable="true"].ProseMirror', 'fieldset div[contenteditable="true"]', '[contenteditable="true"][aria-label*="prompt" i]', 'div[contenteditable="true"]'],
@@ -49,7 +60,6 @@ export const SELECTORS = Object.freeze({
     user: ['[data-testid="user-message"]'],
     login: ['a[href="/login"]', 'input[type="email"]'],
     loginPaths: ['/login', '/logout'],
-    maxChars: MAX_REPLY_CHARS,
   }),
 });
 
@@ -98,8 +108,6 @@ export function pageProbe(sel) {
   const textOf = (el) => (el ? String(el.innerText ?? el.textContent ?? '') : '');
   const path = String(location.pathname || '');
   const composer = q(sel.composer);
-  const assistant = qa(sel.assistant);
-  const last = assistant.length ? assistant[assistant.length - 1] : null;
   const draft = composer ? (composer.tagName === 'TEXTAREA' ? String(composer.value ?? '') : textOf(composer)) : '';
   return {
     href: String(location.href || ''),
@@ -107,9 +115,8 @@ export function pageProbe(sel) {
     composer: Boolean(composer),
     composerEmpty: draft.trim() === '',
     generating: Boolean(q(sel.stop)) || Boolean(q(sel.streaming)),
-    assistantCount: assistant.length,
+    assistantCount: qa(sel.assistant).length,
     userCount: qa(sel.user).length,
-    lastText: textOf(last).slice(0, sel.maxChars),
   };
 }
 
@@ -235,25 +242,32 @@ function cleanProbe(r) {
     generating: o.generating === true,
     assistantCount: Number.isSafeInteger(o.assistantCount) ? o.assistantCount : 0,
     userCount: Number.isSafeInteger(o.userCount) ? o.userCount : 0,
-    lastText: str(o.lastText, MAX_REPLY_CHARS),
   };
 }
 
-// createSender returns {send(site, args)}. tabs and scripting are
-// chrome.tabs and chrome.scripting (or fakes). Sends to one site run one
-// at a time; each gets its own background tab, closed when done.
+// createSender returns {send(site, args), close(site, conversationId)}.
+// tabs and scripting are chrome.tabs and chrome.scripting (or fakes). Sends
+// to one site run one at a time, each in its own background tab. A
+// successful send leaves its tab open for close (or the keepMs timer).
 export function createSender({
   tabs,
   scripting,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = () => Date.now(),
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (t) => clearTimeout(t),
   timeoutMs = SEND_TIMEOUT_MS,
   pollMs = 1000,
   loadMs = 45000,
   sendConfirmMs = 15000,
-  stableProbes = 2,
+  idWaitMs = ID_WAIT_MS,
+  keepMs = KEEP_TAB_MS,
 }) {
+  // owned: tabs being driven by a send, the only ones that may be
+  // scripted. kept: finished sends' tabs, tab id -> {site, id, timer},
+  // the only ones close may remove.
   const owned = new Set();
+  const kept = new Map();
   const queues = {};
 
   async function inject(tabId, func, args) {
@@ -276,6 +290,23 @@ export function createSender({
     }
   }
 
+  async function removeTab(tabId) {
+    try {
+      await tabs.remove(tabId);
+    } catch {
+      // Already closed.
+    }
+  }
+
+  function keep(tabId, site, id) {
+    const timer = setTimer(() => {
+      if (kept.get(tabId)?.timer !== timer) return;
+      kept.delete(tabId);
+      removeTab(tabId);
+    }, keepMs);
+    kept.set(tabId, { site, id, timer });
+  }
+
   async function run(site, args) {
     const cfg = SITES[site];
     const sel = SELECTORS[site];
@@ -283,11 +314,13 @@ export function createSender({
     const start = now();
     const deadline = start + timeoutMs;
     const late = () => now() >= deadline;
-    const target = args.conversation_id && !args.new_chat ? cfg.convURL(args.conversation_id) : cfg.newURL;
+    const existing = args.conversation_id && !args.new_chat ? args.conversation_id : '';
+    const target = existing ? cfg.convURL(existing) : cfg.newURL;
 
     const tab = await tabs.create({ url: target, active: false });
     if (!tab || !Number.isSafeInteger(tab.id)) throw new OpError('send_failed', 'could not open a tab');
     owned.add(tab.id);
+    let done = false;
     try {
       // 1. Page load, then a composer (or a login page).
       const loadBy = Math.min(deadline, start + loadMs);
@@ -305,9 +338,9 @@ export function createSender({
         }
         await sleep(pollMs);
       }
-      if (args.conversation_id && !args.new_chat) {
+      if (existing) {
         const m = cfg.idFrom.exec(page.href);
-        if (!m || m[1] !== args.conversation_id) throw new OpError('not_found', 'conversation not found');
+        if (!m || m[1] !== existing) throw new OpError('not_found', 'conversation not found');
       }
       const base = page;
 
@@ -319,64 +352,50 @@ export function createSender({
       }
 
       // 3. Send: retry while the button is disabled, then confirm the page
-      // took the message.
+      // took the message. A new chat's URL gaining an id also confirms it.
       const confirmBy = Math.min(deadline, now() + sendConfirmMs);
+      let submittedAt;
       for (;;) {
+        submittedAt = now();
         const r = await inject(tab.id, pageSubmit, [sel]);
         if (r && r.ok === true) break;
         if (r && r.code === 'composer_not_found') throw new OpError('composer_not_found', 'the message box went away');
         if (now() >= confirmBy) throw new OpError('send_failed', 'the send button stayed disabled');
         await sleep(pollMs);
       }
+      let id = existing;
       for (;;) {
         await sleep(pollMs);
+        if (!existing) {
+          const m = cfg.idFrom.exec((await tabURL(tab.id)).url);
+          if (m) {
+            id = m[1];
+            break;
+          }
+        }
         const p = cleanProbe(await inject(tab.id, pageProbe, [sel]));
         if (p.loggedOut) throw new OpError('not_logged_in', 'logged out while sending');
         if (p.userCount > base.userCount || p.generating || p.assistantCount > base.assistantCount) break;
         if (now() >= confirmBy) throw new OpError('send_failed', 'the page did not take the message');
       }
 
-      // 4. Wait for the reply to finish: nothing streaming, a new or changed
-      // last reply, and the same text on consecutive probes.
-      let prev = null;
-      let same = 0;
-      let last;
-      for (;;) {
-        if (late()) throw new OpError('timeout', `no finished reply within ${Math.round(timeoutMs / 1000)}s`);
-        await sleep(pollMs);
-        last = cleanProbe(await inject(tab.id, pageProbe, [sel]));
-        if (last.loggedOut) throw new OpError('not_logged_in', 'logged out while waiting for the reply');
-        const fresh = last.assistantCount > base.assistantCount || (last.lastText !== base.lastText && last.assistantCount > 0);
-        if (last.generating || !fresh || last.lastText.trim() === '') {
-          prev = null;
-          same = 0;
-          continue;
-        }
-        same = prev === last.lastText ? same + 1 : 0;
-        prev = last.lastText;
-        if (same >= stableProbes - 1) break;
-      }
-
-      // 5. The conversation id, from the tab URL.
-      let id = '';
-      for (;;) {
-        const t = await tabURL(tab.id);
-        const m = cfg.idFrom.exec(t.url) || cfg.idFrom.exec(last.href);
+      // 4. A new chat's id, from the tab URL. Nothing waits for the reply.
+      const idBy = Math.min(deadline, now() + idWaitMs);
+      while (!id) {
+        const m = cfg.idFrom.exec((await tabURL(tab.id)).url);
         if (m) {
           id = m[1];
           break;
         }
-        if (late()) throw new OpError('send_failed', 'the reply finished but the page has no conversation id');
+        if (now() >= idBy) throw new OpError('timeout', 'the message was sent but no conversation id appeared in time');
         await sleep(pollMs);
       }
-      return { conversation_id: id, url: cfg.convURL(id), reply_text: last.lastText };
+      done = true;
+      keep(tab.id, site, id);
+      return { conversation_id: id, url: cfg.convURL(id), submitted_at: submittedAt };
     } finally {
       owned.delete(tab.id);
-      try {
-        await tabs.remove(tab.id);
-      } catch {
-        // Already closed.
-      }
+      if (!done) await removeTab(tab.id);
     }
   }
 
@@ -387,6 +406,19 @@ export function createSender({
       const p = prev.catch(() => {}).then(() => run(site, args));
       queues[site] = p;
       return p;
+    },
+    // close closes the tabs a finished send to conversationId left open,
+    // and only those. It reports how many it closed.
+    async close(site, conversationId) {
+      let closed = 0;
+      for (const [tabId, k] of [...kept]) {
+        if (k.site !== site || k.id !== conversationId) continue;
+        kept.delete(tabId);
+        clearTimer(k.timer);
+        await removeTab(tabId);
+        closed++;
+      }
+      return { closed };
     },
   };
 }

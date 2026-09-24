@@ -18,14 +18,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-// DefaultWebRequestTimeout bounds one web agent request: longer than a
-// send's own limits (SendClientTimeout) plus the reads after it.
+// DefaultWebRequestTimeout bounds one web agent request: the send, the
+// wait for the reply to finish, and the reads after it.
 const DefaultWebRequestTimeout = 8 * time.Minute
+
+// DefaultWebPollInterval is how often the conversation is read while the
+// reply is being written.
+const DefaultWebPollInterval = 2 * time.Second
+
+// webClockSkew is how much earlier than the extension's submitted_at the
+// site may date the new message and still have it count as this send's.
+const webClockSkew = 2 * time.Minute
 
 // maxWebReplyBytes caps the reply text, leaving room in the relay's body
 // limit for the footer and notes.
@@ -86,7 +95,10 @@ type WebAgent struct {
 	TempDir        string
 	Hold           time.Duration
 	RequestTimeout time.Duration
-	Log            io.Writer
+	// PollInterval is how often the conversation is read while waiting
+	// for the reply (DefaultWebPollInterval when zero).
+	PollInterval time.Duration
+	Log          io.Writer
 
 	mu sync.Mutex
 }
@@ -282,12 +294,14 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 			convID, remembered = m.ID, true
 		}
 	}
+	anchor := w.anchorFor(ctx, convID, wr.message)
 	res, err := w.Native.Send(ctx, w.Site, wr.message, convID, newChat)
 	var note string
 	if remembered && errors.Is(err, ErrNotFound) {
 		note = fmt.Sprintf("Your previous %s conversation (id %s) was not found, so this went to a new chat.", label, convID)
 		delete(st.Conversations, req.From)
 		convID = ""
+		anchor = replyAnchor{message: wr.message}
 		res, err = w.Native.Send(ctx, w.Site, wr.message, "", true)
 	}
 	if err != nil {
@@ -295,17 +309,26 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		w.reply(ctx, req, w.sendFailure(err, convID), envelope.StatusFailed, nil)
 		return
 	}
+	// The send left its tab open so the site can finish the reply; it is
+	// closed once the reply is read or the wait gives up, on a context of
+	// its own because ctx may be spent by then.
+	defer w.closeTab(ctx, res.ConversationID)
 	st.Conversations[req.From] = webMemory{ID: res.ConversationID, Updated: time.Now().UTC()}
 	w.saveState(st)
 
-	// 4. The reply, read back through the detail operation.
-	text, conv, fromPage := w.readReply(ctx, res, wr.message)
+	// 4. Wait for the reply to finish, reading the conversation through
+	// the detail operation, then build the answer from that read.
+	anchor.since = res.Submitted()
+	raw, err := w.waitReply(ctx, res.ConversationID, anchor)
+	if err != nil {
+		w.logf("request %s from %s: waiting for the reply in %s: %v", req.ID, req.From, res.ConversationID, err)
+		w.reply(ctx, req, w.waitFailure(err, res.ConversationID), envelope.StatusFailed, nil)
+		return
+	}
+	text, conv := w.readReply(ctx, res.ConversationID, raw)
 	body, truncated := capReply(text)
 	if truncated {
 		body += fmt.Sprintf("\n\n(reply truncated: showing %d of %d bytes)", len(body), len(text))
-	}
-	if fromPage {
-		body += "\n\n(read from the page; images are not included)"
 	}
 	if note != "" {
 		body += "\n\n" + note
@@ -349,31 +372,259 @@ func (w *WebAgent) live() *live {
 	return NewChatGPT(w.Native).live()
 }
 
-// readReply reads the conversation's last turn through the detail
-// operation and resolves its generated images through the file operation.
-// If that fails, or the last turn is not the message just sent, it falls
-// back to the text the page showed (fromPage).
-func (w *WebAgent) readReply(ctx context.Context, res SendResult, message string) (text string, conv []Conversation, fromPage bool) {
-	l := w.live()
-	th, err := l.detail(ctx, res.ConversationID)
-	if err != nil || len(th.turns) == 0 {
-		if err != nil {
-			w.logf("conversation %s: detail: %v", res.ConversationID, err)
+// closeTab asks the extension to close the tab the send left open for
+// convID. It runs on a fresh context so it also happens after a timeout.
+func (w *WebAgent) closeTab(ctx context.Context, convID string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := w.Native.Close(cctx, w.Site, convID); err != nil {
+		w.logf("conversation %s: closing the tab: %v", convID, err)
+	}
+}
+
+func (w *WebAgent) waitFailure(err error, convID string) string {
+	label := siteLabel(w.Site)
+	var ue *UnavailableError
+	if errors.As(err, &ue) && !errors.Is(err, ErrTimeout) {
+		return fmt.Sprintf("Sorry, %s. The message was sent to %s (conversation %s), but the reply could not be read.", ue.Error(), label, convID)
+	}
+	return fmt.Sprintf("Sorry, %s did not finish answering in time. The message was sent; the conversation is %s.", label, convID)
+}
+
+// replyAnchor identifies the message this request sent, so a finished
+// reply to an earlier message is never taken for this one's.
+type replyAnchor struct {
+	// prevUser is the id of the conversation's last user message before
+	// the send ("" for a new chat, or when it could not be read).
+	prevUser string
+	// since is when the extension clicked send (zero if unknown).
+	since time.Time
+	// message is the text sent. needText makes a match on it required,
+	// for a continued conversation whose previous state is unknown.
+	message  string
+	needText bool
+}
+
+// anchorFor reads the conversation's last user message before a send into
+// an existing conversation.
+func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) replyAnchor {
+	a := replyAnchor{message: message}
+	if convID == "" {
+		return a
+	}
+	raw, err := w.Native.Request(ctx, w.live().detailOp, OpArgs{ID: convID})
+	if err == nil {
+		var p replyProgress
+		if p, err = w.progress(raw, replyAnchor{}); err == nil {
+			a.prevUser = p.userID
+			return a
 		}
-		return res.ReplyText, nil, true
+	}
+	if !errors.Is(err, ErrNotFound) {
+		w.logf("conversation %s: reading it before the send: %v", convID, err)
+	}
+	a.needText = true
+	return a
+}
+
+// accepts reports whether a user message is the one this request sent.
+func (a replyAnchor) accepts(id, text string, at time.Time) bool {
+	if a.prevUser != "" && id == a.prevUser {
+		return false
+	}
+	if !a.since.IsZero() && !at.IsZero() && at.Before(a.since.Add(-webClockSkew)) {
+		return false
+	}
+	return !a.needText || sameMessage(text, a.message)
+}
+
+// sameMessage compares a sent message with what the site stored, ignoring
+// whitespace and the markdown marks editors rewrite.
+func sameMessage(a, b string) bool {
+	norm := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) || strings.ContainsRune("#*`>_-", r) {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	return norm(a) == norm(b)
+}
+
+// replyProgress is what one detail read says about the reply.
+type replyProgress struct {
+	// userID is the id of the last user message on the current branch.
+	userID string
+	// found: an assistant reply to this request's message is there.
+	found bool
+	// finished: the site marks that reply finished.
+	finished bool
+	// sig fingerprints the reply, for the stability check.
+	sig string
+}
+
+func (w *WebAgent) progress(raw json.RawMessage, a replyAnchor) (replyProgress, error) {
+	if w.Site == SourceClaudeAI {
+		return claudeProgress(raw, a)
+	}
+	return chatgptProgress(raw, a)
+}
+
+// chatgptProgress: the reply is the last message on the current_node
+// branch, an assistant message to everyone after this request's user
+// message. It is finished when its status is finished_successfully,
+// finish_details is present, or end_turn is true, and end_turn is not
+// false.
+func chatgptProgress(raw json.RawMessage, a replyAnchor) (replyProgress, error) {
+	var d cgDetail
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return replyProgress{}, err
+	}
+	if d.Mapping == nil {
+		return replyProgress{}, errors.New("no mapping")
+	}
+	var path []*cgMessage
+	for _, m := range d.path() {
+		if !m.Metadata.Hidden {
+			path = append(path, m)
+		}
+	}
+	var p replyProgress
+	u := -1
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i].Author.Role == "user" {
+			u = i
+			break
+		}
+	}
+	if u < 0 {
+		return p, nil
+	}
+	um := path[u]
+	p.userID = um.ID
+	text, _ := um.parts()
+	if !a.accepts(um.ID, text, um.CreateTime.Time) || u == len(path)-1 {
+		return p, nil
+	}
+	leaf := path[len(path)-1]
+	if leaf.Author.Role != "assistant" || (leaf.Recipient != "" && leaf.Recipient != "all") {
+		return p, nil
+	}
+	// Reasoning and tool-call messages are not the answer.
+	if ct := leaf.Content.ContentType; ct != "text" && ct != "multimodal_text" {
+		return p, nil
+	}
+	reply, pointers := leaf.parts()
+	p.found = strings.TrimSpace(reply) != "" || len(pointers) > 0
+	p.sig = fmt.Sprintf("%s\n%d\n%s", leaf.ID, len(pointers), reply)
+	details := len(leaf.Metadata.FinishDetails) > 0 && string(leaf.Metadata.FinishDetails) != "null"
+	endTurn := leaf.EndTurn != nil && *leaf.EndTurn
+	notEnd := leaf.EndTurn != nil && !*leaf.EndTurn
+	p.finished = p.found && !notEnd && (leaf.Status == "finished_successfully" || details || endTurn)
+	return p, nil
+}
+
+// claudeProgress: the reply is the last message on the current branch,
+// from the assistant, after this request's human message. It is finished
+// when it carries a stop_reason; otherwise waitReply waits for its text
+// to stay the same across two reads.
+func claudeProgress(raw json.RawMessage, a replyAnchor) (replyProgress, error) {
+	var c caConversation
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return replyProgress{}, err
+	}
+	path := c.path()
+	var p replyProgress
+	u := -1
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i].Sender == "human" {
+			u = i
+			break
+		}
+	}
+	if u < 0 {
+		return p, nil
+	}
+	hm := path[u]
+	p.userID = hm.UUID
+	if !a.accepts(hm.UUID, hm.text(), hm.CreatedAt.Time) || u == len(path)-1 {
+		return p, nil
+	}
+	leaf := path[len(path)-1]
+	if leaf.Sender != "assistant" {
+		return p, nil
+	}
+	reply := leaf.text()
+	p.found = strings.TrimSpace(reply) != "" || len(leaf.images()) > 0
+	p.sig = fmt.Sprintf("%s\n%d\n%s", leaf.UUID, len(leaf.images()), reply)
+	p.finished = p.found && strings.TrimSpace(leaf.StopReason) != ""
+	return p, nil
+}
+
+// waitReply reads the conversation every PollInterval until the reply to
+// this request's message is finished, and returns that read. claude.ai
+// replies without a stop_reason count as finished when the same reply is
+// read twice in a row. Errors that will not clear (logged out, the API
+// changed, the extension gone) end the wait at once; others are retried
+// until ctx ends.
+func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor) (json.RawMessage, error) {
+	every := w.PollInterval
+	if every <= 0 {
+		every = DefaultWebPollInterval
+	}
+	op := w.live().detailOp
+	prev := ""
+	for {
+		raw, err := w.Native.Request(ctx, op, OpArgs{ID: convID})
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		switch {
+		case err == nil:
+			p, perr := w.progress(raw, a)
+			if perr != nil {
+				return nil, unavailable(w.Site, ErrEndpointChanged, "unexpected conversation shape")
+			}
+			if p.finished || (w.Site == SourceClaudeAI && p.found && p.sig == prev) {
+				return raw, nil
+			}
+			prev = ""
+			if p.found {
+				prev = p.sig
+			}
+		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected):
+			return nil, err
+		default:
+			w.logf("conversation %s: detail: %v (retrying)", convID, err)
+		}
+		t := time.NewTimer(every)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// readReply builds the answer from the finished read: the last turn's
+// reply text, with its generated images fetched through the file
+// operation.
+func (w *WebAgent) readReply(ctx context.Context, convID string, raw json.RawMessage) (text string, conv []Conversation) {
+	l := w.live()
+	th, err := l.parseDetail(convID, raw)
+	if err != nil || len(th.turns) == 0 {
+		return "", nil
 	}
 	t := th.turns[len(th.turns)-1]
-	if oneLineText(t.prompt.Text) != oneLineText(message) || strings.TrimSpace(t.reply.Text) == "" {
-		w.logf("conversation %s: the last turn is not this message yet; using the page text", res.ConversationID)
-		return res.ReplyText, nil, true
-	}
 	if len(t.replyImages) == 0 {
-		return t.reply.Text, nil, false
+		return t.reply.Text, nil
 	}
-	c := []Conversation{{Source: w.Site, ID: res.ConversationID, Messages: []Message{{Role: RoleAssistant, Images: t.replyImages}}}}
+	c := []Conversation{{Source: w.Site, ID: convID, Messages: []Message{{Role: RoleAssistant, Images: t.replyImages}}}}
 	c = l.resolve(ctx, c)
 	capImages(c)
-	return t.reply.Text, c, false
+	return t.reply.Text, c
 }
 
 // attachImages saves and uploads the reply's images and appends a line to
