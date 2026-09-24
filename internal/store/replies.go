@@ -57,7 +57,7 @@ const ParentPreviewChars = 1000
 func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
 	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
 	args = append(args, MaxUnseenReplies)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments,
 		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), COALESCE(substr(par.body, 1, ?), ''), COALESCE(par.status, '')
 		FROM requests q JOIN replies p ON p.request_id = q.id
 		LEFT JOIN requests par ON q.parent_id != '' AND par.id = q.parent_id AND par.to_agent = q.from_agent
@@ -73,9 +73,12 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 		var repStatus string
 		var repCreated int64
 		var par envelope.Parent
-		var parStatus string
-		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &par.ID, &par.From, &par.Body, &parStatus}})
+		var parStatus, repAtts string
+		req, st, err := scanRequest(extraCols{rows, []any{&rep.From, &repStatus, &rep.Body, &repCreated, &repAtts, &par.ID, &par.From, &par.Body, &parStatus}})
 		if err != nil {
+			return nil, err
+		}
+		if rep.Attachments, err = decodeAttachments(repAtts); err != nil {
 			return nil, err
 		}
 		rep.RequestID, rep.Status, rep.CreatedAt = req.ID, envelope.Status(repStatus), time.UnixMilli(repCreated).UTC()

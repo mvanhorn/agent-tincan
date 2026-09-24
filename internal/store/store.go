@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS requests (
   updated_at  INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL,
   lease_until INTEGER NOT NULL DEFAULT 0,
-  reply_seen_at INTEGER NOT NULL DEFAULT 0
+  reply_seen_at INTEGER NOT NULL DEFAULT 0,
+  attachments TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_to_status ON requests(to_agent, status);
 CREATE TABLE IF NOT EXISTS replies (
@@ -68,14 +69,16 @@ CREATE TABLE IF NOT EXISTS replies (
   from_agent TEXT NOT NULL,
   status     TEXT NOT NULL,
   body       TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  attachments TEXT NOT NULL DEFAULT ''
 );
 `
 
 // Store is the relay's SQLite store.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db   *sql.DB
+	now  func() time.Time
+	path string // the database file, "" for an in-memory store
 }
 
 // Open opens (creating if needed) the database at path. Use ":memory:" in
@@ -102,6 +105,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
 	s := &Store{db: db, now: time.Now}
+	if path != ":memory:" {
+		s.path = path
+	}
 	if err := s.migrateAgents(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate agents: %w", err)
@@ -124,12 +130,20 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate reply seen: %w", err)
 	}
+	if err := s.migrateAttachments(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate attachments: %w", err)
+	}
 	if err := s.ensureAudit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("audit schema: %w", err)
 	}
 	return s, nil
 }
+
+// Path is the database file the store was opened on, or "" for an
+// in-memory store. The relay keeps attachment files beside it.
+func (s *Store) Path() string { return s.path }
 
 // SetClock overrides the clock in tests.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
@@ -392,6 +406,9 @@ func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, b
 
 // Enqueue stores a new request. The caller has already set From, To, Kind,
 // Body, TraceID, Hop, Chain, and ParentID. Enqueue assigns ID and CreatedAt.
+// Attachments name uploads by id: each must be the sender's own finished
+// upload on no other message, and comes back filled in from its metadata.
+// A bad reference stores nothing.
 func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()
 	req.ID = randomID()
@@ -403,15 +420,27 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	return req, nil
+	defer tx.Rollback()
+	if req.Attachments, err = bindAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
+		return envelope.Request{}, err
+	}
+	atts, err := encodeAttachments(req.Attachments)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO requests
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
+		string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	return req, tx.Commit()
 }
 
 // Deliver hands up to limit queued requests for agent to its poller, marking
@@ -520,8 +549,15 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, ErrWrongState
 	}
 	rep.RequestID, rep.From, rep.CreatedAt = id, agent, now.UTC().Truncate(time.Millisecond)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO replies(request_id, from_agent, status, body, created_at) VALUES (?, ?, ?, ?, ?)`,
-		id, agent, string(rep.Status), rep.Body, now.UnixMilli()); err != nil {
+	if rep.Attachments, err = bindAttachments(ctx, tx, rep.Attachments, agent, id); err != nil {
+		return envelope.Reply{}, err
+	}
+	atts, err := encodeAttachments(rep.Attachments)
+	if err != nil {
+		return envelope.Reply{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO replies(request_id, from_agent, status, body, created_at, attachments) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, agent, string(rep.Status), rep.Body, now.UnixMilli(), atts); err != nil {
 		return envelope.Reply{}, err
 	}
 	return rep, tx.Commit()
@@ -556,13 +592,16 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 func (s *Store) replyFor(ctx context.Context, id string) (*envelope.Reply, error) {
 	var rep envelope.Reply
 	var created int64
-	var st string
-	err := s.db.QueryRowContext(ctx, `SELECT from_agent, status, body, created_at FROM replies WHERE request_id = ?`, id).
-		Scan(&rep.From, &st, &rep.Body, &created)
+	var st, atts string
+	err := s.db.QueryRowContext(ctx, `SELECT from_agent, status, body, created_at, attachments FROM replies WHERE request_id = ?`, id).
+		Scan(&rep.From, &st, &rep.Body, &created, &atts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if rep.Attachments, err = decodeAttachments(atts); err != nil {
 		return nil, err
 	}
 	rep.RequestID, rep.Status, rep.CreatedAt = id, envelope.Status(st), time.UnixMilli(created).UTC()
@@ -685,18 +724,22 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
-	var chain, kind, status string
+	var chain, kind, status, atts string
 	var created int64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts); err != nil {
 		return envelope.Request{}, "", err
 	}
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
+		return envelope.Request{}, "", err
+	}
+	var err error
+	if r.Attachments, err = decodeAttachments(atts); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.Kind, r.CreatedAt = envelope.Kind(kind), time.UnixMilli(created).UTC()

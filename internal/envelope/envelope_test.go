@@ -100,3 +100,93 @@ func TestReplyStatusValidation(t *testing.T) {
 		t.Fatalf("reply without status should default to answered, got %+v %v", rep, err)
 	}
 }
+
+// A send names attachments by id only; name, mime, and size are the relay's
+// to fill from the upload, so client-supplied values are dropped.
+func TestParseSendKeepsAttachmentIDsOnly(t *testing.T) {
+	raw := []byte(`{"to":"instinct","body":"see image","attachments":[{"id":"a1","name":"evil/../x","mime":"text/html","size":9},{"id":"a2"}]}`)
+	req, err := ParseSend(raw, "muse", DefaultMaxBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Attachments) != 2 || req.Attachments[0] != (Attachment{ID: "a1"}) || req.Attachments[1] != (Attachment{ID: "a2"}) {
+		t.Fatalf("attachments = %+v, want ids a1 and a2 only", req.Attachments)
+	}
+}
+
+// A send without attachments decodes exactly as before.
+func TestParseSendWithoutAttachmentsUnchanged(t *testing.T) {
+	req, err := ParseSend([]byte(`{"to":"instinct","body":"hi"}`), "muse", DefaultMaxBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Attachments != nil {
+		t.Fatalf("attachments = %+v, want nil", req.Attachments)
+	}
+	raw, _ := json.Marshal(req)
+	if strings.Contains(string(raw), "attachments") {
+		t.Fatalf("request without attachments encodes the field: %s", raw)
+	}
+}
+
+func TestParseSendRejectsBadAttachments(t *testing.T) {
+	many := `{"to":"instinct","body":"x","attachments":[`
+	var ids []string
+	for i := range MaxAttachments + 1 {
+		ids = append(ids, `{"id":"a`+string(rune('a'+i))+`"}`)
+	}
+	many += strings.Join(ids, ",") + `]}`
+	cases := map[string]string{
+		"too many":  many,
+		"empty id":  `{"to":"instinct","body":"x","attachments":[{"id":""}]}`,
+		"duplicate": `{"to":"instinct","body":"x","attachments":[{"id":"a1"},{"id":"a1"}]}`,
+	}
+	for name, raw := range cases {
+		if _, err := ParseSend([]byte(raw), "muse", DefaultMaxBody); err == nil {
+			t.Errorf("%s: want error, got nil", name)
+		}
+	}
+	_, err := ParseSend([]byte(many), "muse", DefaultMaxBody)
+	if !errors.Is(err, ErrTooManyAttachments) {
+		t.Fatalf("too many: err = %v, want ErrTooManyAttachments", err)
+	}
+}
+
+// Attachments may carry a message with an empty body, since the file is the
+// content.
+func TestParseSendAllowsEmptyBodyWithAttachment(t *testing.T) {
+	req, err := ParseSend([]byte(`{"to":"instinct","body":"","attachments":[{"id":"a1"}]}`), "muse", DefaultMaxBody)
+	if err != nil || len(req.Attachments) != 1 {
+		t.Fatalf("req = %+v, err = %v", req, err)
+	}
+}
+
+func TestParseReplyAttachments(t *testing.T) {
+	rep, err := ParseReply([]byte(`{"body":"here","attachments":[{"id":"a1","mime":"text/html"}]}`), DefaultMaxBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Attachments) != 1 || rep.Attachments[0] != (Attachment{ID: "a1"}) {
+		t.Fatalf("attachments = %+v", rep.Attachments)
+	}
+	var ids []string
+	for i := range MaxAttachments + 1 {
+		ids = append(ids, `{"id":"a`+string(rune('a'+i))+`"}`)
+	}
+	if _, err := ParseReply([]byte(`{"body":"x","attachments":[`+strings.Join(ids, ",")+`]}`), DefaultMaxBody); !errors.Is(err, ErrTooManyAttachments) {
+		t.Fatalf("too many: err = %v", err)
+	}
+	if _, err := ParseReply([]byte(`{"body":"x","attachments":[{"id":"a1"},{"id":"a1"}]}`), DefaultMaxBody); err == nil {
+		t.Fatal("duplicate ids should be rejected")
+	}
+}
+
+func TestAttachmentJSONShape(t *testing.T) {
+	raw, err := json.Marshal(Request{To: "muse", Body: "x", Attachments: []Attachment{{ID: "a1", Name: "cat.png", MIME: "image/png", Size: 42}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"attachments":[{"id":"a1","name":"cat.png","mime":"image/png","size":42}]`) {
+		t.Fatalf("json = %s", raw)
+	}
+}

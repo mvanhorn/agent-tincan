@@ -14,7 +14,8 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `hop` | relay | Position in the chain: 1 for a new request, parent hop plus 1 otherwise. |
 | `chain` | relay | Agents the request has passed through, oldest first. |
 | `kind` | client | `ask` (expects a reply, the default) or `notify`. |
-| `body` | client | The request text. Capped at 256 KB. |
+| `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
+| `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
 | `created_at` | relay | When the relay queued it. |
 
 ## Reply
@@ -25,6 +26,7 @@ Agents talk to the relay over plain HTTP on the tailnet. The relay identifies th
 | `from` | relay | Replying agent, resolved from the tailnet node. |
 | `status` | client | `answered` (default), `failed`, or `declined`. |
 | `body` | client | The reply text. Capped at 256 KB. |
+| `attachments` | client names ids, relay fills the rest | As on a request. |
 | `created_at` | relay | When the relay stored it. |
 
 ## Request states
@@ -52,3 +54,29 @@ Any other `replies` value is a 400.
 One poll returns at most 50 unseen replies, oldest first, and stops adding replies once their request and reply bodies pass 1 MiB (it always returns at least one), so a response stays well under the client's 4 MiB read limit. Bodies are not cut. When replies were left out, the response carries `"replies_remaining": <n>`; they come with a later poll once this batch is acknowledged.
 
 When a reply lands, the relay also tells the waker, which nudges a webhook or email asker if the reply is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60s). The nudge carries only counts. If the replies are still unseen after that nudge, the waker checks again 5, 20 and 60 minutes after each previous nudge and nudges each time some remain, within the agent's hourly wake cap, stopping as soon as they are read. The grace and follow-up timers live in memory, so a relay that restarts schedules a fresh reply nudge for every webhook or email agent that still holds unseen replies.
+
+## Attachments
+
+Requests and replies can carry images and small files. The file goes to the relay first, and the message names it by id.
+
+`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
+
+`POST /v1/attachments?name=<display name>` uploads one file as the calling agent. The body is the raw file and `Content-Type` its media type; when that is missing, unparseable, or `application/octet-stream`, the relay detects the type from the first bytes. The name is display metadata only, reduced to its last path element; the relay stores the file by id. The response is `201` with `{"id", "name", "mime", "size", "sha256"}`. This is the one route not held to the relay's 1 MB body limit; it has its own 10 MB limit and a 5 minute read deadline.
+
+| Limit | Value | Refusal |
+|---|---|---|
+| Per file | 10 MB | 413 |
+| Per message | 8 attachments | 400 |
+| Per uploading agent, kept at once | 200 MB | 413 |
+| Relay-wide, kept at once | 1 GB | 507 |
+| Free disk after the upload | at least 512 MB | 507 |
+
+Quota is reserved before the file is written (the `Content-Length`, or the full 10 MB when it is absent), so concurrent uploads cannot pass it together. Deleted files stop counting.
+
+To send, name the ids in the send or reply body: `"attachments": [{"id": "..."}]`. The relay accepts only the sender's own finished uploads (403 for another agent's upload, 400 for an unknown id), and each upload rides on one message (409 if it is already on one; upload it again to send it again). The relay fills in `name`, `mime`, and `size` from the upload and ignores any the client sends.
+
+`GET /v1/attachments/{id}` returns the file with its media type, `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and `X-Tincan-SHA256` (the client checks the bytes against it). It is served to the uploader, to the sender and target of the request that carries it (on the request or on its reply), and to admins. Anyone else gets the same 404 as for an unknown id. A file retention has removed answers 410.
+
+Retention runs when the relay starts and hourly. An upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state (`answered`, `failed`, `declined`, `expired`, or `cancelled`); its metadata row stays, marked deleted, so the message still lists what it carried.
+
+Files live in an `attachments` directory (0700, files 0600) beside the relay database. Uploads and fetches are audited as `attachment_uploaded` and `attachment_fetched`.

@@ -33,6 +33,7 @@ type Config struct {
 	MaxWait       time.Duration // cap on get-reply waits
 	SweepEvery    time.Duration
 	Now           func() time.Time
+	Attachments   AttachmentConfig
 }
 
 func (c *Config) defaults() {
@@ -57,6 +58,7 @@ func (c *Config) defaults() {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
+	c.Attachments.defaults()
 }
 
 // Preparer fills in a new request's chain fields and applies policy. The
@@ -93,6 +95,7 @@ type Server struct {
 	wake   WakeNamer
 	conn   Connector
 	dist   *dist
+	blobs  string // attachment directory, "" when attachments are off
 
 	mu       sync.Mutex
 	lastPoll map[string]time.Time
@@ -111,7 +114,7 @@ const persistEvery = time.Minute
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	return &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
-		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}}
+		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, blobs: defaultAttachmentDir(st)}
 }
 
 // SetPreparer installs the chain and policy step.
@@ -158,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
 	mux.HandleFunc("GET /v1/dist", s.handleDistManifest)
 	mux.HandleFunc("GET /v1/dist/{name}", s.handleDistFile)
+	mux.HandleFunc("POST "+uploadPath, s.handleUpload)
 	s.adminRoutes(mux)
 	return limitBodies(mux)
 }
@@ -172,6 +176,8 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.handleVerify)
+	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
+	mux.HandleFunc("GET /v1/attachments/{id}", s.handleFetch)
 }
 
 // AdminHandler serves only admin routes and treats every caller as the local
@@ -185,24 +191,34 @@ func (s *Server) AdminHandler() http.Handler {
 	})
 }
 
+// limitBodies caps every request body at the API limit, except an
+// attachment upload, whose handler applies its own larger cap.
 func limitBodies(h http.Handler) http.Handler {
 	max := client.Defaults(client.RelayAPI).MaxBodyBytes
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		client.LimitBody(w, r, max)
+		if r.Method != http.MethodPost || r.URL.Path != uploadPath {
+			client.LimitBody(w, r, max)
+		}
 		h.ServeHTTP(w, r)
 	})
 }
 
-// Run sweeps expired requests and leases until ctx ends.
+// Run sweeps expired requests and leases, and applies attachment retention
+// at start and every Attachments.SweepEvery, until ctx ends.
 func (s *Server) Run(ctx context.Context) {
 	t := time.NewTicker(s.cfg.SweepEvery)
 	defer t.Stop()
+	at := time.NewTicker(s.cfg.Attachments.SweepEvery)
+	defer at.Stop()
+	s.SweepAttachments(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			s.Sweep(ctx)
+		case <-at.C:
+			s.SweepAttachments(ctx)
 		}
 	}
 }
@@ -327,6 +343,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if len(req.Attachments) > 0 && s.blobs == "" {
+		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
+		return
+	}
 	if !s.isAgent(r.Context(), req.To) {
 		writeErr(w, http.StatusNotFound, errors.New("no such agent: "+req.To))
 		return
@@ -338,7 +358,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err = s.store.Enqueue(r.Context(), req, s.cfg.RequestTTL)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeErr(w, attachmentStatus(err, http.StatusInternalServerError), err)
 		return
 	}
 	s.hub.notify(inboxKey(req.To))
@@ -576,10 +596,14 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if len(rep.Attachments) > 0 && s.blobs == "" {
+		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
+		return
+	}
 	id := r.PathValue("id")
 	rep, err = s.store.Reply(r.Context(), id, name, rep)
 	if err != nil {
-		writeErr(w, statusFor(err), err)
+		writeErr(w, attachmentStatus(err, statusFor(err)), err)
 		return
 	}
 	s.hub.notify(requestKey(id))
