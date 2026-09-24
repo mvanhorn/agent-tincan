@@ -43,12 +43,7 @@ func NewCodex() *Codex {
 // Source implements Reader.
 func (c *Codex) Source() Source { return SourceCodex }
 
-func (c *Codex) now() time.Time {
-	if c.Now != nil {
-		return c.Now()
-	}
-	return time.Now()
-}
+func (c *Codex) now() time.Time { return orNow(c.Now) }
 
 // codexEntry is one candidate thread.
 type codexEntry struct {
@@ -414,8 +409,8 @@ func (c *Codex) load(e codexEntry, all bool, p codexParse) (thread, bool, error)
 
 // List implements Reader.
 func (c *Codex) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("list count must be positive")
+	if err := checkListCount(count); err != nil {
+		return nil, err
 	}
 	cands, err := c.candidates(ctx, opts.All)
 	if err != nil {
@@ -450,8 +445,8 @@ func (c *Codex) Read(ctx context.Context, q Query, opts Options) ([]Conversation
 	if err := q.Validate(); err != nil {
 		return nil, err
 	}
-	if q.Source != SourceCodex {
-		return nil, fmt.Errorf("codex reader cannot answer source %q", q.Source)
+	if err := checkSource(SourceCodex, q); err != nil {
+		return nil, err
 	}
 	p := codexParse{images: q.WantImages}
 	if q.Mode == ModeConversation {

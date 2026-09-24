@@ -2,6 +2,8 @@
 package cli
 
 import (
+	"encoding/json"
+
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -53,4 +55,14 @@ func versionCmd() *cobra.Command {
 		Short: "Print the tincan version",
 		Run:   func(cmd *cobra.Command, _ []string) { cmd.Println(Version) },
 	}
+}
+
+// printJSON prints v as indented JSON and a newline.
+func printJSON(cmd *cobra.Command, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	cmd.Println(string(b))
+	return nil
 }

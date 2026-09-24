@@ -71,9 +71,5 @@ func SaveConfig(c Config) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writePrivate(p, raw)
 }

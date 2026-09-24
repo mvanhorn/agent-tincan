@@ -43,12 +43,7 @@ func splitRef(img Image) (pointer, name string, ok bool) {
 	return pointer, name, ok
 }
 
-func (l *live) clock() time.Time {
-	if l.now != nil {
-		return l.now()
-	}
-	return time.Now()
-}
+func (l *live) clock() time.Time { return orNow(l.now) }
 
 // list asks the extension for the n newest conversations, newest first.
 func (l *live) list(ctx context.Context, n int) ([]Conversation, error) {
@@ -82,8 +77,8 @@ func (l *live) detail(ctx context.Context, id string) (thread, error) {
 
 // List implements Reader.List.
 func (l *live) List(ctx context.Context, count int, _ Options) ([]Conversation, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("list count must be positive")
+	if err := checkListCount(count); err != nil {
+		return nil, err
 	}
 	convs, err := l.list(ctx, count)
 	if err != nil {
@@ -104,8 +99,8 @@ func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, er
 	if err := q.Validate(); err != nil {
 		return nil, err
 	}
-	if q.Source != l.source {
-		return nil, fmt.Errorf("%s reader cannot answer source %q", l.source, q.Source)
+	if err := checkSource(l.source, q); err != nil {
+		return nil, err
 	}
 	if q.Mode == ModeConversation {
 		if !validNativeID(q.ConversationID) {

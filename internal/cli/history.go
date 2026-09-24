@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -102,12 +101,7 @@ func historyCmd() *cobra.Command {
 				if convs == nil {
 					convs = []history.Conversation{}
 				}
-				b, err := json.MarshalIndent(convs, "", "  ")
-				if err != nil {
-					return err
-				}
-				cmd.Println(string(b))
-				return nil
+				return printJSON(cmd, convs)
 			}
 			printHistory(cmd, convs, cmd.Flags().Changed("list"))
 			return nil

@@ -158,17 +158,15 @@ func (r *Relay) FetchAttachment(ctx context.Context, id string) ([]byte, Downloa
 // for SendAttached, AskAttached or ReplyAttached. Everything is checked
 // before the first upload: the relay must support attachments, the list
 // must fit in one message, and each path must be a regular file within the
-// relay's per-file cap. Each file's display name is its base name.
+// relay's per-file cap. Each file's display name is its base name. The
+// capability check is made once for the whole batch.
 func (r *Relay) UploadFiles(ctx context.Context, paths []string) ([]UploadedAttachment, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	caps, err := r.Capabilities(ctx)
+	caps, err := r.requireAttachments(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("check relay capabilities: %w", err)
-	}
-	if !caps.Attachments {
-		return nil, ErrAttachmentsUnsupported
+		return nil, err
 	}
 	most := caps.MaxAttachments
 	if most <= 0 {
@@ -219,7 +217,7 @@ func (r *Relay) uploadFile(ctx context.Context, path string, size int64) (Upload
 	if st.Size() != size {
 		return UploadedAttachment{}, errors.New("file changed while attaching")
 	}
-	return r.UploadAttachment(ctx, filepath.Base(path), MediaType(mime.TypeByExtension(filepath.Ext(path))), f, size)
+	return r.upload(ctx, filepath.Base(path), MediaType(mime.TypeByExtension(filepath.Ext(path))), f, size)
 }
 
 // AttachmentIDs returns the ids of uploaded attachments.

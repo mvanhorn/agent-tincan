@@ -365,22 +365,13 @@ func (r *Relay) DownloadDist(ctx context.Context, name string, w io.Writer) erro
 	if r.agent != "" {
 		req.Header.Set(AgentHeader, r.agent)
 	}
-	c := *r.api // same transport and proxy, longer timeout
-	c.Timeout = DistDownloadTimeout
-	resp, err := c.Do(req)
+	resp, err := r.withTimeout(DistDownloadTimeout).Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		var e struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(raw, &e) != nil || e.Error == "" {
-			e.Error = strings.TrimSpace(string(raw))
-		}
-		return &APIError{Code: resp.StatusCode, Message: e.Error}
+		return apiError(resp)
 	}
 	n, err := io.Copy(w, io.LimitReader(resp.Body, MaxDistBytes+1))
 	if err != nil {

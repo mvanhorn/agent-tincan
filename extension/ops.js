@@ -135,6 +135,32 @@ export function createRunner({ fetch }) {
     }
   }
 
+  // readCapped reads the body, throwing too_large as soon as it passes
+  // MAX_FILE_BYTES rather than after buffering all of it.
+  async function readCapped(res) {
+    if (!res.body) return new Uint8Array(0);
+    const reader = res.body.getReader();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > MAX_FILE_BYTES) {
+        reader.cancel().catch(() => {});
+        throw new OpError('too_large', `file over ${MAX_FILE_BYTES} bytes`);
+      }
+      parts.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    for (const part of parts) {
+      bytes.set(part, off);
+      off += part.length;
+    }
+    return bytes;
+  }
+
   async function emitFile(url, init, emit) {
     const res = await send(url, init);
     check(res, url, true);
@@ -144,8 +170,7 @@ export function createRunner({ fetch }) {
     if (!mime.startsWith('image/') && mime !== 'application/octet-stream') {
       throw new OpError('endpoint_changed', `unexpected file type from ${pathOf(url)}`);
     }
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (bytes.length > MAX_FILE_BYTES) throw new OpError('too_large', `file over ${MAX_FILE_BYTES} bytes`);
+    const bytes = await readCapped(res);
     if (bytes.length === 0) throw new OpError('endpoint_changed', 'empty file');
     for (let seq = 0, off = 0; off < bytes.length; seq++, off += CHUNK_BYTES) {
       const end = Math.min(off + CHUNK_BYTES, bytes.length);

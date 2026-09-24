@@ -425,11 +425,8 @@ func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Dura
 		return envelope.Request{}, err
 	}
 	defer tx.Rollback()
-	if req.Attachments, err = bindAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
-		return envelope.Request{}, err
-	}
-	atts, err := encodeAttachments(req.Attachments)
-	if err != nil {
+	var atts string
+	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
@@ -549,11 +546,8 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, ErrWrongState
 	}
 	rep.RequestID, rep.From, rep.CreatedAt = id, agent, now.UTC().Truncate(time.Millisecond)
-	if rep.Attachments, err = bindAttachments(ctx, tx, rep.Attachments, agent, id); err != nil {
-		return envelope.Reply{}, err
-	}
-	atts, err := encodeAttachments(rep.Attachments)
-	if err != nil {
+	var atts string
+	if rep.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, rep.Attachments, agent, id); err != nil {
 		return envelope.Reply{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO replies(request_id, from_agent, status, body, created_at, attachments) VALUES (?, ?, ?, ?, ?, ?)`,

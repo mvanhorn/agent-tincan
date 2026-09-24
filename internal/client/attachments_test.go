@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -186,5 +189,44 @@ func TestDownloadAttachmentOversized(t *testing.T) {
 func TestAttachmentTransfersUseLongTimeout(t *testing.T) {
 	if client.AttachmentTimeout <= client.Defaults(client.APIClient).ClientTimeout {
 		t.Fatalf("AttachmentTimeout %v should exceed the API timeout", client.AttachmentTimeout)
+	}
+}
+
+// UploadFiles checks the relay's capabilities once for the whole batch,
+// not again for each file.
+func TestUploadFilesChecksCapabilitiesOnce(t *testing.T) {
+	var capsHits, uploads atomic.Int32
+	r := distServer(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch req.URL.Path {
+		case "/v1/capabilities":
+			capsHits.Add(1)
+			w.Write([]byte(`{"attachments":true}`))
+		case "/v1/attachments":
+			n := uploads.Add(1)
+			fmt.Fprintf(w, `{"id":"a%d","name":%q}`, n, req.URL.Query().Get("name"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	dir := t.TempDir()
+	paths := []string{filepath.Join(dir, "one.txt"), filepath.Join(dir, "two.txt")}
+	for _, p := range paths {
+		if err := os.WriteFile(p, []byte("hello"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ups, err := r.UploadFiles(context.Background(), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 2 || ups[0].Name != "one.txt" || ups[1].Name != "two.txt" {
+		t.Fatalf("uploads = %+v", ups)
+	}
+	if got := capsHits.Load(); got != 1 {
+		t.Fatalf("capabilities called %d times, want 1", got)
+	}
+	if got := uploads.Load(); got != 2 {
+		t.Fatalf("uploaded %d files, want 2", got)
 	}
 }

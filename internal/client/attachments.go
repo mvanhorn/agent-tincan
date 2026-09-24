@@ -73,17 +73,17 @@ func (r *Relay) Capabilities(ctx context.Context) (Capabilities, error) {
 	return out, err
 }
 
-// requireAttachments returns ErrAttachmentsUnsupported unless the relay
-// advertises attachments.
-func (r *Relay) requireAttachments(ctx context.Context) error {
+// requireAttachments returns the relay's capabilities, or
+// ErrAttachmentsUnsupported unless the relay advertises attachments.
+func (r *Relay) requireAttachments(ctx context.Context) (Capabilities, error) {
 	caps, err := r.Capabilities(ctx)
 	if err != nil {
-		return fmt.Errorf("check relay capabilities: %w", err)
+		return Capabilities{}, fmt.Errorf("check relay capabilities: %w", err)
 	}
 	if !caps.Attachments {
-		return ErrAttachmentsUnsupported
+		return Capabilities{}, ErrAttachmentsUnsupported
 	}
-	return nil
+	return caps, nil
 }
 
 // UploadAttachment stores body on the relay as this agent and returns its
@@ -92,9 +92,15 @@ func (r *Relay) requireAttachments(ctx context.Context) error {
 // or negative when unknown (the relay then reserves its full per-file cap
 // against the quota while the upload runs).
 func (r *Relay) UploadAttachment(ctx context.Context, name, mime string, body io.Reader, size int64) (UploadedAttachment, error) {
-	if err := r.requireAttachments(ctx); err != nil {
+	if _, err := r.requireAttachments(ctx); err != nil {
 		return UploadedAttachment{}, err
 	}
+	return r.upload(ctx, name, mime, body, size)
+}
+
+// upload is UploadAttachment without the capability check, for callers
+// that already made it.
+func (r *Relay) upload(ctx context.Context, name, mime string, body io.Reader, size int64) (UploadedAttachment, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", r.base+"/v1/attachments?name="+url.QueryEscape(name), body)
 	if err != nil {
 		return UploadedAttachment{}, err
@@ -165,11 +171,8 @@ func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) 
 // them.
 func (r *Relay) SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string) (envelope.Request, error) {
 	in := map[string]any{"to": to, "body": body, "kind": kind, "parent_id": parent}
-	if len(attachments) > 0 {
-		if err := r.requireAttachments(ctx); err != nil {
-			return envelope.Request{}, err
-		}
-		in["attachments"] = attachmentRefs(attachments)
+	if err := r.attachIfAny(ctx, in, attachments); err != nil {
+		return envelope.Request{}, err
 	}
 	var out envelope.Request
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
@@ -191,15 +194,25 @@ func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attach
 // ReplyAttached is Reply with attachments; see SendAttached.
 func (r *Relay) ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error) {
 	in := map[string]any{"body": body, "status": status}
-	if len(attachments) > 0 {
-		if err := r.requireAttachments(ctx); err != nil {
-			return envelope.Reply{}, err
-		}
-		in["attachments"] = attachmentRefs(attachments)
+	if err := r.attachIfAny(ctx, in, attachments); err != nil {
+		return envelope.Reply{}, err
 	}
 	var out envelope.Reply
 	err := r.call(ctx, r.api, "POST", "/v1/requests/"+url.PathEscape(id)+"/reply", in, &out)
 	return out, err
+}
+
+// attachIfAny adds attachments to the call body in, first checking that the
+// relay supports them. With none it leaves in alone and makes no call.
+func (r *Relay) attachIfAny(ctx context.Context, in map[string]any, attachments []string) error {
+	if len(attachments) == 0 {
+		return nil
+	}
+	if _, err := r.requireAttachments(ctx); err != nil {
+		return err
+	}
+	in["attachments"] = attachmentRefs(attachments)
+	return nil
 }
 
 func attachmentRefs(ids []string) []Attachment {
@@ -216,9 +229,15 @@ func (r *Relay) long(req *http.Request) (*http.Response, error) {
 	if r.agent != "" {
 		req.Header.Set(AgentHeader, r.agent)
 	}
+	return r.withTimeout(AttachmentTimeout).Do(req)
+}
+
+// withTimeout is this client's API client (same transport and proxy) with
+// timeout d.
+func (r *Relay) withTimeout(d time.Duration) *http.Client {
 	c := *r.api
-	c.Timeout = AttachmentTimeout
-	return c.Do(req)
+	c.Timeout = d
+	return &c
 }
 
 // apiError reads a non-2xx response into an APIError.

@@ -468,16 +468,7 @@ func (c *Client) File(ctx context.Context, op Op, args OpArgs) ([]byte, string, 
 
 // NativeDir is the directory holding the native host socket and wrapper:
 // $TINCAN_HISTORY_NATIVE_DIR or ~/.config/tincan/history-native.
-func NativeDir() string {
-	if d := os.Getenv("TINCAN_HISTORY_NATIVE_DIR"); d != "" {
-		return d
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "tincan", "history-native")
-}
+func NativeDir() string { return configPath("TINCAN_HISTORY_NATIVE_DIR", "history-native") }
 
 // DefaultSocketPath is the native host's socket.
 func DefaultSocketPath() string { return filepath.Join(NativeDir(), "host.sock") }

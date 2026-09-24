@@ -43,12 +43,7 @@ func NewClaudeCode() *ClaudeCode {
 // Source implements Reader.
 func (c *ClaudeCode) Source() Source { return SourceClaudeCode }
 
-func (c *ClaudeCode) now() time.Time {
-	if c.Now != nil {
-		return c.Now()
-	}
-	return time.Now()
-}
+func (c *ClaudeCode) now() time.Time { return orNow(c.Now) }
 
 type claudeEntry struct {
 	id      string
@@ -302,8 +297,8 @@ func (c *ClaudeCode) parse(e claudeEntry, all, images bool) (thread, bool, error
 
 // List implements Reader.
 func (c *ClaudeCode) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("list count must be positive")
+	if err := checkListCount(count); err != nil {
+		return nil, err
 	}
 	cands, err := c.candidates(ctx)
 	if err != nil {
@@ -334,8 +329,8 @@ func (c *ClaudeCode) Read(ctx context.Context, q Query, opts Options) ([]Convers
 	if err := q.Validate(); err != nil {
 		return nil, err
 	}
-	if q.Source != SourceClaudeCode {
-		return nil, fmt.Errorf("claude-code reader cannot answer source %q", q.Source)
+	if err := checkSource(SourceClaudeCode, q); err != nil {
+		return nil, err
 	}
 	cands, err := c.candidates(ctx)
 	if err != nil {

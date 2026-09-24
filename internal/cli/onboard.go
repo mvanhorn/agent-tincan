@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -62,12 +61,7 @@ prints the operator prompt and recipes, for setting up before anyone joins.`,
 				return err
 			}
 			if asJSON {
-				raw, err := json.MarshalIndent(k, "", "  ")
-				if err != nil {
-					return err
-				}
-				cmd.Println(string(raw))
-				return nil
+				return printJSON(cmd, k)
 			}
 			cmd.Print(onboard.Render(k, section))
 			return nil

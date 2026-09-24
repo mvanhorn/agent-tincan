@@ -166,7 +166,7 @@ func New(b Backend, version string, opts ...Option) *mcp.Server {
 // NewWithOptions builds the MCP server with explicit options (channel mode).
 func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...Option) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
-	f := files{b: b}
+	var f files
 	f.att, _ = b.(Attacher)
 	for _, o := range more {
 		o(&f.options)
@@ -333,7 +333,6 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 // files sends and shows attachments for the tools.
 type files struct {
 	options
-	b   Backend
 	att Attacher // nil when the backend cannot move attachments
 }
 

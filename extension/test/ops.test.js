@@ -197,6 +197,57 @@ test('file size cap and content type', async () => {
   await assert.rejects(run(r, 'claudeai.file', { file_id: 'f2' }), (e) => e.code === 'endpoint_changed');
 });
 
+test('file size cap applies to a streamed body with no content-length', async () => {
+  let pulled = 0;
+  let cancelled = false;
+  const chunk = new Uint8Array(1024 * 1024);
+  const body = new ReadableStream({
+    pull(c) {
+      pulled += chunk.length;
+      c.enqueue(chunk);
+      if (pulled > MAX_FILE_BYTES * 4) c.close();
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const res = new Response(body, { status: 200, headers: { 'content-type': 'image/png' } });
+  assert.equal(res.headers.get('content-length'), null);
+  const org = fixture('claudeai/organizations.json');
+  const f = fakeFetch({
+    'https://claude.ai/api/organizations': jsonResponse(org),
+    'https://claude.ai/api/0rg00000-0000-4000-8000-000000000000/files/f3/preview': () => res,
+  });
+  const frames = [];
+  await assert.rejects(
+    createRunner({ fetch: f }).run('claudeai.file', { file_id: 'f3' }, (fr) => frames.push(fr)),
+    (e) => e.code === 'too_large' && e.message === `file over ${MAX_FILE_BYTES} bytes`,
+  );
+  assert.equal(frames.length, 0);
+  assert.ok(pulled <= MAX_FILE_BYTES + 2 * chunk.length, `read ${pulled} bytes before refusing`);
+  assert.ok(cancelled, 'body stream cancelled');
+});
+
+test('a streamed body with no content-length under the cap is emitted whole', async () => {
+  const img = pngBytes(CHUNK_BYTES + 5);
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(img.subarray(0, 100));
+      c.enqueue(img.subarray(100));
+      c.close();
+    },
+  });
+  const org = fixture('claudeai/organizations.json');
+  const f = fakeFetch({
+    'https://claude.ai/api/organizations': jsonResponse(org),
+    'https://claude.ai/api/0rg00000-0000-4000-8000-000000000000/files/f4/preview': () => new Response(body, { status: 200, headers: { 'content-type': 'image/png' } }),
+  });
+  const frames = await run(createRunner({ fetch: f }), 'claudeai.file', { file_id: 'f4' });
+  assert.equal(frames.length, 2);
+  assert.equal(frames[0].size, img.length);
+  assert.deepEqual(new Uint8Array(reassemble(frames)), img);
+});
+
 test('claudeai list, detail and file use the organization from /api/organizations', async () => {
   const org = '0rg00000-0000-4000-8000-000000000000';
   const list = fixture('claudeai/chat_conversations.json');

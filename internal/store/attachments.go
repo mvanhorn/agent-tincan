@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS attachments_uploader ON attachments(uploader, deleted_at);
 CREATE INDEX IF NOT EXISTS attachments_request ON attachments(request_id);
+CREATE INDEX IF NOT EXISTS attachments_live ON attachments(deleted_at, size);
 `
 
 // AttachmentQuota caps the bytes of attachments the relay keeps, per
@@ -199,6 +200,20 @@ func bindAttachments(ctx context.Context, tx *sql.Tx, atts []envelope.Attachment
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// bindAndEncodeAttachments binds atts to requestID inside tx, then returns
+// them filled in along with their stored form.
+func bindAndEncodeAttachments(ctx context.Context, tx *sql.Tx, atts []envelope.Attachment, sender, requestID string) ([]envelope.Attachment, string, error) {
+	bound, err := bindAttachments(ctx, tx, atts, sender, requestID)
+	if err != nil {
+		return nil, "", err
+	}
+	enc, err := encodeAttachments(bound)
+	if err != nil {
+		return nil, "", err
+	}
+	return bound, enc, nil
 }
 
 // encodeAttachments is the stored form of a message's attachments: "" for

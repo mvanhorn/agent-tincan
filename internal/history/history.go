@@ -239,15 +239,45 @@ func (w Window) fresh(updated, now time.Time) bool {
 
 // DefaultScratchDir is the history service's own working directory, whose
 // conversations are never reported.
-func DefaultScratchDir() string {
-	if d := os.Getenv("TINCAN_HISTORY_SCRATCH"); d != "" {
-		return d
+func DefaultScratchDir() string { return configPath("TINCAN_HISTORY_SCRATCH", "history-scratch") }
+
+// configPath returns $env when env is non-empty and set, else
+// ~/.config/tincan/<leaf>, or "" when the home directory is unknown.
+func configPath(env, leaf string) string {
+	if env != "" {
+		if d := os.Getenv(env); d != "" {
+			return d
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "tincan", "history-scratch")
+	return filepath.Join(home, ".config", "tincan", leaf)
+}
+
+// orNow returns f(), or time.Now() when f is nil.
+func orNow(f func() time.Time) time.Time {
+	if f != nil {
+		return f()
+	}
+	return time.Now()
+}
+
+// checkListCount rejects a non-positive List count.
+func checkListCount(count int) error {
+	if count <= 0 {
+		return fmt.Errorf("list count must be positive")
+	}
+	return nil
+}
+
+// checkSource rejects a query addressed to a source other than want.
+func checkSource(want Source, q Query) error {
+	if q.Source != want {
+		return fmt.Errorf("%s reader cannot answer source %q", want, q.Source)
+	}
+	return nil
 }
 
 // inDir reports whether path is dir or inside it. Empty dir matches
@@ -394,23 +424,7 @@ func saveImage(dir string, img *Image) error {
 		*img = checked
 		return nil
 	}
-	tmp, err := os.CreateTemp(dir, ".img-*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(checked.Data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), target); err != nil {
+	if err := writeFileAtomic(target, checked.Data, 0o600); err != nil {
 		return err
 	}
 	checked.Path = target

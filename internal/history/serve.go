@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -23,13 +22,7 @@ import (
 var DefaultAllowlist = []string{"grokbot", "claude-code", "codex"}
 
 // DefaultAllowlistPath is the allowlist file beside the history config.
-func DefaultAllowlistPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".config", "tincan", "history-allow.txt")
-}
+func DefaultAllowlistPath() string { return configPath("", "history-allow.txt") }
 
 var agentName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
