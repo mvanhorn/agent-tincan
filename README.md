@@ -614,7 +614,7 @@ Wait: the service long-polls the relay. Set `{ "history": { "method": "wait" } }
 
 For each request it:
 
-1. Checks the chain allowlist. Every agent in the request's chain, as the relay recorded it, must be on `~/.config/tincan/history-allow.txt` (default: grokbot, claude-code, codex). If muse asks codex and codex asks history while handling muse's request, it is declined because of muse. The file is reread for every request; an unreadable file or a bad name declines everyone.
+1. Checks the allowlist. By default there is no allowlist file and every agent joined to your relay may ask (the relay only delivers requests from joined agents). To restrict it, write `~/.config/tincan/history-allow.txt` with the agent names that may ask; then every agent in the request's chain, as the relay recorded it, must be listed. If muse asks codex and codex asks history while handling muse's request, a file that lists codex but not muse declines it because of muse. A `*` entry in the file means every joined agent. The file is reread for every request; an unreadable file or a bad name declines everyone.
 2. Runs a tool-less query step: one `codex exec` call that sees only the question text and turns it into a structured query (source, mode, search terms, conversation id, count, `want_images`, and `with_images`, which picks the most recent turn that had images rather than the most recent turn). It runs read-only, with no MCP servers, no tools and no session file, and its output is checked against a schema in Go.
 3. Reads the source. Lookups cover the 50 most recent conversations per source, up to 30 days old.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
@@ -639,7 +639,7 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 
 #### Limits and gotchas
 
-- It is the most sensitive agent on the mesh: anyone on the allowlist can read the owner's chat history. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex wake) can read local Codex and Claude Code history directly.
+- It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex wake) can read local Codex and Claude Code history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
 - A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code".
 
@@ -670,7 +670,7 @@ Wait: the service long-polls. Set its method to `wait` in `wake.json`.
 
 For each request, one at a time:
 
-1. Checks the chain allowlist (`~/.config/tincan/chatgpt-web-allow.txt` or `claude-web-allow.txt`, default grokbot, claude-code, codex), exactly like history.
+1. Checks the allowlist exactly like history: with no file, every joined agent may ask; `~/.config/tincan/chatgpt-web-allow.txt` or `claude-web-allow.txt` restricts it to the listed names, and every agent in the chain must be listed.
 2. Reads the optional threading line. A first line `new chat` starts a new conversation; `conversation: <id>` (or a conversation URL) continues that one; otherwise it continues the conversation this asker used last with this agent. Each asker has its own thread. The ids live in `~/.config/tincan/<agent>-state.json` (0600, ids only). Every reply ends with the conversation id so the asker can come back.
 3. Has the extension type the message into a background tab the extension opens itself (`active: false`). The extension fills the message box, clicks send, and returns once the conversation id is in the tab's address (at most 60 seconds). It never touches a tab the owner opened.
 4. Decides completion from the conversation data, not the page: it reads the conversation through the same detail operation the history agent uses (first 5 seconds after the send, then 5, 8 and 12 seconds apart, then every 20 seconds), finds this request's own user message, and waits for the answer after it (ChatGPT: any message in the turn marked end of turn, which covers image turns whose last message is hidden; claude.ai: a `stop_reason`, or the same text on 4 reads spanning at least 10 seconds). The wait is bounded by the 8 minute request timeout. An HTTP 429 waits the site's `Retry-After` or backs off from 30 seconds up to 5 minutes, and a cooldown makes the next requests fail at once with "ChatGPT is rate-limiting this account right now; try again later" instead of hitting the site again. A rate limit that ends the wait after the send says the message was sent, names the conversation, and asks for the reply later instead of sending again. While it waits, the agent keeps its relay presence fresh without claiming new requests.
@@ -692,7 +692,7 @@ For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claud
 
 #### Limits and gotchas
 
-- It acts as the owner. The answer can include what the site remembers about the owner, and it is untrusted model output: the web agents pass it back as is.
+- It acts as the owner, and by default any joined agent may ask it to. Write its allowlist file to restrict that. The answer can include what the site remembers about the owner, and it is untrusted model output: the web agents pass it back as is.
 - The extension checks the site session before opening a tab, so a logged-out browser never sends anonymously.
 - Both sites protect their send endpoints with anti-bot tokens only the real page can produce, which is why it drives a tab instead of calling an API. If a site changes its page, the selectors in `extension/send.js` need an update.
 - The send operations need extension version 0.3.0 or later.

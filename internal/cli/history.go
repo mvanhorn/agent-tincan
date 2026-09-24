@@ -214,7 +214,8 @@ func historyServeCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Run the history agent: answer teammates' history questions over the relay",
 		Long: "Long-polls the relay as the history agent and answers each request itself, in order:\n" +
-			"  1. every agent in the request's relay-set chain must be on the allowlist, or the request is declined;\n" +
+			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
+			"     with no file (or a * entry) any joined agent may ask;\n" +
 			"  2. a tool-less codex exec call turns the question text (and only that) into a structured query;\n" +
 			"  3. the matching source is read (ChatGPT and claude.ai through the Tincan Chrome extension);\n" +
 			"  4. the reply is filled in from a fixed template, with the images attached.\n" +
@@ -275,7 +276,7 @@ func historyServeCmd() *cobra.Command {
 			if me.Name != "history" {
 				return wrongHistoryAgent("the relay knows the machine using "+configPath+" as", me.Name)
 			}
-			cmd.PrintErrf("tincan history: serving as %s on %s (allowlist %s: %s)\n", me.Name, cfg.Relay, allowPath, strings.Join(allowed, ", "))
+			cmd.PrintErrf("tincan history: serving as %s on %s (%s)\n", me.Name, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrln("tincan history: stopped")
@@ -285,7 +286,7 @@ func historyServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "the history agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/history.json)")
-	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to read history, one per line (default: ~/.config/tincan/history-allow.txt; missing means grokbot, claude-code, codex)")
+	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to read history, one per line (default: ~/.config/tincan/history-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&codexBin, "codex", "codex", "codex binary used for the tool-less query step")
 	return cmd
 }

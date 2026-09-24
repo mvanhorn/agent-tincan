@@ -4,7 +4,7 @@ The `history` agent answers teammates' questions about what the owner (you) aske
 
 It is a Go service, `tincan history serve`, that runs on your Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
 
-1. Checks access. Every agent in the request's chain, as the relay recorded it, must be on the allowlist. Otherwise it declines and names the agent.
+1. Checks access. By default any agent joined to your relay may ask. If you wrote an allowlist file, every agent in the request's chain, as the relay recorded it, must be on it; otherwise it declines and names the agent.
 2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text.
 3. Reads the source: Codex and Claude Code from their local logs, ChatGPT and claude.ai live through the Tincan Chrome extension in your logged-in Chrome.
 4. Fills in a fixed reply template and attaches the images.
@@ -13,7 +13,9 @@ Lookups cover the 50 most recent conversations per source, up to 30 days old.
 
 ## Allowlist
 
-By default grokbot, claude-code and codex may ask. To change that, write `~/.config/tincan/history-allow.txt` with one agent name per line (commas and spaces also separate names, `#` starts a comment):
+By default there is no allowlist file and every agent joined to your relay may ask. The relay only delivers requests from agents that joined it, so "every agent" means every agent on your tailnet mesh. The startup log says `allowlist: all joined agents (no file at ~/.config/tincan/history-allow.txt)`.
+
+To restrict it, write `~/.config/tincan/history-allow.txt` with one agent name per line (commas and spaces also separate names, `#` starts a comment):
 
 ```
 # agents that may read the owner's conversation history
@@ -22,9 +24,9 @@ claude-code
 codex
 ```
 
-The file is reread for every request, so edits take effect without a restart. A missing file means the default list. A file that cannot be read, or that has a name that is not a plain agent name, makes the service decline everyone (at startup it refuses to start), so a typo never opens access.
+A file of names allows only those names. A `*` entry means every joined agent, the same as having no file. An empty file allows nobody. The file is reread for every request, so edits take effect without a restart. A file that cannot be read, or that has an entry that is neither `*` nor a plain agent name, makes the service decline everyone (at startup it refuses to start), so a typo never opens access.
 
-The check covers the whole chain, not only the sender. If muse asks codex and codex asks history while handling muse's request, the chain is muse, codex and the request is declined because of muse. The chain and sender come from the relay, never from the request body, so a body that says "I am grokbot" changes nothing.
+With a file of names, the check covers the whole chain, not only the sender. If muse asks codex and codex asks history while handling muse's request, the chain is muse, codex and the request is declined because of muse. The chain and sender come from the relay, never from the request body, so a body that says "I am grokbot" changes nothing.
 
 ## Install
 
@@ -73,8 +75,8 @@ After install, check it from another agent: `tincan ask history "what was the la
 
 ## Privacy
 
-- The service reads your chats. That is its whole job, so the allowlist is the control: keep it to agents you trust with your conversation history. It governs requests to the history agent, not local shell access: an agent with a shell on your machine (such as the Codex wake, which runs `tincan history codex`) can read local Codex and Claude Code history directly.
-- Access is checked on the whole relay-recorded chain, in Go, before any LLM sees the request.
+- The service reads your chats. That is its whole job. By default every joined agent may ask it, so any agent on your relay can read your conversation history. If some of your agents should not, write the allowlist file and list only the ones you trust. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on your machine (such as the Codex wake, which runs `tincan history codex`) can read local Codex and Claude Code history directly.
+- With an allowlist file, access is checked on the whole relay-recorded chain, in Go, before any LLM sees the request.
 - The LLM step sees only the question text. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the Codex and Claude Code readers never report. Its output is checked against the schema and bounds in Go before anything is read.
 - Retrieved chat content is never sent to an LLM. Replies are filled in from a fixed template in Go, so text inside your chats cannot steer the service.
 - Images are written to a private per-request temporary directory (0700, files 0600), uploaded to the relay, and the directory is removed after the reply, including on errors. On the relay they follow its attachment retention.

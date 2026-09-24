@@ -18,8 +18,14 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-// DefaultAllowlist is who may read history when no allowlist file exists.
-var DefaultAllowlist = []string{"grokbot", "claude-code", "codex"}
+// AllowAll is the allowlist entry meaning every joined agent. The relay
+// only delivers requests from agents that joined it, so "all" is bounded
+// by the tailnet's own membership.
+const AllowAll = "*"
+
+// DefaultAllowlist is who may use an agent when no allowlist file exists:
+// every joined agent.
+var DefaultAllowlist = []string{AllowAll}
 
 // DefaultAllowlistPath is the allowlist file beside the history config.
 func DefaultAllowlistPath() string { return configPath("", "history-allow.txt") }
@@ -28,8 +34,11 @@ var agentName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 // LoadAllowlist reads agent names from path: one or more per line,
 // separated by spaces or commas, with # starting a comment. A missing file
-// means DefaultAllowlist. Any name that is not a plain agent name is an
-// error, so a typo never silently widens or narrows access.
+// means DefaultAllowlist, every joined agent. An entry "*" also means every
+// joined agent, and then the result is just AllowAll. A file of names
+// restricts access to those names; an empty one allows nobody. Any entry
+// that is neither "*" nor a plain agent name is an error, so a typo never
+// silently widens or narrows access.
 func LoadAllowlist(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -40,12 +49,17 @@ func LoadAllowlist(path string) ([]string, error) {
 	}
 	defer func() { _ = f.Close() }()
 	var out []string
+	all := false
 	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
 	for sc.Scan() {
 		line, _, _ := strings.Cut(sc.Text(), "#")
 		for _, name := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+			if name == AllowAll {
+				all = true
+				continue
+			}
 			if !agentName.MatchString(name) {
-				return nil, fmt.Errorf("allowlist %s: %q is not an agent name", path, name)
+				return nil, fmt.Errorf("allowlist %s: %q is not an agent name or *", path, name)
 			}
 			if !slices.Contains(out, name) {
 				out = append(out, name)
@@ -55,7 +69,25 @@ func LoadAllowlist(path string) ([]string, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
+	if all {
+		return []string{AllowAll}, nil
+	}
 	return out, nil
+}
+
+// DescribeAllowlist phrases allowed, as loaded from path, for a startup
+// log line.
+func DescribeAllowlist(path string, allowed []string) string {
+	if slices.Contains(allowed, AllowAll) {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return fmt.Sprintf("allowlist: all joined agents (no file at %s)", path)
+		}
+		return fmt.Sprintf("allowlist: all joined agents (* in %s)", path)
+	}
+	if len(allowed) == 0 {
+		return fmt.Sprintf("allowlist %s: nobody", path)
+	}
+	return fmt.Sprintf("allowlist %s: %s", path, strings.Join(allowed, ", "))
 }
 
 // StaticAllowlist is an allowlist source that never changes.
@@ -309,14 +341,16 @@ func replyDetached(ctx context.Context, relay *client.Relay, req envelope.Reques
 }
 
 // denied returns why req may not read history, or "" when every agent in
-// its relay-set chain, and its sender, is on the allowlist.
+// its relay-set chain, and its sender, is on the allowlist (or the
+// allowlist is AllowAll).
 func (s *Service) denied(req envelope.Request) string {
 	return chainDenied(s.Allowlist, req, "history", "read the owner's conversation history", s.logf)
 }
 
 // chainDenied returns why req may not use agent, or "" when every agent in
-// its relay-set chain, and its sender, is on the allowlist. Only relay-set
-// fields are consulted, never the body. what says what access grants, for
+// its relay-set chain, and its sender, is on the allowlist. An allowlist
+// of AllowAll admits any joined agent: the relay already refuses anyone
+// who has not joined. Only relay-set fields are consulted, never the body. what says what access grants, for
 // the reply.
 func chainDenied(allowlist func() ([]string, error), req envelope.Request, agent, what string, logf func(string, ...any)) string {
 	if allowlist == nil {
@@ -333,6 +367,9 @@ func chainDenied(allowlist func() ([]string, error), req envelope.Request, agent
 	}
 	if len(chain) == 0 {
 		return "Declined: the request has no sender."
+	}
+	if slices.Contains(allowed, AllowAll) {
+		return ""
 	}
 	for _, a := range chain {
 		if !slices.Contains(allowed, a) {

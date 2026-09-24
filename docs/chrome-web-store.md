@@ -37,7 +37,7 @@ Detailed description:
 >
 > The extension works through the session you are already logged in with. It runs only a fixed set of operations (list conversations, read a conversation, fetch its images, send a message in a background tab it opens itself, close that tab) and only when the Agent Tincan helper on your computer asks. It talks only to that helper, over Chrome native messaging. No data is sent to Agent Tincan or any other third party, there is no analytics or advertising, and no cookie or token leaves your browser.
 >
-> Access is controlled by allowlists on your own computer: only agents you choose can ask. The extension does nothing on its own without the Agent Tincan helper installed (`tincan history install`).
+> Only agents you have joined to your own relay can ask, and allowlists on your own computer can narrow that further. The extension does nothing on its own without the Agent Tincan helper installed (`tincan history install`).
 >
 > Privacy policy: https://agenttincan.com/privacy
 

@@ -214,7 +214,7 @@
           <p class="section-lede">A small Tincan service on your Mac answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn.</p>
           <p>Try something like: "What was the last thing I asked ChatGPT? Send the image."</p>
           <ul class="checks">
-            <li>Only agents on its allowlist can ask, and every agent in a request's chain must be on it.</li>
+            <li>Only agents you have joined to your relay can ask. To narrow that, list the ones allowed in an allowlist file, and every agent in a request's chain must be on it.</li>
             <li>It is a service, not a model. Your chats are never fed to a model, so text inside them cannot steer it.</li>
             <li>Covers your recent conversations, up to 30 days back.</li>
           </ul>
@@ -268,7 +268,7 @@
           <li class="trust-item">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h14M5 12h14M5 18h9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 17l1.5 1.5L21 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <h3>Allowlists for sensitive agents</h3>
-            <p>The history and web agents answer only agents you list, and every agent in the chain must be on that list. Chains that loop or run too long are refused.</p>
+            <p>The history and web agents answer only agents you have joined to your relay. Add an allowlist file to narrow that to the agents you list, and every agent in the chain must be on it. Chains that loop or run too long are refused.</p>
           </li>
           <li class="trust-item">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 9h18M8 13h3M8 16h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>

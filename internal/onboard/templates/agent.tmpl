@@ -194,9 +194,9 @@ Install the native messaging host and the service definition: tincan history ins
 Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist; Linux: systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service).
 The only human step: install the Tincan Chrome extension from the Chrome Web Store (<Chrome Web Store link, not yet published>) and accept its permission dialog (chatgpt.com, claude.ai, native messaging). Until the store listing is live: unzip tincan-history-extension.zip from the release into a folder you will keep (for example ~/tincan-extension), open chrome://extensions, turn on Developer mode, click Load unpacked and pick that folder, then run tincan history install --extension-dir ~/tincan-extension (from a repo checkout, the extension/ folder works the same way).
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
-Choose who may ask in ~/.config/tincan/history-allow.txt, one agent name per line; without the file the built-in default list applies (docs/adapters/history.md). The file is reread on every request.
+Without an allowlist file, every agent joined to the relay may ask. To restrict it, list the agents that may ask in ~/.config/tincan/history-allow.txt, one agent name per line (a * entry means every joined agent); then every agent in a request's chain must be on it (docs/adapters/history.md). The file is reread on every request.
 If the service log (~/Library/Logs/tincan-history.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
-Check it from an allowed agent: tincan ask {{.Name}} "what was the last thing {{.Owner}} asked Codex?"
+Check it from another agent: tincan ask {{.Name}} "what was the last thing {{.Owner}} asked Codex?"
 {{- end -}}
 
 {{- define "setup.web" -}}
@@ -206,10 +206,10 @@ It needs the Tincan Chrome extension and its native host, the same ones the hist
 Write the service definition: tincan web install --site {{template "websiteflag" .}}. It writes a launchd agent on macOS (a systemd user unit on Linux) and prints the command that starts it. It starts nothing itself.
 Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.{{template "websiteflag" .}}.plist).
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
-Choose who may ask in ~/.config/tincan/{{.Kind}}-allow.txt, one agent name per line; without the file the built-in default list applies (docs/adapters/web-agents.md). Every agent in a request's chain must be on it. The file is reread on every request.
+Without an allowlist file, every agent joined to the relay may ask. To restrict it, list the agents that may ask in ~/.config/tincan/{{.Kind}}-allow.txt, one agent name per line (a * entry means every joined agent); then every agent in a request's chain must be on it (docs/adapters/web-agents.md). The file is reread on every request.
 Threading: a first line "new chat" starts a new conversation, "conversation: <id>" continues that one, and anything else continues the conversation that asker used last.
 If the service log (~/Library/Logs/tincan-{{.Kind}}.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
-Check it from an allowed agent: tincan ask {{.Name}} "say hello in five words"
+Check it from another agent: tincan ask {{.Name}} "say hello in five words"
 {{- end -}}
 {{- define "websitefull"}}{{if eq .Kind "claude-web"}}claude.ai{{else}}chatgpt.com{{end}}{{end -}}
 {{- define "setup.chatgpt-web"}}{{template "setup.web" .}}{{end -}}

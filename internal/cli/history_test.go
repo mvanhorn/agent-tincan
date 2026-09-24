@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -306,5 +309,66 @@ func TestHistoryServeRefusesWhenRelaySaysAnotherAgent(t *testing.T) {
 	_, err := run(t, Root(), "history", "serve", "--config", cfg, "--allowlist", allow)
 	if err == nil || !strings.Contains(err.Error(), `"codex"`) || !strings.Contains(err.Error(), "history.json") {
 		t.Fatalf("serve as codex per whoami: err = %v", err)
+	}
+}
+
+// startupLine runs a serve command against a relay that confirms name and
+// stops the command at its first poll, and returns what it printed.
+func startupLine(t *testing.T, name string, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/whoami" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": name})
+			return
+		}
+		cancel()
+		http.Error(w, "stopping", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	cmd := Root()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(append(args, "--config", serveConfig(t, srv.URL, name)))
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("%v: %v\n%s", args, err, out.String())
+	}
+	return out.String()
+}
+
+// The startup line says who may use the agent: everyone by default, "*",
+// or the listed names.
+func TestServeStartupLineDescribesAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.txt")
+	star := filepath.Join(dir, "star.txt")
+	names := filepath.Join(dir, "names.txt")
+	if err := os.WriteFile(star, []byte("*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(names, []byte("grokbot, codex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"history", []string{"history", "serve"}},
+		{"chatgpt-web", []string{"web", "serve", "--site", "chatgpt"}},
+		{"claude-web", []string{"web", "serve", "--site", "claude-ai"}},
+	}
+	for _, c := range cases {
+		for allow, want := range map[string]string{
+			missing: "allowlist: all joined agents (no file at " + missing + ")",
+			star:    "allowlist: all joined agents (* in " + star + ")",
+			names:   "allowlist " + names + ": grokbot, codex",
+		} {
+			out := startupLine(t, c.name, append(slices.Clone(c.args), "--allowlist", allow)...)
+			if !strings.Contains(out, want) {
+				t.Errorf("%s with %s: output missing %q:\n%s", c.name, filepath.Base(allow), want, out)
+			}
+		}
 	}
 }

@@ -4,7 +4,7 @@ A web agent makes chatgpt.com or claude.ai a teammate. Another agent asks it som
 
 It is a Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`), running on your Mac next to Chrome. It is not a model. For each request it:
 
-1. Checks access. Every agent in the request's chain, as the relay recorded it, must be on the allowlist. Otherwise it declines and names the agent.
+1. Checks access. By default any agent joined to your relay may ask. If you wrote an allowlist file, every agent in the request's chain, as the relay recorded it, must be on it; otherwise it declines and names the agent.
 2. Reads the optional threading line (below). The rest of the body is the message, sent as is.
 3. Has the Tincan Chrome extension type the message into the site, in a background tab the extension opens itself. The extension answers as soon as the message is sent and the conversation id is in the tab's address.
 4. Reads the conversation through the same detail operation the history agent uses until the reply is finished (bounded by the request timeout, 8 minutes), then replies with the answer text and the generated images, fetched through the file operation, as attachments. Then it has the extension close the tab. The first read is 5 seconds after the send, then the reads back off: 5, 8 and 12 seconds apart, then every 20 seconds. Every read is a request on your account, so it never polls faster than that.
@@ -25,11 +25,14 @@ Why a tab and not an API call: both sites protect their send endpoints with anti
 
 ## Allowlist
 
-By default grokbot, claude-code and codex may ask. Each web agent has its own file, `~/.config/tincan/chatgpt-web-allow.txt` or `~/.config/tincan/claude-web-allow.txt`, one agent name per line (commas and spaces also separate names, `#` starts a comment). It works exactly like the history allowlist:
+By default there is no allowlist file and every agent joined to your relay may ask, so any agent on your mesh can act as you in ChatGPT or Claude. The startup log says `allowlist: all joined agents (no file at ~/.config/tincan/chatgpt-web-allow.txt)`.
+
+To restrict it, write the web agent's own file, `~/.config/tincan/chatgpt-web-allow.txt` or `~/.config/tincan/claude-web-allow.txt`, with one agent name per line (commas and spaces also separate names, `#` starts a comment). It works exactly like the history allowlist:
 
 - It is reread for every request.
-- A missing file means the default list. An unreadable file, or a name that is not a plain agent name, declines everyone (and stops the service from starting).
-- It covers the whole chain. If muse asks codex and codex asks chatgpt-web while handling muse's request, the request is declined because of muse. The chain and sender come from the relay, never from the request body.
+- A file of names allows only those names. A `*` entry means every joined agent, the same as no file. An empty file allows nobody.
+- An unreadable file, or an entry that is neither `*` nor a plain agent name, declines everyone (and stops the service from starting).
+- A file of names covers the whole chain. If muse asks codex and codex asks chatgpt-web while handling muse's request, a file that lists codex but not muse declines it because of muse. The chain and sender come from the relay, never from the request body.
 
 ## Threading
 

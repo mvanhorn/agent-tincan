@@ -54,7 +54,8 @@ func webServeCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Run a web agent: answer teammates by asking ChatGPT or Claude in your browser",
 		Long: "Long-polls the relay as the web agent and handles one request at a time:\n" +
-			"  1. every agent in the request's relay-set chain must be on the allowlist, or the request is declined;\n" +
+			"  1. with an allowlist file of names, every agent in the request's relay-set chain must be listed, or the request is declined;\n" +
+			"     with no file (or a * entry) any joined agent may ask;\n" +
 			"  2. the body is the message. A first line \"new chat\" or \"conversation: <id>\" picks the conversation;\n" +
 			"     otherwise it continues the one this asker used last (remembered in a 0600 state file);\n" +
 			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
@@ -117,7 +118,7 @@ func webServeCmd() *cobra.Command {
 				JournalPath: history.DefaultWebJournalPath(name),
 				Log:         cmd.ErrOrStderr(),
 			}
-			cmd.PrintErrf("tincan web %s: serving %s on %s (allowlist %s: %s)\n", name, src, cfg.Relay, allowPath, strings.Join(allowed, ", "))
+			cmd.PrintErrf("tincan web %s: serving %s on %s (%s)\n", name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
 			err = agent.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrf("tincan web %s: stopped\n", name)
@@ -129,7 +130,7 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&site, "site", "", "chatgpt or claude-ai")
 	cmd.Flags().StringVar(&name, "name", "", "this agent's name (default chatgpt-web or claude-web)")
 	cmd.Flags().StringVar(&configPath, "config", "", "the agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/<name>.json)")
-	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing means grokbot, claude-code, codex)")
+	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
 	return cmd
 }

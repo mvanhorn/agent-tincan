@@ -62,14 +62,14 @@
           <li>Close the background tabs it opened, once a reply is finished.</li>
           <li>Reload itself after an update.</li>
         </ul>
-        <p>These operations run only when the Agent Tincan helper on your computer asks for them, which happens only when one of your agents makes a request that your allowlists permit. The extension does not watch your browsing, does not read other websites, and does not run on pages you visit.</p>
+        <p>These operations run only when the Agent Tincan helper on your computer asks for them, which happens only when one of the agents you joined to your relay makes a request that your allowlists permit (by default, every joined agent is permitted). The extension does not watch your browsing, does not read other websites, and does not run on pages you visit.</p>
         <p>To read conversations it uses your existing chatgpt.com and claude.ai session. On chatgpt.com it reads a session token from ChatGPT's own session endpoint and uses it only for the requests it is making at that moment; the token is never returned to the helper, logged, or stored. No cookie or token ever leaves your browser. Before sending a message it checks that you are logged in, so it never sends anything anonymously.</p>
         <p>Messages your agents send are treated as plain text: they are typed into the message box and never executed. Everything the extension runs is included in the extension package; it loads no remote code.</p>
 
         <h2>Where your data goes</h2>
         <ul>
           <li>The extension sends what it reads (conversation lists, conversation text, images, and replies) only to the Agent Tincan helper on the same computer, over Chrome native messaging. Native messaging is a local channel between Chrome and a program installed on your computer; it does not use the network.</li>
-          <li>The helper answers the agent that asked, over your own Agent Tincan relay on your own private Tailscale network. Only agents you have joined to your relay, and allowed in your allowlists, can receive it.</li>
+          <li>The helper answers the agent that asked, over your own Agent Tincan relay on your own private Tailscale network. Only agents you have joined to your relay, and allowed in your allowlists if you have written any, can receive it.</li>
           <li>The relay is run by you, on a machine you control. Whoever runs the relay can read the requests and replies that pass through it. Images passed along are kept on your relay for a limited time and then deleted.</li>
           <li>When you ask the history agent a question, the question text (never your chat content) is turned into a structured search by a model you have already set up on your own computer, under your own account with that model's provider.</li>
           <li>Messages your agents send to ChatGPT or Claude go to OpenAI or Anthropic under your own account, exactly as if you had typed them, and appear in your chat history there. Those services' own privacy policies apply.</li>
@@ -95,7 +95,7 @@
 
         <h2>Your control</h2>
         <ul>
-          <li>Allowlists decide which of your agents may use the history agent and the ChatGPT and Claude web agents. They are plain text files on your computer (<code>~/.config/tincan/history-allow.txt</code>, <code>chatgpt-web-allow.txt</code>, <code>claude-web-allow.txt</code>). Each file is reread for every request, the check covers the whole chain of agents that led to a request, and a file that cannot be read declines everyone.</li>
+          <li>By default, every agent you have joined to your relay may use the history agent and the ChatGPT and Claude web agents. Allowlists narrow that to the agents you list. They are plain text files on your computer (<code>~/.config/tincan/history-allow.txt</code>, <code>chatgpt-web-allow.txt</code>, <code>claude-web-allow.txt</code>). Each file is reread for every request, the check covers the whole chain of agents that led to a request, and a file that cannot be read declines everyone.</li>
           <li>You can remove an agent from your relay at any time with <code>tincan remove &lt;agent&gt;</code>.</li>
           <li>To stop the extension, disable or remove it in <code>chrome://extensions</code>.</li>
           <li>To remove the helper's connection to Chrome, delete its native messaging manifest. On macOS: <code>rm ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.agenttincan.history.json</code>. On Linux: <code>rm ~/.config/google-chrome/NativeMessagingHosts/com.agenttincan.history.json</code>. On macOS, also stop the helper services with <code>launchctl bootout gui/$(id -u)/com.agenttincan.history</code> (and the same for <code>com.agenttincan.web.chatgpt</code> and <code>com.agenttincan.web.claude-ai</code> if you installed the web agents) and delete their <code>.plist</code> files in <code>~/Library/LaunchAgents</code>. On Linux, stop them with <code>systemctl --user disable --now tincan-history.service</code> (and the web agent units).</li>

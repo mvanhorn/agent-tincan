@@ -38,7 +38,7 @@ Earlier tonight, also passed: allowlist live (grokbot allowed; muse declined dir
 1. Muse: tell Muse yourself "run tincan upgrade and restart your tincan wait loop". Its safety filter declines maintenance requests that come from other agents. Until then Muse (0.4.0-rc3) cannot receive attachments.
 2. Grok Bot: refresh or reconnect its tincan MCP connector in the Grok Bot app. The binary exposes get_attachment, but the platform caches the old tool list; until refreshed, Grok Bot fetches images through the CLI (works, just not inline).
 3. Chrome Web Store (optional for launch): follow docs/chrome-web-store.md. Build with `make store` (last build sha256 cb637f7d1a2e4d3769d1ffeafe4d20841383558002e5979703b905b1bc35d7bf; it changes on each rebuild). Review usually takes days, so launch uses the unpacked install. Do not switch the native host to the store id until the store build is installed.
-4. Decide whether hermes may use chatgpt-web and claude-web (add it to ~/.config/tincan/chatgpt-web-allow.txt and claude-web-allow.txt). Default allowlist: grokbot, claude-code, codex.
+4. Done: every joined agent, hermes included, may use history, chatgpt-web and claude-web by default (no allowlist files). To restrict one later, write its ~/.config/tincan/<agent>-allow.txt with the names allowed.
 5. When you are ready to open the repo: make it public, then add install links to agenttincan.com (site/index.html) and redeploy with `cd site && vercel deploy --prod`.
 6. Promote the release when happy: tag v0.5.0 on main, `make dist`, create the GitHub release with the dist files, and ask Grok Bot to update the relay the usual way.
 

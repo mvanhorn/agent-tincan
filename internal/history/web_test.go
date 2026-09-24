@@ -298,26 +298,58 @@ func TestWebAllowedAskerGetsReplyWithImage(t *testing.T) {
 	}
 }
 
-func TestWebDeclinesDisallowedAndViaChain(t *testing.T) {
+// With no allowlist file, every joined agent may use the web agent,
+// directly or through another agent.
+func TestWebAllowsMuseByDefault(t *testing.T) {
 	rig := newWebRig(t)
+	rig.agent.Allowlist = FileAllowlist(filepath.Join(t.TempDir(), "missing.txt"))
+	res := rig.ask(t, "muse", "hello ChatGPT")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("direct: %s %q", res.Status, res.Reply.Body)
+	}
+	codex, fwd := forwardViaCodex(t, rig.mesh, "chatgpt-web", "hello again ChatGPT")
+	res = rig.serve(t, codex, fwd.ID)
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("via codex: %s %q", res.Status, res.Reply.Body)
+	}
+	if n := len(rig.browser.sent()); n != 2 {
+		t.Fatalf("messages sent = %d, want 2", n)
+	}
+}
+
+func TestWebStarAllowsEveryone(t *testing.T) {
+	rig := newWebRig(t)
+	rig.agent.Allowlist = FileAllowlist(writeAllowlist(t, "*\n"))
+	if res := rig.ask(t, "muse", "hello ChatGPT"); res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+}
+
+func TestWebUnreadableAllowlistFailsClosed(t *testing.T) {
+	rig := newWebRig(t)
+	dir := filepath.Join(t.TempDir(), "allow.txt")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rig.agent.Allowlist = FileAllowlist(dir)
+	if res := rig.ask(t, "muse", "hello ChatGPT"); res.Status != envelope.StatusDeclined {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if rig.browser.exchanges() != 0 {
+		t.Fatal("a declined request reached the browser")
+	}
+}
+
+// A file with names restricts the web agent to those names, and every
+// agent in the chain must be listed.
+func TestWebFileWithNamesDeclinesOthersAndViaChain(t *testing.T) {
+	rig := newWebRig(t)
+	rig.agent.Allowlist = FileAllowlist(writeAllowlist(t, "grokbot, claude-code, codex\n"))
 	res := rig.ask(t, "muse", "hello ChatGPT")
 	if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "muse is not on the chatgpt-web allowlist") {
 		t.Fatalf("direct: %s %q", res.Status, res.Reply.Body)
 	}
-
-	ctx := t.Context()
-	muse, codex := rig.mesh.Client(t, "muse"), rig.mesh.Client(t, "codex")
-	orig, err := muse.Send(ctx, "codex", "ask chatgpt-web something for me", envelope.KindAsk, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := codex.Claim(ctx, orig.ID); err != nil {
-		t.Fatal(err)
-	}
-	fwd, err := codex.Send(ctx, "chatgpt-web", "hello ChatGPT", envelope.KindAsk, orig.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	codex, fwd := forwardViaCodex(t, rig.mesh, "chatgpt-web", "hello ChatGPT")
 	res = rig.serve(t, codex, fwd.ID)
 	if res.Status != envelope.StatusDeclined || !strings.Contains(res.Reply.Body, "came through muse") {
 		t.Fatalf("via chain: %s %q", res.Status, res.Reply.Body)
