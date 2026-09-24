@@ -21,8 +21,24 @@ const maxFrame = 64 << 20
 // Stdio returns the stdio transport. MCP stdio is newline-delimited JSON,
 // but some hosts send LSP-style Content-Length framed messages instead; the
 // first message's framing is used for the whole session, both ways.
-func Stdio() mcp.Transport {
+func Stdio() mcp.Transport { return StdioRecorded(nil) }
+
+// StdioRecorded is Stdio that also notes in rec which framing the app used
+// and when it initialized, listed the tools and first called one.
+func StdioRecorded(rec *Recorder) mcp.Transport {
 	r, w := newAutoFraming(os.Stdin, os.Stdout)
+	if rec != nil {
+		a := r.(autoReader).a
+		r = io.TeeReader(r, rec)
+		go func() {
+			<-a.ready
+			if a.framed {
+				rec.SetFraming("content-length")
+			} else {
+				rec.SetFraming("newline")
+			}
+		}()
+	}
 	return &mcp.IOTransport{Reader: io.NopCloser(r), Writer: nopWriteCloser{w}}
 }
 

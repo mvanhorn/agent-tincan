@@ -268,6 +268,17 @@ tincan upgrade                                                  # agent: downloa
 
 The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
 
+### When an agent's tincan tools go missing
+
+Run `tincan doctor` on the agent's machine. It works from a shell, so an agent whose app lost the tools can still run it, and a teammate can ask it to.
+
+```bash
+tincan doctor          # report with a fix line for every problem
+tincan doctor --json   # the same, for an agent to read
+```
+
+It checks the saved join and the relay, whether the binary is the relay's current release, a self-test of `tincan mcp` in both stdio framings (newline JSON and Content-Length), the MCP config entries that run tincan (wrong path, `mcp` in the command instead of args, names with spaces, duplicates, disabled entries), and whether the app has actually been starting `tincan mcp`. Every `tincan mcp` records its start next to the agent config (`mcp-launches/`, the last 20): which app started it, the framing, and whether the app initialized, listed the tools and called one. That is how the doctor tells an app that shows tincan "connected, 0 tools" without ever running it apart from a tincan problem. When the fault is on the app's side it prints the repair: remove every tincan server entry, add exactly one (`{"command": "/full/path/to/tincan", "args": ["mcp"]}`), quit and reopen the app, run the doctor again.
+
 ### Audit log and trace
 
 Every send, delivery, claim, reply, rejection, wake, join, rebind and removal is written to an append-only, hash-chained log. Wake nudges carry only counts, never request text.

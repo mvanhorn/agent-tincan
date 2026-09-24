@@ -31,16 +31,20 @@ for another session or a later check. Start Claude Code with:
   claude --dangerously-load-development-channels server:agent-tincan
 
 (channels are a research preview; custom channels need that flag).`,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
+			// Record the launch before anything can fail, so tincan doctor
+			// can tell an app that never starts tincan from one that does.
+			rec := mcpserver.StartRecorder(mcpserver.LaunchDir(client.ConfigPath()), Version, channel)
+			defer func() { rec.End(err) }()
 			r, cfg, err := connect()
 			if err != nil {
 				return err
 			}
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			if !channel {
-				return mcpserver.New(r, Version, files).Run(cmd.Context(), mcpserver.Stdio())
+				return mcpserver.New(r, Version, files).Run(cmd.Context(), mcpserver.StdioRecorded(rec))
 			}
-			t := mcpserver.NewChannelTransport(mcpserver.Stdio())
+			t := mcpserver.NewChannelTransport(mcpserver.StdioRecorded(rec))
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			go pushWaiting(ctx, r, t)
