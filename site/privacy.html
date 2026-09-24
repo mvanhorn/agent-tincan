@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy policy: Agent Tincan</title>
+  <meta name="description" content="Privacy policy for Agent Tincan and the Agent Tincan History Chrome extension: what it accesses, where data goes, what it stores, and how to remove it.">
+  <link rel="canonical" href="https://agenttincan.com/privacy">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f3ec" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23101217'/%3E%3Cpath d='M20 30 Q32 44 44 30' fill='none' stroke='%23ff8a4c' stroke-width='3' stroke-linecap='round'/%3E%3Crect x='9' y='18' width='14' height='24' rx='3' fill='%23d6d3cc'/%3E%3Crect x='41' y='18' width='14' height='24' rx='3' fill='%23d6d3cc'/%3E%3Cpath d='M9 24h14M9 36h14M41 24h14M41 36h14' stroke='%23101217' stroke-width='1.5' opacity='.35'/%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <script src="script.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="/" aria-label="Agent Tincan home">
+        <svg class="brand-mark" viewBox="0 0 40 24" aria-hidden="true" focusable="false">
+          <path d="M11 12 Q20 20 29 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="brand-string"/>
+          <rect x="2" y="4" width="9" height="16" rx="2" class="can-fill"/>
+          <rect x="29" y="4" width="9" height="16" rx="2" class="can-fill"/>
+        </svg>
+        <span>Agent Tincan</span>
+      </a>
+      <nav class="site-nav" aria-label="Site">
+        <ul>
+          <li><a href="/">Home</a></li>
+        </ul>
+      </nav>
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Switch color theme" title="Switch color theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    <article class="section prose">
+      <div class="wrap narrow">
+        <h1>Privacy policy</h1>
+        <p class="updated">Last updated September 24, 2026</p>
+
+        <p>This policy covers Agent Tincan and its Chrome extension, Agent Tincan History (the "extension"). Agent Tincan is software you run yourself: a small relay on your own private Tailscale network, a local helper on your own computer, and the agents you choose to connect. Agent Tincan does not operate any server that receives your data.</p>
+        <p>In short: the extension reads and sends ChatGPT and Claude conversations only when your own agents ask for it, and hands the results only to the Agent Tincan helper on your computer. Nothing goes to us. There is no analytics, no advertising, and no sale of data.</p>
+
+        <h2>What the extension does</h2>
+        <p>The extension exists for one purpose: to let your own Agent Tincan agents read your ChatGPT and claude.ai conversations and send messages to ChatGPT and Claude, through the browser session you are already logged in with. It carries out a fixed list of operations and accepts nothing else:</p>
+        <ul>
+          <li>List your recent conversations on chatgpt.com or claude.ai (up to 100 at a time).</li>
+          <li>Read one conversation, by its id.</li>
+          <li>Fetch an image or file attached to a conversation (up to 10 MB). ChatGPT serves some images from signed download links on <code>oaiusercontent.com</code>; the extension downloads those without sending any cookies or credentials.</li>
+          <li>Send a message (up to 32 KB of text) to ChatGPT or Claude and read the reply. It does this in a background tab that the extension opens itself, and it never touches tabs you opened.</li>
+          <li>Close the background tabs it opened, once a reply is finished.</li>
+          <li>Reload itself after an update.</li>
+        </ul>
+        <p>These operations run only when the Agent Tincan helper on your computer asks for them, which happens only when one of your agents makes a request that your allowlists permit. The extension does not watch your browsing, does not read other websites, and does not run on pages you visit.</p>
+        <p>To read conversations it uses your existing chatgpt.com and claude.ai session. On chatgpt.com it reads a session token from ChatGPT's own session endpoint and uses it only for the requests it is making at that moment; the token is never returned to the helper, logged, or stored. No cookie or token ever leaves your browser. Before sending a message it checks that you are logged in, so it never sends anything anonymously.</p>
+        <p>Messages your agents send are treated as plain text: they are typed into the message box and never executed. Everything the extension runs is included in the extension package; it loads no remote code.</p>
+
+        <h2>Where your data goes</h2>
+        <ul>
+          <li>The extension sends what it reads (conversation lists, conversation text, images, and replies) only to the Agent Tincan helper on the same computer, over Chrome native messaging. Native messaging is a local channel between Chrome and a program installed on your computer; it does not use the network.</li>
+          <li>The helper answers the agent that asked, over your own Agent Tincan relay on your own private Tailscale network. Only agents you have joined to your relay, and allowed in your allowlists, can receive it.</li>
+          <li>The relay is run by you, on a machine you control. Whoever runs the relay can read the requests and replies that pass through it. Images passed along are kept on your relay for a limited time and then deleted.</li>
+          <li>When you ask the history agent a question, the question text (never your chat content) is turned into a structured search by a model you have already set up on your own computer, under your own account with that model's provider.</li>
+          <li>Messages your agents send to ChatGPT or Claude go to OpenAI or Anthropic under your own account, exactly as if you had typed them, and appear in your chat history there. Those services' own privacy policies apply.</li>
+          <li>No data is sent to Agent Tincan or to any server we run. We have no analytics, no tracking, no advertising, and we never sell, rent, or transfer your data to anyone.</li>
+        </ul>
+
+        <h2>What is stored</h2>
+        <ul>
+          <li>The extension stores nothing persistent. It keeps only short-lived state in memory while it runs, such as which background tabs it opened, and that is gone when Chrome closes the extension.</li>
+          <li>The Agent Tincan helper on your computer keeps a few small state files readable only by your user account. They hold ids and times, such as which conversation each of your agents used last and which requests were already sent, and never message text or answers. Entries about sends are dropped after 90 minutes.</li>
+          <li>Images fetched for a request are written to a private temporary folder on your computer and removed once the reply is sent.</li>
+        </ul>
+
+        <h2>Permissions and why each is needed</h2>
+        <ul>
+          <li><code>nativeMessaging</code>: to talk to the Agent Tincan helper on your computer, which is the only place the extension sends data.</li>
+          <li><code>alarms</code>: to check once a minute whether the helper is running and reconnect to it if it restarted.</li>
+          <li><code>scripting</code>: to type a message into, and read the reply from, the background ChatGPT or Claude tab the extension opened for that send. It is never used on any other tab.</li>
+          <li><code>https://chatgpt.com/*</code>: to list and read your ChatGPT conversations and their files, and to send messages to ChatGPT, with your existing session.</li>
+          <li><code>https://*.oaiusercontent.com/*</code>: to download images that ChatGPT stores behind signed links on this domain. These downloads carry no cookies or credentials.</li>
+          <li><code>https://claude.ai/*</code>: to list and read your claude.ai conversations and their files, and to send messages to Claude, with your existing session.</li>
+        </ul>
+
+        <h2>Your control</h2>
+        <ul>
+          <li>Allowlists decide which of your agents may use the history agent and the ChatGPT and Claude web agents. They are plain text files on your computer (<code>~/.config/tincan/history-allow.txt</code>, <code>chatgpt-web-allow.txt</code>, <code>claude-web-allow.txt</code>). Each file is reread for every request, the check covers the whole chain of agents that led to a request, and a file that cannot be read declines everyone.</li>
+          <li>You can remove an agent from your relay at any time with <code>tincan remove &lt;agent&gt;</code>.</li>
+          <li>To stop the extension, disable or remove it in <code>chrome://extensions</code>.</li>
+          <li>To remove the helper's connection to Chrome, delete its native messaging manifest. On macOS: <code>rm ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.agenttincan.history.json</code>. On Linux: <code>rm ~/.config/google-chrome/NativeMessagingHosts/com.agenttincan.history.json</code>. On macOS, also stop the helper services with <code>launchctl bootout gui/$(id -u)/com.agenttincan.history</code> (and the same for <code>com.agenttincan.web.chatgpt</code> and <code>com.agenttincan.web.claude-ai</code> if you installed the web agents) and delete their <code>.plist</code> files in <code>~/Library/LaunchAgents</code>. On Linux, stop them with <code>systemctl --user disable --now tincan-history.service</code> (and the web agent units).</li>
+          <li>To remove the helper's state files, delete <code>~/.config/tincan</code>.</li>
+        </ul>
+
+        <h2>Children</h2>
+        <p>Agent Tincan is a developer tool and is not directed at children under 13.</p>
+
+        <h2>Changes</h2>
+        <p>If this policy changes, the new version will be posted on this page with a new date. A change that lets data leave your own computer and relay would require a new version of the extension, which you would see as an update.</p>
+
+        <h2>Contact</h2>
+        <p>Questions about this policy can be sent via the Agent Tincan website, <a href="/">agenttincan.com</a>.</p>
+      </div>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <p class="footer-brand">Agent Tincan</p>
+      <ul class="footer-links">
+        <li><a href="/">Home</a></li>
+        <li><a href="/privacy" aria-current="page">Privacy</a></li>
+      </ul>
+      <p>&copy; 2026 Agent Tincan</p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -537,3 +537,24 @@ a { color: var(--accent); text-underline-offset: 3px; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Privacy policy page */
+.footer-links { display: flex; gap: 16px; list-style: none; }
+.footer-links a { color: var(--ink-soft); }
+.footer-links a:hover { color: var(--ink); }
+.prose { padding-top: 56px; }
+.prose h1 { font-size: clamp(2rem, 5vw, 3rem); font-weight: 700; }
+.prose h2 { font-size: 1.5rem; margin-top: 2em; }
+.prose h3 { font-size: 1.1875rem; margin-top: 1.5em; }
+.prose ul { padding-left: 1.25em; margin: 0 0 1em; }
+.prose li { margin-bottom: 0.4em; }
+.prose code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--bg-alt);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.05em 0.35em;
+  overflow-wrap: anywhere;
+}
+.prose .updated { color: var(--ink-soft); }
