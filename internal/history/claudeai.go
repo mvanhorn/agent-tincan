@@ -72,7 +72,8 @@ type caMessage struct {
 	Files   []caFile `json:"files"`
 	FilesV2 []caFile `json:"files_v2"`
 	// StopReason is set on a finished assistant message when the site
-	// reports it; the web agent otherwise waits for the text to settle.
+	// reports it (the only completion field in the detail shape); the web
+	// agent otherwise waits for the text to settle.
 	StopReason string `json:"stop_reason"`
 }
 
@@ -187,7 +188,7 @@ func parseClaudeAIDetail(id string, raw json.RawMessage) (thread, error) {
 			if cur != nil {
 				th.turns = append(th.turns, *cur)
 			}
-			cur = &turn{prompt: Message{Role: RoleUser, Text: m.text(), Time: m.CreatedAt.Time, Images: m.images()}}
+			cur = &turn{prompt: Message{Role: RoleUser, Text: m.text(), Time: m.CreatedAt.Time, Images: m.images()}, promptID: m.UUID}
 		case "assistant":
 			if cur == nil {
 				continue

@@ -27,6 +27,14 @@ export const MAX_MESSAGE_BYTES = 32 * 1024;
 // native host can tell when the unpacked files on disk have changed.
 export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js']);
 
+// extension.reload waits while the sender has tabs (a reload would lose
+// track of them), checking every RELOAD_RETRY_MS for at most
+// RELOAD_MAX_WAIT_MS. At the cap it closes the finished tabs and reloads
+// anyway; a send still typing at that point is abandoned (its tab stays
+// open and the Go side's wait for it times out).
+export const RELOAD_RETRY_MS = 5000;
+export const RELOAD_MAX_WAIT_MS = 5 * 60 * 1000;
+
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const CHATGPT = 'https://chatgpt.com';
 const CLAUDE = 'https://claude.ai';
@@ -109,11 +117,11 @@ async function sha256Hex(bytes) {
   return Array.from(d, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// helloMessage is what the worker tells the native host when it connects:
-// its version, whether it is unpacked (only an unpacked extension picks up
-// new files on reload), and the sha256 of each of its files as Chrome
-// loaded them. A file that cannot be read is reported as ''.
-export async function helloMessage({ manifest, getURL, fetch }) {
+// hashFiles returns the sha256 of each of EXTENSION_FILES, read through
+// fetch; a file that cannot be read is reported as ''. The worker calls it
+// once when it starts, so the hashes describe the code Chrome loaded even
+// after the unpacked files on disk change.
+export async function hashFiles({ getURL, fetch }) {
   const files = {};
   for (const name of EXTENSION_FILES) {
     try {
@@ -123,8 +131,18 @@ export async function helloMessage({ manifest, getURL, fetch }) {
       files[name] = '';
     }
   }
+  return files;
+}
+
+// helloMessage is what the worker tells the native host when it connects:
+// its version, whether it is unpacked (only an unpacked extension picks up
+// new files on reload), and the sha256 of each of its files as Chrome
+// loaded them: files when given (hashFiles from worker start), else
+// hashed now.
+export async function helloMessage({ manifest, getURL, fetch, files }) {
+  const hashes = files && typeof files === 'object' ? files : await hashFiles({ getURL, fetch });
   const m = manifest && typeof manifest === 'object' ? manifest : {};
-  return { id: 0, hello: { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files } };
+  return { id: 0, hello: { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files: hashes } };
 }
 
 function pathOf(url) {
@@ -167,6 +185,32 @@ function b64(bytes) {
 // and its operations then fail as unsupported.
 export function createRunner({ fetch, sender = null, reload = null }) {
   let claudeOrg = null;
+  let reloadPending = false;
+
+  // scheduleReload reloads once the sender is idle, or at the cap after
+  // closing its kept tabs. Timers are looked up at call time so tests can
+  // mock them.
+  function scheduleReload() {
+    if (reloadPending) return;
+    reloadPending = true;
+    const start = Date.now();
+    const attempt = async () => {
+      const busy = sender && typeof sender.busy === 'function' && sender.busy();
+      if (busy) {
+        if (Date.now() - start < RELOAD_MAX_WAIT_MS) {
+          setTimeout(attempt, RELOAD_RETRY_MS);
+          return;
+        }
+        try {
+          if (typeof sender.closeAllKept === 'function') await sender.closeAllKept();
+        } catch {
+          // Reload regardless.
+        }
+      }
+      reload();
+    };
+    setTimeout(attempt, 200);
+  }
 
   async function send(url, init) {
     try {
@@ -334,11 +378,12 @@ export function createRunner({ fetch, sender = null, reload = null }) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('claudeai', a.conversation_id);
     },
-    // The answer goes out first; the reload follows a moment later.
+    // The answer goes out first; the reload follows a moment later, or
+    // once no send has a tab open (see RELOAD_MAX_WAIT_MS).
     async 'extension.reload'(_a, emit) {
       if (!reload) throw new OpError('unsupported', 'reload is not available');
       emit({ ok: true, result: { reloading: true } });
-      setTimeout(reload, 200);
+      scheduleReload();
       return undefined;
     },
   };

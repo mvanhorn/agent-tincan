@@ -107,43 +107,88 @@ type ServiceResult struct {
 // InstallService writes the history service definition: a launchd agent
 // on macOS, a systemd user unit on Linux. It does not load or enable it.
 func InstallService(o ServiceOptions) (ServiceResult, error) {
-	if o.GOOS == "" {
-		o.GOOS = runtime.GOOS
-	}
-	if o.Home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return ServiceResult{}, err
-		}
-		o.Home = h
-	}
-	if o.Binary == "" {
-		b, err := os.Executable()
-		if err != nil {
-			return ServiceResult{}, err
-		}
-		o.Binary = b
-	}
-	if !filepath.IsAbs(o.Binary) || strings.ContainsAny(o.Binary, "\"\n\r\x00%") {
-		return ServiceResult{}, fmt.Errorf("service binary %q must be an absolute path without quotes, %% or newlines", o.Binary)
+	if err := o.fill(); err != nil {
+		return ServiceResult{}, err
 	}
 	if o.CodexDir == "" {
 		if p, err := exec.LookPath("codex"); err == nil {
 			o.CodexDir = filepath.Dir(p)
 		}
 	}
+	path := servicePath(o.CodexDir)
+	return installServiceDef(o, serviceDef{
+		label:       ServiceLabel,
+		unit:        systemdUnit,
+		launchd:     launchdTemplate,
+		systemd:     systemdTemplate,
+		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path},
+		unsupported: "no history service definition for " + o.GOOS + "; run tincan history serve under your own service manager",
+	})
+}
+
+// fill defaults o's empty fields to the running system and checks the
+// binary.
+func (o *ServiceOptions) fill() error {
+	if o.GOOS == "" {
+		o.GOOS = runtime.GOOS
+	}
+	if o.Home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		o.Home = h
+	}
+	if o.Binary == "" {
+		b, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		o.Binary = b
+	}
+	if err := validateServiceBinary(o.Binary); err != nil {
+		return err
+	}
 	if o.UID == 0 {
 		o.UID = os.Getuid()
 	}
-	path := servicePath(o.CodexDir)
+	return nil
+}
+
+// validateServiceBinary refuses a binary path that cannot be written
+// safely into a plist or a systemd ExecStart line.
+func validateServiceBinary(b string) error {
+	if !filepath.IsAbs(b) || strings.ContainsAny(b, "\"\n\r\x00%") {
+		return fmt.Errorf("service binary %q must be an absolute path without quotes, %% or newlines", b)
+	}
+	return nil
+}
+
+// serviceDef is one service definition: its launchd label and plist
+// template, its systemd unit name and template, and the placeholder/value
+// pairs both templates are filled with (XML-escaped for the plist).
+type serviceDef struct {
+	label, unit      string
+	launchd, systemd string
+	vars             []string
+	unsupported      string
+}
+
+// installServiceDef writes d for o.GOOS: the launchd agent in
+// ~/Library/LaunchAgents (making ~/Library/Logs for its log) or the systemd
+// user unit, and returns the command that starts it.
+func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 	switch o.GOOS {
 	case "darwin":
-		dst := filepath.Join(o.Home, "Library", "LaunchAgents", ServiceLabel+".plist")
-		body := strings.NewReplacer(
-			"__TINCAN_BINARY__", xmlEscape(o.Binary),
-			"__HOME__", xmlEscape(o.Home),
-			"__PATH__", xmlEscape(path),
-		).Replace(launchdTemplate)
+		dst := filepath.Join(o.Home, "Library", "LaunchAgents", d.label+".plist")
+		esc := make([]string, len(d.vars))
+		for i, v := range d.vars {
+			if i%2 == 1 {
+				v = xmlEscape(v)
+			}
+			esc[i] = v
+		}
+		body := strings.NewReplacer(esc...).Replace(d.launchd)
 		if err := os.MkdirAll(filepath.Join(o.Home, "Library", "Logs"), 0o755); err != nil {
 			return ServiceResult{}, err
 		}
@@ -152,14 +197,14 @@ func InstallService(o ServiceOptions) (ServiceResult, error) {
 		}
 		return ServiceResult{Path: dst, Next: fmt.Sprintf("launchctl bootstrap gui/%d %s", o.UID, dst)}, nil
 	case "linux":
-		dst := filepath.Join(o.Home, ".config", "systemd", "user", systemdUnit)
-		body := strings.NewReplacer("__TINCAN_BINARY__", o.Binary, "__PATH__", path).Replace(systemdTemplate)
+		dst := filepath.Join(o.Home, ".config", "systemd", "user", d.unit)
+		body := strings.NewReplacer(d.vars...).Replace(d.systemd)
 		if err := writeService(dst, body); err != nil {
 			return ServiceResult{}, err
 		}
-		return ServiceResult{Path: dst, Next: "systemctl --user daemon-reload && systemctl --user enable --now " + systemdUnit}, nil
+		return ServiceResult{Path: dst, Next: "systemctl --user daemon-reload && systemctl --user enable --now " + d.unit}, nil
 	}
-	return ServiceResult{}, errors.New("no history service definition for " + o.GOOS + "; run tincan history serve under your own service manager")
+	return ServiceResult{}, errors.New(d.unsupported)
 }
 
 func servicePath(codexDir string) string {
@@ -256,55 +301,16 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	if _, err := ParseWebSite(string(site)); err != nil {
 		return ServiceResult{}, err
 	}
-	if o.GOOS == "" {
-		o.GOOS = runtime.GOOS
-	}
-	if o.Home == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return ServiceResult{}, err
-		}
-		o.Home = h
-	}
-	if o.Binary == "" {
-		b, err := os.Executable()
-		if err != nil {
-			return ServiceResult{}, err
-		}
-		o.Binary = b
-	}
-	if !filepath.IsAbs(o.Binary) || strings.ContainsAny(o.Binary, "\"\n\r\x00%") {
-		return ServiceResult{}, fmt.Errorf("service binary %q must be an absolute path without quotes, %% or newlines", o.Binary)
-	}
-	if o.UID == 0 {
-		o.UID = os.Getuid()
+	if err := o.fill(); err != nil {
+		return ServiceResult{}, err
 	}
 	agent := WebAgentName(site)
-	switch o.GOOS {
-	case "darwin":
-		dst := filepath.Join(o.Home, "Library", "LaunchAgents", WebServiceLabel(site)+".plist")
-		body := strings.NewReplacer(
-			"__TINCAN_BINARY__", xmlEscape(o.Binary),
-			"__HOME__", xmlEscape(o.Home),
-			"__PATH__", xmlEscape(basePath),
-			"__SITE__", xmlEscape(string(site)),
-			"__AGENT__", xmlEscape(agent),
-		).Replace(webLaunchdTemplate)
-		if err := os.MkdirAll(filepath.Join(o.Home, "Library", "Logs"), 0o755); err != nil {
-			return ServiceResult{}, err
-		}
-		if err := writeService(dst, body); err != nil {
-			return ServiceResult{}, err
-		}
-		return ServiceResult{Path: dst, Next: fmt.Sprintf("launchctl bootstrap gui/%d %s", o.UID, dst)}, nil
-	case "linux":
-		unit := "tincan-" + agent + ".service"
-		dst := filepath.Join(o.Home, ".config", "systemd", "user", unit)
-		body := strings.NewReplacer("__TINCAN_BINARY__", o.Binary, "__PATH__", basePath, "__SITE__", string(site), "__AGENT__", agent).Replace(webSystemdTemplate)
-		if err := writeService(dst, body); err != nil {
-			return ServiceResult{}, err
-		}
-		return ServiceResult{Path: dst, Next: "systemctl --user daemon-reload && systemctl --user enable --now " + unit}, nil
-	}
-	return ServiceResult{}, errors.New("no web agent service definition for " + o.GOOS + "; run tincan web serve under your own service manager")
+	return installServiceDef(o, serviceDef{
+		label:       WebServiceLabel(site),
+		unit:        "tincan-" + agent + ".service",
+		launchd:     webLaunchdTemplate,
+		systemd:     webSystemdTemplate,
+		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", basePath, "__SITE__", string(site), "__AGENT__", agent},
+		unsupported: "no web agent service definition for " + o.GOOS + "; run tincan web serve under your own service manager",
+	})
 }

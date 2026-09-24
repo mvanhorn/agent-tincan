@@ -108,13 +108,14 @@ func webServeCmd() *cobra.Command {
 				return wrongWebAgent(name, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
 			agent := &history.WebAgent{
-				Relay:     r,
-				Site:      src,
-				Name:      name,
-				Native:    history.NewClient(),
-				Allowlist: history.FileAllowlist(allowPath),
-				StatePath: expandHome(statePath),
-				Log:       cmd.ErrOrStderr(),
+				Relay:       r,
+				Site:        src,
+				Name:        name,
+				Native:      history.NewClient(),
+				Allowlist:   history.FileAllowlist(allowPath),
+				StatePath:   expandHome(statePath),
+				JournalPath: history.DefaultWebJournalPath(name),
+				Log:         cmd.ErrOrStderr(),
 			}
 			cmd.PrintErrf("tincan web %s: serving %s on %s (allowlist %s: %s)\n", name, src, cfg.Relay, allowPath, strings.Join(allowed, ", "))
 			err = agent.Run(ctx)

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -204,8 +206,15 @@ type webRig struct {
 
 func newWebRig(t *testing.T) *webRig {
 	t.Helper()
-	m := testrelay.New(t, relay.Config{})
-	m.Server.SetAttachmentDir(t.TempDir())
+	return newWebRigWith(t, relay.Config{}, true)
+}
+
+func newWebRigWith(t *testing.T, cfg relay.Config, attachments bool) *webRig {
+	t.Helper()
+	m := testrelay.New(t, cfg)
+	if attachments {
+		m.Server.SetAttachmentDir(t.TempDir())
+	}
 	me := m.JoinOnMachineOf(t, "instinct", "chatgpt-web")
 	m.JoinOnMachineOf(t, "instinct", "codex")
 	fb := newFakeBrowser()
@@ -215,14 +224,15 @@ func newWebRig(t *testing.T) *webRig {
 		browser: fb,
 		state:   state,
 		agent: &WebAgent{
-			Relay:     me,
-			Site:      SourceChatGPT,
-			Name:      "chatgpt-web",
-			Native:    &Client{Channel: fb},
-			Allowlist: StaticAllowlist(DefaultAllowlist...),
-			StatePath: state,
-			TempDir:   t.TempDir(),
-			Log:       testLog{t},
+			Relay:       me,
+			Site:        SourceChatGPT,
+			Name:        "chatgpt-web",
+			Native:      &Client{Channel: fb},
+			Allowlist:   StaticAllowlist(DefaultAllowlist...),
+			StatePath:   state,
+			JournalPath: filepath.Join(filepath.Dir(state), "chatgpt-web-journal.json"),
+			TempDir:     t.TempDir(),
+			Log:         testLog{t},
 			// Fast polls for tests; the default is 2s.
 			PollInterval: 5 * time.Millisecond,
 		},
@@ -585,6 +595,7 @@ func claudeRig(t *testing.T, frames []*string, stopReason string) (*webRig, func
 	polls := 0
 	rig := newWebRig(t)
 	rig.agent.Site = SourceClaudeAI
+	rig.agent.ClaudeStableFor = time.Nanosecond
 	rig.agent.Native = &Client{Channel: channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
 		mu.Lock()
 		ops = append(ops, req.Op)
@@ -621,7 +632,7 @@ func claudeRig(t *testing.T, frames []*string, stopReason string) (*webRig, func
 }
 
 // claude.ai without stop_reason: the reply is done once its text is the
-// same on two polls in a row.
+// same on four polls in a row (the default ClaudeStablePolls).
 func TestWebClaudeWaitsForStableReply(t *testing.T) {
 	rig, ops, closes := claudeRig(t, []*string{nil, new("Hel"), new("Hello the"), new("Hello there, friend."), new("Hello there, friend.")}, "")
 	res := rig.ask(t, "grokbot", "new chat\nhello claude")
@@ -639,7 +650,7 @@ func TestWebClaudeWaitsForStableReply(t *testing.T) {
 			details++
 		}
 	}
-	if got[0] != OpClaudeAISend || details != 5 || got[len(got)-1] != OpClaudeAIClose {
+	if got[0] != OpClaudeAISend || details != 7 || got[len(got)-1] != OpClaudeAIClose {
 		t.Fatalf("ops = %v", got)
 	}
 	if c := closes(); len(c) != 1 || c[0] != "c1a0d000-0000-4000-8000-000000000002" {
@@ -680,5 +691,486 @@ func TestWebClaudeTimeoutClosesTab(t *testing.T) {
 	}
 	if len(closes()) != 1 {
 		t.Fatalf("closes = %v", closes())
+	}
+}
+
+// cgm is one message of a hand-built chatgpt.com conversation.
+type cgm struct {
+	id, role, text string
+	at             time.Time
+	// status is in_progress or finished_successfully; done adds end_turn
+	// and finish_details.
+	status string
+	done   bool
+}
+
+// cgChain renders msgs as one chatgpt.com branch, root first.
+func cgChain(convID string, msgs ...cgm) json.RawMessage {
+	mapping := map[string]any{"root": map[string]any{"message": nil, "parent": nil}}
+	parent := "root"
+	for _, m := range msgs {
+		msg := map[string]any{"id": m.id, "author": map[string]any{"role": m.role}, "create_time": float64(m.at.UnixMilli()) / 1000, "content": map[string]any{"content_type": "text", "parts": []any{m.text}}, "recipient": "all", "status": m.status}
+		if m.done {
+			msg["end_turn"] = true
+			msg["metadata"] = map[string]any{"finish_details": map[string]any{"type": "stop"}}
+		}
+		mapping[m.id] = map[string]any{"message": msg, "parent": parent}
+		parent = m.id
+	}
+	b, _ := json.Marshal(map[string]any{"title": "Chat", "conversation_id": convID, "current_node": parent, "mapping": mapping})
+	return b
+}
+
+// scriptRig serves sends and details for site from a script: detail(n,
+// sentAt) is the n-th detail read (reads before the send see a zero
+// sentAt). It records every op and closed conversation.
+type scriptRig struct {
+	*webRig
+	mu     sync.Mutex
+	ops    []Op
+	closes []string
+}
+
+const scriptConv = "c1a0d000-0000-4000-8000-000000000003"
+
+func newScriptRig(t *testing.T, site Source, detail func(n int, sentAt time.Time) (json.RawMessage, *NativeError)) *scriptRig {
+	t.Helper()
+	s := &scriptRig{webRig: newWebRig(t)}
+	s.agent.Site = site
+	s.agent.ClaudeStableFor = time.Nanosecond
+	var sentAt time.Time
+	polls := 0
+	s.agent.Native = &Client{Channel: channelFunc(func(_ context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		s.mu.Lock()
+		s.ops = append(s.ops, req.Op)
+		s.mu.Unlock()
+		switch req.Op {
+		case OpChatGPTSend, OpClaudeAISend:
+			s.mu.Lock()
+			sentAt = time.Now()
+			s.mu.Unlock()
+			res, _ := json.Marshal(SendResult{ConversationID: scriptConv, SubmittedAt: sentAt.UnixMilli()})
+			_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: res})
+			return err
+		case OpChatGPTDetail, OpClaudeAIDetail:
+			s.mu.Lock()
+			n, at := polls, sentAt
+			polls++
+			s.mu.Unlock()
+			raw, nerr := detail(n, at)
+			if nerr != nil {
+				_, err := recv(NativeResponse{ID: req.ID, Error: nerr})
+				return err
+			}
+			_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: raw})
+			return err
+		case OpChatGPTClose, OpClaudeAIClose:
+			s.mu.Lock()
+			s.closes = append(s.closes, req.Args.ConversationID)
+			s.mu.Unlock()
+			_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: json.RawMessage(`{"closed":1}`)})
+			return err
+		}
+		_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: "bad_request"}})
+		return err
+	})}
+	return s
+}
+
+func (s *scriptRig) closed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.closes...)
+}
+
+// The owner (or another client) posts in the same ChatGPT conversation
+// while the agent waits: the reply is the answer to this request's own
+// message, never the later turn's.
+func TestWebChatGPTIgnoresLaterUserTurn(t *testing.T) {
+	rig := newScriptRig(t, SourceChatGPT, func(_ int, at time.Time) (json.RawMessage, *NativeError) {
+		return cgChain(scriptConv,
+			cgm{id: "u1", role: "user", text: "what is two plus two?", at: at, status: "finished_successfully"},
+			cgm{id: "a1", role: "assistant", text: "Four.", at: at.Add(time.Second), status: "finished_successfully", done: true},
+			cgm{id: "u2", role: "user", text: "the owner's own question", at: at.Add(2 * time.Second), status: "finished_successfully"},
+			cgm{id: "a2", role: "assistant", text: "The owner's answer.", at: at.Add(3 * time.Second), status: "finished_successfully", done: true},
+		), nil
+	})
+	res := rig.ask(t, "grokbot", "new chat\nwhat is two plus two?")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "Four.") || strings.Contains(body, "owner's answer") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+}
+
+// A later user turn arrives while this request's reply is still being
+// written: the agent keeps waiting for this turn's own reply.
+func TestWebChatGPTKeepsWaitingForOwnReplyPastLaterTurn(t *testing.T) {
+	rig := newScriptRig(t, SourceChatGPT, func(n int, at time.Time) (json.RawMessage, *NativeError) {
+		mine := cgm{id: "a1", role: "assistant", text: "Fo", at: at.Add(time.Second), status: "in_progress"}
+		if n >= 3 {
+			mine = cgm{id: "a1", role: "assistant", text: "Four, finally.", at: at.Add(time.Second), status: "finished_successfully", done: true}
+		}
+		return cgChain(scriptConv,
+			cgm{id: "u1", role: "user", text: "what is two plus two?", at: at, status: "finished_successfully"},
+			mine,
+			cgm{id: "u2", role: "user", text: "the owner's own question", at: at.Add(2 * time.Second), status: "finished_successfully"},
+			cgm{id: "a2", role: "assistant", text: "The owner's answer.", at: at.Add(3 * time.Second), status: "finished_successfully", done: true},
+		), nil
+	})
+	res := rig.ask(t, "grokbot", "new chat\nwhat is two plus two?")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "Four, finally.") || strings.Contains(body, "owner's answer") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+}
+
+// A later user turn follows this request's message with no reply between
+// them: there will never be a reply to this one, so the request fails
+// saying so instead of returning the later turn's answer.
+func TestWebChatGPTInterveningTurnWithoutReplyFails(t *testing.T) {
+	rig := newScriptRig(t, SourceChatGPT, func(_ int, at time.Time) (json.RawMessage, *NativeError) {
+		return cgChain(scriptConv,
+			cgm{id: "u1", role: "user", text: "what is two plus two?", at: at, status: "finished_successfully"},
+			cgm{id: "u2", role: "user", text: "the owner's own question", at: at.Add(2 * time.Second), status: "finished_successfully"},
+			cgm{id: "a2", role: "assistant", text: "The owner's answer.", at: at.Add(3 * time.Second), status: "finished_successfully", done: true},
+		), nil
+	})
+	rig.agent.RequestTimeout = 2 * time.Second
+	res := rig.ask(t, "grokbot", "new chat\nwhat is two plus two?")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusFailed || strings.Contains(body, "owner's answer") || !strings.Contains(body, "another message was sent") || !strings.Contains(body, scriptConv) {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+	if c := rig.closed(); len(c) != 1 {
+		t.Fatalf("closes = %v", c)
+	}
+}
+
+// A user message with the same text as this request's, dated well before
+// the send (beyond the clock-skew allowance), is not this request's.
+func TestWebClockSkewGuardRejectsOldMatchingMessage(t *testing.T) {
+	rig := newScriptRig(t, SourceChatGPT, func(n int, at time.Time) (json.RawMessage, *NativeError) {
+		msgs := []cgm{
+			{id: "u0", role: "user", text: "ping", at: at.Add(-webClockSkew - time.Minute), status: "finished_successfully"},
+			{id: "a0", role: "assistant", text: "stale pong", at: at.Add(-webClockSkew - 50*time.Second), status: "finished_successfully", done: true},
+		}
+		if n >= 2 {
+			// Dated a minute early (inside the allowance): still this one.
+			msgs = append(msgs,
+				cgm{id: "u1", role: "user", text: "ping", at: at.Add(-time.Minute), status: "finished_successfully"},
+				cgm{id: "a1", role: "assistant", text: "fresh pong", at: at.Add(time.Second), status: "finished_successfully", done: true})
+		}
+		return cgChain(scriptConv, msgs...), nil
+	})
+	res := rig.ask(t, "grokbot", "new chat\nping")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "fresh pong") || strings.Contains(body, "stale pong") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+}
+
+// The pre-send read fails with something other than not found: the agent
+// cannot know the last user message before the send, so it binds to the
+// first message after the send's time whose text is the one it sent.
+func TestWebAnchorFallbackWhenPreSendReadFails(t *testing.T) {
+	rig := newWebRig(t)
+	failed := false
+	fb := rig.browser
+	rig.agent.Native = &Client{Channel: channelFunc(func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		if req.Op == OpChatGPTDetail && len(fb.sent()) == 1 && !failed {
+			failed = true
+			_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: "source_failed", Message: "flaky"}})
+			return err
+		}
+		return fb.Exchange(ctx, req, recv)
+	})}
+	rig.ask(t, "grokbot", "question A")
+	fb.lag = 3
+	res := rig.ask(t, "grokbot", "question B")
+	if !failed {
+		t.Fatal("the pre-send read never failed")
+	}
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "You said: question B") || strings.Contains(res.Reply.Body, "question A") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+}
+
+// end_turn:false vetoes an otherwise finished-looking ChatGPT message: the
+// agent keeps polling until end_turn is no longer false.
+func TestWebChatGPTEndTurnFalseKeepsPolling(t *testing.T) {
+	rig := newScriptRig(t, SourceChatGPT, func(n int, at time.Time) (json.RawMessage, *NativeError) {
+		raw := cgChain(scriptConv,
+			cgm{id: "u1", role: "user", text: "hi", at: at, status: "finished_successfully"},
+			cgm{id: "a1", role: "assistant", text: "partial so far", at: at.Add(time.Second), status: "finished_successfully", done: true},
+		)
+		if n < 3 {
+			raw = []byte(strings.Replace(string(raw), `"end_turn":true`, `"end_turn":false`, 1))
+		}
+		return raw, nil
+	})
+	res := rig.ask(t, "grokbot", "new chat\nhi")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	details := 0
+	rig.mu.Lock()
+	for _, o := range rig.ops {
+		if o == OpChatGPTDetail {
+			details++
+		}
+	}
+	rig.mu.Unlock()
+	if details != 4 {
+		t.Fatalf("detail read %d times; end_turn:false must keep the agent polling", details)
+	}
+}
+
+// claudeScript renders a claude.ai conversation: an old finished turn,
+// then msgs, each a child of the one before.
+func claudeScript(sentAt time.Time, msgs ...map[string]any) json.RawMessage {
+	all := []map[string]any{
+		{"uuid": "h0", "sender": "human", "index": 0, "created_at": sentAt.Add(-time.Hour).UTC().Format(time.RFC3339Nano), "content": []any{map[string]any{"type": "text", "text": "long ago"}}, "parent_message_uuid": "root"},
+		{"uuid": "a0", "sender": "assistant", "index": 1, "created_at": sentAt.Add(-time.Hour).UTC().Format(time.RFC3339Nano), "content": []any{map[string]any{"type": "text", "text": "old finished answer"}}, "parent_message_uuid": "h0", "stop_reason": "end_turn"},
+	}
+	parent := "a0"
+	for i, m := range msgs {
+		m["index"] = i + 2
+		m["parent_message_uuid"] = parent
+		if _, ok := m["created_at"]; !ok {
+			m["created_at"] = sentAt.Add(time.Duration(i+1) * time.Second).UTC().Format(time.RFC3339Nano)
+		}
+		parent = m["uuid"].(string)
+		all = append(all, m)
+	}
+	b, _ := json.Marshal(map[string]any{"uuid": scriptConv, "name": "Chat", "current_leaf_message_uuid": parent, "chat_messages": all})
+	return b
+}
+
+func caMsg(uuid, sender, text, stop string) map[string]any {
+	m := map[string]any{"uuid": uuid, "sender": sender, "content": []any{map[string]any{"type": "text", "text": text}}}
+	if stop != "" {
+		m["stop_reason"] = stop
+	}
+	return m
+}
+
+// claude.ai: a later human turn after this request's reply is ignored; the
+// answer is the reply to this request's own message.
+func TestWebClaudeIgnoresLaterHumanTurn(t *testing.T) {
+	rig := newScriptRig(t, SourceClaudeAI, func(_ int, at time.Time) (json.RawMessage, *NativeError) {
+		return claudeScript(at,
+			caMsg("h1", "human", "hello claude", ""),
+			caMsg("a1", "assistant", "Hello to you.", "end_turn"),
+			caMsg("h2", "human", "the owner's own question", ""),
+			caMsg("a2", "assistant", "The owner's answer.", "end_turn"),
+		), nil
+	})
+	res := rig.ask(t, "grokbot", "new chat\nhello claude")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "Hello to you.") || strings.Contains(body, "owner's answer") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+}
+
+// claude.ai without stop_reason: a reply that pauses for a few polls
+// mid-generation is not taken as finished; only text that stays the same
+// across the configured number of polls is.
+func TestWebClaudePauseIsNotFinished(t *testing.T) {
+	frames := []*string{nil, new("Hel"), new("Hello"), new("Hello"), new("Hello"), new("Hello there, friend.")}
+	rig, _, _ := claudeRig(t, frames, "")
+	rig.agent.ClaudeStableFor = time.Nanosecond
+	res := rig.ask(t, "grokbot", "new chat\nhello claude")
+	body := res.Reply.Body
+	if res.Status != envelope.StatusAnswered || !strings.Contains(body, "Hello there, friend.") {
+		t.Fatalf("a paused partial reply was returned as finished: %s %q", res.Status, body)
+	}
+}
+
+// claude.ai without stop_reason: the same text must also hold for at least
+// ClaudeStableFor, however many polls see it.
+func TestWebClaudeStableWindowSpansTime(t *testing.T) {
+	var frames []*string
+	frames = append(frames, nil)
+	for range 8 {
+		frames = append(frames, new("Hello")) // ~40ms at 5ms polls
+	}
+	frames = append(frames, new("Hello there, friend."))
+	rig, _, _ := claudeRig(t, frames, "")
+	rig.agent.ClaudeStablePolls = 2
+	rig.agent.ClaudeStableFor = 150 * time.Millisecond
+	res := rig.ask(t, "grokbot", "new chat\nhello claude")
+	if body := res.Reply.Body; res.Status != envelope.StatusAnswered || !strings.Contains(body, "Hello there, friend.") {
+		t.Fatalf("%s %q", res.Status, body)
+	}
+}
+
+// The agent crashes (or its reply is lost) after the extension confirmed
+// the send; the relay requeues the request when the claim lease runs out.
+// The second delivery must not type the message into the site again: it
+// resumes from the send journal, waits for the reply in the journaled
+// conversation and answers.
+func TestWebRequeuedRequestIsNotSentAgain(t *testing.T) {
+	rig := newWebRigWith(t, relay.Config{ClaimLease: time.Millisecond}, true)
+	fb := rig.browser
+	crash := true
+	rig.agent.Native = &Client{Channel: channelFunc(func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		if req.Op == OpChatGPTDetail && crash {
+			panic("agent died mid-request")
+		}
+		return fb.Exchange(ctx, req, recv)
+	})}
+	ctx := t.Context()
+	grok := rig.mesh.Client(t, "grokbot")
+	sent, err := grok.Send(ctx, "chatgpt-web", "only once, please", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First delivery: the send goes through, then the agent dies before
+	// it replies (no handleSafely, so no failure reply either).
+	n, err := pollAndHandle(ctx, rig.agent.Relay, time.Second, func(ctx context.Context, req envelope.Request) {
+		defer func() { _ = recover() }()
+		rig.agent.Handle(ctx, req)
+	})
+	if err != nil || n != 1 {
+		t.Fatalf("first delivery: %d %v", n, err)
+	}
+	if got := fb.sent(); len(got) != 1 {
+		t.Fatalf("first delivery sends = %+v", got)
+	}
+	st, err := os.Stat(rig.agent.JournalPath)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("journal: %v %v", st, err)
+	}
+	if b, _ := os.ReadFile(rig.agent.JournalPath); !strings.Contains(string(b), sent.ID) || !strings.Contains(string(b), "conv-1") || strings.Contains(string(b), "only once") {
+		t.Fatalf("journal holds the request id and conversation, not the message: %s", b)
+	}
+
+	// The claim lease runs out and the relay requeues the request.
+	time.Sleep(5 * time.Millisecond)
+	rig.mesh.Server.Sweep(ctx)
+	crash = false
+	res := rig.serve(t, grok, sent.ID)
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "You said: only once, please") || !strings.Contains(res.Reply.Body, "conv-1") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if got := fb.sent(); len(got) != 1 {
+		t.Fatalf("the requeued request was sent to the browser again: %+v", got)
+	}
+	if b, _ := os.ReadFile(rig.agent.JournalPath); !strings.Contains(string(b), `"answered"`) {
+		t.Fatalf("journal not marked answered: %s", b)
+	}
+}
+
+// Journal entries older than the retention are pruned; newer ones stay.
+func TestWebJournalPrunesOldEntries(t *testing.T) {
+	rig := newWebRig(t)
+	if err := os.MkdirAll(filepath.Dir(rig.agent.JournalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-rig.agent.journalRetention() - time.Minute).UTC().Format(time.RFC3339Nano)
+	recent := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	seed := fmt.Sprintf(`{"requests":{"req-old":{"conversation_id":"conv-9","recorded":%q,"state":"sent"},"req-new":{"conversation_id":"conv-8","recorded":%q,"state":"answered"}}}`, old, recent)
+	if err := os.WriteFile(rig.agent.JournalPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.ask(t, "grokbot", "hello")
+	b, _ := os.ReadFile(rig.agent.JournalPath)
+	if strings.Contains(string(b), "req-old") || !strings.Contains(string(b), "req-new") {
+		t.Fatalf("journal after prune: %s", b)
+	}
+}
+
+// A requeued request the journal says was already answered (its reply was
+// lost on the way to the relay) is answered again from the conversation,
+// without sending anything to the site.
+func TestWebRequeuedAnsweredRequestRepliesWithoutSending(t *testing.T) {
+	rig := newWebRig(t)
+	rig.ask(t, "grokbot", "hello") // conv-1, user message u0
+	ctx := t.Context()
+	grok := rig.mesh.Client(t, "grokbot")
+	sent, err := grok.Send(ctx, "chatgpt-web", "hello", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.agent.journal(sent.ID, webSend{ConversationID: "conv-1", UserMessageID: "u0", Recorded: time.Now().UTC(), State: webSendAnswered})
+	res := rig.serve(t, grok, sent.ID)
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "You said: hello") || !strings.Contains(res.Reply.Body, "conv-1") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if got := rig.browser.sent(); len(got) != 1 {
+		t.Fatalf("sends = %+v, want only the first ask", got)
+	}
+}
+
+var attachedClaim = regexp.MustCompile(`\d+ images? attached`)
+
+// webImages is a reply's generated images, as readReply hands them to
+// attachImages.
+func webImages(imgs ...Image) []Conversation {
+	return []Conversation{{Source: SourceChatGPT, ID: "conv-1", Messages: []Message{{Role: RoleAssistant, Images: imgs}}}}
+}
+
+// Each way attaching the reply's images can fail leaves a note in the
+// body, never a claim that images were attached, and no image dir behind.
+func TestWebAttachImagesFailures(t *testing.T) {
+	png := Image{Name: "fox.png", MIME: "image/png", Data: fakePNG(2000)}
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		setup func(r *webRig)
+		conv  []Conversation
+		want  string
+	}{
+		{name: "temp dir", setup: func(r *webRig) { r.agent.TempDir = filepath.Join(blocker, "tmp") }, conv: webImages(png), want: "The images could not be attached."},
+		{name: "save images", conv: webImages(png, Image{Name: "evil.sh", Data: []byte("#!/bin/sh\nrm -rf /\n")}), want: "The images could not be attached."},
+		{name: "upload error", setup: func(r *webRig) { r.mesh.Server.SetAttachmentDir(filepath.Join(blocker, "blobs")) }, conv: webImages(png), want: "the upload to the relay failed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rig := newWebRig(t)
+			if c.setup != nil {
+				c.setup(rig)
+			}
+			body := "answer"
+			ids := rig.agent.attachImages(t.Context(), envelope.Request{ID: "req-1"}, c.conv, &body)
+			if len(ids) != 0 || !strings.Contains(body, c.want) || attachedClaim.MatchString(body) {
+				t.Fatalf("ids %v body %q", ids, body)
+			}
+			if left, _ := os.ReadDir(rig.agent.TempDir); len(left) != 0 {
+				t.Fatalf("image dir left behind: %v", left)
+			}
+		})
+	}
+	t.Run("unsupported", func(t *testing.T) {
+		rig := newWebRigWith(t, relay.Config{}, false)
+		body := "answer"
+		ids := rig.agent.attachImages(t.Context(), envelope.Request{ID: "req-1"}, webImages(png), &body)
+		if len(ids) != 0 || !strings.Contains(body, "this relay does not support attachments") {
+			t.Fatalf("ids %v body %q", ids, body)
+		}
+		if left, _ := os.ReadDir(rig.agent.TempDir); len(left) != 0 {
+			t.Fatalf("image dir left behind: %v", left)
+		}
+	})
+}
+
+// A finished read that cannot be parsed into turns fails the request with
+// a clear message instead of answering "(the reply was empty)".
+func TestWebReadReplyUnparseable(t *testing.T) {
+	rig := newWebRig(t)
+	_, _, err := rig.agent.readReply(t.Context(), "conv-1", "u0", json.RawMessage(`{"mapping":null}`))
+	if !errors.Is(err, errReplyUnreadable) {
+		t.Fatalf("err = %v", err)
+	}
+	_, _, err = rig.agent.readReply(t.Context(), "conv-1", "missing", chatgptDetailJSON("conv-1", []fakeTurn{{prompt: "hi", reply: "hello", sentAt: time.Now()}}))
+	if !errors.Is(err, errReplyUnreadable) {
+		t.Fatalf("turn not found: err = %v", err)
+	}
+	msg := rig.agent.waitFailure(err, "conv-1")
+	if !strings.Contains(msg, "the reply could not be read") || !strings.Contains(msg, "conv-1") || strings.Contains(msg, "empty") {
+		t.Fatalf("%q", msg)
 	}
 }

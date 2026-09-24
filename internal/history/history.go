@@ -512,7 +512,10 @@ func matchTerms(text string, terms []string) bool {
 // asked" in every local source.
 type turn struct {
 	prompt Message
-	reply  Message
+	// promptID is the site's id for the prompt message, where the source
+	// has one (the web agent finds its own turn by it).
+	promptID string
+	reply    Message
 	// replyImages are images the assistant generated in the reply.
 	replyImages []Image
 }

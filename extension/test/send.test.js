@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { SELECTORS, createSender, pageFill, pageProbe, pageSubmit } from '../send.js';
-import { createRunner, helloMessage, EXTENSION_FILES } from '../ops.js';
+import { createRunner, helloMessage, EXTENSION_FILES, RELOAD_RETRY_MS, RELOAD_MAX_WAIT_MS } from '../ops.js';
 
 // ---- A fake DOM, just enough for the page functions.
 
@@ -501,6 +501,85 @@ test('runner: chatgpt.close and claudeai.close close only the tab a send left op
   assert.deepEqual(fc.log.removed, [100]);
   const none = createRunner({ fetch: async () => jsonResponse({}) });
   await assert.rejects(none.run('claudeai.close', { conversation_id: id }, () => {}), (e) => e.code === 'unsupported');
+});
+
+test('busy reports owned or kept tabs; closeAllKept closes every kept tab and its timer', async () => {
+  const fc = fakeChrome((url) => new FakeSite('claudeai', url, { neverFinish: true }));
+  const timers = fakeTimers();
+  const s = sender(fc, { timers });
+  assert.equal(s.busy(), false);
+  const pending = s.send('claudeai', { message: 'x' });
+  assert.equal(s.busy(), true, 'busy while the send owns its tab');
+  const r = await pending;
+  assert.equal(s.busy(), true, 'busy while the finished tab waits for close');
+  assert.deepEqual(await s.close('claudeai', r.conversation_id), { closed: 1 });
+  assert.equal(s.busy(), false);
+
+  await s.send('claudeai', { message: 'y' });
+  await s.send('claudeai', { message: 'z' });
+  assert.equal(timers.pending().length, 2);
+  assert.deepEqual(await s.closeAllKept(), { closed: 2 });
+  assert.equal(timers.pending().length, 0, 'keep timers cleared');
+  assert.deepEqual(fc.log.removed, [100, 101, 102]);
+  assert.equal(s.busy(), false);
+  assert.ok(fc.tabs.has(1), "the user's tab is never closed");
+});
+
+const flush = () => new Promise((r) => setImmediate(r));
+
+test('runner: extension.reload waits while a send has tabs, then reloads', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let reloads = 0;
+  let busy = true;
+  let closedAll = 0;
+  const fakeSender = { busy: () => busy, closeAllKept: async () => { closedAll++; return { closed: 0 }; } };
+  const r = createRunner({ fetch: async () => jsonResponse({}), sender: fakeSender, reload: () => reloads++ });
+  const frames = [];
+  await r.run('extension.reload', {}, (f) => frames.push(f));
+  assert.deepEqual(frames, [{ ok: true, result: { reloading: true } }]);
+  t.mock.timers.tick(200);
+  await flush();
+  assert.equal(reloads, 0, 'deferred while busy');
+  // A second request while one is pending does not start a second wait.
+  await r.run('extension.reload', {}, (f) => frames.push(f));
+  for (let i = 0; i < 10; i++) {
+    t.mock.timers.tick(RELOAD_RETRY_MS);
+    await flush();
+  }
+  assert.equal(reloads, 0, 'still deferred');
+  busy = false;
+  t.mock.timers.tick(RELOAD_RETRY_MS);
+  await flush();
+  assert.equal(reloads, 1, 'reloads once the sender is idle');
+  assert.equal(closedAll, 0, 'nothing to force-close');
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(RELOAD_RETRY_MS);
+    await flush();
+  }
+  assert.equal(reloads, 1, 'one reload for both requests');
+});
+
+test('runner: extension.reload at the cap closes kept tabs, then reloads anyway', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let reloads = 0;
+  const order = [];
+  const fakeSender = { busy: () => true, closeAllKept: async () => { order.push('closeAllKept'); return { closed: 1 }; } };
+  const r = createRunner({ fetch: async () => jsonResponse({}), sender: fakeSender, reload: () => { reloads++; order.push('reload'); } });
+  await r.run('extension.reload', {}, () => {});
+  t.mock.timers.tick(200);
+  await flush();
+  let waited = 200;
+  while (waited < RELOAD_MAX_WAIT_MS - RELOAD_RETRY_MS) {
+    t.mock.timers.tick(RELOAD_RETRY_MS);
+    waited += RELOAD_RETRY_MS;
+    await flush();
+  }
+  assert.equal(reloads, 0, `reloaded after ${waited}ms, before the cap`);
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(RELOAD_RETRY_MS);
+    await flush();
+  }
+  assert.deepEqual(order, ['closeAllKept', 'reload']);
 });
 
 test('runner: extension.reload answers, then reloads', async () => {

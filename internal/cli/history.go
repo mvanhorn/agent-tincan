@@ -225,11 +225,7 @@ func historyServeCmd() *cobra.Command {
 			if configPath == "" {
 				configPath = defaultHistoryConfig()
 			}
-			if strings.HasPrefix(configPath, "~/") {
-				if home, err := os.UserHomeDir(); err == nil {
-					configPath = filepath.Join(home, configPath[2:])
-				}
-			}
+			configPath = expandHome(configPath)
 			cfg, err := client.LoadConfigFrom(configPath)
 			if err != nil {
 				return fmt.Errorf("history config %s: %w", configPath, err)

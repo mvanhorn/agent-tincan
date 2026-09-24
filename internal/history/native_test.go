@@ -724,3 +724,39 @@ func TestOldExtensionUnknownOpSaysReload(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("pipe closed") }
+
+// A reload request that could not be written does not start the cooldown:
+// the next hello toward the same files asks again.
+func TestNativeHostFailedReloadWriteDoesNotStartCooldown(t *testing.T) {
+	extDir := t.TempDir()
+	loaded := writeExtensionDir(t, extDir, "0.1.0", map[string]string{"ops.js": "old"})
+	writeExtensionDir(t, extDir, "0.2.0", map[string]string{"ops.js": "new"})
+	statePath := filepath.Join(t.TempDir(), "reload-state.json")
+	var logBuf lockedBuffer
+	host := &NativeHost{Out: failWriter{}, ExtensionDir: extDir, ReloadStatePath: statePath, Log: &logBuf}
+	host.onHello(loaded)
+	if !strings.Contains(logBuf.String(), "reload request failed") {
+		t.Fatalf("log: %s", logBuf.String())
+	}
+	var out bytes.Buffer
+	host.Out = &out
+	host.onHello(loaded)
+	b, err := ReadMessage(&out, MaxHostMessage)
+	if err != nil {
+		t.Fatalf("no reload request after a failed write: %v (log: %s)", err, logBuf.String())
+	}
+	var r NativeRequest
+	if err := json.Unmarshal(b, &r); err != nil || r.Op != OpExtensionReload {
+		t.Fatalf("host sent %s", b)
+	}
+	// This one went out, so the cooldown holds now.
+	out.Reset()
+	host.onHello(loaded)
+	if out.Len() != 0 {
+		t.Fatalf("asked again inside the cooldown: %q", out.String())
+	}
+}

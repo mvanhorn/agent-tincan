@@ -80,10 +80,21 @@ test('background connects to the native host and answers only valid requests', a
   assert.deepEqual(errs.map((e) => [e.id, e.ok, e.error.code]), [[2, false, 'bad_request'], [3, false, 'bad_request'], [0, false, 'bad_request']]);
   assert.ok(!JSON.stringify(state.posted).includes('tok"'), 'token never posted');
 
-  // Disconnect, then the alarm reconnects.
+  // The files change on disk (an update without a reload yet). Disconnect,
+  // then the alarm reconnects: the new hello still reports the hashes of
+  // the files this worker loaded, so the host can see the drift.
+  const inner = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith('chrome-extension://')) return new Response('changed on disk ' + url);
+    return inner(url, init);
+  };
   listeners.disconnect.forEach((fn) => fn());
   listeners.alarm.forEach((fn) => fn({ name: 'tincan-reconnect' }));
   assert.equal(state.connects.length, 2);
+  await settle();
+  const hellos = state.posted.filter((m) => m.hello);
+  assert.equal(hellos.length, 2);
+  assert.deepEqual(hellos[1].hello.files, hello.hello.files, 'hello reports the loaded files, not the ones on disk now');
   // Already connected: no duplicate port.
   listeners.alarm.forEach((fn) => fn({ name: 'tincan-reconnect' }));
   listeners.startup.forEach((fn) => fn());

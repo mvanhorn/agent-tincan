@@ -7,7 +7,7 @@
 // native port keeps the worker alive; if the host is missing or exits, an
 // alarm retries.
 
-import { NATIVE_HOST, OpError, createRunner, helloMessage, validate } from './ops.js';
+import { NATIVE_HOST, OpError, createRunner, hashFiles, helloMessage, validate } from './ops.js';
 import { createSender } from './send.js';
 
 const RECONNECT_ALARM = 'tincan-reconnect';
@@ -17,6 +17,10 @@ const runner = createRunner({
   reload: () => chrome.runtime.reload(),
 });
 let port = null;
+// The files are hashed once, when this worker starts: every hello reports
+// the code Chrome loaded, not whatever is on disk at reconnect time, so
+// the host can tell when an update is waiting for a reload.
+const loadedFiles = hashFiles({ getURL: (f) => chrome.runtime.getURL(f), fetch: (url, init) => fetch(url, init) });
 
 function post(msg) {
   if (!port) return;
@@ -64,7 +68,8 @@ function connect() {
     void chrome.runtime.lastError;
     if (port === p) port = null;
   });
-  helloMessage({ manifest: chrome.runtime.getManifest(), getURL: (f) => chrome.runtime.getURL(f), fetch: (url, init) => fetch(url, init) })
+  loadedFiles
+    .then((files) => helloMessage({ manifest: chrome.runtime.getManifest(), files }))
     .then((m) => {
       if (port === p) post(m);
     })

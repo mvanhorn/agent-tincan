@@ -245,7 +245,8 @@ function cleanProbe(r) {
   };
 }
 
-// createSender returns {send(site, args), close(site, conversationId)}.
+// createSender returns {send(site, args), close(site, conversationId),
+// busy(), closeAllKept()}.
 // tabs and scripting are chrome.tabs and chrome.scripting (or fakes). Sends
 // to one site run one at a time, each in its own background tab. A
 // successful send leaves its tab open for close (or the keepMs timer).
@@ -269,6 +270,8 @@ export function createSender({
   const owned = new Set();
   const kept = new Map();
   const queues = {};
+  // inflight counts sends accepted and not yet settled, queued ones too.
+  let inflight = 0;
 
   async function inject(tabId, func, args) {
     if (!owned.has(tabId)) throw new OpError('internal', 'refusing to script a tab the extension did not open');
@@ -305,6 +308,18 @@ export function createSender({
       removeTab(tabId);
     }, keepMs);
     kept.set(tabId, { site, id, timer });
+  }
+
+  async function closeKept(match) {
+    let closed = 0;
+    for (const [tabId, k] of [...kept]) {
+      if (!match(k)) continue;
+      kept.delete(tabId);
+      clearTimer(k.timer);
+      await removeTab(tabId);
+      closed++;
+    }
+    return { closed };
   }
 
   async function run(site, args) {
@@ -403,22 +418,31 @@ export function createSender({
     // send runs after any earlier send to the same site has finished.
     send(site, args) {
       const prev = queues[site] || Promise.resolve();
-      const p = prev.catch(() => {}).then(() => run(site, args));
+      inflight++;
+      const p = prev
+        .catch(() => {})
+        .then(() => run(site, args))
+        .finally(() => {
+          inflight--;
+        });
       queues[site] = p;
       return p;
     },
     // close closes the tabs a finished send to conversationId left open,
     // and only those. It reports how many it closed.
     async close(site, conversationId) {
-      let closed = 0;
-      for (const [tabId, k] of [...kept]) {
-        if (k.site !== site || k.id !== conversationId) continue;
-        kept.delete(tabId);
-        clearTimer(k.timer);
-        await removeTab(tabId);
-        closed++;
-      }
-      return { closed };
+      return closeKept((k) => k.site === site && k.id === conversationId);
+    },
+    // busy reports whether a send is queued or driving a tab, or a
+    // finished send's tab is still waiting for its close: state a reload
+    // would lose.
+    busy() {
+      return inflight > 0 || owned.size > 0 || kept.size > 0;
+    },
+    // closeAllKept closes every tab finished sends left open (used before
+    // a forced reload, which would otherwise orphan them).
+    async closeAllKept() {
+      return closeKept(() => true);
     },
   };
 }

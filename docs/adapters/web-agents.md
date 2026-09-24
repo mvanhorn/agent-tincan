@@ -50,7 +50,7 @@ Every reply ends with the conversation id, for example `ChatGPT conversation: 6a
 - The answer text, capped at 64 KB. A longer answer is cut and the reply says how much is shown.
 - Images the assistant generated in that turn, as relay attachments (up to 8). The reply says how many were attached, or why none were.
 - Messages are capped at 32 KB. A longer one is refused, not cut.
-- If the answer finished but the conversation could not be read back, the reply carries the text as the page showed it and says images are not included.
+- If the answer finished but the conversation could not be read back, the request fails saying the message was sent and naming the conversation; the answer is there on the site.
 
 ## Install
 
@@ -72,7 +72,7 @@ Set its wake method to `wait` in the relay's `wake.json`; the service long-polls
 
 ### Extension updates
 
-The send operations need extension version 0.3.0 or later (0.2.0 waited for the answer on the page). Load `extension/` unpacked once from `chrome://extensions`. After that, updates need no Reload click: run `tincan history install` from the repo checkout (or pass `--extension-dir <path to extension/>`), and whenever the extension connects, the native host compares its version and file hashes with the files on disk and, if they differ, sends the fixed `extension.reload` operation. The extension then calls `chrome.runtime.reload()` and Chrome re-reads the files. The host asks at most once per 10 minutes for the same files, so a copy loaded from somewhere else cannot cause a reload loop. A store install is never reloaded this way.
+The send operations need extension version 0.3.0 or later (0.2.0 waited for the answer on the page). Load `extension/` unpacked once from `chrome://extensions`. After that, updates need no Reload click: run `tincan history install` from the repo checkout (or pass `--extension-dir <path to extension/>`), and whenever the extension connects, the native host compares its version and file hashes with the files on disk and, if they differ, sends the fixed `extension.reload` operation. The extension hashes its files once when its worker starts, so the hashes describe the code Chrome loaded even after the files on disk change. On `extension.reload` it calls `chrome.runtime.reload()` and Chrome re-reads the files, but not while a send is typing in a tab or a finished send's tab is waiting to be closed (a reload would lose track of those tabs): it checks again every 5 seconds for up to 5 minutes. At that cap it closes the finished sends' tabs and reloads anyway; a send still typing then is abandoned, its tab stays open, and that request fails when its wait times out. The host asks at most once per 10 minutes for the same files, so a copy loaded from somewhere else cannot cause a reload loop. A store install is never reloaded this way.
 
 ## Troubleshooting
 
@@ -108,7 +108,15 @@ The text is entered by typing (`document.execCommand('insertText')`), then a pas
 
 The web agent decides from the conversation detail, never from the page:
 
-- ChatGPT: the last message on the `current_node` branch is an assistant message to everyone, after this request's user message, with status `finished_successfully`, `finish_details`, or `end_turn: true` (and `end_turn` not `false`).
-- claude.ai: the last message on the current branch is from the assistant, after this request's human message, and has a `stop_reason`, or else its text is the same on two reads in a row.
+First it finds this request's own user message: the first user (claude.ai: human) message on the current branch after the one that was last before the send (read just before sending into an existing conversation), whose text is the text sent (ignoring whitespace and the markdown marks ``#*`>_-``, the same comparison the extension uses to check the message box), and that is not dated more than 2 minutes before the extension's `submitted_at`. Once seen, that message is fixed for the rest of the wait. So neither a finished answer to an earlier message, even with the same text, nor the answer to a message sent later in the same conversation (you typing there meanwhile) is taken for this one.
 
-"This request's user message" is the last user message on the branch, as long as it is not the one that was last before the send (read just before sending into an existing conversation) and is not dated more than 2 minutes before the extension's `submitted_at`. So a finished answer to an earlier message, even with the same text, is never taken for the new one.
+The answer is the last message after that user message and before the next user message on the branch, if any:
+
+- ChatGPT: an assistant message to everyone, with status `finished_successfully`, `finish_details`, or `end_turn: true` (and `end_turn` not `false`).
+- claude.ai: an assistant message with a `stop_reason`, or else whose text is the same on 4 reads in a row spanning at least 10 seconds, so a pause mid-answer is not taken for the end.
+
+If a later user message follows this request's message with nothing between them, no answer will come, and the request fails saying another message was sent in the conversation first. If this request's answer is still being written when a later message appears, the agent keeps waiting for it.
+
+### Retries and duplicate sends
+
+The relay requeues a claimed request whose reply never arrives (after its 30-minute claim lease), for example when the agent crashed or the reply failed to reach the relay. A send is not repeated for that: right after the extension confirms a send, the agent records the request id, conversation id, the id of the message it sent (once seen) and `submitted_at` in `~/.config/tincan/<agent>-journal.json` (mode 0600; ids and times only, never messages or answers), and marks the entry answered once it replies. A request found there is not sent again; the agent reads the answer from the journaled conversation (waiting for it if needed) and replies. Entries are dropped after 90 minutes.

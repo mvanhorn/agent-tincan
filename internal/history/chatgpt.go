@@ -239,7 +239,7 @@ func parseChatGPTDetail(id string, raw json.RawMessage) (thread, error) {
 				continue
 			}
 			flush()
-			cur = &turn{prompt: Message{Role: RoleUser, Text: text, Time: m.CreateTime.Time}}
+			cur = &turn{prompt: Message{Role: RoleUser, Text: text, Time: m.CreateTime.Time}, promptID: m.ID}
 			for _, p := range pointers {
 				pid := chatgptPointerID(p)
 				name := names[pid]

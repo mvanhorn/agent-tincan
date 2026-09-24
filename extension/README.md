@@ -21,11 +21,14 @@ All page selectors are in the `SELECTORS` table in `send.js`; see
 docs/adapters/web-agents.md.
 
 On connect the worker sends the host a hello with its version and the sha256
-of each file. When `tincan history install --extension-dir` (or a run from the
-repo checkout) told the host where the unpacked files are, and they differ,
-the host sends `extension.reload` and the worker calls
+of each file, hashed once when the worker started (so it describes the code
+Chrome loaded). When `tincan history install --extension-dir` (or a run from
+the repo checkout) told the host where the unpacked files are, and they
+differ, the host sends `extension.reload` and the worker calls
 `chrome.runtime.reload()`, so updates need no Reload click after the first
-load.
+load. The reload waits while a send has a tab open (checking every 5 seconds,
+up to 5 minutes; at that cap it closes finished sends' tabs and reloads
+anyway).
 
 ## Extension id
 

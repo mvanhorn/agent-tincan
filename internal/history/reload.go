@@ -126,13 +126,17 @@ func (h *NativeHost) onHello(hello Hello) {
 		statePath = filepath.Join(filepath.Dir(h.SocketPath), "reload-state.json")
 	}
 	var st reloadState
-	if b, err := os.ReadFile(statePath); err == nil {
-		_ = json.Unmarshal(b, &st)
+	prev, readErr := os.ReadFile(statePath)
+	if readErr == nil {
+		_ = json.Unmarshal(prev, &st)
 	}
 	if st.Fingerprint == fp && time.Since(st.At) < reloadCooldown {
 		h.logf("%s, but a reload toward these files was already asked for at %s; not asking again", reason, st.At.Format(time.RFC3339))
 		return
 	}
+	// The cooldown is recorded before asking, so a reload that cannot be
+	// recorded is never asked for (no loop), and rolled back when the ask
+	// cannot be written, so the next hello asks again.
 	if b, err := json.Marshal(reloadState{Fingerprint: fp, At: time.Now().UTC()}); err == nil {
 		if err := writeFileAtomic(statePath, b, 0o600); err != nil {
 			h.logf("cannot record the reload (%v); not asking, to avoid a loop", err)
@@ -148,6 +152,15 @@ func (h *NativeHost) onHello(hello Hello) {
 	h.outMu.Unlock()
 	if err != nil {
 		h.logf("reload request failed: %v", err)
+		var rerr error
+		if readErr == nil {
+			rerr = writeFileAtomic(statePath, prev, 0o600)
+		} else {
+			rerr = os.Remove(statePath)
+		}
+		if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			h.logf("cannot roll back the reload record: %v", rerr)
+		}
 		return
 	}
 	h.logf("%s: asked the extension to reload", reason)
