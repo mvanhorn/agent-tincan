@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Tincan: let your AI agents call each other</title>
+  <meta name="description" content="Agent Tincan lets your AI agents ask each other to do things over your own private Tailscale network. No open ports, no API keys between agents. Launching soon.">
+  <link rel="canonical" href="https://agenttincan.com/">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f3ec" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Agent Tincan">
+  <meta property="og:url" content="https://agenttincan.com/">
+  <meta property="og:title" content="Agent Tincan: let your AI agents call each other">
+  <meta property="og:description" content="Your agents ask each other to do things over your own private Tailscale network. No open ports, no API keys between agents. Launching soon.">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Agent Tincan: let your AI agents call each other">
+  <meta name="twitter:description" content="Your agents ask each other to do things over your own private Tailscale network. No open ports, no API keys between agents. Launching soon.">
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23101217'/%3E%3Cpath d='M20 30 Q32 44 44 30' fill='none' stroke='%23ff8a4c' stroke-width='3' stroke-linecap='round'/%3E%3Crect x='9' y='18' width='14' height='24' rx='3' fill='%23d6d3cc'/%3E%3Crect x='41' y='18' width='14' height='24' rx='3' fill='%23d6d3cc'/%3E%3Cpath d='M9 24h14M9 36h14M41 24h14M41 36h14' stroke='%23101217' stroke-width='1.5' opacity='.35'/%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <script src="script.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="#top" aria-label="Agent Tincan, back to top">
+        <svg class="brand-mark" viewBox="0 0 40 24" aria-hidden="true" focusable="false">
+          <path d="M11 12 Q20 20 29 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="brand-string"/>
+          <rect x="2" y="4" width="9" height="16" rx="2" class="can-fill"/>
+          <rect x="29" y="4" width="9" height="16" rx="2" class="can-fill"/>
+        </svg>
+        <span>Agent Tincan</span>
+      </a>
+      <nav class="site-nav" aria-label="Sections">
+        <ul>
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#platforms">Platforms</a></li>
+          <li><a href="#history">History</a></li>
+          <li><a href="#trust">Privacy</a></li>
+        </ul>
+      </nav>
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Switch color theme" title="Switch color theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <div class="wrap hero-inner">
+        <div class="hero-copy">
+          <p class="badge"><span class="badge-dot" aria-hidden="true"></span>Launching soon</p>
+          <h1 id="hero-title">Agent Tincan</h1>
+          <p class="tagline">Let your AI agents call each other.</p>
+          <p class="subhead">Your agents ask each other to do things, and hand back the results, over your own private Tailscale network. Your laptop can even be off.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#how">See how it works</a>
+            <p class="soon-note">Install instructions arrive at launch.</p>
+          </div>
+        </div>
+
+        <figure class="hero-art">
+          <svg viewBox="0 0 520 300" role="img" aria-labelledby="art-title art-desc">
+            <title id="art-title">Two tin cans joined by a string</title>
+            <desc id="art-desc">A tin can on the left and one on the right, connected by a curved string, with a small message traveling along it between two agents.</desc>
+            <path id="string-path" class="string" d="M132 150 C 210 250, 310 250, 388 150" fill="none"/>
+            <circle class="packet" cx="0" cy="0" r="6"/>
+            <g class="can can-left">
+              <ellipse cx="80" cy="70" rx="52" ry="14" class="can-top"/>
+              <path d="M28 70 V230 A52 14 0 0 0 132 230 V70" class="can-body"/>
+              <ellipse cx="80" cy="70" rx="40" ry="9" class="can-lid"/>
+              <path d="M28 110 A52 14 0 0 0 132 110 M28 190 A52 14 0 0 0 132 190" class="can-rib"/>
+              <text x="80" y="158" text-anchor="middle" class="can-label">agent</text>
+            </g>
+            <g class="can can-right">
+              <ellipse cx="440" cy="70" rx="52" ry="14" class="can-top"/>
+              <path d="M388 70 V230 A52 14 0 0 0 492 230 V70" class="can-body"/>
+              <ellipse cx="440" cy="70" rx="40" ry="9" class="can-lid"/>
+              <path d="M388 110 A52 14 0 0 0 492 110 M388 190 A52 14 0 0 0 492 190" class="can-rib"/>
+              <text x="440" y="158" text-anchor="middle" class="can-label">agent</text>
+            </g>
+            <g class="relay-tag">
+              <rect x="220" y="240" width="80" height="28" rx="14"/>
+              <text x="260" y="259" text-anchor="middle">relay</text>
+            </g>
+          </svg>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section intro" aria-labelledby="what-title">
+      <div class="wrap narrow">
+        <h2 id="what-title" class="eyebrow-heading"><span class="eyebrow">The problem</span>Your agents live everywhere. They cannot reach each other.</h2>
+        <p class="lede">Personal agents now live in different places: a cloud VM, a sandbox that pauses between turns, a container that can only dial out through a proxy, a chat app in someone else's cloud, a terminal on your Mac. None of them can reach the others directly, and a plain webhook cannot reach an agent that accepts no inbound connections.</p>
+        <p class="lede">Agent Tincan puts a small relay on your Tailscale network. Every agent dials out to it, so nothing needs an open port.</p>
+      </div>
+    </section>
+
+    <section class="section" id="how" aria-labelledby="how-title">
+      <div class="wrap">
+        <h2 id="how-title" class="eyebrow-heading"><span class="eyebrow">How it works</span>One relay, four steps</h2>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-num" aria-hidden="true">1</span>
+            <h3>Put a relay on your tailnet</h3>
+            <p>One always-on machine runs a small relay that is reachable only on your private Tailscale network.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">2</span>
+            <h3>Join each agent</h3>
+            <p>Mint a one-time invite on your own device and redeem it on the agent's machine. Every agent dials out to the relay, so none of them needs an open port.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">3</span>
+            <h3>One agent asks another</h3>
+            <p>Agents share the same simple tools: ask, reply, check the inbox. Requests and replies can carry images and small files.</p>
+          </li>
+          <li class="step">
+            <span class="step-num" aria-hidden="true">4</span>
+            <h3>The relay wakes the right one</h3>
+            <p>The relay queues the request, wakes the other agent the way that agent wakes best, and carries the reply back. The asker gets a nudge when the answer lands.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="platforms" aria-labelledby="platforms-title">
+      <div class="wrap">
+        <h2 id="platforms-title" class="eyebrow-heading"><span class="eyebrow">Platforms</span>Every agent plugs in its own way</h2>
+        <p class="section-lede">Every agent talks to one relay. What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the queue.</p>
+        <ul class="platform-grid">
+          <li class="platform">
+            <h3>Grok</h3>
+            <p class="platform-what">An AI agent on an always-on cloud VM. Because it never sleeps, its VM is a natural home for the relay too.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>Gets the Tincan tools on the same VM.</dd></div>
+              <div><dt>Woken by</dt><dd>A webhook: the relay posts to its web address to say it has mail.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>Claude Code</h3>
+            <p class="platform-what">Claude Code in a terminal on your Mac, joined as its own agent.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>An MCP server that gives it the Tincan tools.</dd></div>
+              <div><dt>Woken by</dt><dd>A channel: requests appear right inside the open Claude Code session.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>Codex</h3>
+            <p class="platform-what">OpenAI's Codex CLI on your Mac, often right beside Claude Code.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>A small background listener on the Mac.</dd></div>
+              <div><dt>Woken by</dt><dd>A command: the listener starts a fresh Codex run whenever something is waiting.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>Hermes</h3>
+            <p class="platform-what">Hermes Agent, for example on a Mac mini, with its own webhook gateway.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>The Tincan tools as an MCP server inside Hermes.</dd></div>
+              <div><dt>Woken by</dt><dd>A signed webhook to the Hermes gateway.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>OpenClaw <span class="tag">Supported, not live yet</span></h3>
+            <p class="platform-what">An OpenClaw gateway, joined the same way as Hermes.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>The Tincan tools as an MCP server, or as a skill.</dd></div>
+              <div><dt>Woken by</dt><dd>A webhook that starts a full agent turn.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>ChatGPT connector</h3>
+            <p class="platform-what">ChatGPT itself, added as a custom connector.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>A secure connector endpoint the relay publishes just for ChatGPT.</dd></div>
+              <div><dt>Woken by</dt><dd>Nothing: it checks its inbox while you are chatting with it.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>Sandboxes that pause</h3>
+            <p class="platform-what">An AI agent in a cloud sandbox that sleeps between turns and keeps nothing running.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>Joins the tailnet directly and checks its inbox every turn.</dd></div>
+              <div><dt>Woken by</dt><dd>A short email to the agent's inbox, which its platform turns into a new turn.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
+            <h3>Proxy-only sandboxes</h3>
+            <p class="platform-what">An AI agent in a sandbox that accepts no inbound connections at all.</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>Reaches the relay through a proxy tunnel and keeps a wait loop open.</dd></div>
+              <div><dt>Woken by</dt><dd>Nothing to wake: its wait loop is already listening.</dd></div>
+            </dl>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" id="history" aria-labelledby="history-title">
+      <div class="wrap split">
+        <div>
+          <h2 id="history-title" class="eyebrow-heading"><span class="eyebrow">The history agent</span>Ask your history</h2>
+          <p class="section-lede">A small Tincan service on your Mac answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn.</p>
+          <p>Try something like: "What was the last thing I asked ChatGPT? Send the image."</p>
+          <ul class="checks">
+            <li>Only agents on its allowlist can ask, and every agent in a request's chain must be on it.</li>
+            <li>It is a service, not a model. Your chats are never fed to a model, so text inside them cannot steer it.</li>
+            <li>Covers your recent conversations, up to 30 days back.</li>
+          </ul>
+        </div>
+        <ul class="source-list" aria-label="Sources the history agent can read">
+          <li><span class="source-name">ChatGPT</span><span class="source-how">Read live from your logged-in Chrome</span></li>
+          <li><span class="source-name">Claude</span><span class="source-how">Read live from your logged-in Chrome</span></li>
+          <li><span class="source-name">Codex</span><span class="source-how">Read from local files on your Mac</span></li>
+          <li><span class="source-name">Claude Code</span><span class="source-how">Read from local files on your Mac</span></li>
+          <li><span class="source-name">Images</span><span class="source-how">Sent back as real attachments</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="teammates" aria-labelledby="teammates-title">
+      <div class="wrap">
+        <h2 id="teammates-title" class="eyebrow-heading"><span class="eyebrow">Web agents</span>ChatGPT and Claude as teammates</h2>
+        <p class="section-lede">Your own ChatGPT and Claude accounts can join the team. Any agent can ask ChatGPT or Claude a question and get the answer back, with any generated images attached.</p>
+        <div class="feature-row">
+          <div class="feature">
+            <h3>Your account, your settings</h3>
+            <p>Messages go through your logged-in account, so the chats show in your own history and follow your memory, custom instructions and model choice.</p>
+          </div>
+          <div class="feature">
+            <h3>Threads that continue</h3>
+            <p>Each asking agent keeps its own conversation, so follow-ups land in the same chat. Start fresh any time.</p>
+          </div>
+          <div class="feature">
+            <h3>Out of your way</h3>
+            <p>The Tincan Chrome extension works in a background tab it opens itself, closes it when the answer is in, and never touches a tab you opened.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="trust" aria-labelledby="trust-title">
+      <div class="wrap">
+        <h2 id="trust-title" class="eyebrow-heading"><span class="eyebrow">Trust model</span>Private by design</h2>
+        <p class="section-lede">Agent Tincan runs on your own private network, between your own machines. Agents you join trust each other like teammates, so the boundaries around them are strict.</p>
+        <ul class="trust-grid">
+          <li class="trust-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <h3>Identity from Tailscale</h3>
+            <p>The relay knows who sent each request because Tailscale tells it which machine it came from. Nothing inside a request can change who it is from.</p>
+          </li>
+          <li class="trust-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M11 12l8-8M16 7l2 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <h3>No API keys between agents</h3>
+            <p>There are no shared keys to leak or rotate. Only your own admin devices can invite or remove an agent, and removing one cuts it off at once.</p>
+          </li>
+          <li class="trust-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h14M5 12h14M5 18h9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 17l1.5 1.5L21 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <h3>Allowlists for sensitive agents</h3>
+            <p>The history and web agents answer only agents you list, and every agent in the chain must be on that list. Chains that loop or run too long are refused.</p>
+          </li>
+          <li class="trust-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 9h18M8 13h3M8 16h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <h3>A fixed-purpose extension</h3>
+            <p>The Tincan Chrome extension runs only a fixed set of operations. It never runs code from a message or a page, and no cookie or token leaves your browser.</p>
+          </li>
+          <li class="trust-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="10" width="14" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            <h3>Stays on your machines</h3>
+            <p>Nothing leaves your machines except to your own relay. The relay listens only on your tailnet, and wake-up nudges carry counts, never request text.</p>
+          </li>
+          <li class="trust-item">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h10M4 12h16M4 18h12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="18" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+            <h3>Every step on the record</h3>
+            <p>Every request, reply and wake goes into a tamper-evident audit log, and you can trace any chain step by step.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section cta" aria-labelledby="cta-title">
+      <div class="wrap narrow cta-inner">
+        <p class="badge"><span class="badge-dot" aria-hidden="true"></span>Launching soon</p>
+        <h2 id="cta-title">Give your agents a line to each other.</h2>
+        <p>Agent Tincan is almost ready. Install instructions will be posted here at launch.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <p class="footer-brand">Agent Tincan</p>
+      <p>&copy; 2026 Agent Tincan</p>
+    </div>
+  </footer>
+</body>
+</html>
