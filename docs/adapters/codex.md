@@ -62,7 +62,26 @@ Set codex's wake to `command` in the relay's `wake.json`:
 
 codex-wake.sh runs `codex exec` with `--sandbox workspace-write -c approval_policy=never`. `codex exec` has no `--ask-for-approval` flag (that flag is interactive-mode only); `-c approval_policy=never` is the non-interactive equivalent, set via a config override. This lets an unattended run act without a human present to answer approval prompts (there is a real trade-off: model-generated commands execute without asking first), but it still confines them to the sandbox's workspace-write policy rather than full disk access. It does not use `--dangerously-bypass-approvals-and-sandbox`, which would remove the sandbox boundary entirely.
 
-The run's working directory, and so its write scope under workspace-write, is `TINCAN_CODEX_WORKDIR` (default `$HOME/tincan-codex`, created if missing), not the whole home directory. If your requests need to write elsewhere, add `--add-dir` to the script rather than widening the working directory or reaching for the bypass flag.
+The run's working directory, and so its write scope under workspace-write, is `TINCAN_CODEX_WORKDIR` (default `$HOME/tincan-codex`, created if missing), not the whole home directory. If your requests need to write elsewhere, open write roots as described below rather than widening the working directory or reaching for the bypass flag.
+
+### Network access
+
+codex-wake.sh also passes `-c sandbox_workspace_write.network_access=true`. Without it the workspace-write sandbox blocks outbound network, so `gh` and `git push` fail inside an unattended run and Codex cannot look at a PR or issue it is asked about. This is a deliberate trade-off: with network on, a model-generated command can send data off the machine (anything it can read, and reading is allowed everywhere under workspace-write), not only change files inside its write roots. It is on because reaching GitHub is part of the work codex is woken for. If your codex does not need the network, delete that line from your copy of the script.
+
+### Finding prior work
+
+The wake prompt tells Codex that, before touching any checkout for work that continues a prior thread (for example "the work you did yesterday"), it should run `tincan history codex --list 20 --all` to find that thread, when it was last updated, and its real working directory, and then work in that `cwd` instead of guessing a path. `--all` matters because earlier wake runs are themselves `codex exec` runs, which the history listing leaves out by default. The command needs `tincan` on the `PATH` the listener passes to the script.
+
+### Write roots
+
+Codex reads anywhere but writes only in `TINCAN_CODEX_WORKDIR` and the directories passed with `--add-dir`. The operator, not the model, chooses those extra directories, by exporting `TINCAN_CODEX_WRITE_ROOTS` before starting the listener:
+
+```bash
+TINCAN_CODEX_WRITE_ROOTS="$HOME/code/agent-tincan:$HOME/Documents/Codex/site" \
+  tincan listen --exec ~/agent-tincan/examples/codex/codex-wake.sh
+```
+
+It is a colon-separated list of absolute paths to existing directories. For each one the script resolves the canonical path (following symlinks and `..`) and adds it as `--add-dir` only if that path is at or under an allowed root. The allowed roots default to `$HOME/Documents/Codex`, `$HOME/code` and `$HOME/tincan-codex`; override them with `TINCAN_CODEX_ALLOWED_ROOTS`, also colon-separated and also canonicalized. Anything else is skipped with a note on stderr: a relative path, a missing directory, a path outside every allowed root, a `../` path that climbs out of one, a sibling that merely shares a root's name prefix (`$HOME/code-old` is not under `$HOME/code`), and a symlink inside an allowed root that points outside it. The script resolves and checks these paths; nothing in the prompt or the model's output can add a write root.
 
 ## Limits
 
