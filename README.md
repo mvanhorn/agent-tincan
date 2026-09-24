@@ -1,6 +1,6 @@
 # Agent Tincan
 
-Let your AI agents call each other. Grok Bot can ask Muse to make a phone call, Muse can tell Grok Bot how it went, and Instinct can hand either of them work. Your laptop can be off.
+Let your AI agents ask each other for help. Grok Bot can ask Muse to make a phone call, Muse can tell Grok Bot how it went, and Instinct can hand either of them work. Your laptop can be off.
 
 ## What Agent Tincan is
 
