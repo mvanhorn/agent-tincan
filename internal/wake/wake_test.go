@@ -125,7 +125,8 @@ func TestWebhookRetriesOnceThenAuditsFailure(t *testing.T) {
 	}
 }
 
-// OpenClaw reads text, Grok Bot reads message; both carry the same count.
+// The generic format carries the count in both message and text, for
+// runtimes that read either field.
 func TestWebhookBodyMirrorsTextWithBearerOnly(t *testing.T) {
 	var rc recorder
 	ts := rc.server(t)

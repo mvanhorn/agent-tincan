@@ -5,7 +5,8 @@
 // the methods:
 //
 //   - webhook (relay-side): POST a short prompt to a URL, with an optional
-//     bearer token or HMAC signature. Grok Bot, Hermes, OpenClaw.
+//     bearer token or HMAC signature. Grok Bot, Hermes. With format
+//     "openclaw" the body is an OpenClaw gateway /hooks/agent payload.
 //   - email (relay-side): send a short email through AgentMail. Instinct,
 //     which wakes on email but cannot keep a background listener alive.
 //   - wait (agent-side): the agent keeps `tincan wait` running in the
@@ -30,6 +31,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -58,6 +60,16 @@ const (
 	None    = "none"
 )
 
+// Webhook body formats.
+const (
+	// FormatGeneric (the default) posts source, message and text.
+	FormatGeneric = ""
+	// FormatOpenClaw posts an OpenClaw gateway POST /hooks/agent payload:
+	// message, name, agentId and deliver, authenticated by the hook token
+	// as a bearer header, with an Idempotency-Key the retry reuses.
+	FormatOpenClaw = "openclaw"
+)
+
 // Target is one agent's wake settings in the relay-local config.
 type Target struct {
 	Method string `json:"method"`
@@ -67,6 +79,15 @@ type Target struct {
 	BearerToken string `json:"bearer_token,omitempty"`
 	// HMACSecret signs the body as X-Hub-Signature-256 (GitHub scheme). Hermes.
 	HMACSecret string `json:"hmac_secret,omitempty"`
+	// Format selects the webhook body: FormatGeneric or FormatOpenClaw.
+	Format string `json:"format,omitempty"`
+	// AgentID is the OpenClaw agent id sent as agentId (format openclaw).
+	// Empty lets the gateway resolve its default agent.
+	AgentID string `json:"agent_id,omitempty"`
+	// Deliver is OpenClaw's deliver flag (format openclaw). Nil means
+	// false: the run's output is not announced, since the agent replies
+	// through Agent Tincan.
+	Deliver *bool `json:"deliver,omitempty"`
 
 	// email (AgentMail)
 	EmailTo       string `json:"email_to,omitempty"`
@@ -98,10 +119,18 @@ func LoadConfig(path string) (Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	for name, t := range c {
+		if t.Format != FormatGeneric && (t.Method != Webhook || t.Format != FormatOpenClaw) {
+			return nil, fmt.Errorf("wake %s: unknown format %q (webhook supports \"openclaw\")", name, t.Format)
+		}
 		switch t.Method {
 		case Webhook:
 			if t.URL == "" {
 				return nil, fmt.Errorf("wake %s: webhook needs url", name)
+			}
+			if t.Format == FormatOpenClaw {
+				if err := checkOpenClaw(t); err != nil {
+					return nil, fmt.Errorf("wake %s: %w", name, err)
+				}
 			}
 		case Email:
 			if t.EmailTo == "" || t.AgentMailFrom == "" || t.AgentMailKey == "" {
@@ -113,6 +142,25 @@ func LoadConfig(path string) (Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// checkOpenClaw validates an OpenClaw hook target against what the gateway
+// accepts: a hook token in a header (never the query string), no HMAC.
+func checkOpenClaw(t Target) error {
+	if t.BearerToken == "" {
+		return errors.New("format openclaw needs bearer_token (the gateway's hooks.token)")
+	}
+	if t.HMACSecret != "" {
+		return errors.New("format openclaw authenticates with bearer_token; OpenClaw does not check hmac_secret, remove it")
+	}
+	u, err := url.Parse(t.URL)
+	if err != nil {
+		return fmt.Errorf("url: %w", err)
+	}
+	if u.Query().Has("token") {
+		return errors.New("OpenClaw rejects a token query parameter; remove it from url and use bearer_token")
+	}
+	return nil
 }
 
 // DefaultReplyGrace is how long a reply may sit unread before its asker is
@@ -334,10 +382,11 @@ func (w *Waker) fire(agent string) {
 		return
 	}
 	msg := WaitingMessage(p.requests, replies)
-	err := w.send(ctx, agent, msg)
+	key := nudgeKey() // the retry reuses it, so a lost response never runs two turns
+	err := w.send(ctx, agent, msg, key)
 	if err != nil {
 		time.Sleep(w.opts.RetryDelay)
-		err = w.send(ctx, agent, msg)
+		err = w.send(ctx, agent, msg, key)
 	}
 	if err != nil {
 		log.Printf("wake %s: %v", agent, err)
@@ -424,17 +473,48 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-func (w *Waker) send(ctx context.Context, agent, msg string) error {
+// nudgeKey is a fresh idempotency key for one nudge.
+func nudgeKey() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "agent-tincan-" + hex.EncodeToString(b)
+}
+
+// webhookBody is the JSON a webhook wake posts.
+func webhookBody(t Target, msg string) []byte {
+	if t.Format == FormatOpenClaw {
+		// OpenClaw's POST /hooks/agent: message starts the turn, name labels
+		// it in gateway logs, agentId routes it. deliver false keeps the
+		// run's output out of the main session; the agent replies through
+		// Agent Tincan. sessionMode is left at its default, isolated, which
+		// matches a fresh-session agent. source lets hooks.mappings match on
+		// it and text keeps a mistaken /hooks/wake URL working; the gateway
+		// ignores both on /hooks/agent.
+		b := map[string]any{"source": "agent-tincan", "message": msg, "text": msg, "name": "Agent Tincan", "deliver": t.Deliver != nil && *t.Deliver}
+		if t.AgentID != "" {
+			b["agentId"] = t.AgentID
+		}
+		body, _ := json.Marshal(b)
+		return body
+	}
+	// text mirrors message for runtimes that read text.
+	body, _ := json.Marshal(map[string]string{"source": "agent-tincan", "message": msg, "text": msg})
+	return body
+}
+
+func (w *Waker) send(ctx context.Context, agent, msg, key string) error {
 	t := w.cfg[agent]
 	switch t.Method {
 	case Webhook:
-		// text mirrors message for runtimes that read text (OpenClaw /hooks/wake).
-		body, _ := json.Marshal(map[string]string{"source": "agent-tincan", "message": msg, "text": msg})
+		body := webhookBody(t, msg)
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if t.Format == FormatOpenClaw {
+			req.Header.Set("Idempotency-Key", key)
+		}
 		if t.BearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+t.BearerToken)
 		}

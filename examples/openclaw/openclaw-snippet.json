@@ -1,14 +1,20 @@
 {
-  "mcpServers": {
-    "agent-tincan": {
-      "command": "tincan",
-      "args": ["mcp"]
+  "mcp": {
+    "servers": {
+      "agent-tincan": {
+        "command": "tincan",
+        "args": ["mcp"],
+        "env": {
+          "TINCAN_CONFIG": "/home/<you>/.config/tincan/openclaw.json"
+        }
+      }
     }
   },
   "hooks": {
     "enabled": true,
-    "token": "<hook token, matches wake.json bearer_token for openclaw>",
+    "token": "<long random hook token; put the same value in wake.json bearer_token>",
     "path": "/hooks",
-    "allowedAgentIds": ["main"]
+    "allowedAgentIds": ["main"],
+    "allowRequestSessionKey": false
   }
 }

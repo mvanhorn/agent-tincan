@@ -87,7 +87,7 @@ A Hermes webhook run whose message starts with "Agent Tincan:" means teammates n
 {{- end -}}
 
 {{- define "instructions.openclaw" -}}
-A wake from the OpenClaw gateway hooks endpoint whose text starts with "Agent Tincan:" means teammates need you. The text only carries a count, never the request itself.
+An OpenClaw hook turn (a POST to /hooks/agent named "Agent Tincan") whose message starts with "Agent Tincan:" means teammates need you. The message only carries a count, never the request itself, so the only thing to do with it is call check_inbox (or run {{template "cfg" .}}tincan inbox if the Agent Tincan tools are not loaded in this turn) and handle what that returns.
 {{template "instructions.fresh" .}}
 {{- end -}}
 
@@ -173,10 +173,12 @@ Paste the standing instructions into Hermes.
 {{- end -}}
 
 {{- define "setup.openclaw" -}}
-Add tincan to mcpServers in the OpenClaw config: "tincan" with command "tincan", args ["mcp"] and {{template "mcpenv" .}}.
-Enable gateway hooks (hooks.enabled and hooks.token) so a POST to /hooks/agent starts a turn (/hooks/wake only queues for the next heartbeat).
-On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the gateway /hooks/agent URL) and bearer_token (the hooks token) hold secrets; set them in the file only.
-Paste the standing instructions into OpenClaw.
+After joining, add the MCP server on the gateway host: openclaw mcp add agent-tincan --command tincan --arg mcp --env TINCAN_CONFIG=<full path of {{template "cfgpath" .}}> (MCP configs do not expand ~; if the gateway's PATH lacks tincan, give --command its full path). Check it with openclaw mcp doctor agent-tincan --probe.
+Enable gateway hooks so a POST to /hooks/agent starts a turn (/hooks/wake only queues for the next heartbeat): hooks.enabled true, hooks.token a long random value used only for hooks (not the gateway auth token), hooks.path /hooks, hooks.allowedAgentIds the agent that handles wakes (usually main). examples/openclaw/openclaw-snippet.json has this block and the MCP entry: fill in its placeholders on the gateway host and apply it with openclaw config patch --file <your copy>. Never paste the token in chat.
+Run openclaw config validate, then openclaw gateway restart.
+On the relay host, in wake.json (chmod 600): set {{.Name}} to {"method": "webhook", "format": "openclaw", "url": "<gateway /hooks/agent URL>", "agent_id": "main", "bearer_token": "<hooks.token>"}. The url is the gateway /hooks/agent URL (gateway port 18789 by default, for example http://<openclaw-host>:18789/hooks/agent over the tailnet); url and bearer_token hold secrets, set them in the file only. agent_id must be in hooks.allowedAgentIds. The relay sends the token as Authorization: Bearer, with deliver false so runs are not announced.
+Paste the standing instructions into ~/.openclaw/workspace/AGENTS.md (or the handling agent's own workspace AGENTS.md).
+If hook turns do not get the Agent Tincan MCP tools, install the skill that drives the tincan CLI: copy examples/openclaw/skills/agent-tincan to ~/.openclaw/skills/. Full guide and troubleshooting: docs/adapters/openclaw.md.
 {{- end -}}
 
 {{- define "setup.codex" -}}
