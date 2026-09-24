@@ -1,0 +1,221 @@
+{
+  "title": "Generate Image",
+  "create_time": 1790233634.0,
+  "update_time": 1790233659.0,
+  "conversation_id": "6ab4cc22-0000-4000-8000-00000000c0de",
+  "current_node": "a-img-0002",
+  "mapping": {
+    "client-created-root": {
+      "id": "client-created-root",
+      "message": null,
+      "parent": null,
+      "children": [
+        "u-img-0001"
+      ]
+    },
+    "u-img-0001": {
+      "id": "u-img-0001",
+      "message": {
+        "id": "u-img-0001",
+        "author": {
+          "role": "user",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1790233634.0,
+        "update_time": 1790233634.0,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "Tincan test: generate a tiny simple image: a red circle on a white background. No text."
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "turn_exchange_id": "x"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "client-created-root",
+      "children": [
+        "t-img-0001"
+      ]
+    },
+    "t-img-0001": {
+      "id": "t-img-0001",
+      "message": {
+        "id": "t-img-0001",
+        "author": {
+          "role": "tool",
+          "name": "t2uay3k.sj1i4kz",
+          "metadata": {}
+        },
+        "create_time": 1790233654.0,
+        "update_time": 1790233654.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "image_asset_pointer",
+              "asset_pointer": "sediment://file_00000000aaaa0000bbbb0000cccc0001",
+              "size_bytes": 695391,
+              "width": 1024,
+              "height": 1024
+            }
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "image_gen_title": "Red circle",
+          "turn_exchange_id": "x"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "u-img-0001",
+      "children": [
+        "t-img-0002"
+      ]
+    },
+    "t-img-0002": {
+      "id": "t-img-0002",
+      "message": {
+        "id": "t-img-0002",
+        "author": {
+          "role": "tool",
+          "name": "t2uay3k.sj1i4kz",
+          "metadata": {}
+        },
+        "create_time": 1790233655.0,
+        "update_time": 1790233655.0,
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "image_asset_pointer",
+              "asset_pointer": "sediment://file_00000000aaaa0000bbbb0000cccc0001",
+              "size_bytes": 695391,
+              "width": 1024,
+              "height": 1024
+            },
+            "Model caption: a red circle on a white background."
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "is_visually_hidden_from_conversation": true,
+          "image_gen_title": "Red circle"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "t-img-0001",
+      "children": [
+        "t-img-0003"
+      ]
+    },
+    "t-img-0003": {
+      "id": "t-img-0003",
+      "message": {
+        "id": "t-img-0003",
+        "author": {
+          "role": "tool",
+          "name": "t2uay3k.sj1i4kz",
+          "metadata": {}
+        },
+        "create_time": 1790233656.0,
+        "update_time": 1790233656.0,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "Generated images from the last image_gen.text2im call were shown to the user."
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "is_visually_hidden_from_conversation": true
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "t-img-0002",
+      "children": [
+        "a-img-0001"
+      ]
+    },
+    "a-img-0001": {
+      "id": "a-img-0001",
+      "message": {
+        "id": "a-img-0001",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1790233657.0,
+        "update_time": 1790233657.0,
+        "content": {
+          "content_type": "reasoning_recap",
+          "content": "Thought for a couple of seconds"
+        },
+        "status": "finished_successfully",
+        "end_turn": false,
+        "weight": 1.0,
+        "metadata": {
+          "reasoning_status": "reasoning_ended"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "t-img-0003",
+      "children": [
+        "a-img-0002"
+      ]
+    },
+    "a-img-0002": {
+      "id": "a-img-0002",
+      "message": {
+        "id": "a-img-0002",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1790233658.0,
+        "update_time": 1790233658.0,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            ""
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {
+          "is_visually_hidden_from_conversation": true,
+          "is_complete": true,
+          "finish_details": {
+            "type": "stop",
+            "stop_tokens": [
+              200002
+            ]
+          }
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "a-img-0001",
+      "children": []
+    }
+  }
+}

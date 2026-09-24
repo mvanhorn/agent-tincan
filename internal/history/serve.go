@@ -349,6 +349,8 @@ func chainDenied(allowlist func() ([]string, error), req envelope.Request, agent
 func readFailure(q Query, err error) string {
 	var ue *UnavailableError
 	switch {
+	case errors.As(err, &ue) && ue.Kind == ErrRateLimited:
+		return "Sorry, " + rateLimitMessage(ue.Source) + "."
 	case errors.As(err, &ue):
 		return "Sorry, " + ue.Error() + "."
 	case errors.Is(err, ErrNoHistory):

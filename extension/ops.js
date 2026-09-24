@@ -60,11 +60,46 @@ const SPEC = Object.freeze({
 
 export const OPS = new Set(Object.keys(SPEC));
 
+// MAX_RETRY_AFTER_S caps a Retry-After reported to the host, in seconds.
+export const MAX_RETRY_AFTER_S = 3600;
+
 export class OpError extends Error {
-  constructor(code, message) {
+  // retryAfter, for rate_limited, is the site's Retry-After in whole
+  // seconds when it sent one.
+  constructor(code, message, retryAfter) {
     super(message);
     this.code = code;
+    if (Number.isSafeInteger(retryAfter) && retryAfter >= 0) this.retryAfter = retryAfter;
   }
+}
+
+// errorFrame is the failure frame for an error thrown by an operation:
+// its code and message (retry_after too for a rate limit), or a bare
+// internal error for anything that is not an OpError, so no unexpected
+// detail leaves the extension.
+export function errorFrame(e) {
+  if (!(e instanceof OpError)) return { ok: false, error: { code: 'internal', message: 'internal error' } };
+  const error = { code: e.code, message: e.message };
+  if (e.retryAfter !== undefined) error.retry_after = e.retryAfter;
+  return { ok: false, error };
+}
+
+// retryAfterSeconds reads a Retry-After header: delay seconds or an
+// HTTP date. It returns whole seconds (capped at MAX_RETRY_AFTER_S), or
+// undefined when the header is missing, malformed or in the past.
+function retryAfterSeconds(res) {
+  const v = (res.headers.get('retry-after') || '').trim();
+  if (v === '') return undefined;
+  let s;
+  if (/^\d+$/.test(v)) {
+    s = Number(v);
+  } else {
+    const at = Date.parse(v);
+    if (Number.isNaN(at)) return undefined;
+    s = Math.ceil((at - Date.now()) / 1000);
+    if (s < 0) return undefined;
+  }
+  return Math.min(s, MAX_RETRY_AFTER_S);
 }
 
 const bad = (m) => new OpError('bad_request', m);
@@ -168,7 +203,7 @@ function check(res, url, notFound) {
     throw new OpError('not_logged_in', where);
   }
   if (res.status === 404 || res.status === 410) throw new OpError(notFound ? 'not_found' : 'endpoint_changed', where);
-  if (res.status === 429) throw new OpError('rate_limited', where);
+  if (res.status === 429) throw new OpError('rate_limited', where, retryAfterSeconds(res));
   throw new OpError('http_error', where);
 }
 

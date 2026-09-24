@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validate, createRunner, OPS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES } from '../ops.js';
+import { validate, createRunner, errorFrame, OpError, OPS, CHUNK_BYTES, MAX_FILE_BYTES, MAX_MESSAGE_BYTES } from '../ops.js';
 
 const fixture = (p) => JSON.parse(readFileSync(new URL('../../internal/history/testdata/' + p, import.meta.url)));
 
@@ -140,6 +140,42 @@ test('error classes: blocked, endpoint changed, not found, rate limited', async 
   }
   const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }) });
   await assert.rejects(run(createRunner({ fetch: f }), 'chatgpt.detail', { id: 'missing-1' }), (e) => e.code === 'not_found');
+});
+
+test('rate_limited carries retry_after seconds from the Retry-After header', async () => {
+  const listURL = 'https://chatgpt.com/backend-api/conversations?offset=0&limit=1&order=updated';
+  const limited = (headers) => new Response('{}', { status: 429, headers: { 'content-type': 'application/json', ...headers } });
+  const soon = new Date(Date.now() + 90_000).toUTCString();
+  const cases = [
+    [{ 'retry-after': '120' }, 120],
+    [{ 'retry-after': soon }, [88, 91]],
+    [{ 'retry-after': 'Wed, 21 Oct 2015 07:28:00 GMT' }, undefined],
+    [{ 'retry-after': 'soon' }, undefined],
+    [{ 'retry-after': '999999' }, 3600],
+    [{}, undefined],
+  ];
+  for (const [headers, want] of cases) {
+    const f = fakeFetch({ [SESSION]: jsonResponse({ accessToken: TOKEN }), [listURL]: limited(headers) });
+    let caught;
+    await assert.rejects(run(createRunner({ fetch: f }), 'chatgpt.list', { count: 1 }), (e) => {
+      caught = e;
+      return e.code === 'rate_limited';
+    });
+    const frame = errorFrame(caught);
+    assert.equal(frame.ok, false);
+    assert.equal(frame.error.code, 'rate_limited');
+    assert.match(frame.error.message, /HTTP 429 from \/backend-api\/conversations/);
+    if (Array.isArray(want)) {
+      assert.ok(frame.error.retry_after >= want[0] && frame.error.retry_after <= want[1], `${JSON.stringify(headers)}: ${frame.error.retry_after}`);
+    } else if (want === undefined) {
+      assert.ok(!('retry_after' in frame.error), `${JSON.stringify(headers)}: ${JSON.stringify(frame.error)}`);
+    } else {
+      assert.equal(frame.error.retry_after, want, JSON.stringify(headers));
+    }
+  }
+  // Other errors carry no retry_after; unknown errors are internal.
+  assert.deepEqual(errorFrame(new OpError('http_error', 'HTTP 502 from /x')), { ok: false, error: { code: 'http_error', message: 'HTTP 502 from /x' } });
+  assert.deepEqual(errorFrame(new Error('secret detail')), { ok: false, error: { code: 'internal', message: 'internal error' } });
 });
 
 function pngBytes(n) {

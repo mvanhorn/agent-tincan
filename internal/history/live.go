@@ -144,8 +144,9 @@ func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, er
 
 // resolve fetches the bytes of every placeholder image in convs. An image
 // that cannot be fetched or is not an allowed image is dropped; the text
-// answer still stands.
+// answer still stands. After a rate limit no further image is asked for.
 func (l *live) resolve(ctx context.Context, convs []Conversation) []Conversation {
+	limited := false
 	for ci := range convs {
 		for mi := range convs[ci].Messages {
 			m := &convs[ci].Messages[mi]
@@ -157,11 +158,12 @@ func (l *live) resolve(ctx context.Context, convs []Conversation) []Conversation
 					continue
 				}
 				op, args, ok := l.fileArgs(convs[ci].ID, pointer)
-				if !ok {
+				if !ok || limited {
 					continue
 				}
 				data, _, err := l.client.File(ctx, op, args)
 				if err != nil {
+					_, limited = rateLimited(err)
 					continue
 				}
 				got, ok := newImage(data, name)

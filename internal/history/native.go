@@ -256,6 +256,9 @@ type NativeRequest struct {
 type NativeError struct {
 	Code    string `json:"code"`
 	Message string `json:"message,omitempty"`
+	// RetryAfter is the site's Retry-After, in seconds, on a rate_limited
+	// error when the extension could read it (zero when unknown).
+	RetryAfter int `json:"retry_after,omitempty"`
 }
 
 // NativeChunk is one piece of a file's bytes, base64.
@@ -292,6 +295,9 @@ var (
 	ErrTimeout               = errors.New("timeout")
 	ErrRejected              = errors.New("request rejected")
 	ErrSourceFailed          = errors.New("request failed")
+	// ErrRateLimited: the site answered HTTP 429 (or a cooldown after one
+	// is still running). The *UnavailableError carries the wait.
+	ErrRateLimited = errors.New("rate limited")
 	// The send operations' page failures.
 	ErrComposerNotFound = errors.New("message box not found")
 	ErrSendFailed       = errors.New("send failed")
@@ -305,6 +311,9 @@ type UnavailableError struct {
 	Source Source
 	Kind   error
 	Detail string
+	// RetryAfter is how long to wait before asking the site again, for
+	// ErrRateLimited (zero when the site did not say).
+	RetryAfter time.Duration
 }
 
 func siteOf(s Source) string {
@@ -334,6 +343,10 @@ func (e *UnavailableError) Error() string {
 		reason = "no message box on the " + site + " page (the page may have changed)"
 	case ErrSendFailed:
 		reason = "the message could not be sent on " + site
+	case ErrRateLimited:
+		// The detail (a URL path, a cooldown note) adds nothing for the
+		// reader.
+		return "source unavailable: " + string(e.Source) + ": " + rateLimitMessage(e.Source)
 	default:
 		reason = site + " request failed"
 	}
@@ -348,6 +361,78 @@ func (e *UnavailableError) Unwrap() error { return e.Kind }
 func unavailable(s Source, kind error, detail string) error {
 	return &UnavailableError{Source: s, Kind: kind, Detail: detail}
 }
+
+// rateLimitMessage is what a reply says when the site is rate-limiting the
+// owner's account.
+func rateLimitMessage(s Source) string {
+	return siteLabel(s) + " is rate-limiting this account right now; try again later"
+}
+
+// rateLimited reports whether err is a rate limit, and how long the site
+// asked to wait (zero when it did not say).
+func rateLimited(err error) (time.Duration, bool) {
+	var ue *UnavailableError
+	if !errors.As(err, &ue) || ue.Kind != ErrRateLimited {
+		return 0, false
+	}
+	return ue.RetryAfter, true
+}
+
+// serverError reports whether err is an HTTP 5xx from the site.
+func serverError(err error) bool {
+	var ue *UnavailableError
+	return errors.As(err, &ue) && ue.Kind == ErrSourceFailed && serverStatus.MatchString(ue.Detail)
+}
+
+var serverStatus = regexp.MustCompile(`^HTTP 5\d\d\b`)
+
+// maxRetryAfter caps a Retry-After the site (or the extension) reports.
+const maxRetryAfter = time.Hour
+
+// DefaultRateLimitCooldown is how long every request to a site is refused
+// locally after a 429 that carried no Retry-After.
+const DefaultRateLimitCooldown = 30 * time.Second
+
+// SiteCooldown remembers, per site, until when requests must not go to it
+// because it rate-limited the account. The zero value is ready to use.
+type SiteCooldown struct {
+	// Now is the clock (time.Now when nil).
+	Now   func() time.Time
+	mu    sync.Mutex
+	until map[Source]time.Time
+}
+
+func (c *SiteCooldown) now() time.Time { return orNow(c.Now) }
+
+// Note starts (or extends) src's cooldown to at least d from now.
+func (c *SiteCooldown) Note(src Source, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.until == nil {
+		c.until = map[Source]time.Time{}
+	}
+	if t := c.now().Add(d); t.After(c.until[src]) {
+		c.until[src] = t
+	}
+}
+
+// Remaining is how much of src's cooldown is left (zero when none).
+func (c *SiteCooldown) Remaining(src Source) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d := c.until[src].Sub(c.now()); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// sharedCooldown is the process-wide cooldown every Client without one of
+// its own uses, so one 429 holds back every reader and agent in this
+// process.
+var sharedCooldown = &SiteCooldown{}
 
 // fromNativeError maps an extension error code to a typed error.
 func fromNativeError(s Source, ne *NativeError) error {
@@ -374,6 +459,9 @@ func fromNativeError(s Source, ne *NativeError) error {
 		return unavailable(s, ErrSendFailed, detail)
 	case "unsupported":
 		return unavailable(s, ErrRejected, "the extension needs an update: "+detail)
+	case "rate_limited", "http_429":
+		after := time.Duration(min(max(ne.RetryAfter, 0), int(maxRetryAfter/time.Second))) * time.Second
+		return &UnavailableError{Source: s, Kind: ErrRateLimited, Detail: detail, RetryAfter: after}
 	}
 	return unavailable(s, ErrSourceFailed, detail)
 }
@@ -402,6 +490,26 @@ type Client struct {
 	MaxJSON int
 	// MaxFile caps a file; zero means MaxImageBytes.
 	MaxFile int
+	// Cooldown holds requests back from a site after it rate-limited the
+	// account (the process-wide one when nil).
+	Cooldown *SiteCooldown
+}
+
+func (c *Client) cooldown() *SiteCooldown {
+	if c.Cooldown != nil {
+		return c.Cooldown
+	}
+	return sharedCooldown
+}
+
+// CooldownRemaining is how long requests to src are still held back after
+// a rate limit (zero when they are not).
+func (c *Client) CooldownRemaining(src Source) time.Duration { return c.cooldown().Remaining(src) }
+
+// hitsSite reports whether op makes a request to the site. Closing a tab
+// does not, so it runs during a cooldown.
+func (op Op) hitsSite() bool {
+	return op != OpChatGPTClose && op != OpClaudeAIClose && op != OpExtensionReload
 }
 
 // NewClient returns a client for the local native host socket.
@@ -431,12 +539,23 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 	if c.Channel == nil {
 		return unavailable(src, ErrExtensionNotConnected, "")
 	}
+	// A site that rate-limited the account is not asked again until its
+	// cooldown ends.
+	if left := c.cooldown().Remaining(src); left > 0 && op.hitsSite() {
+		return &UnavailableError{Source: src, Kind: ErrRateLimited, Detail: "cooling down after a rate limit", RetryAfter: left}
+	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout(op))
 	defer cancel()
 	req := NativeRequest{ID: requestSeq.Add(1), Op: op, Args: args}
 	err := c.Channel.Exchange(ctx, req, recv)
 	if err == nil {
 		return nil
+	}
+	if after, ok := rateLimited(err); ok {
+		if after <= 0 {
+			after = DefaultRateLimitCooldown
+		}
+		c.cooldown().Note(src, after)
 	}
 	var ue *UnavailableError
 	switch {
@@ -749,12 +868,29 @@ type NativeHost struct {
 	// Log receives one line per reload decision (discarded when nil;
 	// stdout belongs to Chrome).
 	Log io.Writer
+	// RecheckInterval is how often, while the extension stays connected,
+	// the host compares its last hello with the files on disk again
+	// (DefaultRecheckInterval when zero), so an update is picked up
+	// without waiting for a reconnect.
+	RecheckInterval time.Duration
 
 	outMu   sync.Mutex
 	mu      sync.Mutex
 	pending map[int64]chan []byte
 	seq     int64
+	// hello is the last hello from the extension (under mu).
+	hello *Hello
+	// reloadMu serializes reload decisions (a hello and a recheck).
+	reloadMu sync.Mutex
+	// cooldown answers a site's requests itself for a while after the
+	// site rate-limited the account. The host is shared by every reader
+	// and agent, so this holds all of them back.
+	cooldown SiteCooldown
 }
+
+// DefaultRecheckInterval is how often a connected native host re-checks
+// the unpacked extension files for drift.
+const DefaultRecheckInterval = 10 * time.Minute
 
 // Run serves until Chrome closes In or ctx ends, then removes the socket.
 func (h *NativeHost) Run(ctx context.Context) error {
@@ -778,6 +914,9 @@ func (h *NativeHost) Run(ctx context.Context) error {
 
 	readErr := make(chan error, 1)
 	go func() { readErr <- h.readChrome(); cancel() }()
+	if h.ExtensionDir != "" {
+		go h.recheck(ctx)
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -814,7 +953,11 @@ func (h *NativeHost) readChrome() error {
 			continue
 		}
 		if head.Hello != nil {
-			h.onHello(*head.Hello)
+			hello := *head.Hello
+			h.mu.Lock()
+			h.hello = &hello
+			h.mu.Unlock()
+			h.onHello(hello)
 			continue
 		}
 		h.mu.Lock()
@@ -860,6 +1003,12 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 		_ = WriteMessage(conn, NativeResponse{ID: req.ID, Error: &NativeError{Code: "bad_request", Message: msg}}, MaxHostMessage)
 		return
 	}
+	src := req.Op.source()
+	if left := h.cooldown.Remaining(src); left > 0 && req.Op.hitsSite() {
+		secs := int((left + time.Second - 1) / time.Second)
+		_ = WriteMessage(conn, NativeResponse{ID: req.ID, Error: &NativeError{Code: "rate_limited", Message: "cooling down after a rate limit", RetryAfter: secs}}, MaxHostMessage)
+		return
+	}
 	clientID := req.ID
 	ch := make(chan []byte, 64)
 	h.mu.Lock()
@@ -900,6 +1049,13 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 				return
 			}
 			r.ID = clientID
+			if r.Error != nil && (r.Error.Code == "rate_limited" || r.Error.Code == "http_429") {
+				after := time.Duration(min(max(r.Error.RetryAfter, 0), int(maxRetryAfter/time.Second))) * time.Second
+				if after <= 0 {
+					after = DefaultRateLimitCooldown
+				}
+				h.cooldown.Note(src, after)
+			}
 			if err := WriteMessage(conn, r, MaxChromeMessage); err != nil || r.final() {
 				return
 			}

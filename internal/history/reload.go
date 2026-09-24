@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -102,6 +103,33 @@ func (h *NativeHost) logf(format string, args ...any) {
 	}
 }
 
+// recheck compares the last hello with the files on disk every
+// RecheckInterval until ctx ends, so an update that lands while the
+// extension stays connected still gets a reload. onHello's cooldown keeps
+// a reload that does not help from repeating, and the extension itself
+// defers the reload while a send has a tab open.
+func (h *NativeHost) recheck(ctx context.Context) {
+	every := h.RecheckInterval
+	if every <= 0 {
+		every = DefaultRecheckInterval
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		h.mu.Lock()
+		hello := h.hello
+		h.mu.Unlock()
+		if hello != nil {
+			h.onHello(*hello)
+		}
+	}
+}
+
 // onHello asks the extension to reload when the unpacked files on disk
 // differ from the ones it loaded, at most once per cooldown for the same
 // files.
@@ -109,6 +137,8 @@ func (h *NativeHost) onHello(hello Hello) {
 	if h.ExtensionDir == "" {
 		return
 	}
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
 	if !hello.Unpacked {
 		h.logf("extension %s is not unpacked; it updates through its store", hello.Version)
 		return

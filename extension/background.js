@@ -7,7 +7,7 @@
 // native port keeps the worker alive; if the host is missing or exits, an
 // alarm retries.
 
-import { NATIVE_HOST, OpError, createRunner, hashFiles, helloMessage, validate } from './ops.js';
+import { NATIVE_HOST, createRunner, errorFrame, hashFiles, helloMessage, validate } from './ops.js';
 import { createSender } from './send.js';
 
 const RECONNECT_ALARM = 'tincan-reconnect';
@@ -46,8 +46,7 @@ async function onHostMessage(msg) {
   try {
     await runner.run(req.op, req.args, (frame) => post({ id: req.id, ...frame }));
   } catch (e) {
-    const known = e instanceof OpError;
-    post({ id: req.id, ok: false, error: { code: known ? e.code : 'internal', message: known ? e.message : 'internal error' } });
+    post({ id: req.id, ...errorFrame(e) });
   }
 }
 

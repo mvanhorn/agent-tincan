@@ -26,7 +26,8 @@ Chrome loaded). When `tincan history install --extension-dir` (or a run from
 the repo checkout) told the host where the unpacked files are, and they
 differ, the host sends `extension.reload` and the worker calls
 `chrome.runtime.reload()`, so updates need no Reload click after the first
-load. The reload waits while a send has a tab open (checking every 5 seconds,
+load. The host compares again every 10 minutes while the worker stays
+connected, so an update that lands mid-session is picked up too. The reload waits while a send has a tab open (checking every 5 seconds,
 up to 5 minutes; at that cap it closes finished sends' tabs and reloads
 anyway).
 
