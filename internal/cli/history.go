@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
@@ -118,18 +120,21 @@ func historyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "show one conversation by id")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	cmd.Flags().StringVar(&imagesDir, "images-dir", "", "save the selected turn's images here (created 0700, files 0600)")
-	cmd.AddCommand(historyInstallCmd(), historyNativeHostCmd())
+	cmd.AddCommand(historyInstallCmd(), historyNativeHostCmd(), historyServeCmd())
 	return cmd
 }
 
 func historyInstallCmd() *cobra.Command {
 	var extID, binary string
+	var noService bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Register the native messaging host the Tincan Chrome extension talks to",
 		Long: "Writes the Chrome native messaging host manifest for " + history.NativeHostName + " into this user's Chrome\n" +
 			"NativeMessagingHosts directory (no admin rights), allowed only for the Tincan extension, pointing at a\n" +
-			"wrapper that runs tincan history native-host. On Windows it also prints the registry entry to add.",
+			"wrapper that runs tincan history native-host. On Windows it also prints the registry entry to add.\n" +
+			"It also writes the history service definition (a launchd agent on macOS, a systemd user unit on Linux)\n" +
+			"that runs tincan history serve, and prints the command that starts it. It never starts it itself.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			res, err := history.InstallNativeHost(history.InstallOptions{ExtensionID: extID, Binary: binary})
@@ -141,11 +146,112 @@ func historyInstallCmd() *cobra.Command {
 			if res.Note != "" {
 				cmd.Println(res.Note)
 			}
+			if noService {
+				return nil
+			}
+			svc, err := history.InstallService(history.ServiceOptions{Binary: binary})
+			if err != nil {
+				cmd.Printf("history service: not written: %v\n", err)
+				return nil
+			}
+			cmd.Printf("history service definition: %s (not started)\n", svc.Path)
+			cmd.Printf("start it with:\n  %s\n", svc.Next)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&extID, "extension-id", history.DefaultExtensionID, "Chrome extension id allowed to start the host")
-	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the host runs (default: this executable)")
+	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the host and the service run (default: this executable)")
+	cmd.Flags().BoolVar(&noService, "no-service", false, "do not write the history service definition")
+	return cmd
+}
+
+// defaultHistoryConfig is the history agent's own client config:
+// TINCAN_CONFIG when set, else ~/.config/tincan/history.json.
+func defaultHistoryConfig() string {
+	if os.Getenv("TINCAN_CONFIG") != "" {
+		return client.ConfigPath()
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return client.ConfigPath()
+	}
+	return filepath.Join(home, ".config", "tincan", "history.json")
+}
+
+func historyServeCmd() *cobra.Command {
+	var configPath, allowPath, codexBin string
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run the history agent: answer teammates' history questions over the relay",
+		Long: "Long-polls the relay as the history agent and answers each request itself, in order:\n" +
+			"  1. every agent in the request's relay-set chain must be on the allowlist, or the request is declined;\n" +
+			"  2. a tool-less codex exec call turns the question text (and only that) into a structured query;\n" +
+			"  3. the matching source is read (ChatGPT and claude.ai through the Tincan Chrome extension);\n" +
+			"  4. the reply is filled in from a fixed template, with the images attached.\n" +
+			"Retrieved chat content is never sent to an LLM. The allowlist file is reread for every request.\n" +
+			"Normally started by the service definition tincan history install writes. See docs/adapters/history.md.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if configPath == "" {
+				configPath = defaultHistoryConfig()
+			}
+			if strings.HasPrefix(configPath, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					configPath = filepath.Join(home, configPath[2:])
+				}
+			}
+			cfg, err := client.LoadConfigFrom(configPath)
+			if err != nil {
+				return fmt.Errorf("history config %s: %w", configPath, err)
+			}
+			if cfg.Relay == "" {
+				return fmt.Errorf("no relay configured in %s: run TINCAN_CONFIG=%s tincan join <code> --relay http://tincan-relay", configPath, configPath)
+			}
+			if allowPath == "" {
+				allowPath = history.DefaultAllowlistPath()
+			}
+			allowed, err := history.LoadAllowlist(allowPath)
+			if err != nil {
+				return fmt.Errorf("history allowlist: %w", err)
+			}
+			r, err := client.NewRelayFor(cfg)
+			if err != nil {
+				return err
+			}
+			readers := map[history.Source]history.Reader{}
+			for _, src := range history.Sources {
+				rd, err := historyReader(string(src))
+				if err != nil {
+					return err
+				}
+				readers[src] = rd
+			}
+			ext := history.NewCodexExtractor()
+			ext.Binary = codexBin
+			svc := &history.Service{
+				Relay:     r,
+				Extractor: ext,
+				Readers:   readers,
+				Allowlist: history.FileAllowlist(allowPath),
+				Log:       cmd.ErrOrStderr(),
+			}
+			if cfg.Agent != "" && cfg.Agent != "history" {
+				cmd.PrintErrf("tincan history: warning: %s is joined as %q, not \"history\"\n", configPath, cfg.Agent)
+			}
+			cmd.PrintErrf("tincan history: serving as %s on %s (allowlist %s: %s)\n", cfg.Agent, cfg.Relay, allowPath, strings.Join(allowed, ", "))
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			err = svc.Run(ctx)
+			if ctx.Err() != nil {
+				cmd.PrintErrln("tincan history: stopped")
+				return nil
+			}
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "the history agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/history.json)")
+	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to read history, one per line (default: ~/.config/tincan/history-allow.txt; missing means grokbot, claude-code, codex)")
+	cmd.Flags().StringVar(&codexBin, "codex", "codex", "codex binary used for the tool-less query step")
 	return cmd
 }
 

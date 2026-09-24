@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Agent Tincan history agent: runs "tincan history serve" under launchd,
+  outside any Codex sandbox. "tincan history install" copies this file into
+  ~/Library/LaunchAgents with the real paths filled in. It does not load it;
+  start it with:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist
+  See docs/adapters/history.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agenttincan.history</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__TINCAN_BINARY__</string>
+    <string>history</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TINCAN_CONFIG</key>
+    <string>__HOME__/.config/tincan/history.json</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/tincan-history.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/tincan-history.log</string>
+</dict>
+</plist>

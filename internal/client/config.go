@@ -36,9 +36,13 @@ func ConfigPath() string {
 
 // LoadConfig reads the saved config, then applies TINCAN_RELAY and
 // TINCAN_PROXY overrides.
-func LoadConfig() (Config, error) {
+func LoadConfig() (Config, error) { return LoadConfigFrom(ConfigPath()) }
+
+// LoadConfigFrom reads the config at path, then applies TINCAN_RELAY and
+// TINCAN_PROXY overrides. A missing file is an empty config.
+func LoadConfigFrom(path string) (Config, error) {
 	var c Config
-	raw, err := os.ReadFile(ConfigPath())
+	raw, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:

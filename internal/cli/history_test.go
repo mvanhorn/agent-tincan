@@ -190,3 +190,65 @@ func TestHistoryLiveSourceUnavailable(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryInstallWritesServiceDefinitionWithoutLoading(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no service definition on " + runtime.GOOS)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", filepath.Join(home, "native"))
+	// A PATH with no launchctl or systemctl proves install never runs them.
+	t.Setenv("PATH", t.TempDir())
+	out, err := run(t, Root(), "history", "install", "--binary", "/opt/tincan/tincan")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	var def, next string
+	if runtime.GOOS == "darwin" {
+		def = filepath.Join(home, "Library", "LaunchAgents", history.ServiceLabel+".plist")
+		next = "launchctl bootstrap gui/"
+	} else {
+		def = filepath.Join(home, ".config", "systemd", "user", "tincan-history.service")
+		next = "systemctl --user enable --now tincan-history.service"
+	}
+	b, err := os.ReadFile(def)
+	if err != nil {
+		t.Fatalf("service definition not written: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(b), "/opt/tincan/tincan") || !strings.Contains(out, def) || !strings.Contains(out, next) {
+		t.Fatalf("definition:\n%s\noutput:\n%s", b, out)
+	}
+	if _, err := run(t, Root(), "history", "install", "--binary", "/opt/tincan/tincan", "--no-service"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryServeFlagsAndMissingConfig(t *testing.T) {
+	out, err := run(t, Root(), "history", "serve", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--config", "--allowlist", "--codex"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("serve help missing %s:\n%s", want, out)
+		}
+	}
+	t.Setenv("TINCAN_RELAY", "")
+	_, err = run(t, Root(), "history", "serve", "--config", filepath.Join(t.TempDir(), "history.json"))
+	if err == nil || !strings.Contains(err.Error(), "no relay configured") {
+		t.Fatalf("serve without a config: err = %v", err)
+	}
+	p := filepath.Join(t.TempDir(), "allow.txt")
+	if err := os.WriteFile(p, []byte("not/a name\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "history.json")
+	if err := os.WriteFile(cfg, []byte(`{"relay":"http://127.0.0.1:1","agent":"history"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = run(t, Root(), "history", "serve", "--config", cfg, "--allowlist", p)
+	if err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("serve with a bad allowlist: err = %v", err)
+	}
+}
