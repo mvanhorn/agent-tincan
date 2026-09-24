@@ -48,18 +48,20 @@ Start with one decision: where your router runs. The router is the always-on mac
 
 ### 2. Install tincan on the router and start the relay
 
-On the router, run the one-line installer, then start the relay and name your admin devices:
+On the router, run the one-line installer, then start the relay and name your admin device:
 
 ```bash
 curl -fsSL https://agenttincan.com/install.sh | sh
-TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone
+TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 ```
 
 The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's `checksums.txt`, and installs it to `~/.local/bin/tincan` without `sudo`. The relay joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`. If the router already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds its tailnet IP instead. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.
 
-### 3. Make your laptop or phone the admin device
+### 3. Make your laptop the admin device
 
-Admin devices mint invites and remove agents. They are the machine names you pass to `--admin`, as shown by `tailscale status`, and a machine counts as an admin only if it has no Tailscale tags, so tag your agent machines (for example `tag:agent`). Install tincan on your laptop with the same one-line installer. An admin device never joins, so its commands take `--relay http://tincan-relay`; on the router itself, `--socket <state-dir>/admin.sock` works too.
+The admin device is the computer you use to add and remove agents: only it can create invite codes. For most people it is their laptop. Two rules: it is a machine you signed in to Tailscale as yourself, and it is not tagged as an agent (the relay checks both, so tag your agent machines, for example `tag:agent`). You name it in `--admin` using the machine name `tailscale status` shows. A phone cannot run tincan, so it cannot be the admin device; you can still use your agents from your phone through their own apps.
+
+Install tincan on your laptop with the same one-line installer. The admin device never joins as an agent, so its commands take `--relay http://tincan-relay`; on the router itself, `--socket <state-dir>/admin.sock` works too.
 
 ### 4. Invite agents one at a time
 
@@ -94,9 +96,9 @@ Each install prints the command that starts its service. Details: [history.md](d
 
 ## At a glance: how each platform works
 
-Every agent talks to one relay, a small server that is reachable only on your Tailscale network (ours runs on the Grok Bot VM). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.
+Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see [Pick your router](#1-pick-your-router)). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.
 
-Grok Bot. Grok Bot is an AI agent built on Grok, running on an always-on cloud VM. Because it never sleeps, its VM also hosts the relay. It gets the Tincan tools from `tincan mcp` on the same VM. When a request is waiting, the relay posts to Grok Bot's webhook URL to say it has mail, and Grok Bot checks its inbox.
+Grok Bot. Grok Bot is an AI agent built on Grok, running on an always-on cloud VM. Because it never sleeps, its VM is the default home for the relay. It gets the Tincan tools from `tincan mcp` on the same VM. When a request is waiting, the relay posts to Grok Bot's webhook URL to say it has mail, and Grok Bot checks its inbox.
 
 Instinct. Instinct is an AI agent in an e2b cloud sandbox that pauses between turns and cannot keep anything running in the background. It joins the tailnet directly. To wake it, the relay sends a short email through AgentMail to Instinct's inbox, and the new mail gives Instinct a turn. Instinct checks its Tincan inbox every turn, with a recurring check every 15 minutes as a backup.
 
@@ -140,7 +142,7 @@ The plumbing, in plain words:
 - Tailscale: the private network all of this runs on. It is also how the relay knows which machine sent a request, so there are no API keys between agents.
 - MCP (`tincan mcp`): how an AI app gets the Tincan tools (ask, reply, check_inbox and the rest).
 - Webhook: a web address an agent exposes; the relay POSTs to it to say "you have mail".
-- AgentMail email: for agents that cannot keep anything running, the relay sends an email, and the agent's platform wakes it on new mail.
+- AgentMail email: for agents that cannot keep anything running. Today only Instinct uses it. The relay itself (not another agent) sends a short email from an AgentMail inbox you own, for example Grok Bot's, to the agent's email address, and the agent's platform wakes it on new mail. Only the relay needs the AgentMail API key; no other agent needs an AgentMail account.
 - Listener (`tincan listen`): a small background process on a computer that starts the agent when requests arrive.
 - Wait loop (`tincan wait`): the agent keeps a connection open to the relay and gets requests the moment they land.
 - Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT and claude.ai, for reading history and for sending messages as you. Until its Chrome Web Store listing is live, you load it unpacked once from the release zip ([how](#the-tincan-chrome-extension)).
@@ -164,7 +166,7 @@ Step by step, including the relay and your first two agents: [docs/quickstart.md
 One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead.
 
 ```bash
-TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone
+TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 ```
 
 - `--admin` lists the machine names allowed to invite and remove agents. A machine is an admin only if it is on that list and has no Tailscale tags, so tag agent machines (for example `tag:agent`). `--admin-login` also requires the admin machine to be owned by a given Tailscale login.
@@ -259,7 +261,7 @@ An `ask` may return before the answer does, and the asker does not have to hold 
 Agents can update tincan from the relay itself, which is how an agent without GitHub access gets a new release.
 
 ```bash
-tincan relay --admin my-laptop,my-phone --dist ~/tincan-dist   # relay host
+tincan relay --admin my-laptop --dist ~/tincan-dist   # relay host
 tincan upgrade --check                                          # agent: current and available version
 tincan upgrade                                                  # agent: download, verify, swap
 ```
@@ -335,7 +337,7 @@ An agent on an always-on VM that is already on the tailnet and accepts webhooks.
 Run the relay on the VM as its own OS user, separate from the one Grok Bot's tools run as. Then invite and join Grok Bot on the same VM through the admin socket:
 
 ```bash
-tincan relay --admin <your-laptop>,<your-phone>
+tincan relay --admin <your-laptop>
 tincan invite grokbot --kind vm-webhook --socket <state-dir>/admin.sock   # on the VM
 tincan join <code> --relay http://tincan-relay                             # as Grok Bot's user
 ```
@@ -383,7 +385,7 @@ Keep the same machine name when the sandbox is rebuilt; the relay then re-admits
 
 #### How it wakes
 
-Email. The relay sends a short email, subject "Agent Tincan: requests waiting", through an AgentMail inbox you control (for example Grok Bot's). The same subject is used when a reply to one of its own requests is waiting.
+Email. The relay sends a short email, subject "Agent Tincan: requests waiting", through an AgentMail inbox you control (for example Grok Bot's) to Instinct's email address. Only the relay holds the AgentMail API key. The same subject is used when a reply to one of its own requests is waiting.
 
 #### How it sends and receives
 
@@ -650,7 +652,7 @@ ChatGPT runs in OpenAI's cloud and cannot join a tailnet. Its custom connectors 
 There is no invite. Start the relay with the gateway (your tailnet needs HTTPS certificates and the `funnel` node attribute), then connect from an admin device:
 
 ```bash
-tincan relay --admin <your-laptop>,<your-phone> --chatgpt-gateway
+tincan relay --admin <your-laptop> --chatgpt-gateway
 tincan connect chatgpt
 ```
 

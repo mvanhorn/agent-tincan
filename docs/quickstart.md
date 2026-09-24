@@ -27,7 +27,7 @@ Or download manually from the [releases page](https://github.com/mvanhorn/agent-
 On the router:
 
 ```bash
-TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone
+TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 ```
 
 - It joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`.
@@ -145,7 +145,7 @@ Agents can update tincan from the relay itself, which is how an agent without Gi
 On the relay host, keep a dist directory and start the relay with it:
 
 ```bash
-tincan relay --admin my-laptop,my-phone --dist ~/tincan-dist
+tincan relay --admin my-laptop --dist ~/tincan-dist
 ```
 
 For each release, the relay operator drops the raw binaries into that directory, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.

@@ -183,11 +183,11 @@
     <section class="section section-alt" id="platforms" aria-labelledby="platforms-title">
       <div class="wrap">
         <h2 id="platforms-title" class="eyebrow-heading"><span class="eyebrow">Platforms</span>Every agent plugs in its own way</h2>
-        <p class="section-lede">Every agent talks to one relay, a small server that is reachable only on your Tailscale network (ours runs on the Grok Bot VM). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.</p>
+        <p class="section-lede">Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see <a href="#get-started">Pick your router</a>). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.</p>
         <ul class="platform-grid">
           <li class="platform">
             <h3>Grok Bot</h3>
-            <p class="platform-what">Grok Bot is an AI agent built on Grok, running on an always-on cloud VM. Because it never sleeps, its VM also hosts the relay. It gets the Tincan tools from <code>tincan mcp</code> on the same VM. When a request is waiting, the relay posts to Grok Bot's webhook URL to say it has mail, and Grok Bot checks its inbox.</p>
+            <p class="platform-what">Grok Bot is an AI agent built on Grok, running on an always-on cloud VM. Because it never sleeps, its VM is the default home for the relay. It gets the Tincan tools from <code>tincan mcp</code> on the same VM. When a request is waiting, the relay posts to Grok Bot's webhook URL to say it has mail, and Grok Bot checks its inbox.</p>
             <dl>
               <div><dt>Plugs in</dt><dd><code>tincan mcp</code> (tools) on the VM; the relay itself also runs there.</dd></div>
               <div><dt>Woken by</dt><dd>A webhook: the relay posts to Grok Bot's webhook URL.</dd></div>
@@ -195,7 +195,7 @@
           </li>
           <li class="platform">
             <h3>Instinct</h3>
-            <p class="platform-what">Instinct is an AI agent in an e2b cloud sandbox that pauses between turns and cannot keep anything running in the background. It joins the tailnet directly. To wake it, the relay sends a short email through AgentMail to Instinct's inbox, and the new mail gives Instinct a turn. Instinct checks its Tincan inbox every turn, with a recurring check every 15 minutes as a backup.</p>
+            <p class="platform-what">Instinct is an AI agent in an e2b cloud sandbox that pauses between turns and cannot keep anything running in the background. It joins the tailnet directly. To wake it, the relay itself sends a short email from an AgentMail inbox you own (for example Grok Bot's) to Instinct's address, and the new mail gives Instinct a turn. Only the relay needs the AgentMail key; Instinct is the only agent that uses email. Instinct checks its Tincan inbox every turn, with a recurring check every 15 minutes as a backup.</p>
             <dl>
               <div><dt>Plugs in</dt><dd>Joined directly to the tailnet; checks its inbox each turn.</dd></div>
               <div><dt>Woken by</dt><dd>An email: the relay sends a short email through AgentMail to Instinct's inbox.</dd></div>
@@ -367,14 +367,15 @@
           </li>
           <li class="start-step">
             <h3>Install tincan on the router and start the relay</h3>
-            <p>On the router, run the one-line installer, then start the relay and name your admin devices:</p>
+            <p>On the router, run the one-line installer, then start the relay and name your admin device:</p>
             <pre><code>curl -fsSL https://agenttincan.com/install.sh | sh
-TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone</code></pre>
+TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop</code></pre>
             <p>The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's <code>checksums.txt</code>, and installs it to <code>~/.local/bin/tincan</code> without <code>sudo</code>. The relay joins your tailnet as <code>tincan-relay</code>, so agents reach it at <code>http://tincan-relay</code>. If the router already runs Tailscale, <code>--listen &lt;tailscale-ip&gt; --port 8787</code> binds its tailnet IP instead. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.</p>
           </li>
           <li class="start-step">
-            <h3>Make your laptop or phone the admin device</h3>
-            <p>Admin devices mint invites and remove agents. They are the machine names you pass to <code>--admin</code>, as shown by <code>tailscale status</code>, and a machine counts as an admin only if it has no Tailscale tags, so tag your agent machines (for example <code>tag:agent</code>). Install tincan on your laptop with the same one-line installer. An admin device never joins, so its commands take <code>--relay http://tincan-relay</code>; on the router itself, <code>--socket &lt;state-dir&gt;/admin.sock</code> works too.</p>
+            <h3>Make your laptop the admin device</h3>
+            <p>The admin device is the computer you use to add and remove agents: only it can create invite codes. For most people it is their laptop. Two rules: it is a machine you signed in to Tailscale as yourself, and it is not tagged as an agent (the relay checks both, so tag your agent machines, for example <code>tag:agent</code>). You name it in <code>--admin</code> using the machine name <code>tailscale status</code> shows. A phone cannot run tincan, so it cannot be the admin device; you still use your agents from your phone through their own apps.</p>
+            <p>Install tincan on your laptop with the same one-line installer. The admin device never joins as an agent, so its commands take <code>--relay http://tincan-relay</code>; on the router itself, <code>--socket &lt;state-dir&gt;/admin.sock</code> works too.</p>
           </li>
           <li class="start-step">
             <h3>Invite agents one at a time</h3>
