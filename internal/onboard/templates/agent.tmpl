@@ -11,10 +11,13 @@ They also commonly share a machine with another agent, so every tincan command
 in their join, setup and self-heal lines carries a per-agent TINCAN_CONFIG
 (template "cfg"), their MCP entries set that env, and their rejoin names the
 agent. claude-code and generic get one line saying when to add the prefix.
+history is a Go service, not a model: it carries TINCAN_CONFIG like the
+fresh-session kinds, but its path is always ~/.config/tincan/history.json (the
+service's default config), and its block has no standing instructions.
 */ -}}
 
-{{- define "cfgpath"}}~/.config/tincan/{{.Name}}.json{{end -}}
-{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
+{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "history"}}history{{else}}{{.Name}}{{end}}.json{{end -}}
+{{- define "cfg"}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history")}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
 {{- define "mcpenv"}}env TINCAN_CONFIG set to the full path of {{template "cfgpath" .}} (MCP configs do not expand ~){{end -}}
 {{- define "setup.cfghint" -}}
 If another agent already runs on this machine, prefix every tincan command (join, mcp, listen, rejoin) with TINCAN_CONFIG={{template "cfgpath" .}}.
@@ -42,7 +45,7 @@ If tincan says not joined or no relay configured (for example after this machine
 {{- end -}}
 {{- end -}}
 
-{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex")}} --name {{.Name}}{{end}}{{end -}}
+{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if or (eq .Kind "hermes") (eq .Kind "openclaw") (eq .Kind "codex") (eq .Kind "history")}} --name {{.Name}}{{end}}{{end -}}
 
 {{- define "setup.samename" -}}
 Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.
@@ -88,6 +91,10 @@ A wake from the OpenClaw gateway hooks endpoint whose text starts with "Agent Ti
 {{- define "instructions.codex" -}}
 You are started by tincan listen with a check-inbox prompt whenever teammates' requests, or replies to your own requests, are waiting.
 {{template "instructions.fresh" .}}
+{{- end -}}
+
+{{- define "instructions.history" -}}
+{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Codex and Claude Code, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
 {{- define "instructions.generic" -}}
@@ -167,6 +174,17 @@ On the relay host, in wake.json: set {{.Name}} to method "command". No secret fi
 Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{- end -}}
 
+{{- define "setup.history" -}}
+Run it on the machine where {{.Owner}} uses Chrome, Codex and Claude Code; it reads their history there. codex must be installed and logged in for the query step (check with codex login status).
+Install the native messaging host and the service definition: tincan history install. It writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS, a systemd user unit on Linux), then prints the command that starts the service. It starts nothing itself.
+Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist; Linux: systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service).
+The only human step: install the Tincan Chrome extension from the Chrome Web Store (<Chrome Web Store link, not yet published>) and accept its permission dialog (chatgpt.com, claude.ai, native messaging). For development, load extension/ unpacked from chrome://extensions instead (see extension/README.md).
+On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
+Choose who may ask in ~/.config/tincan/history-allow.txt, one agent name per line; without the file the built-in default list applies (docs/adapters/history.md). The file is reread on every request.
+If the service log (~/Library/Logs/tincan-history.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.
+Check it from an allowed agent: tincan ask {{.Name}} "what was the last thing {{.Owner}} asked Codex?"
+{{- end -}}
+
 {{- define "setup.generic" -}}
 {{template "setup.tools" .}}
 On the relay host, in wake.json (chmod 600): set {{.Name}} to its wake method ({{.Wake}} now; one of webhook, email, wait, channel, command, none). Secret fields: url, bearer_token and hmac_secret for webhook; email_to, agentmail_inbox and agentmail_key for email. Set them in the file only.
@@ -183,4 +201,5 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.hermes"}}Hermes Agent woken by webhook route{{end -}}
 {{- define "title.openclaw"}}OpenClaw woken by gateway hooks{{end -}}
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
+{{- define "title.history"}}History service for ChatGPT, claude.ai, Codex and Claude Code chats{{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}

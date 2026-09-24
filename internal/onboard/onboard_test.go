@@ -201,13 +201,13 @@ func TestEmptyRosterAndOffline(t *testing.T) {
 
 func TestRecipes(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL})
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "generic", "second-agent", "relay-host"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "history", "generic", "second-agent", "relay-host"} {
 		r := recipe(t, k, kind)
 		if r.Title == "" || len(r.Steps) < 2 {
 			t.Errorf("recipe %s too thin: %+v", kind, r)
 		}
 	}
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "generic"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "hermes", "openclaw", "codex", "history", "generic"} {
 		r := recipe(t, k, kind)
 		all := strings.Join(r.Steps, "\n")
 		inv := strings.Index(all, "tincan invite <name> --kind "+kind)
@@ -280,7 +280,8 @@ func TestRenderedOutputHygiene(t *testing.T) {
 		build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: append(matts(),
 			Member{Name: "hermes", Wake: "webhook"}, Member{Name: "openclaw", Wake: "webhook"},
 			Member{Name: "codex", Wake: "command"}, Member{Name: "chatgpt", Wake: "none"},
-			Member{Name: "zed", Wake: "command"}, Member{Name: "q", Wake: "none"})}),
+			Member{Name: "zed", Wake: "command"}, Member{Name: "q", Wake: "none"},
+			Member{Name: "history", Wake: "wait", Kind: "history"})}),
 		build(t, Options{Offline: true}),
 		build(t, Options{RelayURL: relayURL}),
 	}
@@ -351,5 +352,86 @@ func TestWakeBlocksMentionReplies(t *testing.T) {
 		if txt := block(t, k, n).Instructions; !strings.Contains(txt, "reply to your own request") {
 			t.Errorf("%s block should say a wake can mean a reply to its own request:\n%s", n, txt)
 		}
+	}
+}
+
+func historyRoster() []Member {
+	return append(matts(), Member{Name: "history", Wake: "wait", Kind: "history"})
+}
+
+// The history agent is a Go service, not a model: its block has nothing to
+// paste, joins with its own config, installs the native host and service,
+// and names the extension install as the one human step.
+func TestHistoryBlock(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: historyRoster()})
+	a := block(t, k, "history")
+	if a.Kind != "history" || a.Wake != "wait" {
+		t.Fatalf("history = %q/%q, want history/wait", a.Kind, a.Wake)
+	}
+	if want := "TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay " + relayURL; a.Join != want {
+		t.Errorf("history join = %q, want %q", a.Join, want)
+	}
+	for _, want := range []string{"service", "nothing to paste"} {
+		if !strings.Contains(a.Instructions, want) {
+			t.Errorf("history instructions missing %q:\n%s", want, a.Instructions)
+		}
+	}
+	for _, stale := range []string{"check_inbox", "You are history"} {
+		if strings.Contains(a.Instructions, stale) {
+			t.Errorf("history instructions should not carry model guidance %q:\n%s", stale, a.Instructions)
+		}
+	}
+	setup := strings.Join(a.Setup, "\n")
+	for _, want := range []string{
+		"tincan history install", "native messaging host", "service definition",
+		"launchctl bootstrap", "systemctl --user",
+		"Tincan Chrome extension", "Chrome Web Store", "chrome://extensions", "unpacked",
+		"only human step", "history-allow.txt", `method "wait"`,
+		"codex login status",
+		"TINCAN_CONFIG=~/.config/tincan/history.json tincan rejoin --relay " + relayURL + " --name history",
+	} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("history setup missing %q:\n%s", want, setup)
+		}
+	}
+	r := recipe(t, k, "history")
+	all := strings.Join(r.Steps, "\n")
+	if !strings.Contains(all, "tincan invite <name> --kind history") || !strings.Contains(all, "TINCAN_CONFIG=~/.config/tincan/history.json tincan join") {
+		t.Errorf("history recipe should invite then join with its own config:\n%s", all)
+	}
+	if got := block(t, build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "history", Wake: "wait"}}}), "history").Kind; got != "history" {
+		t.Errorf("runtime name history = %q, want history", got)
+	}
+}
+
+// With a history agent on the roster, Agent Tincan routes history questions
+// to it verbatim and forwards the reply with its images, without breaking the
+// formula's section order or the quiet rule.
+func TestOperatorRoutesHistory(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: historyRoster()})
+	p := k.Operator
+	headings := []string{"Name: Agent Tincan", "ONLY job:", "Team:", "How:", "Trace / summary:", "History questions:",
+		"Invites:", "Wake:", "Voice:", "Anti-jobs:", "Troubleshooting (in order):", "When Matt asks for status"}
+	pos := 0
+	for _, h := range headings {
+		i := strings.Index(p[pos:], h)
+		if i < 0 {
+			t.Fatalf("heading %q missing or out of order after offset %d:\n%s", h, pos, p)
+		}
+		pos += i + len(h)
+	}
+	for _, want := range []string{
+		"ChatGPT", "claude.ai", "Codex", "Claude Code", "send the image",
+		"to history", "as-is", "every image", "tincan attachment get",
+		"allowlist", "directly",
+		"never messages Matt, even when it finds a problem", "never message Matt unprompted",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("operator prompt missing %q", want)
+		}
+	}
+	plain := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: matts()}).Operator
+	if strings.Contains(plain, "History questions:") {
+		t.Error("no history routing unless a history agent is on the roster")
 	}
 }

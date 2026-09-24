@@ -32,11 +32,12 @@ const (
 	KindHermes       = "hermes"
 	KindOpenClaw     = "openclaw"
 	KindCodex        = "codex"
+	KindHistory      = "history"
 	KindGeneric      = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindHistory, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -51,13 +52,15 @@ const (
 var Sections = []string{"operator", "agents", "recipes", "all"}
 
 // runtimeNames maps runtime names to kinds when nothing else says. Only
-// product runtimes belong here, never anyone's personal agent names.
+// product runtimes and product agents (history) belong here, never anyone's
+// personal agent names.
 var runtimeNames = map[string]string{
 	"claude-code": KindClaudeCode,
 	"chatgpt":     KindChatGPT,
 	"hermes":      KindHermes,
 	"openclaw":    KindOpenClaw,
 	"codex":       KindCodex,
+	"history":     KindHistory,
 }
 
 // defaultWake is the wake method a kind normally uses.
@@ -70,6 +73,7 @@ var defaultWake = map[string]string{
 	KindHermes:       "webhook",
 	KindOpenClaw:     "webhook",
 	KindCodex:        "command",
+	KindHistory:      "wait",
 	KindGeneric:      "none",
 }
 
@@ -134,6 +138,7 @@ type teamLine struct {
 type operatorData struct {
 	Owner, OwnerPoss, RelayURL, Host string
 	HostSet                          bool
+	History                          string // name of the history agent on the roster, if any
 	Team                             []teamLine
 	WakeMethods                      []string
 	Troubleshooting                  []string
@@ -183,6 +188,9 @@ func Build(o Options) (Kit, error) {
 			return Kit{}, err
 		}
 		k.Agents = append(k.Agents, b)
+		if kind == KindHistory && op.History == "" {
+			op.History = m.Name
+		}
 		op.Team = append(op.Team, teamLine{Name: m.Name, Kind: kind, Wake: wake, ExpectOnline: expectOnline(kind, wake)})
 	}
 	if len(roster) == 0 {
@@ -248,12 +256,17 @@ func agentBlock(d agentData) (AgentBlock, error) {
 	if err != nil {
 		return AgentBlock{}, err
 	}
+	instructions := strings.TrimSpace(common) + "\n" + strings.TrimSpace(specific)
+	if d.Kind == KindHistory {
+		// A Go service, not a model: there are no standing instructions.
+		instructions = strings.TrimSpace(specific)
+	}
 	setup, err := lines("setup."+d.Kind, d)
 	if err != nil {
 		return AgentBlock{}, err
 	}
 	return AgentBlock{Name: d.Name, Kind: d.Kind, Wake: d.Wake, Join: strings.TrimSpace(join),
-		Instructions: strings.TrimSpace(common) + "\n" + strings.TrimSpace(specific), Setup: setup}, nil
+		Instructions: instructions, Setup: setup}, nil
 }
 
 // recipes builds the add-agent recipes from the same join and setup templates

@@ -111,7 +111,7 @@ type onboardIn struct {
 	Section  string            `json:"section,omitempty" jsonschema:"operator, agents, recipes, or all (default all)"`
 	Operator string            `json:"operator,omitempty" jsonschema:"the agent that runs the Agent Tincan operator prompt, e.g. grokbot"`
 	Owner    string            `json:"owner,omitempty" jsonschema:"the person who owns the team, used in the generated text"`
-	Kinds    map[string]string `json:"kinds,omitempty" jsonschema:"agent name to kind (vm-webhook, e2b-email, proxy-sandbox, claude-code, chatgpt, hermes, openclaw, codex, generic), overriding the stored kind"`
+	Kinds    map[string]string `json:"kinds,omitempty" jsonschema:"agent name to kind (vm-webhook, e2b-email, proxy-sandbox, claude-code, chatgpt, hermes, openclaw, codex, history, generic), overriding the stored kind"`
 }
 
 type noIn struct{}

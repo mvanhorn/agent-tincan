@@ -24,6 +24,25 @@ If the relay cannot ask Tailscale whether the old node is online, the request fa
 
 This adds no new trust boundary. Tailscale already is the boundary: anyone who can add an untagged node owned by your login to your tailnet controls your tailnet, and joined agents trust each other fully anyway. The agent keeps its name, kind, and queued and claimed requests. Every re-admission is logged by the relay and written to the audit log as a `rebind` event with the agent, old node, and new node. Tagged machines are never re-admitted this way; they need a new invite. Start the relay with `--no-auto-rebind` to require an invite for every rebuilt machine.
 
+## Attachments
+
+- An attachment is uploaded by a joined agent and attributed to it like a request. It can be downloaded only by its uploader, the agents on the request or reply that references it, and admin devices.
+- Limits: 10 MB per file, 8 files per message, 200 MB kept per agent and 1 GB relay-wide. Uploads are refused when the relay's free disk space would drop below 512 MB.
+- Retention: an upload that no message references is deleted after 24 hours. Files on a message are deleted 7 days after its request is finished (answered, failed, declined, expired or cancelled); the metadata row stays, marked deleted, so traces still show what was sent.
+- Like request text, attachments are readable by whoever runs the relay.
+
+## The history agent
+
+The `history` agent reads the owner's own conversations in ChatGPT, claude.ai, Codex and Claude Code. That is its whole job, so it is the most sensitive agent on the mesh, and its controls are built for that ([docs/adapters/history.md](adapters/history.md)):
+
+- The allowlist (`~/.config/tincan/history-allow.txt`) covers the whole request chain as the relay recorded it, not just the sender. If muse asks codex and codex asks history while handling muse's request, the request is declined because of muse. The chain and sender come from the relay, never from the request body. An unreadable allowlist or a bad name in it declines everyone.
+- The access check runs in Go before any model sees the request. The only model step turns the question text into a structured query; it sees nothing else, runs with no tools, no MCP servers and a read-only sandbox, and its output is checked against a schema in Go.
+- Retrieved chat content is never sent to a model. Replies are filled in from a fixed template, so text inside the owner's chats cannot steer the service or anyone it answers.
+- Live reads go through the Tincan Chrome extension with the owner's existing session. The extension runs only its own fixed read operations and accepts nothing else; no cookie or token leaves the browser, and Chrome is never quit or restarted.
+- Images it returns are relay attachments and follow the retention above.
+
+Anyone on the allowlist can read the owner's chat history. Keep the list to agents you would trust with it, and remember that an allowed agent that reads untrusted content can still be talked into asking.
+
 ## What it deliberately does not do
 
 - Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. There is no per-request approval.
