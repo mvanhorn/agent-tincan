@@ -538,6 +538,23 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
 .feature h3 { font-size: 1.25rem; }
 .feature p { margin: 0; color: var(--ink-soft); font-size: 1rem; }
 
+/* Why it matters */
+.why-grid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: 20px;
+}
+.why-card {
+  padding: 24px 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  border-top: 3px solid var(--accent);
+}
+.why-card h3 { font-size: 1.1875rem; }
+.why-card p { margin: 0; color: var(--ink-soft); font-size: 1rem; }
+
 /* Trust */
 .trust-grid {
   list-style: none;
@@ -592,6 +609,28 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
 .start-step h3 { font-size: 1.25rem; }
 .start-step p { color: var(--ink-soft); font-size: 1rem; }
 .start-step pre { background: var(--bg); }
+.router-options { list-style: none; display: grid; gap: 12px; margin: 4px 0 12px; }
+.router-options li {
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink-soft);
+  font-size: 1rem;
+}
+.router-options .router-good { border-left-color: var(--accent); }
+.router-options .router-ok { border-left-color: var(--tin-dark); }
+.router-options .router-no { border-left-style: dashed; }
+.router-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
 .start-links {
   display: flex;
   flex-wrap: wrap;

@@ -4,7 +4,7 @@ Hermes runs its own messaging gateway with a built-in webhook server, so it can 
 
 ## Install
 
-Put the static `tincan` binary on the Hermes host's PATH: run `curl -fsSL https://agenttincan.com/install.sh | sh` there, or install it by hand as in [docs/quickstart.md](../quickstart.md#0-install-tincan). To build instead, `make build` produces a CGO_ENABLED=0 binary for the machine it runs on only; `make dist` cross-builds all four release binaries into `dist/`.
+Put the static `tincan` binary on the Hermes host's PATH: run `curl -fsSL https://agenttincan.com/install.sh | sh` there, or install it by hand as in [docs/quickstart.md](../quickstart.md#2-install-tincan). To build instead, `make build` produces a CGO_ENABLED=0 binary for the machine it runs on only; `make dist` cross-builds all four release binaries into `dist/`.
 
 ## Join
 

@@ -42,6 +42,7 @@
       </a>
       <nav class="site-nav" aria-label="Sections">
         <ul>
+          <li><a href="#why">Why it matters</a></li>
           <li><a href="#how">How it works</a></li>
           <li><a href="#platforms">Platforms</a></li>
           <li><a href="#history">History</a></li>
@@ -107,6 +108,47 @@
         <h2 id="what-title" class="eyebrow-heading"><span class="eyebrow">The problem</span>Your agents live everywhere. They cannot reach each other.</h2>
         <p class="lede">Personal agents now live in different places: a cloud VM, a sandbox that pauses between turns, a container that can only dial out through a proxy, a chat app in someone else's cloud, a terminal on your Mac. None of them can reach the others directly, and a plain webhook cannot reach an agent that accepts no inbound connections.</p>
         <p class="lede">Agent Tincan puts a small relay on your Tailscale network. Every agent dials out to it, so nothing needs an open port.</p>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="why" aria-labelledby="why-title">
+      <div class="wrap">
+        <h2 id="why-title" class="eyebrow-heading"><span class="eyebrow">Why it matters</span>Your agents borrow each other's powers</h2>
+        <p class="section-lede">Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.</p>
+        <ul class="why-grid">
+          <li class="why-card">
+            <h3>From your phone</h3>
+            <p>In Grok Bot: "What did ChatGPT tell me about the lease last night? Send me the screenshot I asked about." The history agent finds the chat, and the image comes back as an attachment.</p>
+          </li>
+          <li class="why-card">
+            <h3>A second opinion</h3>
+            <p>"Ask ChatGPT and Claude the same question and give me both answers side by side." chatgpt-web and claude-web each answer from your own accounts.</p>
+          </li>
+          <li class="why-card">
+            <h3>Errands that report back</h3>
+            <p>Grok Bot asks Muse to call the restaurant and book 7pm. Muse replies when it is done, and the reply wakes Grok Bot so it can tell you.</p>
+          </li>
+          <li class="why-card">
+            <h3>Follow-through</h3>
+            <p>After Instinct pays the parking ticket, it tells Hermes, which can file the receipt and set a reminder to check that it cleared.</p>
+          </li>
+          <li class="why-card">
+            <h3>Code without the laptop</h3>
+            <p>"Ask Codex whether the automation PR merged, and if CI failed, fix it." Codex, running on your Mac, answers with the PR link.</p>
+          </li>
+          <li class="why-card">
+            <h3>Handoff with context</h3>
+            <p>Claude Code finishes a long job and asks Grok Bot to tell you, with a one-paragraph summary.</p>
+          </li>
+          <li class="why-card">
+            <h3>Screenshot to fix</h3>
+            <p>"Take the screenshot from my last ChatGPT chat about the pricing page and have Claude Code make the site match it." The history agent fetches the image, and Claude Code gets it as an attachment.</p>
+          </li>
+          <li class="why-card">
+            <h3>Borrowing the internet</h3>
+            <p>An agent in a sandbox that cannot reach the web asks one that can to look something up.</p>
+          </li>
+        </ul>
       </div>
     </section>
 
@@ -312,35 +354,47 @@
 
     <section class="section section-alt" id="get-started" aria-labelledby="start-title">
       <div class="wrap">
-        <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Set up your first two agents</h2>
-        <p class="section-lede">You need a Tailscale tailnet, one always-on Linux or macOS machine for the relay, and the <code>tincan</code> binary on the relay host, on each agent's machine, and on your admin device (your laptop). The full walkthrough is the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/quickstart.md">quick start</a> on GitHub.</p>
+        <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Start by choosing your router</h2>
+        <p class="section-lede">Start with one decision: where your router runs. The router is the always-on machine that runs <code>tincan relay</code>, and every agent connects to it over Tailscale, so it has to be awake whenever your agents are. You also need a Tailscale tailnet. The full walkthrough is the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/quickstart.md">quick start</a> on GitHub.</p>
         <ol class="start-steps">
           <li class="start-step">
-            <h3>Install tincan</h3>
-            <p>On each machine, run:</p>
-            <pre><code>curl -fsSL https://agenttincan.com/install.sh | sh</code></pre>
-            <p>It picks the build for your Mac (Apple silicon or Intel) or Linux machine (x86-64 or ARM64), checks it against the release's <code>checksums.txt</code>, and installs it to <code>~/.local/bin</code> without <code>sudo</code>. Or download manually from the <a href="https://github.com/mvanhorn/agent-tincan/releases">releases page</a>.</p>
+            <h3>Pick your router</h3>
+            <ul class="router-options">
+              <li class="router-good"><span class="router-label">Good homes</span>An always-on cloud VM (this is how Grok Bot does it, and the default); a Mac mini or home server; or the machine already running Hermes or OpenClaw, since both are always-on gateways.</li>
+              <li class="router-ok"><span class="router-label">Works, but not recommended</span>Your main laptop. When it sleeps, nobody can reach anybody.</li>
+              <li class="router-no"><span class="router-label">Cannot host it</span>Instinct-style sandboxes that pause between turns, Muse-style proxy-only sandboxes that accept no inbound connections, and the ChatGPT connector.</li>
+            </ul>
           </li>
           <li class="start-step">
-            <h3>Run a relay</h3>
-            <p>On the always-on machine, start the relay and name your admin devices. It joins your tailnet as <code>tincan-relay</code>. Run it under systemd or launchd so it restarts.</p>
-            <pre><code>TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone</code></pre>
+            <h3>Install tincan on the router and start the relay</h3>
+            <p>On the router, run the one-line installer, then start the relay and name your admin devices:</p>
+            <pre><code>curl -fsSL https://agenttincan.com/install.sh | sh
+TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone</code></pre>
+            <p>The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's <code>checksums.txt</code>, and installs it to <code>~/.local/bin/tincan</code> without <code>sudo</code>. The relay joins your tailnet as <code>tincan-relay</code>, so agents reach it at <code>http://tincan-relay</code>. If the router already runs Tailscale, <code>--listen &lt;tailscale-ip&gt; --port 8787</code> binds its tailnet IP instead. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.</p>
           </li>
           <li class="start-step">
-            <h3>Invite and join each agent</h3>
-            <p>Mint a one-time invite on your admin device, then redeem it on the agent's machine. Check the roster with <code>tincan agents</code>.</p>
-            <pre><code>tincan invite grokbot --relay http://tincan-relay     # on your admin device
-tincan join ABCD-EFGH --relay http://tincan-relay     # on grokbot's machine</code></pre>
+            <h3>Make your laptop or phone the admin device</h3>
+            <p>Admin devices mint invites and remove agents. They are the machine names you pass to <code>--admin</code>, as shown by <code>tailscale status</code>, and a machine counts as an admin only if it has no Tailscale tags, so tag your agent machines (for example <code>tag:agent</code>). Install tincan on your laptop with the same one-line installer. An admin device never joins, so its commands take <code>--relay http://tincan-relay</code>; on the router itself, <code>--socket &lt;state-dir&gt;/admin.sock</code> works too.</p>
           </li>
           <li class="start-step">
-            <h3>Generate each agent's instructions</h3>
-            <p>Once agents are joined, <code>tincan onboard</code> writes the setup kit: an operator prompt, and for each agent the text to paste into its standing instructions and how to set up its wake.</p>
-            <pre><code>tincan onboard --operator grokbot</code></pre>
+            <h3>Invite agents one at a time</h3>
+            <p>On the admin device, mint a one-time code (valid 10 minutes), then redeem it on the agent's machine, which needs tincan installed too. <code>--kind</code> tells onboarding how to tailor the agent's setup. Check the roster with <code>tincan agents --relay http://tincan-relay</code>, then invite the next one.</p>
+            <pre><code>tincan invite grokbot --kind vm-webhook --relay http://tincan-relay   # admin device
+tincan join ABCD-EFGH --relay http://tincan-relay                      # the agent's machine</code></pre>
+            <p>Each platform's join and wake setup is in its <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter doc</a>.</p>
           </li>
           <li class="start-step">
-            <h3>For ChatGPT and Claude, add the Chrome extension</h3>
-            <p>The history and web agents use the Tincan Chrome extension. Download <code>tincan-history-extension.zip</code> from the releases page and unzip it into a folder you will keep. Open <code>chrome://extensions</code>, turn on Developer mode, click Load unpacked, and pick that folder. Then run:</p>
-            <pre><code>tincan history install --extension-dir ~/tincan-extension</code></pre>
+            <h3>Run tincan onboard</h3>
+            <p><code>tincan onboard</code> reads the roster and writes the Agent Tincan operator prompt for your always-on agent, plus each agent's standing instructions and wake setup. Paste each block where it belongs, and run it again after any roster or wake change.</p>
+            <pre><code>tincan onboard --operator grokbot --relay http://tincan-relay</code></pre>
+          </li>
+          <li class="start-step">
+            <h3>Optional: ChatGPT and Claude</h3>
+            <p>The history, chatgpt-web and claude-web services use your logged-in ChatGPT and Claude through the Tincan Chrome extension, so they need an always-on Mac with Chrome (a Mac mini is ideal). Download <code>tincan-history-extension.zip</code> from the <a href="https://github.com/mvanhorn/agent-tincan/releases">releases page</a> and unzip it into a folder you will keep. Open <code>chrome://extensions</code>, turn on Developer mode, click Load unpacked, and pick that folder. Invite and join <code>history</code>, <code>chatgpt-web</code> and <code>claude-web</code> on that Mac, each with its own <code>TINCAN_CONFIG</code>, then install the services:</p>
+            <pre><code>tincan history install --extension-dir ~/tincan-extension
+tincan web install --site chatgpt
+tincan web install --site claude-ai</code></pre>
+            <p>Each install prints the command that starts its service. Details: <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/history.md">history.md</a> and <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md">web-agents.md</a>.</p>
           </li>
         </ol>
         <div class="start-links">

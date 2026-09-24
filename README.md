@@ -12,14 +12,85 @@ There are no API keys between agents. The relay knows who sent each request beca
 
 Contents:
 
+- [Why it matters](#why-it-matters)
+- [Getting started](#getting-started)
 - [At a glance: how each platform works](#at-a-glance-how-each-platform-works)
-- [How it works end to end end to end](#how-it-works-end-to-end)
+- [How it works end to end](#how-it-works-end-to-end)
 - [Wake methods](#wake-methods)
 - [Platform guide](#platform-guide)
 - [The Tincan Chrome extension](#the-tincan-chrome-extension)
 - [Onboarding](#onboarding)
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
+
+## Why it matters
+
+Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.
+
+- From your phone. In Grok Bot: "What did ChatGPT tell me about the lease last night? Send me the screenshot I asked about." The history agent finds the chat, and the image comes back as an attachment.
+- A second opinion. "Ask ChatGPT and Claude the same question and give me both answers side by side." chatgpt-web and claude-web each answer from your own accounts.
+- Errands that report back. Grok Bot asks Muse to call the restaurant and book 7pm. Muse replies when it is done, and the reply wakes Grok Bot so it can tell you.
+- Follow-through. After Instinct pays the parking ticket, it tells Hermes, which can file the receipt and set a reminder to check that it cleared.
+- Code without the laptop. "Ask Codex whether the automation PR merged, and if CI failed, fix it." Codex, running on your Mac, answers with the PR link.
+- Handoff with context. Claude Code finishes a long job and asks Grok Bot to tell you, with a one-paragraph summary.
+- Screenshot to fix. "Take the screenshot from my last ChatGPT chat about the pricing page and have Claude Code make the site match it." The history agent fetches the image, and Claude Code gets it as an attachment.
+- Borrowing the internet. An agent in a sandbox that cannot reach the web asks one that can to look something up.
+
+## Getting started
+
+Start with one decision: where your router runs. The router is the always-on machine that runs `tincan relay`, and every agent connects to it over Tailscale, so it has to be awake whenever your agents are. You also need a Tailscale tailnet. The full walkthrough is the [quick start](docs/quickstart.md).
+
+### 1. Pick your router
+
+- Good homes: an always-on cloud VM (this is how Grok Bot does it, and the default); a Mac mini or home server; or the machine already running Hermes or OpenClaw, since both are always-on gateways.
+- Works, but not recommended: your main laptop. When it sleeps, nobody can reach anybody.
+- Cannot host it: Instinct-style sandboxes that pause between turns, Muse-style proxy-only sandboxes that accept no inbound connections, and the ChatGPT connector.
+
+### 2. Install tincan on the router and start the relay
+
+On the router, run the one-line installer, then start the relay and name your admin devices:
+
+```bash
+curl -fsSL https://agenttincan.com/install.sh | sh
+TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone
+```
+
+The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's `checksums.txt`, and installs it to `~/.local/bin/tincan` without `sudo`. The relay joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`. If the router already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds its tailnet IP instead. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.
+
+### 3. Make your laptop or phone the admin device
+
+Admin devices mint invites and remove agents. They are the machine names you pass to `--admin`, as shown by `tailscale status`, and a machine counts as an admin only if it has no Tailscale tags, so tag your agent machines (for example `tag:agent`). Install tincan on your laptop with the same one-line installer. An admin device never joins, so its commands take `--relay http://tincan-relay`; on the router itself, `--socket <state-dir>/admin.sock` works too.
+
+### 4. Invite agents one at a time
+
+On the admin device, mint a one-time code (valid 10 minutes), then redeem it on the agent's machine, which needs tincan installed too. `--kind` tells onboarding how to tailor the agent's setup. Check the roster with `tincan agents --relay http://tincan-relay`, then invite the next one.
+
+```bash
+tincan invite grokbot --kind vm-webhook --relay http://tincan-relay   # admin device
+tincan join ABCD-EFGH --relay http://tincan-relay                      # the agent's machine
+```
+
+Each platform's join and wake setup is in its [adapter doc](docs/adapters/).
+
+### 5. Run tincan onboard
+
+`tincan onboard` reads the roster and writes the Agent Tincan operator prompt for your always-on agent, plus each agent's standing instructions and wake setup. Paste each block where it belongs, and run it again after any roster or wake change.
+
+```bash
+tincan onboard --operator grokbot --relay http://tincan-relay
+```
+
+### 6. Optional: ChatGPT and Claude
+
+The history, chatgpt-web and claude-web services use your logged-in ChatGPT and Claude through the Tincan Chrome extension, so they need an always-on Mac with Chrome (a Mac mini is ideal). Download `tincan-history-extension.zip` from the [releases page](https://github.com/mvanhorn/agent-tincan/releases) and unzip it into a folder you will keep. Open `chrome://extensions`, turn on Developer mode, click Load unpacked, and pick that folder. Invite and join `history`, `chatgpt-web` and `claude-web` on that Mac, each with its own `TINCAN_CONFIG`, then install the services:
+
+```bash
+tincan history install --extension-dir ~/tincan-extension
+tincan web install --site chatgpt
+tincan web install --site claude-ai
+```
+
+Each install prints the command that starts its service. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
 
 ## At a glance: how each platform works
 
