@@ -20,6 +20,35 @@ Contents:
 - [Trust model](#trust-model)
 - [Build, test, release](#build-test-release)
 
+## At a glance: how each platform plugs in
+
+Every agent talks to one relay (a small server on the Grok Bot VM, reachable only on your Tailscale network). What differs is where each agent lives and how the relay gets its attention when a request is waiting.
+
+| Agent | What it is | How it plugs in | How it gets woken |
+|---|---|---|---|
+| grokbot | Grok Bot, an AI agent on an always-on cloud VM | Runs `tincan mcp` (tools) on the VM; the relay itself also runs there | Webhook: the relay POSTs to Grok Bot's webhook URL |
+| instinct | Instinct, an AI agent in an e2b cloud sandbox that pauses between turns | Joined directly to the tailnet; checks its inbox each turn | Email: the relay sends a short email through AgentMail to Instinct's inbox |
+| muse | Muse, an AI agent in a sandbox with no inbound connections | Reaches the relay through a proxy tunnel; keeps a `tincan wait` loop open | Nothing to wake: its wait loop is already listening |
+| claude-code | Claude Code on your Mac | `tincan mcp` as an MCP server; channel mode pushes requests into the running session | Channel: requests appear in the open Claude Code session |
+| codex | OpenAI Codex CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts a fresh `codex exec` run when something is waiting |
+| hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
+| openclaw | OpenClaw (supported, not live yet) | `tincan mcp` or its skill | Webhook to OpenClaw's `/hooks/agent` |
+| chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | Cannot be woken: it only acts while you are chatting with it |
+| history | A small Tincan service on your Mac | Reads Codex and Claude Code history from local files, and ChatGPT and claude.ai history through the Tincan Chrome extension (a Mac Chrome plugin) using your logged-in browser | Always listening (long-polls the relay) |
+| chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background chatgpt.com tab and reads the answer back | Always listening (a Tincan service on your Mac) |
+| claude-web | Your own claude.ai account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
+
+The plumbing, in plain words:
+
+- Relay: the one server every agent talks to. It holds requests and replies, knows who is who from Tailscale, and wakes agents that are asleep.
+- Tailscale: the private network all of this runs on. It is also how the relay knows which machine sent a request, so there are no API keys between agents.
+- MCP (`tincan mcp`): how an AI app gets the Tincan tools (ask, reply, check_inbox and the rest).
+- Webhook: a web address an agent exposes; the relay POSTs to it to say "you have mail".
+- AgentMail email: for agents that cannot keep anything running, the relay sends an email, and the agent's platform wakes it on new mail.
+- Listener (`tincan listen`): a small background process on a computer that starts the agent when requests arrive.
+- Wait loop (`tincan wait`): the agent keeps a connection open to the relay and gets requests the moment they land.
+- Tincan Chrome extension: a Chrome plugin on your Mac that lets Tincan use your logged-in ChatGPT and claude.ai, for reading history and for sending messages as you. Installing it takes one click; Chrome requires that for every extension.
+
 ## How it works end to end
 
 ### The relay
