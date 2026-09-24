@@ -25,7 +25,7 @@ export const CHUNK_BYTES = 384 * 1024;
 export const MAX_MESSAGE_BYTES = 32 * 1024;
 // EXTENSION_FILES are the files the hello message reports hashes of, so the
 // native host can tell when the unpacked files on disk have changed.
-export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js']);
+export const EXTENSION_FILES = Object.freeze(['manifest.json', 'background.js', 'ops.js', 'send.js', 'icon16.png', 'icon48.png', 'icon128.png']);
 
 // extension.reload waits while the sender has tabs (a reload would lose
 // track of them), checking every RELOAD_RETRY_MS for at most

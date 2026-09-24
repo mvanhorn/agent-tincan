@@ -55,7 +55,7 @@ test('background connects to the native host and answers only valid requests', a
   assert.equal(hello.id, 0);
   assert.equal(hello.hello.version, '9.9.9');
   assert.equal(hello.hello.unpacked, true);
-  assert.deepEqual(Object.keys(hello.hello.files), ['manifest.json', 'background.js', 'ops.js', 'send.js']);
+  assert.deepEqual(Object.keys(hello.hello.files), ['manifest.json', 'background.js', 'ops.js', 'send.js', 'icon16.png', 'icon48.png', 'icon128.png']);
   assert.match(hello.hello.files['ops.js'], /^[0-9a-f]{64}$/);
 
   const send = (m) => listeners.message.forEach((fn) => fn(m));
