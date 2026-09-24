@@ -182,6 +182,7 @@ func askCmd() *cobra.Command {
 	var wait time.Duration
 	var parent string
 	var notify bool
+	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent> <message...>",
 		Short: "Ask another agent to do something and wait briefly for the reply",
@@ -192,15 +193,20 @@ func askCmd() *cobra.Command {
 				return err
 			}
 			body := strings.Join(args[1:], " ")
+			ups, err := r.UploadFiles(cmd.Context(), attach)
+			if err != nil {
+				return err
+			}
+			ids := client.AttachmentIDs(ups)
 			if notify {
-				req, err := r.Send(cmd.Context(), args[0], body, envelope.KindNotify, parent)
+				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids)
 				if err != nil {
 					return err
 				}
 				cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
 				return nil
 			}
-			res, err := r.Ask(cmd.Context(), args[0], body, parent, client.ClampWait(wait))
+			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait))
 			if err != nil {
 				return err
 			}
@@ -211,6 +217,7 @@ func askCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
+	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	return cmd
 }
 
@@ -287,6 +294,7 @@ func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 
 func replyCmd() *cobra.Command {
 	var status string
+	var attach []string
 	cmd := &cobra.Command{
 		Use:   "reply <request-id> <message...>",
 		Short: "Answer a request from a teammate",
@@ -296,7 +304,11 @@ func replyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rep, err := r.Reply(cmd.Context(), args[0], strings.Join(args[1:], " "), envelope.Status(status))
+			ups, err := r.UploadFiles(cmd.Context(), attach)
+			if err != nil {
+				return err
+			}
+			rep, err := r.ReplyAttached(cmd.Context(), args[0], strings.Join(args[1:], " "), envelope.Status(status), client.AttachmentIDs(ups))
 			if err != nil {
 				return err
 			}
@@ -305,6 +317,7 @@ func replyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&status, "status", "answered", "answered, failed, or declined")
+	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	return cmd
 }
 

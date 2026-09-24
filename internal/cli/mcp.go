@@ -33,18 +33,19 @@ for another session or a later check. Start Claude Code with:
 
 (channels are a research preview; custom channels need that flag).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			r, _, err := connect()
+			r, cfg, err := connect()
 			if err != nil {
 				return err
 			}
+			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			if !channel {
-				return mcpserver.New(r, Version).Run(cmd.Context(), &mcp.StdioTransport{})
+				return mcpserver.New(r, Version, files).Run(cmd.Context(), &mcp.StdioTransport{})
 			}
 			t := mcpserver.NewChannelTransport(&mcp.StdioTransport{})
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			go pushWaiting(ctx, r, t)
-			return mcpserver.NewWithOptions(r, Version, mcpserver.ChannelOptions()).Run(ctx, t)
+			return mcpserver.NewWithOptions(r, Version, mcpserver.ChannelOptions(), files).Run(ctx, t)
 		},
 	}
 	cmd.Flags().BoolVar(&channel, "channel", false, "announce waiting teammate requests and replies in a running Claude Code session (channels preview)")

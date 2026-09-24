@@ -6,6 +6,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -27,6 +28,7 @@ const Instructions = `You are one agent in Matt's Agent Tincan team. Other joine
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from Matt, then call reply.
 - list_agents shows who is in the team, who is online, how each one wakes, and when each last called the relay.
+- ask and reply take attach, a list of local file paths to send with the message (images and small files). Images you receive show as images; other files are saved on this machine and their paths are listed.
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
 
 // Backend is what the tools need from the relay client.
@@ -43,15 +45,42 @@ type Backend interface {
 	Raw(ctx context.Context, method, path string, in, out any) error
 }
 
+// Attacher is the part of a Backend that moves attachments. *client.Relay
+// implements it; a Backend without it can neither send nor show them.
+type Attacher interface {
+	UploadFiles(ctx context.Context, paths []string) ([]client.UploadedAttachment, error)
+	SendAttached(ctx context.Context, to, body string, kind envelope.Kind, parent string, attachments []string) (envelope.Request, error)
+	AskAttached(ctx context.Context, to, body, parent string, attachments []string, wait time.Duration) (client.Result, error)
+	ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error)
+	FetchAttachment(ctx context.Context, id string) ([]byte, client.DownloadedAttachment, error)
+}
+
+// Option configures the server.
+type Option func(*options)
+
+type options struct {
+	filesDir string // where received non-image files are saved; "" means local files are off
+}
+
+// LocalFiles lets ask and reply attach files from this machine and saves
+// received non-image attachments in dir (0700, files 0600, named by
+// attachment id). Only a server running on the agent's own machine should
+// get it: the gateway serves remote agents and must not read its host's
+// files.
+func LocalFiles(dir string) Option {
+	return func(o *options) { o.filesDir = dir }
+}
+
 // ToolNames lists the tools the server exposes, in order.
 var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard"}
 
 type askIn struct {
-	To          string `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
-	Message     string `json:"message" jsonschema:"what you want them to do or answer"`
-	WaitSeconds int    `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the reply, 0 to 20 (default 20)"`
-	Notify      bool   `json:"notify,omitempty" jsonschema:"true to send without expecting a reply"`
-	ParentID    string `json:"parent_id,omitempty" jsonschema:"the request id you are handling, when this ask continues it"`
+	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
+	Message     string   `json:"message" jsonschema:"what you want them to do or answer"`
+	WaitSeconds int      `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the reply, 0 to 20 (default 20)"`
+	Notify      bool     `json:"notify,omitempty" jsonschema:"true to send without expecting a reply"`
+	ParentID    string   `json:"parent_id,omitempty" jsonschema:"the request id you are handling, when this ask continues it"`
+	Attach      []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
 }
 
 type idIn struct {
@@ -68,9 +97,10 @@ type inboxIn struct {
 }
 
 type replyIn struct {
-	RequestID string `json:"request_id" jsonschema:"the request you are answering"`
-	Message   string `json:"message" jsonschema:"your answer or result"`
-	Status    string `json:"status,omitempty" jsonschema:"answered (default), failed, or declined"`
+	RequestID string   `json:"request_id" jsonschema:"the request you are answering"`
+	Message   string   `json:"message" jsonschema:"your answer or result"`
+	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, or declined"`
+	Attach    []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
 }
 
 type traceIn struct {
@@ -129,16 +159,24 @@ func Onboard(ctx context.Context, r Roster, o onboard.Options, section string) (
 }
 
 // New builds the MCP server over a relay backend.
-func New(b Backend, version string) *mcp.Server {
-	return NewWithOptions(b, version, &mcp.ServerOptions{Instructions: Instructions})
+func New(b Backend, version string, opts ...Option) *mcp.Server {
+	return NewWithOptions(b, version, &mcp.ServerOptions{Instructions: Instructions}, opts...)
 }
 
 // NewWithOptions builds the MCP server with explicit options (channel mode).
-func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Server {
+func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...Option) *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
+	f := files{b: b}
+	f.att, _ = b.(Attacher)
+	for _, o := range more {
+		o(&f.options)
+	}
 
 	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask a teammate agent to do something or answer something. Waits up to wait_seconds for the reply, otherwise returns a request id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
+			if len(in.Attach) > 0 {
+				return f.askAttached(ctx, in)
+			}
 			if in.Notify {
 				req, err := b.Send(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID)
 				if err != nil {
@@ -154,7 +192,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			if err != nil {
 				return fail(err)
 			}
-			return text(client.FormatResult(res))
+			return f.result(ctx, client.FormatResult(res), replyAttachments(res))
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "get_reply", Description: "Check on a request you sent with ask."},
@@ -163,7 +201,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			if err != nil {
 				return fail(err)
 			}
-			return text(client.FormatResult(res))
+			return f.result(ctx, client.FormatResult(res), replyAttachments(res))
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "check_inbox", Description: "Pick up requests from teammates, and replies to requests you sent that you have not seen yet. Claims the requests so no one else handles them. Reply to each request when done."},
@@ -173,12 +211,20 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 				return fail(err)
 			}
 			out := client.FormatInbox(ctx, b, inbox)
+			var atts []envelope.Attachment
+			for _, r := range inbox.Replies {
+				atts = append(atts, replyAttachments(r)...)
+			}
+			for _, r := range inbox.Requests {
+				atts = append(atts, r.Attachments...)
+			}
+			res, _, _ := f.result(ctx, out, atts)
 			// Replies count as seen only once the result is built for the
 			// agent; a poll that never gets this far leaves them unseen.
 			if err := b.AckReplies(ctx, inbox.ReplyIDs()); err != nil {
-				out += fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)
+				res.Content = append(res.Content, &mcp.TextContent{Text: fmt.Sprintf("(could not mark these replies read, so they may show again: %v)\n", err)})
 			}
-			return text(out)
+			return res, nil, nil
 		})
 
 	mcp.AddTool(s, &mcp.Tool{Name: "claim", Description: "Mark a delivered request as yours to handle. check_inbox already does this."},
@@ -192,7 +238,16 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 
 	mcp.AddTool(s, &mcp.Tool{Name: "reply", Description: "Answer a request from a teammate."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in replyIn) (*mcp.CallToolResult, any, error) {
-			rep, err := b.Reply(ctx, in.RequestID, in.Message, envelope.Status(in.Status))
+			var rep envelope.Reply
+			var err error
+			if len(in.Attach) > 0 {
+				var ids []string
+				if ids, err = f.upload(ctx, in.Attach); err == nil {
+					rep, err = f.att.ReplyAttached(ctx, in.RequestID, in.Message, envelope.Status(in.Status), ids)
+				}
+			} else {
+				rep, err = b.Reply(ctx, in.RequestID, in.Message, envelope.Status(in.Status))
+			}
 			if err != nil {
 				return fail(err)
 			}
@@ -273,6 +328,100 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions) *mcp.Ser
 			return text(out.String())
 		})
 	return s
+}
+
+// files sends and shows attachments for the tools.
+type files struct {
+	options
+	b   Backend
+	att Attacher // nil when the backend cannot move attachments
+}
+
+// upload checks that local files may be attached here, then uploads them
+// all (the client checks every file and the relay's support first).
+func (f files) upload(ctx context.Context, paths []string) ([]string, error) {
+	if f.filesDir == "" {
+		return nil, errors.New("this server cannot attach local files (attach works only in the MCP server on the agent's own machine)")
+	}
+	if f.att == nil {
+		return nil, errors.New("this server cannot send attachments")
+	}
+	ups, err := f.att.UploadFiles(ctx, paths)
+	if err != nil {
+		return nil, err
+	}
+	return client.AttachmentIDs(ups), nil
+}
+
+func (f files) askAttached(ctx context.Context, in askIn) (*mcp.CallToolResult, any, error) {
+	ids, err := f.upload(ctx, in.Attach)
+	if err != nil {
+		return fail(err)
+	}
+	if in.Notify {
+		req, err := f.att.SendAttached(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, ids)
+		if err != nil {
+			return fail(err)
+		}
+		return text(fmt.Sprintf("Sent to %s with %d attachments (request %s).", in.To, len(ids), req.ID))
+	}
+	wait := MaxWait
+	if in.WaitSeconds != 0 {
+		wait = clamp(in.WaitSeconds)
+	}
+	res, err := f.att.AskAttached(ctx, in.To, in.Message, in.ParentID, ids, wait)
+	if err != nil {
+		return fail(err)
+	}
+	return f.result(ctx, client.FormatResult(res), replyAttachments(res))
+}
+
+// result is the tool result for msg plus atts: images are fetched and shown
+// as image content, other files are saved under filesDir (when local files
+// are on) and their paths listed. A failed fetch is reported in the text and
+// does not fail the call.
+func (f files) result(ctx context.Context, msg string, atts []envelope.Attachment) (*mcp.CallToolResult, any, error) {
+	if len(atts) == 0 || f.att == nil {
+		return text(msg)
+	}
+	var b strings.Builder
+	b.WriteString(msg)
+	var images []mcp.Content
+	for _, a := range atts {
+		data, d, err := f.att.FetchAttachment(ctx, a.ID)
+		if err != nil {
+			fmt.Fprintf(&b, "Attachment %s %q: could not fetch it: %v\n", a.ID, a.Name, err)
+			continue
+		}
+		declared := d.MIME
+		if declared == "" {
+			declared = a.MIME
+		}
+		if mt, ok := client.InlineImage(declared, data); ok {
+			fmt.Fprintf(&b, "Attachment %s %q (%s, %d bytes): shown as an image below.\n", a.ID, a.Name, mt, len(data))
+			images = append(images, &mcp.ImageContent{Data: data, MIMEType: mt})
+			continue
+		}
+		mt := client.MediaType(declared)
+		if f.filesDir == "" {
+			fmt.Fprintf(&b, "Attachment %s %q (%s, %d bytes): not saved here.\n", a.ID, a.Name, mt, len(data))
+			continue
+		}
+		p, err := client.SaveAttachmentFile(f.filesDir, a.ID, mt, data)
+		if err != nil {
+			fmt.Fprintf(&b, "Attachment %s %q: could not save it: %v\n", a.ID, a.Name, err)
+			continue
+		}
+		fmt.Fprintf(&b, "Attachment %s %q (%s, %d bytes): saved to %s\n", a.ID, a.Name, mt, len(data), p)
+	}
+	return &mcp.CallToolResult{Content: append([]mcp.Content{&mcp.TextContent{Text: b.String()}}, images...)}, nil, nil
+}
+
+func replyAttachments(r client.Result) []envelope.Attachment {
+	if r.Reply == nil {
+		return nil
+	}
+	return r.Reply.Attachments
 }
 
 func clamp(secs int) time.Duration {

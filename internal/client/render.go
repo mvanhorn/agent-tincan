@@ -23,6 +23,7 @@ func FormatRequest(req envelope.Request) string {
 	b.WriteString("---\n")
 	b.WriteString(req.Body)
 	b.WriteString("\n---\n")
+	b.WriteString(FormatAttachments(req.Attachments))
 	return b.String()
 }
 
@@ -30,7 +31,7 @@ func FormatRequest(req envelope.Request) string {
 func FormatResult(r Result) string {
 	switch {
 	case r.Reply != nil:
-		return fmt.Sprintf("%s replied (%s):\n%s\n", r.Reply.From, r.Reply.Status, r.Reply.Body)
+		return fmt.Sprintf("%s replied (%s):\n%s\n", r.Reply.From, r.Reply.Status, r.Reply.Body) + FormatAttachments(r.Reply.Attachments)
 	case r.Done():
 		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
 	default:
@@ -47,8 +48,9 @@ const RepliesHeading = "Replies to your requests:\n"
 func FormatReply(r Result) string {
 	var b strings.Builder
 	from, status, body := r.Request.To, r.Status, ""
+	var atts []envelope.Attachment
 	if r.Reply != nil {
-		from, status, body = r.Reply.From, r.Reply.Status, r.Reply.Body
+		from, status, body, atts = r.Reply.From, r.Reply.Status, r.Reply.Body, r.Reply.Attachments
 	}
 	fmt.Fprintf(&b, "Request %s to %s: %s replied (%s).\n", r.Request.ID, r.Request.To, from, status)
 	fmt.Fprintf(&b, "You asked: %s\n", truncate(r.Request.Body, 300))
@@ -64,6 +66,22 @@ func FormatReply(r Result) string {
 	b.WriteString("---\n")
 	b.WriteString(body)
 	b.WriteString("\n---\n")
+	b.WriteString(FormatAttachments(atts))
+	return b.String()
+}
+
+// FormatAttachments lists a message's attachments by id, with the sender's
+// display name, type and size, and how to fetch one. It is empty when there
+// are none.
+func FormatAttachments(atts []envelope.Attachment) string {
+	if len(atts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Attachments (%d), fetch one with `tincan attachment get <id>`:\n", len(atts))
+	for _, a := range atts {
+		fmt.Fprintf(&b, "  %s %q (%s, %d bytes)\n", a.ID, a.Name, a.MIME, a.Size)
+	}
 	return b.String()
 }
 

@@ -1,8 +1,11 @@
 package mcpserver_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -376,5 +379,247 @@ func TestCheckInboxShowsRepliesFirst(t *testing.T) {
 	}
 	if again := call(t, cs, "check_inbox", nil); strings.Contains(again, "no slots") || !strings.Contains(again, "No requests waiting") {
 		t.Fatalf("second check_inbox = %q", again)
+	}
+}
+
+var testPNG = append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{7}, 64)...)
+
+// attachMesh is a mesh whose relay stores attachments.
+func attachMesh(t *testing.T, cfg relay.Config) *testrelay.Mesh {
+	t.Helper()
+	m := testrelay.New(t, cfg)
+	m.Server.SetAttachmentDir(t.TempDir())
+	return m
+}
+
+// fileSession is session with local files on: attach paths are read and
+// non-image attachments are saved under dir.
+func fileSession(t *testing.T, m *testrelay.Mesh, agent, dir string) *mcp.ClientSession {
+	t.Helper()
+	srvT, cliT := mcp.NewInMemoryTransports()
+	srv := mcpserver.New(m.Client(t, agent), "test", mcpserver.LocalFiles(dir))
+	ss, err := srv.Connect(t.Context(), srvT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ss.Close() })
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil).Connect(t.Context(), cliT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
+}
+
+// callFull returns a tool's text and its image contents.
+func callFull(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any) (string, []*mcp.ImageContent) {
+	t.Helper()
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: tool, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s: %v", tool, err)
+	}
+	var b strings.Builder
+	var imgs []*mcp.ImageContent
+	for _, c := range res.Content {
+		switch c := c.(type) {
+		case *mcp.TextContent:
+			b.WriteString(c.Text)
+		case *mcp.ImageContent:
+			imgs = append(imgs, c)
+		}
+	}
+	if res.IsError {
+		return "ERROR: " + b.String(), imgs
+	}
+	return b.String(), imgs
+}
+
+func writeFile(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// A reply with an attached PNG reaches the asker as image content, in
+// check_inbox and in get_reply.
+func TestReplyImageShowsAsImageContent(t *testing.T) {
+	m := attachMesh(t, relay.Config{MaxWait: 3 * time.Second})
+	grok := fileSession(t, m, "grokbot", filepath.Join(t.TempDir(), "grok"))
+	muse := fileSession(t, m, "muse", filepath.Join(t.TempDir(), "muse"))
+
+	call(t, grok, "ask", map[string]any{"to": "muse", "message": "send the chart", "wait_seconds": 1})
+	id := between(call(t, muse, "check_inbox", nil), "Request ", " from")
+	img := writeFile(t, "chart.png", testPNG)
+	if got := call(t, muse, "reply", map[string]any{"request_id": id, "message": "here it is", "attach": []string{img}}); !strings.Contains(got, "Replied") {
+		t.Fatalf("reply = %q", got)
+	}
+
+	for _, tool := range []string{"check_inbox", "get_reply"} {
+		var args map[string]any
+		if tool == "get_reply" {
+			args = map[string]any{"request_id": id}
+		}
+		out, imgs := callFull(t, grok, tool, args)
+		if !strings.Contains(out, "here it is") || !strings.Contains(out, "chart.png") {
+			t.Fatalf("%s text = %q", tool, out)
+		}
+		if len(imgs) != 1 || imgs[0].MIMEType != "image/png" || !bytes.Equal(imgs[0].Data, testPNG) {
+			t.Fatalf("%s images = %+v", tool, imgs)
+		}
+	}
+}
+
+// An image the asker attaches shows to the target in check_inbox.
+func TestAskImageShowsInTargetInbox(t *testing.T) {
+	m := attachMesh(t, relay.Config{})
+	grok := fileSession(t, m, "grokbot", t.TempDir())
+	muse := fileSession(t, m, "muse", t.TempDir())
+	out := call(t, grok, "ask", map[string]any{"to": "muse", "message": "what is this", "notify": true, "attach": []string{writeFile(t, "x.png", testPNG)}})
+	if !strings.Contains(out, "Sent to muse") {
+		t.Fatalf("ask = %q", out)
+	}
+	text, imgs := callFull(t, muse, "check_inbox", nil)
+	if !strings.Contains(text, "what is this") || len(imgs) != 1 || !bytes.Equal(imgs[0].Data, testPNG) {
+		t.Fatalf("inbox = %q, %d images", text, len(imgs))
+	}
+}
+
+// Non-image attachments are saved as <id>.<ext> in the agent's directory,
+// 0600 in a 0700 dir, whatever name the uploader gave them.
+func TestNonImageSavedByIDInsideDir(t *testing.T) {
+	m := attachMesh(t, relay.Config{})
+	ctx := t.Context()
+	root := t.TempDir()
+	dir := filepath.Join(root, "attachments", "grokbot")
+	grok := fileSession(t, m, "grokbot", dir)
+	museC := m.Client(t, "muse")
+
+	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "send the notes", envelope.KindAsk, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := museC.Claim(ctx, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, name := range []string{"../../escape.txt", "/etc/evil.txt", "..", "notes.pdf"} {
+		body, mime := "hello notes", "text/plain"
+		if name == "notes.pdf" {
+			body, mime = "%PDF-1.4 fake", "application/pdf"
+		}
+		up, err := museC.UploadAttachment(ctx, name, mime, strings.NewReader(body), int64(len(body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, up.ID)
+	}
+	if _, err := museC.ReplyAttached(ctx, req.ID, "notes attached", envelope.StatusAnswered, ids); err != nil {
+		t.Fatal(err)
+	}
+
+	out, imgs := callFull(t, grok, "check_inbox", nil)
+	if len(imgs) != 0 {
+		t.Fatalf("non-images came back as images: %d", len(imgs))
+	}
+	st, err := os.Stat(dir)
+	if err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("dir = %v, %v", st, err)
+	}
+	want := map[string]bool{ids[0] + ".txt": true, ids[1] + ".txt": true, ids[2] + ".txt": true, ids[3] + ".pdf": true}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != len(want) {
+		t.Fatalf("dir holds %v, want %v", entries, want)
+	}
+	for _, e := range entries {
+		if !want[e.Name()] {
+			t.Fatalf("unexpected file %q", e.Name())
+		}
+		info, _ := e.Info()
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v", e.Name(), info.Mode().Perm())
+		}
+		if !strings.Contains(out, filepath.Join(dir, e.Name())) {
+			t.Fatalf("inbox does not report %s:\n%s", e.Name(), out)
+		}
+	}
+	// Nothing escaped: the root holds only the attachments tree.
+	if es, _ := os.ReadDir(root); len(es) != 1 || es[0].Name() != "attachments" {
+		t.Fatalf("root holds %v", es)
+	}
+	if es, _ := os.ReadDir(filepath.Join(root, "attachments")); len(es) != 1 {
+		t.Fatalf("attachments holds %v", es)
+	}
+	if !strings.Contains(out, "application/pdf") || !strings.Contains(out, "escape.txt") {
+		t.Fatalf("inbox should show mime and display name:\n%s", out)
+	}
+}
+
+// Against a relay that stores no attachments, ask and reply with attach
+// fail before anything is sent.
+func TestAttachAgainstRelayWithoutSupport(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	grok := fileSession(t, m, "grokbot", t.TempDir())
+	img := writeFile(t, "a.png", testPNG)
+	out := call(t, grok, "ask", map[string]any{"to": "muse", "message": "look", "attach": []string{img}})
+	if !strings.HasPrefix(out, "ERROR:") || !strings.Contains(out, "does not support attachments") {
+		t.Fatalf("ask = %q", out)
+	}
+	if n, _ := m.Store.CountQueued(ctx, "muse"); n != 0 {
+		t.Fatalf("refused ask queued %d requests", n)
+	}
+	req, _ := m.Client(t, "muse").Send(ctx, "grokbot", "send it", envelope.KindAsk, "")
+	m.Client(t, "grokbot").Claim(ctx, req.ID)
+	out = call(t, grok, "reply", map[string]any{"request_id": req.ID, "message": "here", "attach": []string{img}})
+	if !strings.HasPrefix(out, "ERROR:") || !strings.Contains(out, "does not support attachments") {
+		t.Fatalf("reply = %q", out)
+	}
+	if res, _ := m.Client(t, "muse").Get(ctx, req.ID, 0); res.Reply != nil {
+		t.Fatalf("refused reply was sent: %+v", res.Reply)
+	}
+}
+
+// Bad attach lists fail before sending: a missing file, a file over the
+// relay's cap, and more files than a message carries.
+func TestAttachEdgeCases(t *testing.T) {
+	m := attachMesh(t, relay.Config{Attachments: relay.AttachmentConfig{MaxFileBytes: 1024}})
+	ctx := t.Context()
+	grok := fileSession(t, m, "grokbot", t.TempDir())
+	small := writeFile(t, "s.txt", []byte("hi"))
+	many := make([]string, envelope.MaxAttachments+1)
+	for i := range many {
+		many[i] = small
+	}
+	for name, tc := range map[string]struct {
+		paths []string
+		want  string
+	}{
+		"missing":  {[]string{filepath.Join(t.TempDir(), "nope.png")}, "nope.png"},
+		"oversize": {[]string{writeFile(t, "big.bin", bytes.Repeat([]byte("x"), 2048))}, "larger than 1024 bytes"},
+		"too many": {many, "too many attachments"},
+		"dir":      {[]string{t.TempDir()}, "not a regular file"},
+	} {
+		out := call(t, grok, "ask", map[string]any{"to": "muse", "message": "x", "attach": tc.paths})
+		if !strings.HasPrefix(out, "ERROR:") || !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: ask = %q, want error containing %q", name, out, tc.want)
+		}
+	}
+	if n, _ := m.Store.CountQueued(ctx, "muse"); n != 0 {
+		t.Fatalf("refused asks queued %d requests", n)
+	}
+}
+
+// A server without local files (the gateway) never reads local paths.
+func TestAttachNeedsLocalFiles(t *testing.T) {
+	m := attachMesh(t, relay.Config{})
+	out := call(t, session(t, m, "grokbot"), "ask", map[string]any{"to": "muse", "message": "x", "attach": []string{writeFile(t, "a.png", testPNG)}})
+	if !strings.HasPrefix(out, "ERROR:") || !strings.Contains(out, "local files") {
+		t.Fatalf("ask = %q", out)
+	}
+	if n, _ := m.Store.CountQueued(t.Context(), "muse"); n != 0 {
+		t.Fatalf("queued %d", n)
 	}
 }
