@@ -70,6 +70,7 @@ func TestInstallServiceDarwin(t *testing.T) {
 }
 
 func TestInstallServiceLinux(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no codex or claude found on this machine
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{GOOS: "linux", Home: home, Binary: "/opt/tin can/tincan"})
 	if err != nil {
@@ -87,6 +88,9 @@ func TestInstallServiceLinux(t *testing.T) {
 	}
 	if !strings.Contains(res.Next, "systemctl --user enable --now tincan-history.service") {
 		t.Fatalf("next = %q", res.Next)
+	}
+	if strings.Contains(s, "homebrew") || !strings.Contains(s, home+"/.local/bin") {
+		t.Errorf("unit PATH should carry user bins and no macOS paths:\n%s", s)
 	}
 }
 

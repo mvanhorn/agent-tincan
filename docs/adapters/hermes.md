@@ -4,7 +4,7 @@ Hermes runs its own messaging gateway with a built-in webhook server, so it can 
 
 ## Install
 
-Put the static `tincan` binary on the Hermes host's PATH. `make build` in this repo produces a CGO_ENABLED=0 binary for darwin/arm64, linux/amd64, and linux/arm64; copy the one matching the Hermes machine (matts-mac-mini is darwin/arm64).
+Put the static `tincan` binary on the Hermes host's PATH: download the one for its platform (`tincan_darwin_arm64`, `tincan_linux_amd64` or `tincan_linux_arm64`) from the release page and install it as in [docs/quickstart.md](../quickstart.md#0-install-tincan). To build instead, `make build` produces a CGO_ENABLED=0 binary for the machine it runs on only; `make dist` cross-builds all three release binaries into `dist/`.
 
 ## Join
 
@@ -71,7 +71,7 @@ If the webhook gateway is unavailable, run a listener that starts a one-shot Her
 tincan listen --exec 'hermes -z "Call check_inbox, claim and do each waiting Agent Tincan request, and reply to each with its request id. Keep calling check_inbox until it reports the inbox empty."'
 ```
 
-`hermes -z "<prompt>"` (also spelled `--oneshot`) sends a single prompt, prints only the final response, and exits; confirmed against the installed `hermes --help` on matts-mac-mini. Set this agent's wake to `command` in `wake.json`.
+`hermes -z "<prompt>"` (also spelled `--oneshot`) sends a single prompt, prints only the final response, and exits; confirmed against an installed `hermes --help`. Set this agent's wake to `command` in `wake.json`.
 
 ## Limits
 

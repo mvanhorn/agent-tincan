@@ -51,6 +51,20 @@ The plumbing, in plain words:
 
 ## How it works end to end
 
+### Install
+
+Put the `tincan` binary on the relay host, on every agent's machine, and on your admin device. Download it from the Agent Tincan release page (Releases on the GitHub repo): `tincan_darwin_arm64` (Mac with Apple silicon), `tincan_linux_amd64` or `tincan_linux_arm64`, plus `checksums.txt`. There is no Intel Mac or Windows build; build those from source with `make build`.
+
+```bash
+grep tincan_darwin_arm64 checksums.txt | shasum -a 256 -c -   # must print "OK" (Linux: sha256sum -c -)
+chmod +x tincan_darwin_arm64
+xattr -d com.apple.quarantine tincan_darwin_arm64 2>/dev/null   # macOS only: a browser download is quarantined
+sudo mv tincan_darwin_arm64 /usr/local/bin/tincan               # or any directory on your PATH
+tincan version
+```
+
+Step by step, including the relay and your first two agents: [docs/quickstart.md](docs/quickstart.md).
+
 ### The relay
 
 One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead.
@@ -60,7 +74,7 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone
 ```
 
 - `--admin` lists the machine names allowed to invite and remove agents. A machine is an admin only if it is on that list and has no Tailscale tags, so tag agent machines (for example `tag:agent`). `--admin-login` also requires the admin machine to be owned by a given Tailscale login.
-- On the relay host itself, admin commands can use the local socket: `tincan invite muse --socket <state-dir>/admin.sock`.
+- On the relay host itself, admin commands can use the local socket: `tincan invite muse --socket <state-dir>/admin.sock`. The relay prints the path at startup. The default state dir is `~/.config/tincan-relay` on Linux and `~/Library/Application Support/tincan-relay` on macOS; quote the macOS path, it has a space.
 - State (the database, `wake.json`, attachments, the audit log) lives in `--state-dir`. Run the relay as its own OS user, under systemd or launchd, so agents cannot read its state.
 
 The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway (see [ChatGPT](#chatgpt-through-the-oauth-mcp-gateway)).
@@ -74,7 +88,9 @@ tincan invite grokbot --kind vm-webhook          # admin device
 tincan join ABCD-EFGH --relay http://tincan-relay # agent's machine
 ```
 
-`--kind` records the agent's runtime so `tincan onboard` tailors its setup (kinds are listed under [Onboarding](#onboarding); `tincan kind <name> <kind>` changes it later). `join` saves the relay URL and agent name in the client config (`TINCAN_CONFIG` when set). `--proxy` saves a proxy used only for relay traffic, for sandboxes that reach the tailnet through a proxy.
+`invite` prints the code and the join command to run, with the relay URL filled in when it knows it (from `--relay` or a saved config). `--kind` records the agent's runtime so `tincan onboard` tailors its setup (kinds are listed under [Onboarding](#onboarding); `tincan kind <name> <kind>` changes it later). Inviting a name again retires the earlier code for it if that code was not used yet. `join` saves the relay URL and agent name in the client config (`TINCAN_CONFIG` when set). `--proxy` saves a proxy used only for relay traffic, for sandboxes that reach the tailnet through a proxy.
+
+An admin device usually never joins, so it has no saved config. Admin and roster commands (`invite`, `remove`, `kind`, `agents`, `trace`, `audit-verify`) take `--relay <url>`, or `--socket <state-dir>/admin.sock` on the relay host. Two environment variables override the saved config for any command: `TINCAN_RELAY` (the relay URL) and `TINCAN_PROXY` (the proxy). For example, `TINCAN_RELAY=http://tincan-relay tincan agents`.
 
 `tincan remove <name>` cuts an agent off immediately: its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
 
@@ -129,7 +145,7 @@ Requests and replies can carry images and small files. The file is uploaded to t
 
 Retention: an upload no message carries is deleted after 24 hours. A file on a request is deleted 7 days after the request reaches a final state; its metadata stays, marked deleted, so traces still show what was sent. A file can be downloaded only by its uploader, the sender and target of the request that carries it, and admins.
 
-In the MCP tools, received images show as images. Other files are saved as `<attachment id>.<ext>` in the agent's attachments directory (`attachments/<agent>` beside its config, 0700, files 0600); the sender's file name is shown but never used. From the CLI, `tincan attachment get <id>` saves to the same place, or `-o <path>` (`-o -` for stdout). Attaching local files works only in the MCP server running on the agent's own machine.
+In the MCP tools, received images show as images. Other files are saved as `<attachment id>.<ext>` in the agent's attachments directory (`attachments/<agent>` beside its config, 0700, files 0600); the sender's file name is shown but never used. From the CLI, `tincan attachment get <id>` saves to the same place, or `-o <path>` (`-o -` for stdout). The MCP `attach` argument and the CLI `--attach` flag both read files on the machine where tincan runs, so an MCP server reached from elsewhere cannot attach files from your machine.
 
 ### Reply wakes and follow-ups
 
@@ -358,7 +374,7 @@ When requests or replies are waiting, the channel pushes a notice such as `<chan
 
 Claim-on-inbox semantics: the notice never carries the items and never claims anything. Every open Claude Code session runs its own `tincan mcp --channel`, so every session gets the notice; the first one to call `check_inbox` claims the requests, and the others find an empty inbox. A session started without channels, or idle, drops the notice and the items stay queued. Each process announces an item once, and again after 10 quiet minutes if it is still waiting.
 
-Fallback without channels: `tincan listen --exec ~/agent-tincan/examples/claude-code/cmux-wake.sh` opens a new Claude Code session in cmux when requests are waiting (cmux's `automation.socketControlMode` must allow it). Set the wake to `command` for this.
+Fallback without channels: copy [examples/claude-code/cmux-wake.sh](examples/claude-code/cmux-wake.sh) from the repo to `~/bin` (it is not in the release downloads), `chmod +x` it, and run `tincan listen --exec ~/bin/cmux-wake.sh`. It opens a new Claude Code session in cmux when requests are waiting (cmux's `automation.socketControlMode` must allow it). Set the wake to `command` for this.
 
 #### How it sends and receives
 
@@ -395,10 +411,11 @@ TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan join <code> --relay http:
 
 #### How it wakes
 
-Command, through [examples/codex/codex-wake.sh](examples/codex/codex-wake.sh):
+Command, through [examples/codex/codex-wake.sh](examples/codex/codex-wake.sh). The script is not in the release downloads: copy it from the repo to a folder you keep, then point the listener at it:
 
 ```bash
-tincan listen --exec ~/agent-tincan/examples/codex/codex-wake.sh
+mkdir -p ~/bin && cp examples/codex/codex-wake.sh ~/bin/ && chmod +x ~/bin/codex-wake.sh   # from a repo checkout
+TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan listen --exec ~/bin/codex-wake.sh
 ```
 
 The script exports the codex `TINCAN_CONFIG` and runs `codex exec` with a prompt that tells Codex to call `check_inbox`, finish work waiting on replies, handle and reply to each request, and repeat until the inbox is empty. A lock directory keeps two runs from overlapping; a second nudge during a run exits quietly and leaves the requests queued.
@@ -578,7 +595,7 @@ A Go service, `tincan history serve`, not a model. It answers teammates' questio
 - ChatGPT (chatgpt.com) and claude.ai, read live through the Tincan Chrome extension and native messaging in the owner's logged-in Chrome.
 - Codex (CLI and desktop app) and Claude Code, read from their local files (`sessions` under `$CODEX_HOME` or `~/.codex`, and `$CLAUDE_CONFIG_DIR/projects` or `~/.claude/projects`).
 
-Ask it things like "what was the last thing Matt asked ChatGPT? send the image". Agent Tincan's operator prompt routes history questions to it.
+Ask it things like "what was the last thing I asked ChatGPT? send the image". Agent Tincan's operator prompt routes history questions to it.
 
 #### How it joins
 
@@ -609,11 +626,16 @@ The same readers are on the CLI: `tincan history <chatgpt|claude-ai|codex|claude
 Install the Tincan Chrome extension (see [below](#the-tincan-chrome-extension)), make sure `codex` is installed and logged in, then:
 
 ```bash
-tincan history install
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist
+tincan history install --extension-dir ~/tincan-extension                          # the folder you loaded unpacked
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist   # macOS
+systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service  # Linux
 ```
 
-`tincan history install` writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS logging to `~/Library/Logs/tincan-history.log`, or `~/.config/systemd/user/tincan-history.service` on Linux) and prints the start command. It starts nothing. Run it from the repo checkout (or with `--extension-dir`) so the native host can reload the unpacked extension when its files change. `--no-service` skips the service definition.
+`tincan history install` writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS logging to `~/Library/Logs/tincan-history.log`, or `~/.config/systemd/user/tincan-history.service` on Linux) and prints the start command. It starts nothing. Pass `--extension-dir <the folder you loaded>` (or run it from a repo checkout, where it finds `extension/`) so the native host can reload the unpacked extension when its files change. `--no-service` skips the service definition.
+
+The service does not get your login shell's PATH. Its PATH starts with the directories where `codex` and `claude` were found when you ran `tincan history install`, then `~/.local/bin`, `~/.npm-global/bin` and `~/bin`, then the system directories. If you install or move `codex` later, run `tincan history install` again.
+
+On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 #### Limits and gotchas
 
@@ -666,7 +688,7 @@ tincan web install --site chatgpt
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.web.chatgpt.plist
 ```
 
-For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`).
+For Claude: `tincan web install --site claude-ai` and `com.agenttincan.web.claude-ai.plist`. `tincan web install` writes the launchd agent (or a systemd user unit on Linux) and prints the start command; it starts nothing. Logs go to `~/Library/Logs/tincan-chatgpt-web.log` (or `tincan-claude-web.log`). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 #### Limits and gotchas
 
@@ -695,9 +717,15 @@ What it cannot do:
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
 - Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai.
 
-Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. The listing is not published yet, so for now load `extension/` unpacked once from `chrome://extensions`, then run `tincan history install` so Chrome can start the native host. The manifest carries a public key, so an unpacked load always gets the id `ciejooalclcpgpapboofdbbddphldhnh`; a store listing with its own id is passed with `tincan history install --extension-id <id>`.
+Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
-Self-reload: after the first load, updates need no Reload click. When the extension connects, it sends the native host its version and the sha256 of each file (hashed when its worker started). If `tincan history install` was run from the repo checkout (or with `--extension-dir`) and the files on disk differ, the host sends `extension.reload` and the extension calls `chrome.runtime.reload()`. It waits while a send has a tab open, checking every 5 seconds for up to 5 minutes. The host asks at most once per 10 minutes for the same files. A store install is never reloaded this way.
+1. Download `tincan-history-extension.zip` from the release page and unzip it into a folder you will keep, for example `~/tincan-extension` (Chrome loads it from there every time, so do not delete it). From a repo checkout, the `extension/` folder works the same way.
+2. Open `chrome://extensions`, turn on Developer mode (top right), click Load unpacked, and pick that folder.
+3. Run `tincan history install --extension-dir ~/tincan-extension` so Chrome can start the native host and the host can reload the extension when its files change.
+
+The manifest carries a public key, so an unpacked load always gets the id `ciejooalclcpgpapboofdbbddphldhnh`; a store listing with its own id is passed with `tincan history install --extension-id <id>`.
+
+Self-reload: after the first load, updates need no Reload click. When the extension connects, it sends the native host its version and the sha256 of each file (hashed when its worker started). If `tincan history install` was run with `--extension-dir` (or from a repo checkout) and the files on disk differ, the host sends `extension.reload` and the extension calls `chrome.runtime.reload()`. It waits while a send has a tab open, checking every 5 seconds for up to 5 minutes. The host asks at most once per 10 minutes for the same files. A store install is never reloaded this way.
 
 Why an extension is required: ChatGPT and claude.ai offer no official API for reading your own chat history, so the reads go through the sites' own endpoints with your existing browser session, and sends need the real page. An extension is the one way to do that inside your logged-in Chrome without exporting cookies or tokens. Chrome requires a person to click to install any extension, so that click is the one human step in the setup.
 
@@ -737,11 +765,22 @@ make test             # go test -race ./...
 make vet              # go vet ./...
 make extension-test   # node --test for the extension worker code (no dependencies)
 make extension        # dist/tincan-history-extension.zip
+make dist             # every release asset in dist/ (see below)
 ```
 
-CI runs `go vet` and `go test -race` on Linux and macOS, and checks the static builds for linux/amd64, linux/arm64 and darwin/arm64.
+`make build` builds one binary, for the machine you run it on. CI runs `go vet` and `go test -race` on Linux and macOS, and checks the static builds for linux/amd64, linux/arm64 and darwin/arm64.
 
-Releases are on GitHub at [github.com/mvanhorn/agent-tincan/releases](https://github.com/mvanhorn/agent-tincan/releases). Each carries `tincan_darwin_arm64`, `tincan_linux_amd64`, `tincan_linux_arm64`, `checksums.txt` and `tincan-history-extension.zip`. The binaries and `checksums.txt` are what the relay's `--dist` directory takes (add a `VERSION` file).
+Releases are on the GitHub repo's release page. Each carries `tincan_darwin_arm64`, `tincan_linux_amd64`, `tincan_linux_arm64`, `checksums.txt` (sha256 of the three binaries) and `tincan-history-extension.zip`. The binaries and `checksums.txt` are what the relay's `--dist` directory takes (add a `VERSION` file).
+
+Releases are cut by hand; CI does not publish them. From a clean checkout of the commit to release:
+
+```bash
+git tag v0.5.0 && git push origin v0.5.0
+make dist        # static binaries for the three targets, checksums.txt and the extension zip, in dist/
+gh release create v0.5.0 --prerelease --title v0.5.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
+```
+
+`make dist` stamps the version from `git describe`, so tag first.
 
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 

@@ -78,6 +78,11 @@ func (m *MemoryStore) AgentByName(_ context.Context, name string) (Agent, bool, 
 func (m *MemoryStore) PutInvite(_ context.Context, inv Invite) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for code, old := range m.invites {
+		if old.Name == inv.Name {
+			delete(m.invites, code)
+		}
+	}
 	m.invites[inv.Code] = inv
 	return nil
 }

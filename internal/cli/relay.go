@@ -106,6 +106,10 @@ func defaultStateDir() string {
 func runRelay(ctx context.Context, f relayFlags) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Check --listen before creating anything in the state dir.
+	if f.listen != "" && !strings.HasPrefix(f.listen, "100.") {
+		return fmt.Errorf("--listen must be a tailnet 100.x address, got %q", f.listen)
+	}
 	if err := os.MkdirAll(f.stateDir, 0o700); err != nil {
 		return err
 	}
@@ -118,9 +122,6 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	var ln net.Listener
 	var who *identity.LocalResolver
 	if f.listen != "" {
-		if !strings.HasPrefix(f.listen, "100.") {
-			return fmt.Errorf("--listen must be a tailnet 100.x address, got %q", f.listen)
-		}
 		who = identity.NewLocalResolverAt("")
 		if err := who.Probe(ctx); err != nil {
 			return fmt.Errorf("refusing to start without WhoIs: %w", err)
@@ -173,7 +174,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	api := client.Configure(&http.Server{Handler: srv.Handler()}, client.RelayAPI)
 	adminSock := filepath.Join(f.stateDir, "admin.sock")
 	os.Remove(adminSock)
-	aln, err := net.Listen("unix", adminSock)
+	aln, err := client.ListenUnix(adminSock)
 	if err != nil {
 		return fmt.Errorf("admin socket: %w", err)
 	}

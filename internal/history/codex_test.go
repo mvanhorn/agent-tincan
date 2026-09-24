@@ -330,7 +330,7 @@ func TestCodexConversationByID(t *testing.T) {
 func TestCodexMissingHomeIsAClearError(t *testing.T) {
 	r := &Codex{Home: filepath.Join(t.TempDir(), "nope"), Now: func() time.Time { return fixtureNow }}
 	_, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
-	if err == nil || !strings.Contains(err.Error(), "session_index.jsonl") {
+	if err == nil || !strings.Contains(err.Error(), "no Codex history found in "+r.Home) {
 		t.Fatalf("err = %v", err)
 	}
 }

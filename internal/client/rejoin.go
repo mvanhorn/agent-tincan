@@ -46,6 +46,13 @@ func RejoinHint(err error, relayURL string) error {
 	if relayURL == "" {
 		relayURL = "<relay url>"
 	}
+	if !strings.Contains(msg, notJoinedText) {
+		// No config at all: a fresh admin device or a never-joined machine
+		// is far more common than a rebuilt agent, so say both.
+		hint := "If this machine is an agent that was joined before and lost its config (for example after a rebuild), run `tincan rejoin --relay " + relayURL +
+			"` yourself (add --proxy <url> if you reach the relay through a proxy). An admin device that never joined does not need this: pass --relay <url> instead."
+		return fmt.Errorf("%w\n%s", err, hint)
+	}
 	hint := "If this machine was rebuilt or lost its config, run `tincan rejoin --relay " + relayURL +
 		"` yourself (add --proxy <url> if you reach the relay through a proxy). Only a machine that was never joined needs an invite from an admin."
 	return fmt.Errorf("%w\n%s", err, hint)

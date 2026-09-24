@@ -50,8 +50,8 @@ func historyCmd() *cobra.Command {
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
 		Use:   "history <chatgpt|claude-ai|codex|claude-code>",
-		Short: "Read Matt's ChatGPT, claude.ai, Codex or Claude Code history",
-		Long: "Read Matt's ChatGPT, claude.ai, Codex or Claude Code history. With no mode flag it shows the latest prompt Matt typed.\n" +
+		Short: "Read the owner's ChatGPT, claude.ai, Codex or Claude Code history",
+		Long: "Read the owner's ChatGPT, claude.ai, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
 			"Unattended runs (codex exec wakes, Claude Code SDK sessions) are left out unless --all is given.\n" +
 			"chatgpt and claude-ai are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.",
 		Args: cobra.ExactArgs(1),

@@ -81,8 +81,16 @@ RestartSec=10
 WantedBy=default.target
 `
 
-// basePath is the service's PATH after the codex directory.
-const basePath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+// basePaths are the OS default bins at the end of a service's PATH. The
+// Linux list carries no macOS (Homebrew) paths.
+var basePaths = map[string][]string{
+	"darwin": {"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"},
+	"linux":  {"/usr/local/bin", "/usr/bin", "/bin"},
+}
+
+// userBins are per-user bin directories under $HOME where npm, pipx and
+// friends put tools like codex, put on a service's PATH before the OS bins.
+var userBins = []string{".local/bin", ".npm-global/bin", "bin"}
 
 // ServiceOptions controls InstallService. Zero fields take the current
 // user's values.
@@ -93,6 +101,9 @@ type ServiceOptions struct {
 	// CodexDir is put first on the service's PATH so it finds codex (the
 	// query extractor). Default: the directory of codex on PATH, if any.
 	CodexDir string
+	// ClaudeDir is put next on the service's PATH. Default: the directory
+	// of claude on PATH, if any.
+	ClaudeDir string
 	// UID fills the printed launchctl command (default: os.Getuid()).
 	UID int
 }
@@ -110,12 +121,8 @@ func InstallService(o ServiceOptions) (ServiceResult, error) {
 	if err := o.fill(); err != nil {
 		return ServiceResult{}, err
 	}
-	if o.CodexDir == "" {
-		if p, err := exec.LookPath("codex"); err == nil {
-			o.CodexDir = filepath.Dir(p)
-		}
-	}
-	path := servicePath(o.CodexDir)
+	o.findTools()
+	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
 	return installServiceDef(o, serviceDef{
 		label:       ServiceLabel,
 		unit:        systemdUnit,
@@ -124,6 +131,22 @@ func InstallService(o ServiceOptions) (ServiceResult, error) {
 		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path},
 		unsupported: "no history service definition for " + o.GOOS + "; run tincan history serve under your own service manager",
 	})
+}
+
+// findTools fills CodexDir and ClaudeDir from where codex and claude are
+// found on PATH at install time, since a service does not get the login
+// shell's PATH.
+func (o *ServiceOptions) findTools() {
+	if o.CodexDir == "" {
+		if p, err := exec.LookPath("codex"); err == nil {
+			o.CodexDir = filepath.Dir(p)
+		}
+	}
+	if o.ClaudeDir == "" {
+		if p, err := exec.LookPath("claude"); err == nil {
+			o.ClaudeDir = filepath.Dir(p)
+		}
+	}
 }
 
 // fill defaults o's empty fields to the running system and checks the
@@ -207,10 +230,29 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 	return ServiceResult{}, errors.New(d.unsupported)
 }
 
-func servicePath(codexDir string) string {
-	parts := strings.Split(basePath, ":")
-	if codexDir != "" && !strings.ContainsAny(codexDir, ":\n\r") && !slices.Contains(parts, codexDir) {
-		parts = append([]string{codexDir}, parts...)
+// servicePath is the PATH a service runs with on goos: the tool
+// directories found at install time, then the per-user bins under home,
+// then the OS default bins. Directories that cannot be written safely into
+// a plist or a systemd Environment line are skipped, and none repeats.
+func servicePath(goos, home string, toolDirs ...string) string {
+	var dirs []string
+	dirs = append(dirs, toolDirs...)
+	if home != "" {
+		for _, b := range userBins {
+			dirs = append(dirs, filepath.Join(home, b))
+		}
+	}
+	base, ok := basePaths[goos]
+	if !ok {
+		base = basePaths["linux"]
+	}
+	dirs = append(dirs, base...)
+	var parts []string
+	for _, d := range dirs {
+		if d == "" || !filepath.IsAbs(d) || strings.ContainsAny(d, ":\n\r\x00\"\\%$ ") || slices.Contains(parts, d) {
+			continue
+		}
+		parts = append(parts, d)
 	}
 	return strings.Join(parts, ":")
 }
@@ -296,7 +338,7 @@ func WebServiceLabel(site Source) string { return "com.agenttincan.web." + strin
 
 // InstallWebService writes the service definition for a site's web agent
 // (a launchd agent on macOS, a systemd user unit on Linux). Like
-// InstallService it never loads or starts it. o.CodexDir is ignored.
+// InstallService it never loads or starts it.
 func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	if _, err := ParseWebSite(string(site)); err != nil {
 		return ServiceResult{}, err
@@ -305,12 +347,14 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 		return ServiceResult{}, err
 	}
 	agent := WebAgentName(site)
+	o.findTools()
+	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
 	return installServiceDef(o, serviceDef{
 		label:       WebServiceLabel(site),
 		unit:        "tincan-" + agent + ".service",
 		launchd:     webLaunchdTemplate,
 		systemd:     webSystemdTemplate,
-		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", basePath, "__SITE__", string(site), "__AGENT__", agent},
+		vars:        []string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path, "__SITE__", string(site), "__AGENT__", agent},
 		unsupported: "no web agent service definition for " + o.GOOS + "; run tincan web serve under your own service manager",
 	})
 }

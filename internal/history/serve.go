@@ -82,7 +82,7 @@ const (
 const DefaultRequestTimeout = 3 * time.Minute
 
 // clarifyExample is the one-line example in a clarifying reply.
-const clarifyExample = `For example: "what was the last thing Matt asked ChatGPT? send the image"`
+const clarifyExample = `For example: "what was the last thing I asked ChatGPT? send the image"`
 
 // Service is the history agent: it polls the relay as its own identity,
 // checks each request's relay-set chain against the allowlist, turns the
@@ -311,7 +311,7 @@ func replyDetached(ctx context.Context, relay *client.Relay, req envelope.Reques
 // denied returns why req may not read history, or "" when every agent in
 // its relay-set chain, and its sender, is on the allowlist.
 func (s *Service) denied(req envelope.Request) string {
-	return chainDenied(s.Allowlist, req, "history", "read Matt's conversation history", s.logf)
+	return chainDenied(s.Allowlist, req, "history", "read the owner's conversation history", s.logf)
 }
 
 // chainDenied returns why req may not use agent, or "" when every agent in
@@ -337,7 +337,7 @@ func chainDenied(allowlist func() ([]string, error), req envelope.Request, agent
 	for _, a := range chain {
 		if !slices.Contains(allowed, a) {
 			if a == req.From {
-				return fmt.Sprintf("Declined: %s is not on the %s allowlist, so it cannot %s. Matt can add it to the allowlist.", a, agent, what)
+				return fmt.Sprintf("Declined: %s is not on the %s allowlist, so it cannot %s. The owner can add it to the allowlist.", a, agent, what)
 			}
 			return fmt.Sprintf("Declined: this request came through %s, which is not on the %s allowlist, so it cannot %s. Every agent in the chain must be allowed.", a, agent, what)
 		}
@@ -351,6 +351,8 @@ func readFailure(q Query, err error) string {
 	switch {
 	case errors.As(err, &ue):
 		return "Sorry, " + ue.Error() + "."
+	case errors.Is(err, ErrNoHistory):
+		return fmt.Sprintf("No %s history was found on this machine.", sourceLabel(q.Source))
 	case errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("No %s conversation with id %s was found.", sourceLabel(q.Source), q.ConversationID)
 	case errors.Is(err, context.DeadlineExceeded):
@@ -452,7 +454,7 @@ func renderReply(q Query, convs []Conversation) string {
 				if when.IsZero() || ts.After(when) {
 					when = ts
 				}
-				fmt.Fprintf(&b, "Matt asked%s:\n%s\n", stamp(ts), capRunes(m.Text, maxPromptRunes))
+				fmt.Fprintf(&b, "The owner asked%s:\n%s\n", stamp(ts), capRunes(m.Text, maxPromptRunes))
 			case RoleAssistant:
 				lastReply = m.Text
 				if q.Mode == ModeConversation {

@@ -288,7 +288,7 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	label := siteLabel(w.Site)
 
 	// 1. Access, from relay-set fields only.
-	if reason := chainDenied(w.Allowlist, req, w.Name, "send messages to "+label+" as Matt", w.logf); reason != "" {
+	if reason := chainDenied(w.Allowlist, req, w.Name, "send messages to "+label+" as the owner", w.logf); reason != "" {
 		w.logf("request %s from %s (chain %v): declined: %s", req.ID, req.From, req.Chain, reason)
 		w.reply(ctx, req, reason, envelope.StatusDeclined, nil)
 		return

@@ -1,12 +1,12 @@
 # History agent
 
-The `history` agent answers teammates' questions about what Matt asked in four places: ChatGPT (chatgpt.com), claude.ai, Codex (CLI and desktop app) and Claude Code. Ask it things like "what was the last thing Matt asked ChatGPT? send the image" or "find Matt's recent Codex thread about the relay" and it replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments.
+The `history` agent answers teammates' questions about what the owner (you) asked in four places: ChatGPT (chatgpt.com), claude.ai, Codex (CLI and desktop app) and Claude Code. Ask it things like "what was the last thing I asked ChatGPT? send the image" or "find my recent Codex thread about the relay" (your name in place of "I" works too) and it replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments.
 
-It is a Go service, `tincan history serve`, that runs on Matt's Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
+It is a Go service, `tincan history serve`, that runs on your Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
 
 1. Checks access. Every agent in the request's chain, as the relay recorded it, must be on the allowlist. Otherwise it declines and names the agent.
 2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text.
-3. Reads the source: Codex and Claude Code from their local logs, ChatGPT and claude.ai live through the Tincan Chrome extension in Matt's logged-in Chrome.
+3. Reads the source: Codex and Claude Code from their local logs, ChatGPT and claude.ai live through the Tincan Chrome extension in your logged-in Chrome.
 4. Fills in a fixed reply template and attaches the images.
 
 Lookups cover the 50 most recent conversations per source, up to 30 days old.
@@ -16,7 +16,7 @@ Lookups cover the 50 most recent conversations per source, up to 30 days old.
 By default grokbot, claude-code and codex may ask. To change that, write `~/.config/tincan/history-allow.txt` with one agent name per line (commas and spaces also separate names, `#` starts a comment):
 
 ```
-# agents that may read Matt's conversation history
+# agents that may read the owner's conversation history
 grokbot
 claude-code
 codex
@@ -28,14 +28,17 @@ The check covers the whole chain, not only the sender. If muse asks codex and co
 
 ## Install
 
-The only human step is installing the Tincan Chrome extension from the Chrome Web Store with its standard permission dialog (it asks for chatgpt.com, claude.ai and native messaging). Until the store listing is live, load `extension/` unpacked from `chrome://extensions`; see `extension/README.md`.
+The only human step is installing the Tincan Chrome extension from the Chrome Web Store with its standard permission dialog (it asks for chatgpt.com, claude.ai and native messaging). Until the store listing is live, load it unpacked:
+
+1. Download `tincan-history-extension.zip` from the release page and unzip it into a folder you will keep, for example `~/tincan-extension`. Chrome loads it from there every time, so do not delete it. (From a repo checkout, `extension/` works the same way; see `extension/README.md`.)
+2. Open `chrome://extensions`, turn on Developer mode, click Load unpacked, and pick that folder.
 
 Then, on the Mac:
 
 ```bash
-tincan invite history                                              # on an admin device
+tincan invite history --kind history                               # on an admin device
 TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay http://tincan-relay
-tincan history install
+tincan history install --extension-dir ~/tincan-extension          # the folder you loaded
 ```
 
 `tincan history install` writes three things and starts nothing:
@@ -56,34 +59,37 @@ On Linux:
 systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service
 ```
 
-Run from the repo checkout (or with `--extension-dir <path to extension/>`), install also tells the native host where the unpacked extension lives; the host then reloads the extension whenever those files change, so updates need no Reload click in `chrome://extensions` after the first load (see [web-agents.md](web-agents.md#extension-updates)).
+On a headless Linux box, also run `loginctl enable-linger $USER` once; without it, systemd stops user services when you log out.
+
+With `--extension-dir <the folder you loaded>` (or run from a repo checkout, where it finds `extension/`), install also tells the native host where the unpacked extension lives; the host then reloads the extension whenever those files change, so updates need no Reload click in `chrome://extensions` after the first load (see [web-agents.md](web-agents.md#extension-updates)).
 
 Pass `--no-service` to skip the service definition. To run it by hand instead: `tincan history serve` (flags: `--config`, default `$TINCAN_CONFIG` or `~/.config/tincan/history.json`; `--allowlist`; `--codex`, the codex binary for the query step). It stops cleanly on SIGINT or SIGTERM, finishing the request it is on. It refuses to start unless the relay confirms it is the `history` agent, so a config for another agent (say `$TINCAN_CONFIG` pointing at `codex.json`) can never claim that agent's requests.
 
-The service needs `codex` logged in on the Mac for the query step. The plist puts the directory where `codex` was found at install time first on `PATH`.
+The service needs `codex` logged in on the Mac for the query step. A service does not get your login shell's PATH, so install writes one: the directories where `codex` and `claude` were found at install time first, then `~/.local/bin`, `~/.npm-global/bin` and `~/bin`, then the system directories (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin` on macOS; no Homebrew path on Linux). If you install or move `codex` later, run `tincan history install` again.
 
 ## Onboarding
 
-After install, check it from another agent: `tincan ask history "what was the last thing Matt asked Codex?"`. Agent Tincan's operator prompt routes history questions to `history`.
+After install, check it from another agent: `tincan ask history "what was the last thing I asked Codex?"`. Agent Tincan's operator prompt routes history questions to `history`.
 
 ## Privacy
 
-- The service reads Matt's chats. That is its whole job, so the allowlist is the control: keep it to agents Matt trusts with his conversation history. It governs requests to the history agent, not local shell access: an agent with a shell on Matt's machine (such as the Codex wake, which runs `tincan history codex`) can read local Codex and Claude Code history directly.
+- The service reads your chats. That is its whole job, so the allowlist is the control: keep it to agents you trust with your conversation history. It governs requests to the history agent, not local shell access: an agent with a shell on your machine (such as the Codex wake, which runs `tincan history codex`) can read local Codex and Claude Code history directly.
 - Access is checked on the whole relay-recorded chain, in Go, before any LLM sees the request.
 - The LLM step sees only the question text. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the Codex and Claude Code readers never report. Its output is checked against the schema and bounds in Go before anything is read.
-- Retrieved chat content is never sent to an LLM. Replies are filled in from a fixed template in Go, so text inside Matt's chats cannot steer the service.
+- Retrieved chat content is never sent to an LLM. Replies are filled in from a fixed template in Go, so text inside your chats cannot steer the service.
 - Images are written to a private per-request temporary directory (0700, files 0600), uploaded to the relay, and the directory is removed after the reply, including on errors. On the relay they follow its attachment retention.
-- Chrome is never quit or restarted. Live reads use the extension's fixed read operations with Matt's existing session; no cookie or token leaves the browser.
+- Chrome is never quit or restarted. Live reads use the extension's fixed read operations with your existing session; no cookie or token leaves the browser.
 
 ## Troubleshooting
 
 Replies and what to do:
 
-- "Declined: X is not on the history allowlist": add X to `~/.config/tincan/history-allow.txt` if Matt wants it to have access.
+- "Declined: X is not on the history allowlist": add X to `~/.config/tincan/history-allow.txt` if you want it to have access.
 - "Declined: this request came through X, which is not on the history allowlist": an allowed agent was asked by X and passed the question on. Ask X's owner, or add X.
 - "Declined: the history agent could not read its allowlist": fix the file's permissions or the bad name in it. The log says which.
-- "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing Matt asked ChatGPT? send the image".
+- "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing I asked ChatGPT? send the image".
 - "its query step failed": `codex exec` did not run. Check that `codex` is on the service's `PATH` and logged in (`codex login status`), then see `~/Library/Logs/tincan-history.log`.
+- "No Codex history was found on this machine" (on the CLI, "no Codex history found in ~/.codex"; the same for Claude Code): that tool has not been used on this machine yet, or keeps its history elsewhere (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`).
 - "source unavailable: chatgpt: Chrome is not running": start Chrome. Local sources still work.
 - "source unavailable: ...: the Tincan Chrome extension is not connected": install or enable the extension, then run `tincan history install` again.
 - "source unavailable: ...: not logged in to chatgpt.com in Chrome" (or claude.ai): log in in Chrome.

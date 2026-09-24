@@ -576,3 +576,28 @@ func TestTouchAgentNeverMovesBackwards(t *testing.T) {
 		t.Fatalf("last seen after rejoin = %v", seen)
 	}
 }
+
+// A new invite for a name retires any earlier unredeemed code for it, so a
+// code that was sent to the wrong place stops working once it is replaced.
+// Codes for other names are untouched.
+func TestNewInviteRetiresOlderCodeForSameName(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	for _, inv := range []identity.Invite{
+		{Code: "OLDC-ODE1", Name: "muse", Expires: c.t},
+		{Code: "OTHR-ODE2", Name: "hermes", Expires: c.t},
+		{Code: "NEWC-ODE3", Name: "muse", Expires: c.t},
+	} {
+		if err := s.PutInvite(ctx, inv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok, _ := s.TakeInvite(ctx, "OLDC-ODE1"); ok {
+		t.Fatal("older code for muse should be retired")
+	}
+	for _, code := range []string{"NEWC-ODE3", "OTHR-ODE2"} {
+		if _, ok, _ := s.TakeInvite(ctx, code); !ok {
+			t.Fatalf("%s should still work", code)
+		}
+	}
+}

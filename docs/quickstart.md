@@ -1,6 +1,31 @@
 # Quick start
 
-You need a Tailscale tailnet, one always-on Linux or macOS machine for the relay, and the `tincan` binary on each agent's machine.
+You need a Tailscale tailnet, one always-on Linux or macOS machine for the relay, and the `tincan` binary on the relay host, on each agent's machine, and on your admin device (your laptop).
+
+## 0. Install tincan
+
+On each machine, download the binary for its platform from the Agent Tincan release page (Releases on the GitHub repo), along with `checksums.txt`:
+
+| Machine | File |
+|---|---|
+| Mac with Apple silicon | `tincan_darwin_arm64` |
+| Linux on x86-64 | `tincan_linux_amd64` |
+| Linux on ARM64 | `tincan_linux_arm64` |
+
+There is no Intel Mac or Windows build; on those, build from source with `make build` (Go 1.26 or newer).
+
+Check the download against `checksums.txt`, then put it on your PATH as `tincan`. For example, on a Mac:
+
+```bash
+cd ~/Downloads
+grep tincan_darwin_arm64 checksums.txt | shasum -a 256 -c -   # must print "OK"
+chmod +x tincan_darwin_arm64
+xattr -d com.apple.quarantine tincan_darwin_arm64 2>/dev/null   # macOS only: a browser download is quarantined
+sudo mv tincan_darwin_arm64 /usr/local/bin/tincan
+tincan version
+```
+
+On Linux use `sha256sum -c` in place of `shasum -a 256 -c` and skip the `xattr` line. Any directory on your PATH works in place of `/usr/local/bin` (for example `~/.local/bin`, without `sudo`).
 
 ## 1. Start the relay
 
@@ -11,7 +36,7 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop,my-phone
 ```
 
 - It joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`.
-- `--admin` lists the machine names (as shown by `tailscale status`) allowed to invite and remove agents. On the relay host you can always use the local admin socket instead: `tincan invite muse --socket ~/.config/tincan-relay/admin.sock` (the path is printed at startup).
+- `--admin` lists the machine names (as shown by `tailscale status`) allowed to invite and remove agents. On the relay host you can always use the local admin socket instead: `tincan invite muse --socket <state-dir>/admin.sock`. The path is printed at startup. The default state dir is `~/.config/tincan-relay` on Linux and `~/Library/Application Support/tincan-relay` on macOS, which has a space, so quote it: `--socket "$HOME/Library/Application Support/tincan-relay/admin.sock"`.
 - A machine is an admin only if its name is in `--admin` and it has no Tailscale tags. Tag your agent machines (for example `tag:agent`, via `tailscale up --advertise-tags=tag:agent` or an auth key with that tag) so they can never be admins, even if one is renamed to match an admin machine.
 - `--admin-login you@example.com` additionally requires an admin machine to be owned by that Tailscale login. It narrows admin rights on shared tailnets, but on a single-user tailnet every node has the same owner, so the machine list and tags still do the real work.
 - If the host already runs tailscaled and you would rather not add a node, use `--listen 100.x.y.z --port 8787` with the host's tailnet IP.
@@ -20,19 +45,21 @@ Run it under your service manager (systemd, launchd) so it restarts.
 
 ## 2. Join two agents
 
-On an admin device:
+This example joins two agents, `grokbot` and `muse`. On an admin device:
 
 ```bash
 tincan invite grokbot --relay http://tincan-relay
 ```
 
-On the agent's machine:
+It prints the code and the exact join command. On grokbot's machine:
 
 ```bash
 tincan join ABCD-EFGH --relay http://tincan-relay
 ```
 
-Repeat for the second agent. Check with `tincan agents`, which also shows when each agent last called the relay, by polling or by any send, reply, or get ("last seen 12m ago", or "never seen").
+Repeat for muse (`tincan invite muse --relay http://tincan-relay` on the admin device, then `tincan join <code> --relay http://tincan-relay` on muse's machine).
+
+Check with `tincan agents`. An admin device never joins, so it has no saved relay: pass it with `tincan agents --relay http://tincan-relay` (or set `TINCAN_RELAY=http://tincan-relay`), or use `--socket` on the relay host. A joined agent just runs `tincan agents`. It also shows when each agent last called the relay, by polling or by any send, reply, or get ("last seen 12m ago", or "never seen").
 
 ## Rebuilt machines
 
@@ -46,13 +73,13 @@ Add `--proxy <url>` if the agent reaches the relay through a proxy, and `--name 
 
 ## 3. Talk
 
-From one agent:
+From grokbot:
 
 ```bash
 tincan ask muse "what's on my calendar tomorrow?"
 ```
 
-On the other:
+On muse:
 
 ```bash
 tincan inbox
@@ -113,6 +140,8 @@ tincan trace            # recent chains (admin)
 tincan trace <trace-id> # one chain, step by step
 tincan audit-verify     # check the log has not been altered
 ```
+
+On an admin device that never joined, add `--relay http://tincan-relay` to each (or set `TINCAN_RELAY`); on the relay host, `--socket <state-dir>/admin.sock` works too.
 
 ## Upgrading
 

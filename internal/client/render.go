@@ -11,7 +11,7 @@ import (
 
 // FormatRequest renders an incoming request for the receiving model. Requests
 // come from joined agents, which are trusted teammates, so the framing tells
-// the agent to handle them as it would a request from Matt, while keeping the
+// the agent to handle them as it would a request from the owner, while keeping the
 // sender and chain visible.
 func FormatRequest(req envelope.Request) string {
 	var b strings.Builder
@@ -19,7 +19,7 @@ func FormatRequest(req envelope.Request) string {
 	if len(req.Chain) > 1 {
 		fmt.Fprintf(&b, "Chain so far: %s (hop %d).\n", strings.Join(req.Chain, " -> "), req.Hop)
 	}
-	b.WriteString("Handle it as you would a request from Matt. When you are done, reply with `tincan reply " + req.ID + " \"...\"` (or the reply tool).\n")
+	b.WriteString("Handle it as you would a request from the owner. When you are done, reply with `tincan reply " + req.ID + " \"...\"` (or the reply tool).\n")
 	b.WriteString("---\n")
 	b.WriteString(req.Body)
 	b.WriteString("\n---\n")

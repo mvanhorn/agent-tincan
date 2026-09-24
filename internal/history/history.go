@@ -682,3 +682,17 @@ func titleFrom(s string) string {
 
 // ErrNotFound is returned when a conversation id is not visible.
 var ErrNotFound = errors.New("conversation not found")
+
+// ErrNoHistory is returned when a local source (Codex, Claude Code) has no
+// history on this machine at all, for example before its first use.
+var ErrNoHistory = errors.New("no history")
+
+// noHistoryError is ErrNoHistory for one source and directory.
+type noHistoryError struct{ label, dir string }
+
+func (e noHistoryError) Error() string { return "no " + e.label + " history found in " + e.dir }
+
+func (e noHistoryError) Is(target error) bool { return target == ErrNoHistory }
+
+// noHistory is the ErrNoHistory error for source label at dir.
+func noHistory(label, dir string) error { return noHistoryError{label, dir} }

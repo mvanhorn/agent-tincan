@@ -382,10 +382,22 @@ func nullable(v string) any {
 	return v
 }
 
+// PutInvite stores inv and retires any earlier unredeemed code for the same
+// name, so only the newest invite for a name works.
 func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO invites(code, name, expires, kind) VALUES (?, ?, ?, ?)`,
-		inv.Code, inv.Name, inv.Expires.UnixMilli(), nullable(inv.Kind))
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE name = ? AND code != ?`, inv.Name, inv.Code); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO invites(code, name, expires, kind) VALUES (?, ?, ?, ?)`,
+		inv.Code, inv.Name, inv.Expires.UnixMilli(), nullable(inv.Kind)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, bool, error) {

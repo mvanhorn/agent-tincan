@@ -83,6 +83,8 @@ type Store interface {
 	// SetAgentKind records an agent's runtime kind ("" clears it) and reports
 	// whether the agent exists.
 	SetAgentKind(ctx context.Context, name, kind string) (bool, error)
+	// PutInvite stores inv and retires any earlier unredeemed code for the
+	// same name, so re-inviting a name leaves only the newest code valid.
 	PutInvite(ctx context.Context, inv Invite) error
 	// TakeInvite removes and returns the invite, so a code works once.
 	TakeInvite(ctx context.Context, code string) (Invite, bool, error)

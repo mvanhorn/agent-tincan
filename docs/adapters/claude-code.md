@@ -38,10 +38,10 @@ Notes:
 
 ## Fallback: open a session in cmux
 
-If channels are unavailable, run a listener that opens a new Claude Code session in cmux whenever requests are waiting:
+If channels are unavailable, run a listener that opens a new Claude Code session in cmux whenever requests are waiting. The script, `examples/claude-code/cmux-wake.sh`, lives in the agent-tincan repo (it is not in the release downloads); copy it to `~/bin` and `chmod +x` it first:
 
 ```bash
-tincan listen --exec ~/agent-tincan/examples/claude-code/cmux-wake.sh
+tincan listen --exec ~/bin/cmux-wake.sh
 ```
 
 It uses the same cmux control-plane calls as agentmail-to-claude-code, so cmux's `automation.socketControlMode` must allow it (see that repo's `setup_cmux.py`). The listener does not take the requests; the new session picks them up with `check_inbox`. Set this agent's wake to `command` in the relay's `wake.json`.

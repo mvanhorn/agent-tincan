@@ -100,8 +100,8 @@ func inviteCmd() *cobra.Command {
 			if kind != "" {
 				valid = "kind " + kind + ", " + valid
 			}
-			cmd.Printf("Invite code for %q (%s): %s\nOn that machine run:\n  tincan join %s --relay <relay URL>\n"+
-				"(for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>)\n", args[0], valid, code, code)
+			cmd.Printf("Invite code for %q (%s): %s\nOn that machine run:\n  tincan join %s --relay %s\n"+
+				"(for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>)\n", args[0], valid, code, code, inviteRelayURL(relayURL))
 			return nil
 		},
 	}
@@ -109,6 +109,19 @@ func inviteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&kind, "kind", "", "the agent's runtime (hermes, codex, ...), recorded on join so tincan onboard tailors its block")
 	return cmd
+}
+
+// inviteRelayURL is the relay URL to print in an invite's join line: the
+// --relay flag, else the saved config (or TINCAN_RELAY), else a placeholder
+// when the invite went over the admin socket with no URL known.
+func inviteRelayURL(flag string) string {
+	if flag != "" {
+		return flag
+	}
+	if cfg, _ := client.LoadConfig(); cfg.Relay != "" {
+		return cfg.Relay
+	}
+	return "<relay URL>"
 }
 
 func removeCmd() *cobra.Command {
@@ -145,11 +158,23 @@ func relayFor(override string) (*client.Relay, client.Config, error) {
 }
 
 func agentsCmd() *cobra.Command {
-	return &cobra.Command{
+	var relayURL, socket string
+	cmd := &cobra.Command{
 		Use:   "agents",
 		Short: "List agents in the mesh, whether they are online, how they wake, and when each last called the relay",
+		Long: `List agents in the mesh, whether they are online, how they wake, and when
+each last called the relay.
+
+Works from any joined agent (saved config). An admin device that never joined
+passes --relay <url> (or sets TINCAN_RELAY), and the relay host can use
+--socket <state-dir>/admin.sock.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			r, _, err := connect()
+			if socket == "" && relayURL == "" {
+				if cfg, _ := client.LoadConfig(); cfg.Relay == "" {
+					return errors.New("no relay configured: on an admin device pass --relay <url> (or set TINCAN_RELAY), on the relay host pass --socket <state-dir>/admin.sock, or run `tincan join <code> --relay <url>` on an agent")
+				}
+			}
+			r, err := adminRelay(socket, relayURL)
 			if err != nil {
 				return err
 			}
@@ -161,6 +186,9 @@ func agentsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config or TINCAN_RELAY)")
+	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
+	return cmd
 }
 
 func formatAgents(agents []client.AgentInfo, now time.Time) string {

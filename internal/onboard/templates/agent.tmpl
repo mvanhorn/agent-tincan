@@ -181,16 +181,18 @@ Paste the standing instructions into OpenClaw.
 
 {{- define "setup.codex" -}}
 Add tincan to ~/.codex/config.toml: a [mcp_servers.agent-tincan] table with command = "tincan", args = ["mcp"] and env = { TINCAN_CONFIG = "<full path of {{template "cfgpath" .}}>" } and default_tools_approval_mode = "approve" (unattended codex exec runs cannot approve tool calls; MCP configs do not expand ~).
-Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec 'codex exec "Agent Tincan requests or replies are waiting. Run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty."'
+Get the wake script: copy examples/codex/codex-wake.sh from the agent-tincan repo (it is not in the release downloads) to ~/bin/codex-wake.sh and chmod +x it. It takes a lock so two wakes never overlap (a second one exits and leaves the requests queued), and runs codex exec with --sandbox workspace-write and approvals off, in TINCAN_CODEX_WORKDIR (default ~/tincan-codex), with network on for gh and git. Open extra write roots with TINCAN_CODEX_WRITE_ROOTS; see docs/adapters/codex.md.
+Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec ~/bin/codex-wake.sh
+The listener runs the script whenever requests or replies are waiting; the script tells codex to run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty.
 On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
 Put the standing instructions in AGENTS.md or the prompt the listener passes.
 {{- end -}}
 
 {{- define "setup.history" -}}
 Run it on the machine where {{.Owner}} uses Chrome, Codex and Claude Code; it reads their history there. codex must be installed and logged in for the query step (check with codex login status).
-Install the native messaging host and the service definition: tincan history install. It writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS, a systemd user unit on Linux), then prints the command that starts the service. It starts nothing itself.
+Install the native messaging host and the service definition: tincan history install (with --extension-dir <folder> when the extension is loaded unpacked, see below). It writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS, a systemd user unit on Linux), then prints the command that starts the service. It starts nothing itself.
 Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist; Linux: systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service).
-The only human step: install the Tincan Chrome extension from the Chrome Web Store (<Chrome Web Store link, not yet published>) and accept its permission dialog (chatgpt.com, claude.ai, native messaging). For development, load extension/ unpacked from chrome://extensions instead (see extension/README.md).
+The only human step: install the Tincan Chrome extension from the Chrome Web Store (<Chrome Web Store link, not yet published>) and accept its permission dialog (chatgpt.com, claude.ai, native messaging). Until the store listing is live: unzip tincan-history-extension.zip from the release into a folder you will keep (for example ~/tincan-extension), open chrome://extensions, turn on Developer mode, click Load unpacked and pick that folder, then run tincan history install --extension-dir ~/tincan-extension (from a repo checkout, the extension/ folder works the same way).
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the service long-polls the relay. No secret fields.
 Choose who may ask in ~/.config/tincan/history-allow.txt, one agent name per line; without the file the built-in default list applies (docs/adapters/history.md). The file is reread on every request.
 If the service log (~/Library/Logs/tincan-history.log on macOS) says it is not joined, run {{template "rejoin" .}} and restart the service.

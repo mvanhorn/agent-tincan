@@ -95,6 +95,23 @@ func TestInviteCodeExpires(t *testing.T) {
 	}
 }
 
+// Re-inviting a name retires the earlier unredeemed code for it.
+func TestReinviteRetiresOlderCode(t *testing.T) {
+	f := newFixture(t)
+	old := f.invite(t, "muse")
+	other := f.invite(t, "grokbot")
+	current := f.invite(t, "muse")
+	if _, err := f.dir.Join(context.Background(), "100.0.0.4:1", old); !errors.Is(err, identity.ErrBadInvite) {
+		t.Fatalf("older code: want ErrBadInvite, got %v", err)
+	}
+	if got, err := f.dir.Join(context.Background(), "100.0.0.4:1", current); err != nil || got != "muse" {
+		t.Fatalf("current code: %q, %v", got, err)
+	}
+	if got, err := f.dir.Join(context.Background(), "100.0.0.2:1", other); err != nil || got != "grokbot" {
+		t.Fatalf("other name's code: %q, %v", got, err)
+	}
+}
+
 func TestUnknownCodeRejected(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.dir.Join(context.Background(), "100.0.0.4:1", "ABCD-EFGH"); !errors.Is(err, identity.ErrBadInvite) {

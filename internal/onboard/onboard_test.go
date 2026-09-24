@@ -270,6 +270,24 @@ func TestFreshSessionReplyWakeGuidance(t *testing.T) {
 	}
 }
 
+// The Codex recipe wakes through the wake script, which takes a lock and
+// runs a sandboxed codex exec, rather than a raw codex exec line, and does
+// not assume a repo checkout at a fixed path.
+func TestCodexSetupUsesWakeScript(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "codex", Wake: "command", Kind: "codex"}}})
+	setup := strings.Join(block(t, k, "codex").Setup, "\n")
+	for _, want := range []string{"examples/codex/codex-wake.sh", "tincan listen --exec ~/bin/codex-wake.sh", "chmod +x", "lock", "--sandbox workspace-write", "TINCAN_CODEX_WRITE_ROOTS"} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("codex setup missing %q:\n%s", want, setup)
+		}
+	}
+	for _, stale := range []string{`--exec 'codex exec`, "~/agent-tincan/"} {
+		if strings.Contains(setup, stale) {
+			t.Errorf("codex setup still has %q:\n%s", stale, setup)
+		}
+	}
+}
+
 var (
 	codeShape = regexp.MustCompile(`\b[A-Z2-9]{4}-[A-Z2-9]{4}\b`)
 	secretish = regexp.MustCompile(`(?i)(https://hooks\.|agentmail_key"\s*:\s*"[^<]|sk-[a-z0-9]{8})`)
@@ -386,6 +404,7 @@ func TestHistoryBlock(t *testing.T) {
 		"tincan history install", "native messaging host", "service definition",
 		"launchctl bootstrap", "systemctl --user",
 		"Tincan Chrome extension", "Chrome Web Store", "chrome://extensions", "unpacked",
+		"tincan-history-extension.zip", "Developer mode", "Load unpacked", "tincan history install --extension-dir",
 		"only human step", "history-allow.txt", `method "wait"`,
 		"codex login status",
 		"TINCAN_CONFIG=~/.config/tincan/history.json tincan rejoin --relay " + relayURL + " --name history",
@@ -393,6 +412,9 @@ func TestHistoryBlock(t *testing.T) {
 		if !strings.Contains(setup, want) {
 			t.Errorf("history setup missing %q:\n%s", want, setup)
 		}
+	}
+	if strings.Contains(setup, "load extension/ unpacked") {
+		t.Errorf("history setup assumes a repo checkout:\n%s", setup)
 	}
 	r := recipe(t, k, "history")
 	all := strings.Join(r.Steps, "\n")

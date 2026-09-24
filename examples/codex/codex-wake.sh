@@ -3,9 +3,10 @@
 #
 # Codex CLI has no daemon: "codex exec" runs one prompt and exits, so an idle
 # Codex needs something else to start a fresh run when teammates' requests
-# are waiting. Use this with:
+# are waiting. It is not in the release downloads: copy it from the repo
+# (examples/codex/codex-wake.sh) to a folder you keep, chmod +x it, and use:
 #
-#   tincan listen --exec ~/agent-tincan/examples/codex/codex-wake.sh
+#   tincan listen --exec ~/bin/codex-wake.sh
 #
 # "tincan listen" runs this script whenever requests, or unread replies to
 # codex's own requests, are waiting and passes the count in TINCAN_WAITING. It does not take the requests itself, and it

@@ -3,7 +3,9 @@ package history
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -83,6 +85,9 @@ func (c *Codex) candidates(ctx context.Context, all bool) ([]codexEntry, error) 
 		}
 		return true
 	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, noHistory("Codex", c.Home)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("codex: read session_index.jsonl: %w", err)
 	}

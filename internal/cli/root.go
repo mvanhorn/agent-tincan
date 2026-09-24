@@ -3,6 +3,7 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +21,10 @@ func Root() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	// Command output goes to stdout so `tincan onboard > kit.txt` and
+	// `$(tincan version)` work. Cobra's Print* default to stderr; errors
+	// stay there (main prints them to stderr).
+	root.SetOut(os.Stdout)
 	root.AddCommand(relayCmd(), versionCmd())
 	root.AddCommand(agentCmds()...)
 	root.AddCommand(mcpCmd(), traceCmd(), auditCmd(), listenCmd(), connectCmd(), onboardCmd(), rejoinCmd(), upgradeCmd(), historyCmd(), webCmd(), attachmentCmd())
@@ -45,6 +50,12 @@ func withRejoinHints(cmd *cobra.Command) {
 			return nil
 		}
 		cfg, _ := client.LoadConfig()
+		// onboard with no relay already says what to do (--relay, join, or
+		// --offline), and is what a fresh admin runs before anyone joins,
+		// so a rebuilt-machine hint there is only noise.
+		if c.Name() == "onboard" && cfg.Relay == "" && !c.Flags().Changed("relay") {
+			return err
+		}
 		return client.RejoinHint(err, cfg.Relay)
 	}
 }

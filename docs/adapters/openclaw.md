@@ -1,6 +1,6 @@
 # OpenClaw
 
-This adapter has not yet been tested against a live OpenClaw instance; Matt has none running. It is written from OpenClaw's own docs (docs.openclaw.ai, checked September 2026) and the same `tincan mcp` / webhook wake used by Hermes and Grok Bot. Treat the steps below as a starting recipe and file back anything that does not match your OpenClaw version.
+This adapter has not yet been tested against a live OpenClaw instance. It is written from OpenClaw's own docs (docs.openclaw.ai, checked September 2026) and the same `tincan mcp` / webhook wake used by Hermes and Grok Bot. Treat the steps below as a starting recipe and file back anything that does not match your OpenClaw version.
 
 ## Join
 

@@ -3,7 +3,9 @@ package history
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,6 +56,9 @@ type claudeEntry struct {
 // candidates returns session transcripts newest (by mtime) first.
 func (c *ClaudeCode) candidates(ctx context.Context) ([]claudeEntry, error) {
 	projects, err := os.ReadDir(c.Root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, noHistory("Claude Code", c.Root)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("claude-code: read projects: %w", err)
 	}

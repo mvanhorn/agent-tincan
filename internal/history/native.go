@@ -50,6 +50,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 // NativeHostName is the native messaging host name the extension connects
@@ -715,7 +717,7 @@ func ListenSocket(path string) (net.Listener, error) {
 			return nil, err
 		}
 	}
-	ln, err := net.Listen("unix", path)
+	ln, err := client.ListenUnix(path)
 	if err != nil {
 		return nil, err
 	}

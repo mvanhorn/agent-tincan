@@ -69,13 +69,16 @@ func TestRelayErrorsSurface(t *testing.T) {
 
 func TestFormatRequestCarriesTeammateFraming(t *testing.T) {
 	out := client.FormatRequest(envelope.Request{ID: "r9", From: "instinct", Hop: 2, Chain: []string{"instinct", "muse"}, Body: "new time Tue 3pm"})
-	for _, want := range []string{"from instinct (your teammate)", "instinct -> muse", "as you would a request from Matt", "tincan reply r9", "new time Tue 3pm"} {
+	for _, want := range []string{"from instinct (your teammate)", "instinct -> muse", "as you would a request from the owner", "tincan reply r9", "new time Tue 3pm"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("framing missing %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(strings.ToLower(out), "untrusted") {
 		t.Error("teammate requests must not be framed as untrusted")
+	}
+	if strings.Contains(out, "Matt") {
+		t.Errorf("request framing names a specific person:\n%s", out)
 	}
 }
 

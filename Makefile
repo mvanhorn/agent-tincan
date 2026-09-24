@@ -7,11 +7,13 @@
 #   make spike   - cross-compile the U1 spike binaries into spike/bin/
 #   make extension      - package extension/ into dist/tincan-history-extension.zip
 #   make extension-test - node --test for the extension's worker code
+#   make dist    - every release asset in dist/: tincan_<os>_<arch> for the
+#                  three release targets, checksums.txt, and the extension zip
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -X main.Version=$(VERSION)
 
-.PHONY: build test vet lint spike extension extension-test
+.PHONY: build test vet lint spike extension extension-test dist
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o tincan ./cmd/tincan
@@ -43,3 +45,16 @@ extension:
 
 extension-test:
 	node --test 'extension/test/*.test.js'
+
+# Release targets: the raw binaries the release page and the relay's --dist
+# directory carry, stripped (-s -w) like the published releases.
+# checksums.txt covers the binaries.
+RELEASE_TARGETS := darwin/arm64 linux/amd64 linux/arm64
+
+dist: extension
+	mkdir -p dist
+	rm -f dist/tincan_* dist/checksums.txt
+	for t in $(RELEASE_TARGETS); do \
+		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} go build -ldflags "-s -w $(LDFLAGS)" -o dist/tincan_$${t%/*}_$${t#*/} ./cmd/tincan || exit 1; \
+	done
+	cd dist && shasum -a 256 tincan_* > checksums.txt
