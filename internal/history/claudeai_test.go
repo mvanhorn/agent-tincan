@@ -212,6 +212,10 @@ func TestClaudeAISkipsWebAgentConversations(t *testing.T) {
 	if err != nil || len(list) != 1 || list[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
 		t.Fatalf("list skips the web agent's chat: %+v %v", list, err)
 	}
+	list, err = r.List(ctx, 1, Options{})
+	if err != nil || len(list) != 1 || list[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
+		t.Fatalf("list of 1 still fills its count past the skipped chat: %+v %v", list, err)
+	}
 	list, err = r.List(ctx, 10, Options{All: true})
 	if err != nil || len(list) != 2 || !list[0].Automated || list[1].Automated {
 		t.Fatalf("list with all: %+v %v", list, err)

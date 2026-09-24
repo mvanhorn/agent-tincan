@@ -85,11 +85,18 @@ func (l *live) List(ctx context.Context, count int, opts Options) ([]Conversatio
 	if err := checkListCount(count); err != nil {
 		return nil, err
 	}
-	convs, err := l.list(ctx, count)
+	owned := l.agentOwned()
+	// Skipped web agent chats must not use up the count, so ask for
+	// enough extra to cover them.
+	fetch := count
+	if !opts.All {
+		fetch += len(owned)
+	}
+	convs, err := l.list(ctx, fetch)
 	if err != nil {
 		return nil, err
 	}
-	w, now, owned := l.window.orDefault(), l.clock(), l.agentOwned()
+	w, now := l.window.orDefault(), l.clock()
 	out := convs[:0]
 	for _, c := range convs {
 		if !w.fresh(c.UpdatedAt, now) {
@@ -102,6 +109,9 @@ func (l *live) List(ctx context.Context, count int, opts Options) ([]Conversatio
 			c.Automated = true
 		}
 		out = append(out, c)
+		if len(out) == count {
+			break
+		}
 	}
 	return out, nil
 }
