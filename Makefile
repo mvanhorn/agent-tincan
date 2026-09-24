@@ -10,12 +10,19 @@
 #   make store   - Chrome Web Store upload zip (no manifest "key") in
 #                  dist/tincan-history-extension-store.zip, with its sha256
 #   make dist    - every release asset in dist/: tincan_<os>_<arch> for the
-#                  three release targets, checksums.txt, and the extension zip
+#                  four release targets, checksums.txt, and the extension zip
+#   make sign-mac     - codesign dist/tincan_darwin_* with the Developer ID
+#                       identity (hardened runtime, timestamp), then rewrite
+#                       checksums.txt
+#   make notarize-mac - submit each signed dist/tincan_darwin_* to Apple's
+#                       notary service and wait for the verdict
+#   make release-mac  - dist + sign-mac + notarize-mac, checksums regenerated
+#                       after signing
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -X main.Version=$(VERSION)
 
-.PHONY: build test vet lint spike extension extension-test store dist
+.PHONY: build test vet lint spike extension extension-test store dist checksums sign-mac notarize-mac release-mac
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o tincan ./cmd/tincan
@@ -65,7 +72,7 @@ extension-test:
 # Release targets: the raw binaries the release page and the relay's --dist
 # directory carry, stripped (-s -w) like the published releases.
 # checksums.txt covers the binaries.
-RELEASE_TARGETS := darwin/arm64 linux/amd64 linux/arm64
+RELEASE_TARGETS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
 dist: extension
 	mkdir -p dist
@@ -73,4 +80,46 @@ dist: extension
 	for t in $(RELEASE_TARGETS); do \
 		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} go build -ldflags "-s -w $(LDFLAGS)" -o dist/tincan_$${t%/*}_$${t#*/} ./cmd/tincan || exit 1; \
 	done
+	$(MAKE) checksums
+
+checksums:
 	cd dist && shasum -a 256 tincan_* > checksums.txt
+
+# macOS signing and notarization (optional; make dist works without a
+# certificate). Signing changes the binaries' bytes, so sign-mac rewrites
+# checksums.txt. Bare Mach-O binaries cannot be stapled: notarize-mac zips
+# each one for submission, and Gatekeeper finds the ticket online at first
+# launch. One-time notarytool setup:
+#   xcrun notarytool store-credentials <profile> --apple-id <id> --team-id <team>
+TINCAN_SIGN_IDENTITY ?= Developer ID Application: Matthew Charles Van Horn (NM8VT393AR)
+TINCAN_NOTARY_PROFILE ?= agentcookie-notary
+
+sign-mac:
+	@set -e; ls dist/tincan_darwin_* >/dev/null 2>&1 || { echo "make sign-mac: no dist/tincan_darwin_* binaries; run make dist first" >&2; exit 1; }; \
+	security find-identity -v -p codesigning | grep -qF "$(TINCAN_SIGN_IDENTITY)" || { echo "make sign-mac: codesign identity not found: $(TINCAN_SIGN_IDENTITY) (set TINCAN_SIGN_IDENTITY)" >&2; exit 1; }; \
+	for f in dist/tincan_darwin_*; do \
+		echo "signing $$f"; \
+		codesign --force --options runtime --timestamp --sign "$(TINCAN_SIGN_IDENTITY)" "$$f"; \
+		codesign --verify --strict --verbose=2 "$$f"; \
+	done
+	$(MAKE) checksums
+
+notarize-mac:
+	@set -e; ls dist/tincan_darwin_* >/dev/null 2>&1 || { echo "make notarize-mac: no dist/tincan_darwin_* binaries; run make dist sign-mac first" >&2; exit 1; }; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	for f in dist/tincan_darwin_*; do \
+		codesign -dv "$$f" 2>&1 | grep -q 'flags=.*runtime' || { echo "make notarize-mac: $$f is not signed with the hardened runtime; run make sign-mac" >&2; exit 1; }; \
+		zip="$$tmp/$$(basename "$$f").zip"; \
+		ditto -c -k --keepParent "$$f" "$$zip"; \
+		echo "notarizing $$f (waiting for Apple)"; \
+		xcrun notarytool submit "$$zip" --keychain-profile "$(TINCAN_NOTARY_PROFILE)" --wait --output-format json > "$$tmp/result.json" || { cat "$$tmp/result.json" >&2; exit 1; }; \
+		cat "$$tmp/result.json"; echo; \
+		grep -q '"status": *"Accepted"' "$$tmp/result.json" || { echo "make notarize-mac: $$f was not accepted; see xcrun notarytool log <id> --keychain-profile $(TINCAN_NOTARY_PROFILE)" >&2; exit 1; }; \
+		codesign -dvv "$$f" 2>&1 | grep -E 'Authority=Developer ID Application|TeamIdentifier'; \
+		spctl -a -vv -t install "$$f" 2>&1 | grep -q 'source=Notarized Developer ID' && echo "$$f: Gatekeeper source=Notarized Developer ID" || \
+			echo "make notarize-mac: warning: spctl does not report $$f as notarized yet (the ticket can take a few minutes to propagate)" >&2; \
+	done
+
+release-mac: dist sign-mac notarize-mac
+	$(MAKE) checksums
+	cd dist && shasum -a 256 -c checksums.txt

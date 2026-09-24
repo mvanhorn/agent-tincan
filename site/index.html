@@ -316,18 +316,10 @@
         <p class="section-lede">You need a Tailscale tailnet, one always-on Linux or macOS machine for the relay, and the <code>tincan</code> binary on the relay host, on each agent's machine, and on your admin device (your laptop). The full walkthrough is the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/quickstart.md">quick start</a> on GitHub.</p>
         <ol class="start-steps">
           <li class="start-step">
-            <h3>Download tincan</h3>
-            <p>On each machine, download the binary for its platform from the <a href="https://github.com/mvanhorn/agent-tincan/releases">GitHub releases page</a>, along with <code>checksums.txt</code>: <code>tincan_darwin_arm64</code> for a Mac with Apple silicon, <code>tincan_linux_amd64</code> for Linux on x86-64, or <code>tincan_linux_arm64</code> for Linux on ARM64. There is no Intel Mac or Windows build; on those, build from source with <code>make build</code>.</p>
-          </li>
-          <li class="start-step">
-            <h3>Verify it and put it on your PATH</h3>
-            <p>Check the download against <code>checksums.txt</code>, then put it on your PATH as <code>tincan</code>. On a Mac:</p>
-            <pre><code>grep tincan_darwin_arm64 checksums.txt | shasum -a 256 -c -   # must print "OK"
-chmod +x tincan_darwin_arm64
-xattr -d com.apple.quarantine tincan_darwin_arm64 2&gt;/dev/null
-sudo mv tincan_darwin_arm64 /usr/local/bin/tincan
-tincan version</code></pre>
-            <p>On Linux use <code>sha256sum -c</code> and skip the <code>xattr</code> line.</p>
+            <h3>Install tincan</h3>
+            <p>On each machine, run:</p>
+            <pre><code>curl -fsSL https://agenttincan.com/install.sh | sh</code></pre>
+            <p>It picks the build for your Mac (Apple silicon or Intel) or Linux machine (x86-64 or ARM64), checks it against the release's <code>checksums.txt</code>, and installs it to <code>~/.local/bin</code> without <code>sudo</code>. Or download manually from the <a href="https://github.com/mvanhorn/agent-tincan/releases">releases page</a>.</p>
           </li>
           <li class="start-step">
             <h3>Run a relay</h3>

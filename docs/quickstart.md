@@ -4,28 +4,15 @@ You need a Tailscale tailnet, one always-on Linux or macOS machine for the relay
 
 ## 0. Install tincan
 
-On each machine, download the binary for its platform from the Agent Tincan release page (Releases on the GitHub repo), along with `checksums.txt`:
-
-| Machine | File |
-|---|---|
-| Mac with Apple silicon | `tincan_darwin_arm64` |
-| Linux on x86-64 | `tincan_linux_amd64` |
-| Linux on ARM64 | `tincan_linux_arm64` |
-
-There is no Intel Mac or Windows build; on those, build from source with `make build` (Go 1.26 or newer).
-
-Check the download against `checksums.txt`, then put it on your PATH as `tincan`. For example, on a Mac:
+On each machine, run:
 
 ```bash
-cd ~/Downloads
-grep tincan_darwin_arm64 checksums.txt | shasum -a 256 -c -   # must print "OK"
-chmod +x tincan_darwin_arm64
-xattr -d com.apple.quarantine tincan_darwin_arm64 2>/dev/null   # macOS only: a browser download is quarantined
-sudo mv tincan_darwin_arm64 /usr/local/bin/tincan
-tincan version
+curl -fsSL https://agenttincan.com/install.sh | sh
 ```
 
-On Linux use `sha256sum -c` in place of `shasum -a 256 -c` and skip the `xattr` line. Any directory on your PATH works in place of `/usr/local/bin` (for example `~/.local/bin`, without `sudo`).
+It picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), downloads the newest release, checks it against the release's `checksums.txt`, installs it to `~/.local/bin/tincan` without `sudo`, and prints `tincan version`. If `~/.local/bin` is not on your PATH it tells you how to add it. `TINCAN_INSTALL_DIR=<dir>` installs elsewhere; `TINCAN_VERSION=v0.5.0` pins a release.
+
+Or download manually from the [releases page](https://github.com/mvanhorn/agent-tincan/releases): `tincan_<os>_<arch>` plus `checksums.txt`. There is no Windows build; build from source with `make build` (Go 1.26 or newer).
 
 ## 1. Start the relay
 
@@ -153,7 +140,7 @@ On the relay host, keep a dist directory and start the relay with it:
 tincan relay --admin my-laptop,my-phone --dist ~/tincan-dist
 ```
 
-For each release, the relay operator drops the raw binaries into that directory, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.
+For each release, the relay operator drops the raw binaries into that directory, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.
 
 On each agent's machine:
 

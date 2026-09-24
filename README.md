@@ -78,15 +78,13 @@ The plumbing, in plain words:
 
 ### Install
 
-Put the `tincan` binary on the relay host, on every agent's machine, and on your admin device. Download it from the Agent Tincan release page (Releases on the GitHub repo): `tincan_darwin_arm64` (Mac with Apple silicon), `tincan_linux_amd64` or `tincan_linux_arm64`, plus `checksums.txt`. There is no Intel Mac or Windows build; build those from source with `make build`.
+Put the `tincan` binary on the relay host, on every agent's machine, and on your admin device. On each one, run:
 
 ```bash
-grep tincan_darwin_arm64 checksums.txt | shasum -a 256 -c -   # must print "OK" (Linux: sha256sum -c -)
-chmod +x tincan_darwin_arm64
-xattr -d com.apple.quarantine tincan_darwin_arm64 2>/dev/null   # macOS only: a browser download is quarantined
-sudo mv tincan_darwin_arm64 /usr/local/bin/tincan               # or any directory on your PATH
-tincan version
+curl -fsSL https://agenttincan.com/install.sh | sh
 ```
+
+The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), downloads the newest release from GitHub, checks it against the release's `checksums.txt`, and installs it to `~/.local/bin/tincan` without `sudo`. Set `TINCAN_INSTALL_DIR` to install elsewhere, or `TINCAN_VERSION=v0.5.0` to pin a release. Or download manually from the [releases page](https://github.com/mvanhorn/agent-tincan/releases): `tincan_<os>_<arch>` plus `checksums.txt`. There is no Windows build; build from source with `make build`.
 
 Step by step, including the relay and your first two agents: [docs/quickstart.md](docs/quickstart.md).
 
@@ -195,7 +193,7 @@ tincan upgrade --check                                          # agent: current
 tincan upgrade                                                  # agent: download, verify, swap
 ```
 
-The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
+The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
 
 ### Audit log and trace
 
@@ -792,19 +790,25 @@ make extension        # dist/tincan-history-extension.zip
 make dist             # every release asset in dist/ (see below)
 ```
 
-`make build` builds one binary, for the machine you run it on. CI runs `go vet` and `go test -race` on Linux and macOS, and checks the static builds for linux/amd64, linux/arm64 and darwin/arm64.
+`make build` builds one binary, for the machine you run it on. CI runs `go vet` and `go test -race` on Linux and macOS, and checks the static builds for linux/amd64, linux/arm64, darwin/arm64 and darwin/amd64.
 
-Releases are on the GitHub repo's release page. Each carries `tincan_darwin_arm64`, `tincan_linux_amd64`, `tincan_linux_arm64`, `checksums.txt` (sha256 of the three binaries) and `tincan-history-extension.zip`. The binaries and `checksums.txt` are what the relay's `--dist` directory takes (add a `VERSION` file).
+Releases are on the GitHub repo's release page. Each carries `tincan_darwin_arm64`, `tincan_darwin_amd64` (Intel Mac), `tincan_linux_amd64`, `tincan_linux_arm64`, `checksums.txt` (sha256 of the four binaries) and `tincan-history-extension.zip`. The binaries and `checksums.txt` are what the relay's `--dist` directory takes (add a `VERSION` file).
 
 Releases are cut by hand; CI does not publish them. From a clean checkout of the commit to release:
 
 ```bash
 git tag v0.5.0 && git push origin v0.5.0
-make dist        # static binaries for the three targets, checksums.txt and the extension zip, in dist/
+make release-mac # make dist (four static binaries, checksums.txt, extension zip in dist/), then sign and notarize the macOS binaries
 gh release create v0.5.0 --prerelease --title v0.5.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
 ```
 
-`make dist` stamps the version from `git describe`, so tag first.
+`make dist` stamps the version from `git describe`, so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:
+
+- `make sign-mac` signs each `dist/tincan_darwin_*` with `codesign --force --options runtime --timestamp` using `TINCAN_SIGN_IDENTITY` (default: the maintainer's Developer ID Application identity), then rewrites `checksums.txt`, since signing changes the bytes.
+- `make notarize-mac` zips each signed binary, submits it with `xcrun notarytool submit --keychain-profile "$TINCAN_NOTARY_PROFILE" --wait` (default profile `agentcookie-notary`), requires `Accepted`, and checks `spctl -a -vv -t install` reports `Notarized Developer ID`. A bare Mach-O binary cannot be stapled; Gatekeeper looks the ticket up online at first launch.
+- One-time notary setup: `xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>` with an app-specific password. The credentials live in the login keychain, never in the repo.
+
+Always upload the `checksums.txt` written after signing; `make release-mac` rewrites it last and checks it.
 
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
