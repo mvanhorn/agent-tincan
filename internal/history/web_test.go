@@ -231,6 +231,7 @@ func newWebRigWith(t *testing.T, cfg relay.Config, attachments bool) *webRig {
 			Allowlist:   StaticAllowlist(DefaultAllowlist...),
 			StatePath:   state,
 			JournalPath: filepath.Join(filepath.Dir(state), "chatgpt-web-journal.json"),
+			UsedPath:    filepath.Join(filepath.Dir(state), "web-agent-chatgpt-conversations.json"),
 			TempDir:     t.TempDir(),
 			Log:         testLog{t},
 			// Fast polls for tests; the default is 2s.
@@ -295,6 +296,9 @@ func TestWebAllowedAskerGetsReplyWithImage(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(rig.agent.TempDir); len(left) != 0 {
 		t.Fatalf("image dir left behind: %v", left)
+	}
+	if used := loadWebUsed(rig.agent.UsedPath); !used["conv-1"] {
+		t.Fatalf("the conversation sent into is not recorded for history to skip: %v", used)
 	}
 }
 

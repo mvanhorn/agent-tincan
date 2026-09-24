@@ -52,7 +52,7 @@ func historyCmd() *cobra.Command {
 		Use:   "history <chatgpt|claude-ai|codex|claude-code>",
 		Short: "Read the owner's ChatGPT, claude.ai, Codex or Claude Code history",
 		Long: "Read the owner's ChatGPT, claude.ai, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions) are left out unless --all is given.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web and claude-web agents sent into) are left out unless --all is given.\n" +
 			"chatgpt and claude-ai are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -109,7 +109,7 @@ func historyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&list, "list", 20, "list the N most recent conversations with their working directory")
-	cmd.Flags().BoolVar(&all, "all", false, "include unattended runs (codex exec, Claude Code SDK)")
+	cmd.Flags().BoolVar(&all, "all", false, "include unattended runs (codex exec, Claude Code SDK) and the web agents' chats")
 	cmd.Flags().BoolVar(&latest, "latest", false, "show the latest prompt and its reply (default)")
 	cmd.Flags().StringVar(&search, "search", "", "find recent conversations whose title or a prompt contains every word")
 	cmd.Flags().StringVar(&id, "id", "", "show one conversation by id")

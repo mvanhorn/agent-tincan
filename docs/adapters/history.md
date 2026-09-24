@@ -11,6 +11,8 @@ It is a Go service, `tincan history serve`, that runs on your Mac under launchd 
 
 Lookups cover the 50 most recent conversations per source, up to 30 days old.
 
+It answers about what you typed, not what your agents typed. Codex `codex exec` runs and Claude Code SDK runs are left out, and so are the ChatGPT and claude.ai conversations that the chatgpt-web and claude-web agents sent messages into (they list them in `~/.config/tincan/web-agent-<site>-conversations.json`, ids only). `tincan history <source> --all` includes them, marked as automated.
+
 ## Allowlist
 
 By default there is no allowlist file and every agent joined to your relay may ask. The relay only delivers requests from agents that joined it, so "every agent" means every agent on your tailnet mesh. The startup log says `allowlist: all joined agents (no file at ~/.config/tincan/history-allow.txt)`.

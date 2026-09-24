@@ -13,12 +13,14 @@ import (
 // through the extension, open conversations one at a time while pick needs
 // them, then fetch only the images of the turns that were selected.
 type live struct {
-	source   Source
-	client   *Client
-	window   Window
-	now      func() time.Time
-	listOp   Op
-	detailOp Op
+	source Source
+	client *Client
+	window Window
+	now    func() time.Time
+	// agentChats is the web agents' used list (see DefaultWebUsedPath).
+	agentChats string
+	listOp     Op
+	detailOp   Op
 	// parseList turns a list result into conversations without messages.
 	parseList func(raw json.RawMessage) ([]Conversation, error)
 	// parseDetail turns a detail result into a thread whose images are
@@ -75,8 +77,11 @@ func (l *live) detail(ctx context.Context, id string) (thread, error) {
 	return th, nil
 }
 
+// agentOwned returns the conversations the web agents sent into.
+func (l *live) agentOwned() map[string]bool { return loadWebUsed(l.agentChats) }
+
 // List implements Reader.List.
-func (l *live) List(ctx context.Context, count int, _ Options) ([]Conversation, error) {
+func (l *live) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
 	if err := checkListCount(count); err != nil {
 		return nil, err
 	}
@@ -84,18 +89,25 @@ func (l *live) List(ctx context.Context, count int, _ Options) ([]Conversation, 
 	if err != nil {
 		return nil, err
 	}
-	w, now := l.window.orDefault(), l.clock()
+	w, now, owned := l.window.orDefault(), l.clock(), l.agentOwned()
 	out := convs[:0]
 	for _, c := range convs {
-		if w.fresh(c.UpdatedAt, now) {
-			out = append(out, c)
+		if !w.fresh(c.UpdatedAt, now) {
+			continue
 		}
+		if owned[c.ID] {
+			if !opts.All {
+				continue
+			}
+			c.Automated = true
+		}
+		out = append(out, c)
 	}
 	return out, nil
 }
 
 // Read implements Reader.Read.
-func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, error) {
+func (l *live) Read(ctx context.Context, q Query, opts Options) ([]Conversation, error) {
 	if err := q.Validate(); err != nil {
 		return nil, err
 	}
@@ -113,7 +125,7 @@ func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, er
 		out := []Conversation{conversationMessages(th, q.wantsImages())}
 		return l.resolve(ctx, out), nil
 	}
-	w := l.window.orDefault()
+	w, owned := l.window.orDefault(), l.agentOwned()
 	cands, err := l.list(ctx, w.Max)
 	if err != nil {
 		return nil, err
@@ -123,6 +135,10 @@ func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, er
 		func(i int) (thread, bool, error) {
 			if err := ctx.Err(); err != nil {
 				return thread{}, false, err
+			}
+			// A web agent's conversation does not use up a window slot.
+			if owned[cands[i].ID] && !opts.All {
+				return thread{}, false, nil
 			}
 			th, err := l.detail(ctx, cands[i].ID)
 			if err != nil {
@@ -134,6 +150,7 @@ func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, er
 			if th.conv.Title == "" {
 				th.conv.Title = cands[i].Title
 			}
+			th.conv.Automated = owned[cands[i].ID]
 			return th, len(th.turns) > 0, nil
 		})
 	if err != nil {

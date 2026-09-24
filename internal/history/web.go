@@ -94,6 +94,10 @@ type WebAgent struct {
 	// has sent, so a requeued request is never sent twice. Empty turns
 	// the journal off.
 	JournalPath string
+	// UsedPath is the used list (0600): every conversation this agent
+	// sends into, so history leaves them out of the owner's own
+	// conversations. Empty turns it off.
+	UsedPath string
 	// JournalRetention is how long a journal entry is kept
 	// (DefaultWebJournalRetention when zero).
 	JournalRetention time.Duration
@@ -355,6 +359,11 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	anchor.since = res.Submitted()
 	entry := webSend{ConversationID: res.ConversationID, PrevUserID: anchor.prevUser, SubmittedAt: anchor.since, Recorded: time.Now().UTC(), State: webSendSent}
 	w.journal(req.ID, entry)
+	if w.UsedPath != "" {
+		if err := recordWebUsed(w.UsedPath, res.ConversationID, time.Now()); err != nil {
+			w.logf("used list %s: %v", w.UsedPath, err)
+		}
+	}
 	st.Conversations[req.From] = webMemory{ID: res.ConversationID, Updated: time.Now().UTC()}
 	w.saveState(st)
 	w.answer(ctx, req, anchor, entry, note)

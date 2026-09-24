@@ -50,6 +50,8 @@ Make the second one shorter.
 
 `conversation:` takes an id or a conversation URL (`https://chatgpt.com/c/<id>`, `https://claude.ai/chat/<id>`). Without either line, the message continues the conversation this asker used last with this agent, or starts one if there is none. Each asker has its own thread: grokbot's follow-ups never land in codex's conversation. The ids are kept in `~/.config/tincan/<agent>-state.json` (mode 0600; ids only, never messages). If a remembered conversation was deleted, the message goes to a new chat and the reply says so. An explicit `conversation:` id that is gone is an error.
 
+Every conversation the agent sends into is also added to `~/.config/tincan/web-agent-<site>-conversations.json` (mode 0600; ids and times only, newest 1000 kept), so the history agent leaves these chats out when you ask what you last asked ChatGPT or Claude.
+
 Every reply ends with the conversation id, for example `ChatGPT conversation: 6a1f0c2e-...`, so the asker can come back to it.
 
 ## Replies

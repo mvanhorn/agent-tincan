@@ -17,10 +17,15 @@ type ChatGPT struct {
 	Client *Client
 	Window Window
 	Now    func() time.Time
+	// AgentChats is the web agents' used list; those conversations are
+	// left out unless all is asked for (DefaultWebUsedPath from New).
+	AgentChats string
 }
 
 // NewChatGPT returns a ChatGPT reader over c.
-func NewChatGPT(c *Client) *ChatGPT { return &ChatGPT{Client: c} }
+func NewChatGPT(c *Client) *ChatGPT {
+	return &ChatGPT{Client: c, AgentChats: DefaultWebUsedPath(SourceChatGPT)}
+}
 
 // Source implements Reader.
 func (r *ChatGPT) Source() Source { return SourceChatGPT }
@@ -31,6 +36,7 @@ func (r *ChatGPT) live() *live {
 		client:      r.Client,
 		window:      r.Window,
 		now:         r.Now,
+		agentChats:  r.AgentChats,
 		listOp:      OpChatGPTList,
 		detailOp:    OpChatGPTDetail,
 		parseList:   parseChatGPTList,

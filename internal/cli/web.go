@@ -116,6 +116,7 @@ func webServeCmd() *cobra.Command {
 				Allowlist:   history.FileAllowlist(allowPath),
 				StatePath:   expandHome(statePath),
 				JournalPath: history.DefaultWebJournalPath(name),
+				UsedPath:    history.DefaultWebUsedPath(src),
 				Log:         cmd.ErrOrStderr(),
 			}
 			cmd.PrintErrf("tincan web %s: serving %s on %s (%s)\n", name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))

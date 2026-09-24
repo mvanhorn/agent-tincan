@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -183,5 +185,68 @@ func TestClaudeAIWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
 	}
 	if got := imageSHAs(convs[0], RoleUser); len(got) != 1 || got[0] != "f11e0000-0000-4000-8000-0000000000aa" {
 		t.Fatalf("attached image %v", got)
+	}
+}
+
+// A conversation a web agent sent into is the agent's, not the owner's:
+// latest, search and list skip it unless all is asked for, and it is
+// marked automated then. Reading it by id still works.
+func TestClaudeAISkipsWebAgentConversations(t *testing.T) {
+	used := filepath.Join(t.TempDir(), "web-agent-claude-ai-conversations.json")
+	if err := recordWebUsed(used, "c1a0d000-0000-4000-8000-000000000001", liveNow); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestClaudeAI(claudeFake(t))
+	r.AgentChats = used
+	ctx := context.Background()
+
+	convs, err := r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{})
+	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000002" || convs[0].Automated {
+		t.Fatalf("latest skips the web agent's chat: %+v %v", convs, err)
+	}
+	convs, err = r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{All: true})
+	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000001" || !convs[0].Automated {
+		t.Fatalf("latest with all: %+v %v", convs, err)
+	}
+	list, err := r.List(ctx, 10, Options{})
+	if err != nil || len(list) != 1 || list[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
+		t.Fatalf("list skips the web agent's chat: %+v %v", list, err)
+	}
+	list, err = r.List(ctx, 10, Options{All: true})
+	if err != nil || len(list) != 2 || !list[0].Automated || list[1].Automated {
+		t.Fatalf("list with all: %+v %v", list, err)
+	}
+	convs, err = r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-000000000001"}, Options{})
+	if err != nil || len(convs) != 1 {
+		t.Fatalf("by id: %+v %v", convs, err)
+	}
+}
+
+func TestWebUsedKeepsNewestAndSkipsBadIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cfg", "used.json")
+	if got := loadWebUsed(path); len(got) != 0 {
+		t.Fatalf("missing file: %v", got)
+	}
+	base := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	for i := range maxWebUsed + 5 {
+		if err := recordWebUsed(path, fmt.Sprintf("conv-%04d", i), base.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := loadWebUsed(path)
+	if len(got) != maxWebUsed || got["conv-0000"] || !got[fmt.Sprintf("conv-%04d", maxWebUsed+4)] {
+		t.Fatalf("kept %d, oldest kept %v", len(got), got["conv-0000"])
+	}
+	if err := recordWebUsed(path, "../etc", base); err == nil {
+		t.Fatal("bad id recorded")
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v %v", info, err)
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadWebUsed(path); len(got) != 0 {
+		t.Fatalf("corrupt file: %v", got)
 	}
 }

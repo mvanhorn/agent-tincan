@@ -17,10 +17,15 @@ type ClaudeAI struct {
 	Client *Client
 	Window Window
 	Now    func() time.Time
+	// AgentChats is the web agents' used list; those conversations are
+	// left out unless all is asked for (DefaultWebUsedPath from New).
+	AgentChats string
 }
 
 // NewClaudeAI returns a claude.ai reader over c.
-func NewClaudeAI(c *Client) *ClaudeAI { return &ClaudeAI{Client: c} }
+func NewClaudeAI(c *Client) *ClaudeAI {
+	return &ClaudeAI{Client: c, AgentChats: DefaultWebUsedPath(SourceClaudeAI)}
+}
 
 // Source implements Reader.
 func (r *ClaudeAI) Source() Source { return SourceClaudeAI }
@@ -31,6 +36,7 @@ func (r *ClaudeAI) live() *live {
 		client:      r.Client,
 		window:      r.Window,
 		now:         r.Now,
+		agentChats:  r.AgentChats,
 		listOp:      OpClaudeAIList,
 		detailOp:    OpClaudeAIDetail,
 		parseList:   parseClaudeAIList,
