@@ -32,7 +32,7 @@ Add `agent-tincan` under `mcpServers` in `~/.openclaw/openclaw.json` (stdio, lik
 
 See `examples/openclaw/openclaw-snippet.json` for the full block, including hooks. If you set `TINCAN_CONFIG` at join time, add the same `env` entry to this server block, or requests will go out under the machine's other agent name instead of OpenClaw's. OpenClaw's bundled `mcporter` can also add this entry (`mcporter add agent-tincan -- tincan mcp`, syntax may vary by version); either way, restart the gateway afterward so it picks up the change.
 
-This gives OpenClaw the tools `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`. For a skill-based runtime that prefers shelling out to the CLI instead of calling MCP tools directly, install `examples/openclaw/skills/agent-tincan/` as a skill; its SKILL.md declares the `tincan` binary and drives the same commands.
+This gives OpenClaw the tools `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`. For a skill-based runtime that prefers shelling out to the CLI instead of calling MCP tools directly, install `examples/openclaw/skills/agent-tincan/` as a skill; its SKILL.md declares the `tincan` binary and drives the same commands.
 
 ## Wake
 

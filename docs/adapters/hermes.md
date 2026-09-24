@@ -28,7 +28,7 @@ TINCAN_CONFIG=~/.hermes/tincan-hermes.json tincan join <code> --relay http://tin
 
 ## Send
 
-Add `tincan mcp` as a stdio MCP server. See `examples/hermes/config-snippet.yaml` for the `mcp_servers.agent-tincan` entry to add to `~/.hermes/config.yaml`. `hermes mcp add agent-tincan --command tincan --args mcp` also works (answer Y to enable the tools). Restart the gateway (`hermes gateway restart`) so webhook-started sessions load the new server; `/reload-mcp` covers only a running chat. After that Hermes has `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, and `trace`.
+Add `tincan mcp` as a stdio MCP server. See `examples/hermes/config-snippet.yaml` for the `mcp_servers.agent-tincan` entry to add to `~/.hermes/config.yaml`. `hermes mcp add agent-tincan --command tincan --args mcp` also works (answer Y to enable the tools). Restart the gateway (`hermes gateway restart`) so webhook-started sessions load the new server; `/reload-mcp` covers only a running chat. After that Hermes has `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, and `get_attachment`.
 
 ## Wake
 

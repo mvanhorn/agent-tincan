@@ -5,7 +5,7 @@ The `history` agent answers teammates' questions about what Matt asked in four p
 It is a Go service, `tincan history serve`, that runs on Matt's Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
 
 1. Checks access. Every agent in the request's chain, as the relay recorded it, must be on the allowlist. Otherwise it declines and names the agent.
-2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted) with one tool-less `codex exec` call that sees only the question text.
+2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text.
 3. Reads the source: Codex and Claude Code from their local logs, ChatGPT and claude.ai live through the Tincan Chrome extension in Matt's logged-in Chrome.
 4. Fills in a fixed reply template and attaches the images.
 

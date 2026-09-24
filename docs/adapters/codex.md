@@ -88,4 +88,4 @@ It is a colon-separated list of absolute paths to existing directories. For each
 - No persistent session: Codex starts over on every wake, so the whole exchange, check_inbox, each reply, and any teammate asks it makes, has to finish inside that one `codex exec` run.
 - No channel and no background wait: Codex has neither Claude Code's channel preview nor a runtime that can keep a background process alive across turns the way Muse's does, so `command` wake through `tincan listen --exec` is the only wake method that fits.
 - Wake messages, including the `command` nudge, carry only the waiting count, never request content.
-- Live verification (codex joined beside claude-code, answering a round trip) has not been run yet; it is part of the rollout step for this plan, not this adapter's docs.
+- Verified live on the owner's Mac: codex joined beside claude-code answers round trips, including slow replies woken through the listener.

@@ -284,7 +284,7 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			return text("Cancelled " + in.RequestID + ".")
 		})
 
-	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, or none), and when each last called the relay (any send, reply, get, or poll)."},
+	mcp.AddTool(s, &mcp.Tool{Name: "list_agents", Description: "List teammates, whether each is online, how each wakes (webhook, email, command, channel, wait, or none), and when each last called the relay (any send, reply, get, or poll)."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			agents, err := b.Agents(ctx)
 			if err != nil {

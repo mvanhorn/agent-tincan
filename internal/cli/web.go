@@ -57,7 +57,7 @@ func webServeCmd() *cobra.Command {
 			"  1. every agent in the request's relay-set chain must be on the allowlist, or the request is declined;\n" +
 			"  2. the body is the message. A first line \"new chat\" or \"conversation: <id>\" picks the conversation;\n" +
 			"     otherwise it continues the one this asker used last (remembered in a 0600 state file);\n" +
-			"  3. the Tincan Chrome extension types it into the site in a background tab and waits for the reply;\n" +
+			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
 			"  4. the reply text (capped) comes back with generated images as attachments.\n" +
 			"Normally started by the service definition tincan web install writes.",
 		Args: cobra.NoArgs,

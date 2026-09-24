@@ -16,7 +16,7 @@ tincan join <code> --relay http://tincan-relay
 claude mcp add agent-tincan -- tincan mcp --channel
 ```
 
-That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`) and, with `--channel`, pushes teammate requests straight into the running session.
+That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`) and, with `--channel`, pushes teammate requests straight into the running session.
 
 ## Receive requests without typing (channels)
 
