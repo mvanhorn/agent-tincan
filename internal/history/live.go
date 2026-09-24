@@ -110,7 +110,7 @@ func (l *live) Read(ctx context.Context, q Query, _ Options) ([]Conversation, er
 		if err != nil {
 			return nil, err
 		}
-		out := []Conversation{conversationMessages(th, q.WantImages)}
+		out := []Conversation{conversationMessages(th, q.wantsImages())}
 		return l.resolve(ctx, out), nil
 	}
 	w := l.window.orDefault()

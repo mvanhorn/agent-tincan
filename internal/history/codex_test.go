@@ -341,3 +341,69 @@ func TestCodexSourceAndInterface(t *testing.T) {
 		t.Fatal(r.Source())
 	}
 }
+
+// codexAddTextThread adds a Desktop thread newer than every fixture thread
+// whose only turn has no images.
+func codexAddTextThread(t *testing.T, r *Codex) string {
+	t.Helper()
+	const id = "01a0c000-0000-7000-8000-000000000020"
+	dir := filepath.Join(r.Home, "sessions", "2026", "09", "22")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rollout := filepath.Join(dir, "rollout-2026-09-22T10-00-00-"+id+".jsonl")
+	body := `{"timestamp":"2026-09-22T10:00:00.000Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"/Users/matt/code/notes","originator":"Codex Desktop"}}
+{"timestamp":"2026-09-22T10:00:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"rename the notes folder"}]}}}
+{"timestamp":"2026-09-22T10:00:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Renamed."}]}}
+`
+	if err := os.WriteFile(rollout, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setMtime(t, rollout, "2026-09-22T10:00:05Z")
+	f, err := os.OpenFile(filepath.Join(r.Home, "session_index.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString("\n" + `{"id":"` + id + `","thread_name":"Notes rename","updated_at":"2026-09-22T10:00:05.000000Z"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestCodexWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
+	r := codexFixture(t)
+	newer := codexAddTextThread(t, r)
+	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
+	if err != nil || ids(got) != newer {
+		t.Fatalf("plain latest = %s, %v; want the newer text-only thread", ids(got), err)
+	}
+	// with_images alone implies want_images.
+	got, err = r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, WithImages: true}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids(got) != codexA {
+		t.Fatalf("with_images latest = %s, want A", ids(got))
+	}
+	if u := userTurn(t, got[0]); u.Text != "make the ears bigger like this sketch" {
+		t.Fatalf("prompt = %q", u.Text)
+	}
+	var all []Image
+	for _, m := range got[0].Messages {
+		all = append(all, m.Images...)
+	}
+	if c := colors(t, all); c != "green,orange" {
+		t.Fatalf("images = %s, want green,orange", c)
+	}
+}
+
+func TestCodexWithImagesSearchSkipsMatchingTurnsWithoutImages(t *testing.T) {
+	r := codexFixture(t)
+	codexAddTextThread(t, r)
+	// "rename" matches only the text-only thread, so nothing qualifies.
+	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"rename"}, WithImages: true}, Options{})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("search = %+v, %v; want nothing", got, err)
+	}
+}

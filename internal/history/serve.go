@@ -223,7 +223,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		return
 	}
 	var dir string
-	if q.WantImages {
+	if q.wantsImages() {
 		base := s.TempDir
 		if base == "" {
 			base = os.TempDir()
@@ -273,7 +273,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 			ids = client.AttachmentIDs(ups)
 			body += "\n" + imagesLine(len(ids))
 		}
-	} else if q.WantImages && len(convs) > 0 {
+	} else if q.wantsImages() && len(convs) > 0 {
 		body += "\nNo images on this turn."
 	}
 	s.logf("request %s from %s: answered %s %s (%d conversations, %d attachments)", req.ID, req.From, q.Source, q.Mode, len(convs), len(ids))
@@ -382,6 +382,13 @@ func imagesLine(n int) string {
 func renderReply(q Query, convs []Conversation) string {
 	label := sourceLabel(q.Source)
 	if len(convs) == 0 {
+		if q.WithImages {
+			msg := fmt.Sprintf("No %s turn with images found in the last %d conversations (up to %d days)", label, DefaultWindow().Max, int(DefaultWindow().MaxAge.Hours()/24))
+			if q.Mode == ModeSearch {
+				msg += " for: " + strings.Join(q.Terms, ", ")
+			}
+			return msg + "."
+		}
 		switch q.Mode {
 		case ModeSearch:
 			return fmt.Sprintf("No matching %s conversation in the recent window (the last %d conversations, up to %d days) for: %s.", label, DefaultWindow().Max, int(DefaultWindow().MaxAge.Hours()/24), strings.Join(q.Terms, ", "))

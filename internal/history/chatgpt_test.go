@@ -372,3 +372,60 @@ func (blockChannel) Exchange(ctx context.Context, _ NativeRequest, _ func(Native
 func frames(f ...NativeResponse) Channel {
 	return &fakeChannel{handle: func(NativeRequest) ([]NativeResponse, error) { return f, nil }}
 }
+
+// withNewerTextConversation makes the fake list a text-only conversation
+// newer than every fixture conversation.
+func withNewerTextConversation(t *testing.T, fake *fakeChannel, listOp, detailOp Op, list func(json.RawMessage) json.RawMessage, id string, detail string) {
+	t.Helper()
+	inner := fake.handle
+	fake.handle = func(req NativeRequest) ([]NativeResponse, error) {
+		switch {
+		case req.Op == listOp:
+			frames, err := inner(req)
+			if err != nil || len(frames) != 1 {
+				return frames, err
+			}
+			frames[0].Result = list(frames[0].Result)
+			return frames, nil
+		case req.Op == detailOp && req.Args.ID == id:
+			return []NativeResponse{{OK: true, Result: json.RawMessage(detail)}}, nil
+		}
+		return inner(req)
+	}
+}
+
+func TestChatGPTWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
+	const newer = "6a1f0c2e-1111-4a2b-9c3d-000000000004"
+	fake := chatgptFake(t)
+	withNewerTextConversation(t, fake, OpChatGPTList, OpChatGPTDetail, func(raw json.RawMessage) json.RawMessage {
+		var l map[string]any
+		if err := json.Unmarshal(raw, &l); err != nil {
+			t.Fatal(err)
+		}
+		items := l["items"].([]any)
+		l["items"] = append([]any{map[string]any{"id": newer, "title": "Weather", "update_time": "2026-09-22T11:00:00Z"}}, items...)
+		b, _ := json.Marshal(l)
+		return b
+	}, newer, `{"title":"Weather","update_time":"2026-09-22T11:00:00Z","conversation_id":"`+newer+`","current_node":"w-a1","mapping":{
+		"w-root":{"id":"w-root","message":null,"parent":null,"children":["w-u1"]},
+		"w-u1":{"id":"w-u1","message":{"id":"w-u1","author":{"role":"user"},"create_time":"2026-09-22T10:59:00Z","content":{"content_type":"text","parts":["will it rain tomorrow"]},"metadata":{},"recipient":"all"},"parent":"w-root","children":["w-a1"]},
+		"w-a1":{"id":"w-a1","message":{"id":"w-a1","author":{"role":"assistant"},"create_time":"2026-09-22T11:00:00Z","content":{"content_type":"text","parts":["Probably not."]},"metadata":{},"recipient":"all"},"parent":"w-u1","children":[]}}}`)
+	r := newTestChatGPT(fake)
+	convs, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest}, Options{})
+	if err != nil || ids(convs) != newer {
+		t.Fatalf("plain latest = %s, %v; want the newer text-only conversation", ids(convs), err)
+	}
+	convs, err = r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, WithImages: true}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids(convs) != "6a1f0c2e-1111-4a2b-9c3d-000000000001" || convs[0].Messages[0].Text != "make the fox ears bigger like this sketch" {
+		t.Fatalf("with_images latest = %+v", convs)
+	}
+	if got := imageSHAs(convs[0], RoleUser); len(got) != 1 || got[0] != "file-Sk3tchAbc123" {
+		t.Fatalf("attached images %v", got)
+	}
+	if got := imageSHAs(convs[0], RoleAssistant); len(got) != 1 || got[0] != "file-Gen3rated456" {
+		t.Fatalf("generated images %v", got)
+	}
+}

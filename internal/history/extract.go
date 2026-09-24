@@ -60,21 +60,23 @@ Answer with one JSON object matching the output schema:
 - terms: the search keywords for "search" mode (1 to 8 short words or phrases), otherwise [].
 - conversation_id: the id for "conversation" mode, otherwise "".
 - count: how many results were asked for, 1 if not said, at most 20.
-- want_images: true if the question asks for an image, picture, screenshot, sketch, photo or file.`
+- want_images: true if the question asks for an image, picture, screenshot, sketch, photo or file.
+- with_images: true if the question asks for a message, prompt, turn or session that had an image, screenshot, photo or picture (for example "the last time Matt sent a screenshot" or "his most recent session that included a photo"), so the answer must be the most recent turn with images rather than the most recent turn. Use mode "latest" for this unless the question also names a topic to search for. with_images also returns the images. Otherwise false.`
 
 // extractSchema is the structured output schema. Strict structured output
 // needs every property required and no extra properties.
 const extractSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["source", "mode", "terms", "conversation_id", "count", "want_images"],
+  "required": ["source", "mode", "terms", "conversation_id", "count", "want_images", "with_images"],
   "properties": {
     "source": {"type": "string", "enum": ["chatgpt", "claude-ai", "codex", "claude-code", "unknown"]},
     "mode": {"type": "string", "enum": ["latest", "search", "conversation"]},
     "terms": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
     "conversation_id": {"type": "string"},
     "count": {"type": "integer", "minimum": 0, "maximum": 20},
-    "want_images": {"type": "boolean"}
+    "want_images": {"type": "boolean"},
+    "with_images": {"type": "boolean"}
   }
 }
 `
@@ -193,6 +195,7 @@ type extraction struct {
 	ConversationID string   `json:"conversation_id"`
 	Count          int      `json:"count"`
 	WantImages     bool     `json:"want_images"`
+	WithImages     bool     `json:"with_images"`
 }
 
 // parseExtraction decodes and validates the extractor's answer. Anything
@@ -222,7 +225,8 @@ func parseExtraction(raw []byte) (Query, error) {
 		Mode:           Mode(e.Mode),
 		ConversationID: strings.TrimSpace(e.ConversationID),
 		Count:          e.Count,
-		WantImages:     e.WantImages,
+		WantImages:     e.WantImages || e.WithImages,
+		WithImages:     e.WithImages,
 	}
 	for _, t := range e.Terms {
 		if t = strings.TrimSpace(t); t != "" {

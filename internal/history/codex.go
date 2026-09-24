@@ -448,7 +448,7 @@ func (c *Codex) Read(ctx context.Context, q Query, opts Options) ([]Conversation
 	if err := checkSource(SourceCodex, q); err != nil {
 		return nil, err
 	}
-	p := codexParse{images: q.WantImages}
+	p := codexParse{images: q.wantsImages()}
 	if q.Mode == ModeConversation {
 		cands, err := c.candidates(ctx, true)
 		if err != nil {
@@ -465,7 +465,7 @@ func (c *Codex) Read(ctx context.Context, q Query, opts Options) ([]Conversation
 			if !ok {
 				break
 			}
-			return []Conversation{conversationMessages(th, q.WantImages)}, nil
+			return []Conversation{conversationMessages(th, q.wantsImages())}, nil
 		}
 		return nil, fmt.Errorf("codex: %w: %s", ErrNotFound, q.ConversationID)
 	}

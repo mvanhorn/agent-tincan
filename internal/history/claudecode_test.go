@@ -187,3 +187,22 @@ func TestClaudeCodeSlashCommandWithArgsIsAPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeCodeWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
+	r := claudeFixture(t)
+	// The newest prompt in S1 has no image; the earlier one attached red.
+	got, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest, WithImages: true}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids(got) != ccS1 {
+		t.Fatalf("ids = %s", ids(got))
+	}
+	u := userTurn(t, got[0])
+	if !strings.Contains(u.Text, "summarize the relay design in this diagram") {
+		t.Fatalf("prompt = %q, want the earlier turn with the image", u.Text)
+	}
+	if colors(t, u.Images) != "red" {
+		t.Fatalf("images = %s, want red", colors(t, u.Images))
+	}
+}

@@ -341,12 +341,12 @@ func (c *ClaudeCode) Read(ctx context.Context, q Query, opts Options) ([]Convers
 			if e.id != q.ConversationID {
 				continue
 			}
-			th, ok, err := c.parse(e, opts.All, q.WantImages)
+			th, ok, err := c.parse(e, opts.All, q.wantsImages())
 			if err != nil {
 				return nil, err
 			}
 			if ok {
-				return []Conversation{conversationMessages(th, q.WantImages)}, nil
+				return []Conversation{conversationMessages(th, q.wantsImages())}, nil
 			}
 		}
 		return nil, fmt.Errorf("claude-code: %w: %s", ErrNotFound, q.ConversationID)
@@ -357,7 +357,7 @@ func (c *ClaudeCode) Read(ctx context.Context, q Query, opts Options) ([]Convers
 			if err := ctx.Err(); err != nil {
 				return thread{}, false, err
 			}
-			th, ok, err := c.parse(cands[i], opts.All, q.WantImages)
+			th, ok, err := c.parse(cands[i], opts.All, q.wantsImages())
 			// A transcript with no prompts from Matt does not use up a
 			// window slot.
 			return th, ok && len(th.turns) > 0, err

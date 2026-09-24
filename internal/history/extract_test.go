@@ -154,7 +154,7 @@ func TestCodexExtractorFlagsAndInput(t *testing.T) {
 	if err := json.Unmarshal([]byte(readLog(t, logDir, "schema")), &schema); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
-	for _, f := range []string{"source", "mode", "terms", "conversation_id", "count", "want_images"} {
+	for _, f := range []string{"source", "mode", "terms", "conversation_id", "count", "want_images", "with_images"} {
 		if !slices.Contains(schema.Required, f) {
 			t.Errorf("schema does not require %q", f)
 		}
@@ -178,14 +178,15 @@ func TestCodexExtractorFlagsAndInput(t *testing.T) {
 
 func TestCodexExtractorRejectsBadOutput(t *testing.T) {
 	cases := map[string]string{
-		"not json":       `I think they asked about cats`,
-		"unknown source": `{"source":"myspace","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false}`,
-		"unclear":        `{"source":"unknown","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false}`,
-		"count too big":  `{"source":"codex","mode":"latest","terms":[],"conversation_id":"","count":500,"want_images":false}`,
-		"bad id":         `{"source":"codex","mode":"conversation","terms":[],"conversation_id":"../../etc/passwd","count":1,"want_images":false}`,
-		"search no term": `{"source":"codex","mode":"search","terms":[],"conversation_id":"","count":1,"want_images":false}`,
-		"extra field":    `{"source":"codex","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false,"shell":"rm -rf"}`,
-		"two objects":    `{"source":"codex","mode":"latest"} {"source":"chatgpt"}`,
+		"not json":                  `I think they asked about cats`,
+		"unknown source":            `{"source":"myspace","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false}`,
+		"unclear":                   `{"source":"unknown","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false}`,
+		"count too big":             `{"source":"codex","mode":"latest","terms":[],"conversation_id":"","count":500,"want_images":false}`,
+		"bad id":                    `{"source":"codex","mode":"conversation","terms":[],"conversation_id":"../../etc/passwd","count":1,"want_images":false}`,
+		"search no term":            `{"source":"codex","mode":"search","terms":[],"conversation_id":"","count":1,"want_images":false}`,
+		"extra field":               `{"source":"codex","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false,"shell":"rm -rf"}`,
+		"with_images out of bounds": `{"source":"claude-code","mode":"latest","terms":[],"conversation_id":"","count":21,"want_images":true,"with_images":true}`,
+		"two objects":               `{"source":"codex","mode":"latest"} {"source":"chatgpt"}`,
 	}
 	for name, reply := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -229,5 +230,33 @@ func TestParseExtractionTolerance(t *testing.T) {
 	}
 	if q.Source != SourceClaudeCode || q.Mode != ModeSearch || len(q.Terms) != 1 || q.Terms[0] != "relay" {
 		t.Fatalf("query = %+v", q)
+	}
+}
+
+func TestCodexExtractorWithImages(t *testing.T) {
+	logDir, x := fakeCodex(t, `{"source":"claude-code","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false,"with_images":true}`)
+	q, err := x.Extract(context.Background(), "what did Matt ask in his most recent Claude Code session that included a screenshot? send the image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// with_images implies want_images.
+	if q.Source != SourceClaudeCode || q.Mode != ModeLatest || !q.WithImages || !q.WantImages {
+		t.Fatalf("query = %+v", q)
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Type string `json:"type"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(readLog(t, logDir, "schema")), &schema); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	if schema.Properties["with_images"].Type != "boolean" {
+		t.Fatalf("schema with_images = %+v", schema.Properties["with_images"])
+	}
+	for _, want := range []string{"with_images", "screenshot", "photo", "picture"} {
+		if !strings.Contains(extractInstructions, want) {
+			t.Errorf("instructions do not mention %q", want)
+		}
 	}
 }

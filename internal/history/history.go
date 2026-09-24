@@ -86,6 +86,10 @@ type Query struct {
 	ConversationID string   `json:"conversation_id,omitempty"`
 	Count          int      `json:"count,omitempty"`
 	WantImages     bool     `json:"want_images,omitempty"`
+	// WithImages selects the most recent qualifying turn that has images
+	// (attached to Matt's prompt or generated in the reply) instead of the
+	// most recent turn. It implies WantImages.
+	WithImages bool `json:"with_images,omitempty"`
 }
 
 // Validate checks q against the schema and bounds.
@@ -131,6 +135,10 @@ func (q Query) Validate() error {
 	}
 	return nil
 }
+
+// wantsImages reports whether q asks for image bytes. WithImages implies
+// it: a turn picked for its images is only useful with them.
+func (q Query) wantsImages() bool { return q.WantImages || q.WithImages }
 
 // count returns the effective result count for q.
 func (q Query) count() int {
@@ -509,6 +517,26 @@ type turn struct {
 	replyImages []Image
 }
 
+// hasImages reports whether t has images attached to the prompt or
+// generated in the reply. Live readers hold unresolved placeholders here,
+// which count.
+func (t turn) hasImages() bool { return len(t.prompt.Images) > 0 || len(t.replyImages) > 0 }
+
+// eligible returns the turns of th that q may select: every turn, or with
+// WithImages only the turns that have images.
+func eligible(q Query, turns []turn) []turn {
+	if !q.WithImages {
+		return turns
+	}
+	var out []turn
+	for _, t := range turns {
+		if t.hasImages() {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // messages renders t as a user message and, if present, an assistant reply.
 func (t turn) messages(withImages bool) []Message {
 	u := t.prompt
@@ -536,7 +564,9 @@ type thread struct {
 // threads ordered newest first. bound(i) is candidate i's update time, an
 // upper bound on its newest prompt. load(i) parses it and reports false
 // for excluded threads, which do not count toward the window. pick stops
-// at the window's edge and as soon as the answer cannot change.
+// at the window's edge and as soon as the answer cannot change. With
+// q.WithImages only turns that have images are selected, so the scan goes
+// back through the window until it finds them.
 func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, load func(i int) (thread, bool, error)) ([]Conversation, error) {
 	w = w.orDefault()
 	want := q.count()
@@ -565,9 +595,10 @@ func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, 
 			continue
 		}
 		admitted++
+		turns := eligible(q, th.turns)
 		switch q.Mode {
 		case ModeLatest:
-			for _, t := range th.turns {
+			for _, t := range turns {
 				hits = append(hits, hit{th.conv, t})
 			}
 			sortHits(hits, func(a, b int) bool { return hits[a].t.prompt.Time.After(hits[b].t.prompt.Time) })
@@ -576,18 +607,20 @@ func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, 
 			}
 		case ModeSearch:
 			var found *turn
-			for j := len(th.turns) - 1; j >= 0; j-- {
-				if matchTerms(th.turns[j].prompt.Text, q.Terms) {
-					found = &th.turns[j]
+			for j := len(turns) - 1; j >= 0; j-- {
+				if matchTerms(turns[j].prompt.Text, q.Terms) {
+					found = &turns[j]
 					break
 				}
 			}
 			if found == nil && matchTerms(th.conv.Title, q.Terms) {
-				if len(th.turns) == 0 {
-					hits = append(hits, hit{conv: th.conv})
+				if len(turns) == 0 {
+					if !q.WithImages {
+						hits = append(hits, hit{conv: th.conv})
+					}
 					continue
 				}
-				found = &th.turns[len(th.turns)-1]
+				found = &turns[len(turns)-1]
 			}
 			if found != nil {
 				hits = append(hits, hit{th.conv, *found})
@@ -598,7 +631,7 @@ func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, 
 	for _, h := range hits {
 		c := h.conv
 		if h.t.prompt.Role != "" {
-			c.Messages = h.t.messages(q.WantImages)
+			c.Messages = h.t.messages(q.wantsImages())
 		}
 		out = append(out, c)
 	}

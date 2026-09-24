@@ -526,3 +526,49 @@ func TestServeAllowlistErrorFailsClosed(t *testing.T) {
 		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
 	}
 }
+
+// End to end with the Claude Code fixture: with_images skips the newest
+// prompt, which had no image, and returns the earlier turn with its image
+// as an attachment.
+func TestServeWithImagesReturnsOlderImageTurn(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.Readers[SourceClaudeCode] = claudeFixture(t)
+	rig.ext.q = Query{Source: SourceClaudeCode, Mode: ModeLatest, WithImages: true}
+	res := rig.ask(t, "grokbot", "what did Matt ask in his most recent Claude Code session that included a screenshot? send the image")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	for _, want := range []string{"Claude Code", "Relay design", "summarize the relay design in this diagram", "1 image attached"} {
+		if !strings.Contains(res.Reply.Body, want) {
+			t.Errorf("reply missing %q:\n%s", want, res.Reply.Body)
+		}
+	}
+	if strings.Contains(res.Reply.Body, "now write tests for the relay") {
+		t.Errorf("reply shows the newer turn without images:\n%s", res.Reply.Body)
+	}
+	if len(res.Reply.Attachments) != 1 {
+		t.Fatalf("attachments = %+v", res.Reply.Attachments)
+	}
+	data, info, err := rig.mesh.Client(t, "grokbot").FetchAttachment(t.Context(), res.Reply.Attachments[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := client.InlineImage(info.MIME, data); !ok {
+		t.Fatalf("attachment (%s) would not be shown as an image", info.MIME)
+	}
+	rig.assertNoImageDirsLeft(t)
+}
+
+func TestServeWithImagesNothingFound(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.Readers[SourceClaudeCode] = claudeFixture(t)
+	rig.ext.q = Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"write tests"}, WithImages: true}
+	res := rig.ask(t, "grokbot", "the Claude Code prompt about writing tests that had a screenshot")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if !strings.Contains(res.Reply.Body, "No Claude Code turn with images found in the last 50 conversations") {
+		t.Fatalf("reply %q", res.Reply.Body)
+	}
+	rig.assertNoImageDirsLeft(t)
+}

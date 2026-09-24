@@ -155,3 +155,33 @@ func TestLiveImageFetchFailureDropsImageOnly(t *testing.T) {
 		t.Fatalf("images %+v", convs[0].Messages)
 	}
 }
+
+func TestClaudeAIWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
+	const newer = "c1a0d000-0000-4000-8000-000000000004"
+	fake := claudeFake(t)
+	withNewerTextConversation(t, fake, OpClaudeAIList, OpClaudeAIDetail, func(raw json.RawMessage) json.RawMessage {
+		var l []any
+		if err := json.Unmarshal(raw, &l); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(append([]any{map[string]any{"uuid": newer, "name": "Weather", "created_at": "2026-09-22T11:30:00Z", "updated_at": "2026-09-22T11:31:00Z"}}, l...))
+		return b
+	}, newer, `{"uuid":"`+newer+`","name":"Weather","created_at":"2026-09-22T11:30:00Z","updated_at":"2026-09-22T11:31:00Z","chat_messages":[
+		{"uuid":"w0000000-0000-4000-8000-000000000001","text":"will it rain tomorrow","sender":"human","index":0,"created_at":"2026-09-22T11:30:00Z","attachments":[],"files":[]},
+		{"uuid":"w0000000-0000-4000-8000-000000000002","text":"Probably not.","sender":"assistant","index":1,"created_at":"2026-09-22T11:30:05Z","attachments":[],"files":[]}]}`)
+	r := newTestClaudeAI(fake)
+	convs, err := r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{})
+	if err != nil || ids(convs) != newer {
+		t.Fatalf("plain latest = %s, %v; want the newer text-only conversation", ids(convs), err)
+	}
+	convs, err = r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WithImages: true}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids(convs) != "c1a0d000-0000-4000-8000-000000000001" || convs[0].Messages[0].Text != "what is this creature in my photo?" {
+		t.Fatalf("with_images latest = %+v", convs)
+	}
+	if got := imageSHAs(convs[0], RoleUser); len(got) != 1 || got[0] != "f11e0000-0000-4000-8000-0000000000aa" {
+		t.Fatalf("attached image %v", got)
+	}
+}
