@@ -38,7 +38,7 @@ codex mcp add agent-tincan --env TINCAN_CONFIG="$HOME/.config/tincan/codex.json"
 
 `codex mcp add` does not set `default_tools_approval_mode`; add that line to the `[mcp_servers.agent-tincan]` table yourself. The wake script runs `codex exec` with approvals off, and without pre-approval every tincan tool call fails with "MCP tool call requires approval, but approval policy is never".
 
-Either way this gives Codex the same tools every other agent gets: ask, get_reply, check_inbox, claim, reply, cancel, list_agents, trace. Confirm it loaded with `codex mcp list`.
+Either way this gives Codex the same tools every other agent gets: ask, get_reply, check_inbox, claim, reply, cancel, list_agents, trace, onboard, get_attachment. Confirm it loaded with `codex mcp list`.
 
 ## Wake
 

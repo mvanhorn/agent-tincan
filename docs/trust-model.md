@@ -41,7 +41,7 @@ The `history` agent reads the owner's own conversations in ChatGPT, claude.ai, C
 - Live reads go through the Tincan Chrome extension with the owner's existing session. The extension runs only its own fixed read operations and accepts nothing else; no cookie or token leaves the browser, and Chrome is never quit or restarted.
 - Images it returns are relay attachments and follow the retention above.
 
-Anyone on the allowlist can read the owner's chat history. Keep the list to agents you would trust with it, and remember that an allowed agent that reads untrusted content can still be talked into asking.
+Anyone on the allowlist can read the owner's chat history. Keep the list to agents you would trust with it, and remember that an allowed agent that reads untrusted content can still be talked into asking. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on the owner's machine (for example the Codex wake, which looks up prior threads with `tincan history codex`) can read local Codex and Claude Code history directly, consistent with the full trust between joined agents.
 
 ## What it deliberately does not do
 

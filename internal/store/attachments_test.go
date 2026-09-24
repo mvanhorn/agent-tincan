@@ -299,6 +299,58 @@ func TestSweepAttachments(t *testing.T) {
 	}
 }
 
+// A claimed notify stays claimed forever (nothing replies to close it), so
+// claimed is its final state: its attachments go keepAfterDone after the
+// claim. A claimed ask is still open and keeps its attachments.
+func TestSweepAttachmentsClaimedNotify(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	onNotify := upload(t, s, "history", "notify.png", 1)
+	onAsk := upload(t, s, "history", "ask.png", 1)
+	n, err := s.Enqueue(ctx, envelope.Request{From: "history", To: "grokbot", Kind: envelope.KindNotify, Body: "fyi", Hop: 1, Chain: []string{}, Attachments: []envelope.Attachment{{ID: onNotify}}}, 30*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := s.Enqueue(ctx, envelope.Request{From: "history", To: "grokbot", Kind: envelope.KindAsk, Body: "q", Hop: 1, Chain: []string{}, Attachments: []envelope.Attachment{{ID: onAsk}}}, 30*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{n.ID, a.ID} {
+		if _, err := s.Claim(ctx, id, "grokbot", 30*24*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweep := func() []string {
+		t.Helper()
+		ids, err := s.SweepAttachments(ctx, 24*time.Hour, 7*24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+	c.advance(7*24*time.Hour - time.Minute)
+	if ids := sweep(); len(ids) != 0 {
+		t.Fatalf("swept %v before keepAfterDone", ids)
+	}
+	c.advance(2 * time.Minute)
+	if ids := sweep(); !slices.Equal(ids, []string{onNotify}) {
+		t.Fatalf("after keepAfterDone swept %v, want only the notify attachment %v", ids, onNotify)
+	}
+	if rec, err := s.Attachment(ctx, onNotify); err != nil || rec.DeletedAt.IsZero() {
+		t.Fatalf("notify attachment row = %+v, %v; want kept and marked deleted", rec, err)
+	}
+	if rec, _ := s.Attachment(ctx, onAsk); !rec.DeletedAt.IsZero() {
+		t.Fatalf("attachment on a claimed ask was deleted")
+	}
+	if ids := sweep(); len(ids) != 0 {
+		t.Fatalf("second sweep returned %v", ids)
+	}
+	res, err := s.Get(ctx, n.ID, "history")
+	if err != nil || len(res.Request.Attachments) != 1 {
+		t.Fatalf("notify after sweep = %+v, %v", res.Request, err)
+	}
+}
+
 // Deleted blobs no longer count against the quota.
 func TestSweptAttachmentsFreeQuota(t *testing.T) {
 	s, c := open(t, ":memory:")

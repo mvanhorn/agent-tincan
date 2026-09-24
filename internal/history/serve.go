@@ -257,6 +257,8 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		}
 		paths = imagePaths(convs)
 	}
+	// The images line is written only after the upload, from what was
+	// actually attached, so it never claims images that did not arrive.
 	body := renderReply(q, convs)
 	var ids []string
 	if len(paths) > 0 {
@@ -269,14 +271,24 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 			body += "\n\nThe images could not be attached: the upload to the relay failed."
 		default:
 			ids = client.AttachmentIDs(ups)
+			body += "\n" + imagesLine(len(ids))
 		}
+	} else if q.WantImages && len(convs) > 0 {
+		body += "\nNo images on this turn."
 	}
 	s.logf("request %s from %s: answered %s %s (%d conversations, %d attachments)", req.ID, req.From, q.Source, q.Mode, len(convs), len(ids))
 	s.reply(ctx, req, body, envelope.StatusAnswered, ids)
 }
 
+// replyTimeout bounds sending one reply.
+const replyTimeout = 30 * time.Second
+
+// reply sends on its own context, detached from ctx's deadline, so a request
+// that ran out of time (or panicked after it did) still gets its answer.
 func (s *Service) reply(ctx context.Context, req envelope.Request, body string, status envelope.Status, ids []string) {
-	if _, err := s.Relay.ReplyAttached(ctx, req.ID, body, status, ids); err != nil {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
+	defer cancel()
+	if _, err := s.Relay.ReplyAttached(rctx, req.ID, body, status, ids); err != nil {
 		s.logf("request %s: reply failed: %v", req.ID, err)
 	}
 }
@@ -354,6 +366,17 @@ func imagePaths(convs []Conversation) []string {
 	return out
 }
 
+// imagesLine states how many images were attached to the reply.
+func imagesLine(n int) string {
+	switch n {
+	case 0:
+		return "No images were attached."
+	case 1:
+		return "1 image attached."
+	}
+	return fmt.Sprintf("%d images attached.", n)
+}
+
 // renderReply fills the fixed reply template. Only fields come from the
 // conversations; nothing in them is interpreted.
 func renderReply(q Query, convs []Conversation) string {
@@ -382,11 +405,10 @@ func renderReply(q Query, convs []Conversation) string {
 		if c.Cwd != "" {
 			fmt.Fprintf(&b, "Working directory: %s\n", c.Cwd)
 		}
-		prompts, images := 0, 0
+		prompts := 0
 		var lastReply string
 		var when time.Time
 		for _, m := range c.Messages {
-			images += len(m.Images)
 			switch m.Role {
 			case RoleUser:
 				prompts++
@@ -417,16 +439,6 @@ func renderReply(q Query, convs []Conversation) string {
 		}
 		if lastReply != "" {
 			fmt.Fprintf(&b, "Reply excerpt: %s\n", capRunes(oneLineText(lastReply), maxExcerptRunes))
-		}
-		if q.WantImages {
-			switch images {
-			case 0:
-				b.WriteString("No images on this turn.")
-			case 1:
-				b.WriteString("1 image attached.")
-			default:
-				fmt.Fprintf(&b, "%d images attached.", images)
-			}
 		}
 		if b.Len() > maxReplyBytes {
 			break

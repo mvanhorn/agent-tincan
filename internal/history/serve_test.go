@@ -46,6 +46,8 @@ type fakeReader struct {
 	convs   []Conversation
 	err     error
 	queries []Query
+	// block makes Read wait for its context to end and return its error.
+	block bool
 }
 
 func (f *fakeReader) Source() Source { return f.source }
@@ -54,7 +56,17 @@ func (f *fakeReader) List(context.Context, int, Options) ([]Conversation, error)
 	return nil, errors.New("not used")
 }
 
-func (f *fakeReader) Read(_ context.Context, q Query, _ Options) ([]Conversation, error) {
+func (f *fakeReader) Read(ctx context.Context, q Query, _ Options) ([]Conversation, error) {
+	f.mu.Lock()
+	block := f.block
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		f.mu.Lock()
+		f.queries = append(f.queries, q)
+		f.mu.Unlock()
+		return nil, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queries = append(f.queries, q)
@@ -350,6 +362,54 @@ func TestServeWithoutAttachmentSupportRepliesTextWithNote(t *testing.T) {
 		if !strings.Contains(res.Reply.Body, want) {
 			t.Fatalf("reply missing %q:\n%s", want, res.Reply.Body)
 		}
+	}
+	if strings.Contains(res.Reply.Body, "attached.") {
+		t.Fatalf("reply claims images were attached when none were:\n%s", res.Reply.Body)
+	}
+	rig.assertNoImageDirsLeft(t)
+}
+
+// A relay that advertises attachments but fails the upload: the reply says
+// so and never claims a count of attached images.
+func TestServeUploadFailureMakesNoAttachedClaim(t *testing.T) {
+	rig := newServeRig(t, true)
+	// An attachment dir under a regular file cannot be created, so every
+	// upload fails on the relay side.
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.mesh.Server.SetAttachmentDir(filepath.Join(blocker, "blobs"))
+	rig.svc.Readers[SourceCodex] = codexFixture(t)
+	rig.ext.q = Query{Source: SourceCodex, Mode: ModeLatest, WantImages: true}
+	res := rig.ask(t, "grokbot", "what did Matt last ask Codex? include the images")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if len(res.Reply.Attachments) != 0 {
+		t.Fatalf("attachments after a failed upload: %+v", res.Reply.Attachments)
+	}
+	if !strings.Contains(res.Reply.Body, "the upload to the relay failed") {
+		t.Fatalf("reply does not report the failed upload:\n%s", res.Reply.Body)
+	}
+	if strings.Contains(res.Reply.Body, "attached.") {
+		t.Fatalf("reply claims images were attached when none were:\n%s", res.Reply.Body)
+	}
+	rig.assertNoImageDirsLeft(t)
+}
+
+// A request that runs past RequestTimeout still gets its failed reply: the
+// reply is not sent on the already expired request context.
+func TestServeTimeoutStillReplies(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.RequestTimeout = 200 * time.Millisecond
+	rig.chatgpt.block = true
+	res := rig.ask(t, "grokbot", "last ChatGPT prompt")
+	if res.Status != envelope.StatusFailed {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if !strings.Contains(res.Reply.Body, "took too long") {
+		t.Fatalf("reply %q does not say the read took too long", res.Reply.Body)
 	}
 	rig.assertNoImageDirsLeft(t)
 }

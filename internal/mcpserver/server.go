@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -28,8 +29,20 @@ const Instructions = `You are one agent in Matt's Agent Tincan team. Other joine
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
 - Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from Matt, then call reply.
 - list_agents shows who is in the team, who is online, how each one wakes, and when each last called the relay.
-- ask and reply take attach, a list of local file paths to send with the message (images and small files). Images you receive show as images; other files are saved on this machine and their paths are listed.
+` + attachLocal + `
 - onboard returns the setup kit as JSON: the Agent Tincan operator prompt, a join and wake block for every agent on the roster, and recipes for adding agents. It only reads the roster; inviting an agent is an admin command (tincan invite).`
+
+// attachLocal is the attach sentence in Instructions for a server with
+// local files; attachRemote replaces it on a server without them (the
+// gateway), where attach is refused and received files are not saved.
+const (
+	attachLocal  = `- ask and reply take attach, a list of local file paths to send with the message (images and small files). Images you receive show as images; other files are saved on this machine and their paths are listed. If an attachment could not be fetched, get_attachment with its attachment id fetches it again.`
+	attachRemote = `- Images you receive show as images. Other files can be fetched with get_attachment (by attachment id) but are not saved on this server. Attaching local files is not available here.`
+)
+
+// attachmentID is the rule an attachment id must match, the same rule the
+// client applies before an id names a saved file (client.SaveAttachmentFile).
+var attachmentID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Backend is what the tools need from the relay client.
 type Backend interface {
@@ -72,7 +85,7 @@ func LocalFiles(dir string) Option {
 }
 
 // ToolNames lists the tools the server exposes, in order.
-var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard"}
+var ToolNames = []string{"ask", "get_reply", "check_inbox", "claim", "reply", "cancel", "list_agents", "trace", "onboard", "get_attachment"}
 
 type askIn struct {
 	To          string   `json:"to" jsonschema:"the teammate to ask, e.g. muse"`
@@ -101,6 +114,10 @@ type replyIn struct {
 	Message   string   `json:"message" jsonschema:"your answer or result"`
 	Status    string   `json:"status,omitempty" jsonschema:"answered (default), failed, or declined"`
 	Attach    []string `json:"attach,omitempty" jsonschema:"local file paths to attach (images or small files, at most 8, 10 MB each)"`
+}
+
+type attachmentIn struct {
+	ID string `json:"id" jsonschema:"the attachment id, as listed with the request or reply"`
 }
 
 type traceIn struct {
@@ -165,12 +182,17 @@ func New(b Backend, version string, opts ...Option) *mcp.Server {
 
 // NewWithOptions builds the MCP server with explicit options (channel mode).
 func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...Option) *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
 	var f files
 	f.att, _ = b.(Attacher)
 	for _, o := range more {
 		o(&f.options)
 	}
+	if f.filesDir == "" && opts != nil && strings.Contains(opts.Instructions, attachLocal) {
+		o := *opts
+		o.Instructions = strings.Replace(o.Instructions, attachLocal, attachRemote, 1)
+		opts = &o
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
 
 	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask a teammate agent to do something or answer something. Waits up to wait_seconds for the reply, otherwise returns a request id to check with get_reply."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in askIn) (*mcp.CallToolResult, any, error) {
@@ -298,6 +320,10 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			}
 			return text(string(raw))
 		})
+	mcp.AddTool(s, &mcp.Tool{Name: "get_attachment", Description: "Fetch one attachment again by its id, for example after a fetch failed in check_inbox or get_reply. Images show as images; other files are saved locally when this server saves files, otherwise reported as not saved here."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in attachmentIn) (*mcp.CallToolResult, any, error) {
+			return f.one(ctx, in.ID)
+		})
 	mcp.AddTool(s, &mcp.Tool{Name: "trace", Description: "Show a request chain you took part in: who asked whom, in order, with status and replies."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in traceIn) (*mcp.CallToolResult, any, error) {
 			var tr struct {
@@ -377,8 +403,8 @@ func (f files) askAttached(ctx context.Context, in askIn) (*mcp.CallToolResult, 
 
 // result is the tool result for msg plus atts: images are fetched and shown
 // as image content, other files are saved under filesDir (when local files
-// are on) and their paths listed. A failed fetch is reported in the text and
-// does not fail the call.
+// are on) and their paths listed. A failed fetch is reported in the text,
+// naming get_attachment so the agent can retry, and does not fail the call.
 func (f files) result(ctx context.Context, msg string, atts []envelope.Attachment) (*mcp.CallToolResult, any, error) {
 	if len(atts) == 0 || f.att == nil {
 		return text(msg)
@@ -387,33 +413,72 @@ func (f files) result(ctx context.Context, msg string, atts []envelope.Attachmen
 	b.WriteString(msg)
 	var images []mcp.Content
 	for _, a := range atts {
-		data, d, err := f.att.FetchAttachment(ctx, a.ID)
+		img, err := f.show(ctx, &b, a)
 		if err != nil {
-			fmt.Fprintf(&b, "Attachment %s %q: could not fetch it: %v\n", a.ID, a.Name, err)
+			fmt.Fprintf(&b, "Attachment %s %q: could not fetch it: %v (retry with get_attachment with id %q)\n", a.ID, a.Name, err, a.ID)
 			continue
 		}
-		declared := d.MIME
-		if declared == "" {
-			declared = a.MIME
+		if img != nil {
+			images = append(images, img)
 		}
-		if mt, ok := client.InlineImage(declared, data); ok {
-			fmt.Fprintf(&b, "Attachment %s %q (%s, %d bytes): shown as an image below.\n", a.ID, a.Name, mt, len(data))
-			images = append(images, &mcp.ImageContent{Data: data, MIMEType: mt})
-			continue
-		}
-		mt := client.MediaType(declared)
-		if f.filesDir == "" {
-			fmt.Fprintf(&b, "Attachment %s %q (%s, %d bytes): not saved here.\n", a.ID, a.Name, mt, len(data))
-			continue
-		}
-		p, err := client.SaveAttachmentFile(f.filesDir, a.ID, mt, data)
-		if err != nil {
-			fmt.Fprintf(&b, "Attachment %s %q: could not save it: %v\n", a.ID, a.Name, err)
-			continue
-		}
-		fmt.Fprintf(&b, "Attachment %s %q (%s, %d bytes): saved to %s\n", a.ID, a.Name, mt, len(data), p)
 	}
 	return &mcp.CallToolResult{Content: append([]mcp.Content{&mcp.TextContent{Text: b.String()}}, images...)}, nil, nil
+}
+
+// one is get_attachment: the result path for the single attachment id,
+// which must match the client's id rule. A failed fetch is a tool error.
+func (f files) one(ctx context.Context, id string) (*mcp.CallToolResult, any, error) {
+	if !attachmentID.MatchString(id) {
+		return fail(fmt.Errorf("attachment id %q is not valid (letters, digits, _ and -, at most 64)", id))
+	}
+	if f.att == nil {
+		return fail(errors.New("this server cannot fetch attachments"))
+	}
+	var b strings.Builder
+	img, err := f.show(ctx, &b, envelope.Attachment{ID: id})
+	if err != nil {
+		return fail(fmt.Errorf("could not fetch attachment %s: %w (retry with get_attachment)", id, err))
+	}
+	res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: b.String()}}}
+	if img != nil {
+		res.Content = append(res.Content, img)
+	}
+	return res, nil, nil
+}
+
+// show fetches a and writes one line about it to b: an image is returned
+// as image content, another file is saved under filesDir when local files
+// are on and reported as not saved here otherwise. Only a failed fetch is
+// returned as an error; a failed save is reported in b.
+func (f files) show(ctx context.Context, b *strings.Builder, a envelope.Attachment) (mcp.Content, error) {
+	data, d, err := f.att.FetchAttachment(ctx, a.ID)
+	if err != nil {
+		return nil, err
+	}
+	label := a.ID
+	if a.Name != "" {
+		label = fmt.Sprintf("%s %q", a.ID, a.Name)
+	}
+	declared := d.MIME
+	if declared == "" {
+		declared = a.MIME
+	}
+	if mt, ok := client.InlineImage(declared, data); ok {
+		fmt.Fprintf(b, "Attachment %s (%s, %d bytes): shown as an image below.\n", label, mt, len(data))
+		return &mcp.ImageContent{Data: data, MIMEType: mt}, nil
+	}
+	mt := client.MediaType(declared)
+	if f.filesDir == "" {
+		fmt.Fprintf(b, "Attachment %s (%s, %d bytes): not saved here.\n", label, mt, len(data))
+		return nil, nil
+	}
+	p, err := client.SaveAttachmentFile(f.filesDir, a.ID, mt, data)
+	if err != nil {
+		fmt.Fprintf(b, "Attachment %s: could not save it: %v\n", label, err)
+		return nil, nil
+	}
+	fmt.Fprintf(b, "Attachment %s (%s, %d bytes): saved to %s\n", label, mt, len(data), p)
+	return nil, nil
 }
 
 func replyAttachments(r client.Result) []envelope.Attachment {

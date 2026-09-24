@@ -201,6 +201,9 @@ func historyServeCmd() *cobra.Command {
 			if cfg.Relay == "" {
 				return fmt.Errorf("no relay configured in %s: run TINCAN_CONFIG=%s tincan join <code> --relay http://tincan-relay", configPath, configPath)
 			}
+			if cfg.Agent != "" && cfg.Agent != "history" {
+				return wrongHistoryAgent(configPath+" is joined as", cfg.Agent)
+			}
 			if allowPath == "" {
 				allowPath = history.DefaultAllowlistPath()
 			}
@@ -229,12 +232,18 @@ func historyServeCmd() *cobra.Command {
 				Allowlist: history.FileAllowlist(allowPath),
 				Log:       cmd.ErrOrStderr(),
 			}
-			if cfg.Agent != "" && cfg.Agent != "history" {
-				cmd.PrintErrf("tincan history: warning: %s is joined as %q, not \"history\"\n", configPath, cfg.Agent)
-			}
-			cmd.PrintErrf("tincan history: serving as %s on %s (allowlist %s: %s)\n", cfg.Agent, cfg.Relay, allowPath, strings.Join(allowed, ", "))
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			// The relay, not the config file, says who this machine is. Serving
+			// as any other agent would poll and claim that agent's inbox.
+			me, err := r.WhoAmI(ctx)
+			if err != nil {
+				return fmt.Errorf("history serve: could not confirm this agent's identity with the relay: %w", client.RejoinHint(err, cfg.Relay))
+			}
+			if me.Name != "history" {
+				return wrongHistoryAgent("the relay knows the machine using "+configPath+" as", me.Name)
+			}
+			cmd.PrintErrf("tincan history: serving as %s on %s (allowlist %s: %s)\n", me.Name, cfg.Relay, allowPath, strings.Join(allowed, ", "))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrln("tincan history: stopped")
@@ -247,6 +256,14 @@ func historyServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to read history, one per line (default: ~/.config/tincan/history-allow.txt; missing means grokbot, claude-code, codex)")
 	cmd.Flags().StringVar(&codexBin, "codex", "codex", "codex binary used for the tool-less query step")
 	return cmd
+}
+
+// wrongHistoryAgent is the refusal when history serve would run as another
+// agent and so poll and claim that agent's requests.
+func wrongHistoryAgent(who, agent string) error {
+	return fmt.Errorf("history serve refuses to run: %s %q, not \"history\", so it would claim that agent's requests. "+
+		"Point --config (or TINCAN_CONFIG) at the history agent's own config, normally ~/.config/tincan/history.json "+
+		"(join it with TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay <relay url>)", who, agent)
 }
 
 func historyNativeHostCmd() *cobra.Command {

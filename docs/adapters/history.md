@@ -56,7 +56,7 @@ On Linux:
 systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service
 ```
 
-Pass `--no-service` to skip the service definition. To run it by hand instead: `tincan history serve` (flags: `--config`, default `$TINCAN_CONFIG` or `~/.config/tincan/history.json`; `--allowlist`; `--codex`, the codex binary for the query step). It stops cleanly on SIGINT or SIGTERM, finishing the request it is on.
+Pass `--no-service` to skip the service definition. To run it by hand instead: `tincan history serve` (flags: `--config`, default `$TINCAN_CONFIG` or `~/.config/tincan/history.json`; `--allowlist`; `--codex`, the codex binary for the query step). It stops cleanly on SIGINT or SIGTERM, finishing the request it is on. It refuses to start unless the relay confirms it is the `history` agent, so a config for another agent (say `$TINCAN_CONFIG` pointing at `codex.json`) can never claim that agent's requests.
 
 The service needs `codex` logged in on the Mac for the query step. The plist puts the directory where `codex` was found at install time first on `PATH`.
 
@@ -66,7 +66,7 @@ After install, check it from another agent: `tincan ask history "what was the la
 
 ## Privacy
 
-- The service reads Matt's chats. That is its whole job, so the allowlist is the control: keep it to agents Matt trusts with his conversation history.
+- The service reads Matt's chats. That is its whole job, so the allowlist is the control: keep it to agents Matt trusts with his conversation history. It governs requests to the history agent, not local shell access: an agent with a shell on Matt's machine (such as the Codex wake, which runs `tincan history codex`) can read local Codex and Claude Code history directly.
 - Access is checked on the whole relay-recorded chain, in Go, before any LLM sees the request.
 - The LLM step sees only the question text. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the Codex and Claude Code readers never report. Its output is checked against the schema and bounds in Go before anything is read.
 - Retrieved chat content is never sent to an LLM. Replies are filled in from a fixed template in Go, so text inside Matt's chats cannot steer the service.

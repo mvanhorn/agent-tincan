@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -250,5 +252,59 @@ func TestHistoryServeFlagsAndMissingConfig(t *testing.T) {
 	_, err = run(t, Root(), "history", "serve", "--config", cfg, "--allowlist", p)
 	if err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Fatalf("serve with a bad allowlist: err = %v", err)
+	}
+}
+
+// serveConfig writes a history serve config for relay and agent.
+func serveConfig(t *testing.T, relayURL, agent string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{"relay": relayURL, "agent": agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// whoamiRelay answers /v1/whoami with name and fails the test on any other
+// call, so a refusal is proven to happen before any poll or claim.
+func whoamiRelay(t *testing.T, name string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/whoami" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": name})
+			return
+		}
+		t.Errorf("history serve called %s %s before confirming its identity", r.Method, r.URL.Path)
+		http.Error(w, "unexpected", http.StatusTeapot)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A config joined as another agent (TINCAN_CONFIG pointing at codex.json)
+// must not poll and claim that agent's inbox.
+func TestHistoryServeRefusesConfigForAnotherAgent(t *testing.T) {
+	srv := whoamiRelay(t, "codex")
+	cfg := serveConfig(t, srv.URL, "codex")
+	allow := filepath.Join(t.TempDir(), "allow.txt")
+	_, err := run(t, Root(), "history", "serve", "--config", cfg, "--allowlist", allow)
+	if err == nil || !strings.Contains(err.Error(), `"codex"`) || !strings.Contains(err.Error(), "history.json") {
+		t.Fatalf("serve with a codex config: err = %v", err)
+	}
+}
+
+// With no agent in the config, the relay's answer decides: a machine the
+// relay knows as codex is refused too.
+func TestHistoryServeRefusesWhenRelaySaysAnotherAgent(t *testing.T) {
+	srv := whoamiRelay(t, "codex")
+	cfg := serveConfig(t, srv.URL, "")
+	allow := filepath.Join(t.TempDir(), "allow.txt")
+	_, err := run(t, Root(), "history", "serve", "--config", cfg, "--allowlist", allow)
+	if err == nil || !strings.Contains(err.Error(), `"codex"`) || !strings.Contains(err.Error(), "history.json") {
+		t.Fatalf("serve as codex per whoami: err = %v", err)
 	}
 }
