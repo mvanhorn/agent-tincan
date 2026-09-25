@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -105,10 +107,20 @@ func (e *APIError) Error() string { return fmt.Sprintf("relay: %s (HTTP %d)", e.
 
 // Relay talks to a tincan relay.
 type Relay struct {
-	base  string
-	api   *http.Client
-	polls *http.Client
-	agent string // sent as AgentHeader when set
+	baseMu sync.RWMutex
+	base   string
+	api    *http.Client
+	polls  *http.Client
+	agent  string // sent as AgentHeader when set
+
+	// key is the relay key from the saved config. When the relay stops
+	// answering at base, the client looks for the peer that proves it
+	// holds this key and moves there (see relocate).
+	key        string
+	persist    bool // save a found address to the config file
+	findMu     sync.Mutex
+	lastFind   time.Time
+	findRelays func(ctx context.Context, base string) []string // tests replace it
 }
 
 // NewRelay returns a client for the relay at base (for example
@@ -144,6 +156,10 @@ func NewRelayFor(c Config) (*Relay, error) {
 		return nil, err
 	}
 	r.agent = c.Agent
+	r.key = c.RelayKey
+	// Only a relay URL that came from the config file is rewritten there;
+	// TINCAN_RELAY overrides it for this process only.
+	r.persist = os.Getenv("TINCAN_RELAY") == ""
 	return r, nil
 }
 
@@ -164,7 +180,11 @@ func NewRelaySocket(path string) *Relay {
 }
 
 // Base is the relay URL this client talks to.
-func (r *Relay) Base() string { return r.base }
+func (r *Relay) Base() string {
+	r.baseMu.RLock()
+	defer r.baseMu.RUnlock()
+	return r.base
+}
 
 // Send queues a request. parent is the request this one continues, or "".
 func (r *Relay) Send(ctx context.Context, to, body string, kind envelope.Kind, parent string) (envelope.Request, error) {
@@ -358,7 +378,7 @@ const DistDownloadTimeout = 10 * time.Minute
 
 // DownloadDist streams the named release file from the relay into w.
 func (r *Relay) DownloadDist(ctx context.Context, name string, w io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", r.base+"/v1/dist/"+url.PathEscape(name), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", r.Base()+"/v1/dist/"+url.PathEscape(name), nil)
 	if err != nil {
 		return err
 	}
@@ -390,6 +410,14 @@ func (r *Relay) Raw(ctx context.Context, method, path string, in, out any) error
 }
 
 func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, in, out any) error {
+	err := r.callOnce(ctx, c, method, path, in, out)
+	if err != nil && r.relocate(ctx, err) {
+		return r.callOnce(ctx, c, method, path, in, out)
+	}
+	return err
+}
+
+func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
@@ -398,7 +426,7 @@ func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, i
 		}
 		body = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, r.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, r.Base()+path, body)
 	if err != nil {
 		return err
 	}

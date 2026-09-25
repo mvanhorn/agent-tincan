@@ -13,6 +13,9 @@ type Config struct {
 	Relay string `json:"relay"`           // relay base URL, e.g. http://tincan-relay
 	Proxy string `json:"proxy,omitempty"` // proxy for relay traffic (Muse: its tailnet tunnel proxy)
 	Agent string `json:"agent,omitempty"` // the agent name this config joined as; sent on every relay call
+	// RelayKey is the relay's secret, learned from whoami. With it the
+	// client can find its relay again after the relay's address changes.
+	RelayKey string `json:"relay_key,omitempty"`
 }
 
 // ConfigPath is where the agent config lives. A second agent on the same

@@ -101,7 +101,7 @@ func (r *Relay) UploadAttachment(ctx context.Context, name, mime string, body io
 // upload is UploadAttachment without the capability check, for callers
 // that already made it.
 func (r *Relay) upload(ctx context.Context, name, mime string, body io.Reader, size int64) (UploadedAttachment, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", r.base+"/v1/attachments?name="+url.QueryEscape(name), body)
+	req, err := http.NewRequestWithContext(ctx, "POST", r.Base()+"/v1/attachments?name="+url.QueryEscape(name), body)
 	if err != nil {
 		return UploadedAttachment{}, err
 	}
@@ -134,7 +134,7 @@ func (r *Relay) upload(ctx context.Context, name, mime string, body io.Reader, s
 // its size against MaxAttachmentBytes and its content against the sha256
 // the relay reports.
 func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) (DownloadedAttachment, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", r.base+"/v1/attachments/"+url.PathEscape(id), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", r.Base()+"/v1/attachments/"+url.PathEscape(id), nil)
 	if err != nil {
 		return DownloadedAttachment{}, err
 	}

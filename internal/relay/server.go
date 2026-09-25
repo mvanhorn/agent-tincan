@@ -96,6 +96,7 @@ type Server struct {
 	conn   Connector
 	dist   *dist
 	blobs  string // attachment directory, "" when attachments are off
+	key    string // relay key, proves this relay's identity to its agents (hello)
 
 	mu       sync.Mutex
 	lastPoll map[string]time.Time
@@ -114,7 +115,7 @@ const persistEvery = time.Minute
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	return &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
-		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, blobs: defaultAttachmentDir(st)}
+		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, blobs: defaultAttachmentDir(st), key: loadRelayKey(st)}
 }
 
 // SetPreparer installs the chain and policy step.
@@ -158,6 +159,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/requests/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
+	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
 	mux.HandleFunc("GET /v1/dist", s.handleDistManifest)
 	mux.HandleFunc("GET /v1/dist/{name}", s.handleDistFile)
@@ -325,7 +327,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": a.Kind})
+	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": a.Kind, "relay_key": s.key})
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {

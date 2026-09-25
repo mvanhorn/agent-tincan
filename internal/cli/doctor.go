@@ -111,11 +111,19 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		switch {
 		case client.IsNotJoined(err):
 			add(check{"relay", "fail", "the relay does not know this machine: " + err.Error(), "Run tincan rejoin. If it says the machine was never joined, ask the owner for an invite."})
+		case err != nil && cfg.RelayKey == "":
+			add(check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ": " + err.Error(), "Check that this machine is on the tailnet (tailscale status) and the relay is running. If the relay moved to a new address, run tincan rejoin --relay <new URL>; this config has no relay key, so tincan cannot find it by itself."})
 		case err != nil:
-			add(check{"relay", "fail", "cannot reach the relay: " + err.Error(), "Check that this machine is on the tailnet (tailscale status) and the relay is running."})
+			add(check{"relay", "fail", "cannot reach the relay at " + cfg.Relay + ", and no online tailnet peer proved it is this relay: " + err.Error(), "Check that this machine is on the tailnet (tailscale status) and the relay is running. A proxy-only sandbox cannot search the tailnet: run tincan rejoin --relay <new URL>."})
 		default:
 			joined = true
-			add(check{"relay", "ok", fmt.Sprintf("reachable; this machine is agent %q", me.Name), ""})
+			add(check{"relay", "ok", fmt.Sprintf("reachable at %s; this machine is agent %q", r.Base(), me.Name), ""})
+			client.LearnRelayKey(ctx, r)
+			if saved, _ := client.LoadConfig(); saved.RelayKey != "" {
+				add(check{"relay moves", "ok", "the relay key is saved, so this agent finds the relay by itself if its address changes", ""})
+			} else {
+				add(check{"relay moves", "warn", "the relay did not hand out its key (relay older than 0.5.0-rc12), so this agent cannot find the relay by itself if its address changes", "Upgrade the relay, then run tincan doctor again."})
+			}
 		}
 	}
 

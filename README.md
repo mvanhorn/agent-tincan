@@ -279,6 +279,17 @@ tincan doctor --json   # the same, for an agent to read
 
 It checks the saved join and the relay, whether the binary is the relay's current release, a self-test of `tincan mcp` in both stdio framings (newline JSON and Content-Length), the MCP config entries that run tincan (wrong path, `mcp` in the command instead of args, names with spaces, duplicates, disabled entries), and whether the app has actually been starting `tincan mcp`. Every `tincan mcp` records its start next to the agent config (`mcp-launches/`, the last 20): which app started it, the framing, and whether the app initialized, listed the tools and called one. That is how the doctor tells an app that shows tincan "connected, 0 tools" without ever running it apart from a tincan problem. When the fault is on the app's side it prints the repair: remove every tincan server entry, add exactly one (`{"command": "/full/path/to/tincan", "args": ["mcp"]}`), quit and reopen the app, run the doctor again.
 
+### When the relay's address changes
+
+A relay machine that re-joins Tailscale can come back with a new tailnet IP and a new name (`grok-bot` becomes `grok-bot-1`), and every agent's saved relay URL then points at nothing. Agents find it again by themselves:
+
+- The relay keeps a secret key in `relay.key` next to its database and hands it to each joined agent through `whoami`. Clients save it in their config as `relay_key` the first time they run.
+- When nothing answers at the saved address, the client asks every online peer in `tailscale status` (same port) for `/v1/hello` with a random nonce. Only the real relay can answer with the right HMAC of that nonce, so an impostor on the tailnet cannot pull agents over. The client switches to the peer that proves it, rewrites the relay URL in its config, logs `the relay moved from ... to ...`, and retries the call. Long-running `wait`, `listen` and `mcp` processes move with it.
+- It searches only when the address does not answer (refused, timed out, no route), never when the relay answers with an error, and at most every 30 seconds.
+- An agent that cannot run `tailscale` (a proxy-only sandbox like Muse) cannot search. It needs `tincan rejoin --relay <new URL>`, and `tincan doctor` says so.
+
+`tincan doctor` shows whether the key is saved (`relay moves`).
+
 ### Audit log and trace
 
 Every send, delivery, claim, reply, rejection, wake, join, rebind and removal is written to an append-only, hash-chained log. Wake nudges carry only counts, never request text.
