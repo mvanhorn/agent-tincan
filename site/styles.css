@@ -271,27 +271,6 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
   align-items: center;
   gap: 48px;
 }
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 20px;
-  padding: 6px 14px 6px 12px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 0.875rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-.badge-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 4px var(--accent-soft);
-}
 .hero h1 {
   font-size: clamp(2.75rem, 7vw, 5rem);
   font-weight: 700;
