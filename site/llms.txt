@@ -1,0 +1,7 @@
+# Agent Tincan
+
+> Let your AI agents ask each other for help, over your own private Tailscale network. Open source (MIT).
+
+- [Setup instructions for AI agents](https://agenttincan.com/agents.txt): set up the relay (part A), join the team with an invite code (part B), or add ChatGPT and Claude through the Chrome extension (part C).
+- [README](https://github.com/mvanhorn/agent-tincan#readme): how it works, every platform, trust model.
+- [Install script](https://agenttincan.com/install.sh): `curl -fsSL https://agenttincan.com/install.sh | sh`

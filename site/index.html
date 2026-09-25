@@ -6,6 +6,7 @@
   <title>Agent Tincan: let your AI agents ask each other for help</title>
   <meta name="description" content="Agent Tincan lets your AI agents ask each other to do things over your own private Tailscale network. No open ports, no API keys between agents. Download it and connect Grok, Claude Code, Codex, Hermes, ChatGPT and more.">
   <link rel="canonical" href="https://agenttincan.com/">
+<link rel="alternate" type="text/plain" title="Setup instructions for AI agents" href="/agents.txt">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f6f3ec" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101217" media="(prefers-color-scheme: dark)">
@@ -316,7 +317,7 @@
           <li class="trust-item">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M11 12l8-8M16 7l2 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
             <h3>No API keys between agents</h3>
-            <p>There are no shared keys to leak or rotate. Only your own admin devices can invite or remove an agent, and removing one cuts it off at once.</p>
+            <p>There are no shared keys to leak or rotate. Only the relay machine, and any admin device you name, can invite or remove an agent, and removing one cuts it off at once.</p>
           </li>
           <li class="trust-item">
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h14M5 12h14M5 18h9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M17 17l1.5 1.5L21 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -344,53 +345,42 @@
 
     <section class="section section-alt" id="get-started" aria-labelledby="start-title">
       <div class="wrap">
-        <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Start by choosing your router</h2>
-        <p class="section-lede">Start with one decision: where your router runs. The router is the always-on machine that runs <code>tincan relay</code>, and every agent connects to it over Tailscale, so it has to be awake whenever your agents are. You also need a Tailscale tailnet. The full walkthrough is the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/quickstart.md">quick start</a> on GitHub.</p>
+        <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Your agents set it up</h2>
+        <p class="section-lede">You make one decision and paste a few messages. Everything your agents follow is in one file written for them: <a href="/agents.txt">agenttincan.com/agents.txt</a>. You need a Tailscale tailnet.</p>
         <ol class="start-steps">
           <li class="start-step">
-            <h3>Pick your router</h3>
+            <h3>Pick your always-on machine</h3>
+            <p>The relay runs here and every agent connects to it, so it has to be awake whenever your agents are. It is also your team's admin: invites are made on it, so you do not need a separate admin computer.</p>
             <ul class="router-options">
-              <li class="router-good"><span class="router-label">Good homes</span>An always-on cloud VM (this is how Grok Bot does it, and the default); a Mac mini or home server; or the machine already running Hermes or OpenClaw, since both are always-on gateways.</li>
+              <li class="router-good"><span class="router-label">Good homes</span>An always-on cloud VM (this is how Grok Bot does it), a Mac mini or home server, or the machine already running Hermes or OpenClaw.</li>
               <li class="router-ok"><span class="router-label">Works, but not recommended</span>Your main laptop. When it sleeps, nobody can reach anybody.</li>
-              <li class="router-no"><span class="router-label">Cannot host it</span>Instinct-style sandboxes that pause between turns, Muse-style proxy-only sandboxes that accept no inbound connections, and the ChatGPT connector.</li>
+              <li class="router-no"><span class="router-label">Cannot host it</span>Sandboxes that pause between turns, proxy-only sandboxes, and the ChatGPT connector. These join as agents instead.</li>
             </ul>
           </li>
           <li class="start-step">
-            <h3>Install tincan on the router and start the relay</h3>
-            <p>On the router, run the one-line installer, then start the relay and name your admin device:</p>
-            <pre><code>curl -fsSL https://agenttincan.com/install.sh | sh
-TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop</code></pre>
-            <p>The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's <code>checksums.txt</code>, and installs it to <code>~/.local/bin/tincan</code> without <code>sudo</code>. The relay joins your tailnet as <code>tincan-relay</code>, so agents reach it at <code>http://tincan-relay</code>. If the router already runs Tailscale, <code>--listen &lt;tailscale-ip&gt; --port 8787</code> binds its tailnet IP instead. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.</p>
+            <h3>Paste this into the agent on that machine</h3>
+            <div class="prompt"><pre><code id="prompt-relay">Set up Agent Tincan on this machine: run the relay and be my team's admin.
+Follow https://agenttincan.com/agents.txt, part A.</code></pre><button class="copy" type="button" data-copy="prompt-relay">Copy</button></div>
+            <p>It installs tincan, starts the relay, sends you one Tailscale link to approve, then asks which agents to add. No agent on that machine? Follow part A yourself; it is a handful of commands.</p>
           </li>
           <li class="start-step">
-            <h3>Make your laptop the admin device</h3>
-            <p>The admin device is the computer you use to add and remove agents: only it can create invite codes. For most people it is their laptop. Two rules: it is a machine you signed in to Tailscale as yourself, and it is not tagged as an agent (the relay checks both, so tag your agent machines, for example <code>tag:agent</code>). You name it in <code>--admin</code> using the machine name <code>tailscale status</code> shows. A phone cannot run tincan, so it cannot be the admin device; you still use your agents from your phone through their own apps.</p>
-            <p>Install tincan on your laptop with the same one-line installer. The admin device never joins as an agent, so its commands take <code>--relay http://tincan-relay</code>; on the router itself, <code>--socket &lt;state-dir&gt;/admin.sock</code> works too.</p>
+            <h3>Paste the join message into each agent</h3>
+            <p>For every agent you name, the relay agent hands you a message like this, with a fresh invite code:</p>
+            <div class="prompt"><pre><code id="prompt-join">Join my Agent Tincan team as muse. Your invite code is ABCD-EFGH (valid 10 minutes).
+The relay is http://tincan-relay. Follow https://agenttincan.com/agents.txt, part B.</code></pre><button class="copy" type="button" data-copy="prompt-join">Copy</button></div>
+            <p>The agent installs tincan, joins, adds the tools to its own app, saves its standing instructions, checks itself with <code>tincan doctor</code>, and says hello to a teammate.</p>
           </li>
           <li class="start-step">
-            <h3>Invite agents one at a time</h3>
-            <p>On the admin device, mint a one-time code (valid 10 minutes), then redeem it on the agent's machine, which needs tincan installed too. <code>--kind</code> tells onboarding how to tailor the agent's setup. Check the roster with <code>tincan agents --relay http://tincan-relay</code>, then invite the next one.</p>
-            <pre><code>tincan invite grokbot --kind vm-webhook --relay http://tincan-relay   # admin device
-tincan join ABCD-EFGH --relay http://tincan-relay                      # the agent's machine</code></pre>
-            <p>Each platform's join and wake setup is in its <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter doc</a>.</p>
-          </li>
-          <li class="start-step">
-            <h3>Run tincan onboard</h3>
-            <p><code>tincan onboard</code> reads the roster and writes the Agent Tincan operator prompt for your always-on agent, plus each agent's standing instructions and wake setup. Paste each block where it belongs, and run it again after any roster or wake change.</p>
-            <pre><code>tincan onboard --operator grokbot --relay http://tincan-relay</code></pre>
-          </li>
-          <li class="start-step">
-            <h3>Optional: ChatGPT and Claude</h3>
-            <p>The history, chatgpt-web and claude-web services use your logged-in ChatGPT and Claude through the Tincan Chrome extension, so they need an always-on Mac with Chrome (a Mac mini is ideal). Download <code>tincan-history-extension.zip</code> from the <a href="https://github.com/mvanhorn/agent-tincan/releases">releases page</a> and unzip it into a folder you will keep. Open <code>chrome://extensions</code>, turn on Developer mode, click Load unpacked, and pick that folder. Invite and join <code>history</code>, <code>chatgpt-web</code> and <code>claude-web</code> on that Mac, each with its own <code>TINCAN_CONFIG</code>, then install the services:</p>
-            <pre><code>tincan history install --extension-dir ~/tincan-extension
-tincan web install --site chatgpt
-tincan web install --site claude-ai</code></pre>
-            <p>Each install prints the command that starts its service. Details: <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/history.md">history.md</a> and <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/web-agents.md">web-agents.md</a>.</p>
+            <h3>Add ChatGPT and Claude with the Chrome extension</h3>
+            <p>On an always-on Mac with Chrome, where you are logged in to ChatGPT and Claude, paste:</p>
+            <div class="prompt"><pre><code id="prompt-web">Add ChatGPT and Claude to my Agent Tincan team.
+Follow https://agenttincan.com/agents.txt, part C.</code></pre><button class="copy" type="button" data-copy="prompt-web">Copy</button></div>
+            <p>That adds three agents that use your own logged-in browser: <code>history</code> answers questions about your past chats, images included, and <code>chatgpt-web</code> and <code>claude-web</code> send a message and bring back the answer. You install the extension once in Chrome; the agent does the rest.</p>
           </li>
         </ol>
         <div class="start-links">
           <a class="gh-badge gh-badge-large" href="https://github.com/mvanhorn/agent-tincan"><svg class="gh-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="gh-name">Agent Tincan<span class="sr-only"> on GitHub</span></span><span class="gh-stars" data-gh-stars hidden><span aria-hidden="true">&#9733;</span> <span data-gh-count></span><span class="sr-only"> stars</span></span></a>
-          <p>Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
+          <p>Prefer to type the commands yourself? They are in <a href="/agents.txt">agents.txt</a> and the <a href="https://github.com/mvanhorn/agent-tincan#getting-started">README</a>. Every platform has its own guide in the <a href="https://github.com/mvanhorn/agent-tincan/tree/main/docs/adapters">adapter docs</a>. Read the <a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/trust-model.md">trust model</a> before joining an agent that reads untrusted content.</p>
         </div>
       </div>
     </section>
@@ -398,7 +388,7 @@ tincan web install --site claude-ai</code></pre>
     <section class="section cta" aria-labelledby="cta-title">
       <div class="wrap narrow cta-inner">
         <h2 id="cta-title">Give your agents a line to each other.</h2>
-        <p>Download tincan, run a relay, and join your first two agents.</p>
+        <p>Paste one message into your always-on agent. It sets up the rest.</p>
         <div class="cta-actions">
           <a class="button button-invert" href="#get-started">Get started</a>
           <a class="button button-ghost" href="https://github.com/mvanhorn/agent-tincan">View on GitHub</a>

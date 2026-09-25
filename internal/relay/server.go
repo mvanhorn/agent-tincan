@@ -173,6 +173,7 @@ func (s *Server) Handler() http.Handler {
 // devices) and the local admin socket. /v1/agents is added by the caller.
 func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/invite", s.handleInvite)
+	mux.HandleFunc("GET /v1/admin/urls", s.handleAdminURLs)
 	mux.HandleFunc("POST /v1/admin/remove", s.handleRemove)
 	mux.HandleFunc("PUT /v1/agents/{name}/kind", s.handleSetKind)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)

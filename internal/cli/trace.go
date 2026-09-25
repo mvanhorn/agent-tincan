@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,6 +23,11 @@ type traceResp struct {
 // adminRelay lets admin commands go through the local admin socket on the
 // relay host instead of the network.
 func adminRelay(socket, relayURL string) (*client.Relay, error) {
+	if socket == "" && relayURL == "" {
+		// On the relay machine itself the local admin socket makes this
+		// machine the admin: no --admin device and no flags needed.
+		socket = localAdminSocket()
+	}
 	if socket != "" {
 		return client.NewRelaySocket(socket), nil
 	}
@@ -123,4 +130,14 @@ func auditCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
 	return cmd
+}
+
+// localAdminSocket returns the relay's admin socket in the default state
+// dir when a relay runs on this machine, or "".
+func localAdminSocket() string {
+	p := filepath.Join(defaultStateDir(), "admin.sock")
+	if st, err := os.Stat(p); err == nil && st.Mode()&os.ModeSocket != 0 {
+		return p
+	}
+	return ""
 }

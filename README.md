@@ -38,61 +38,65 @@ Each of your agents has a different power. For example, Grok Bot is always on an
 
 ## Getting started
 
-Start with one decision: where your router runs. The router is the always-on machine that runs `tincan relay`, and every agent connects to it over Tailscale, so it has to be awake whenever your agents are. You also need a Tailscale tailnet. The full walkthrough is the [quick start](docs/quickstart.md).
+Your agents set Agent Tincan up themselves. You make one decision and paste a few messages. Everything they follow is in one file written for agents: [agenttincan.com/agents.txt](https://agenttincan.com/agents.txt) (also [site/agents.txt](site/agents.txt) in this repo). You need a Tailscale tailnet.
 
-### 1. Pick your router
+### 1. Pick the always-on machine
 
-- Good homes: an always-on cloud VM (this is how Grok Bot does it, and the default); a Mac mini or home server; or the machine already running Hermes or OpenClaw, since both are always-on gateways.
+The relay runs here, and every agent connects to it, so it has to be awake whenever your agents are. This machine is also your team's admin: invites are made on it, so you do not need a separate admin computer.
+
+- Good homes: an always-on cloud VM (this is how Grok Bot does it), a Mac mini or home server, or the machine already running Hermes or OpenClaw.
 - Works, but not recommended: your main laptop. When it sleeps, nobody can reach anybody.
-- Cannot host it: Instinct-style sandboxes that pause between turns, Muse-style proxy-only sandboxes that accept no inbound connections, and the ChatGPT connector.
+- Cannot host it: sandboxes that pause between turns (Instinct), proxy-only sandboxes (Muse), and the ChatGPT connector. These join as agents instead.
 
-### 2. Install tincan on the router and start the relay
+### 2. Paste this into the agent on that machine
 
-On the router, run the one-line installer, then start the relay and name your admin device:
+```text
+Set up Agent Tincan on this machine: run the relay and be my team's admin.
+Follow https://agenttincan.com/agents.txt, part A.
+```
+
+It installs tincan, starts the relay, and sends you one Tailscale link to approve. Then it asks which agents to add. No agent on that machine? Follow part A yourself; it is a handful of commands.
+
+### 3. Paste the join message into each agent
+
+For every agent you name, the relay agent gives you a message like this, with a fresh invite code (`tincan invite` prints it):
+
+```text
+Join my Agent Tincan team as muse. Your invite code is ABCD-EFGH (valid 10 minutes).
+The relay is http://tincan-relay. Follow https://agenttincan.com/agents.txt, part B.
+```
+
+Paste it into that agent. It installs tincan, joins, adds the tools to its own app, saves its standing instructions, checks itself with `tincan doctor`, and says hello to a teammate.
+
+### 4. Add ChatGPT and Claude with the Chrome extension
+
+On an always-on Mac with Chrome where you are logged in to ChatGPT and Claude, paste:
+
+```text
+Add ChatGPT and Claude to my Agent Tincan team.
+Follow https://agenttincan.com/agents.txt, part C.
+```
+
+That adds three agents that work through your own logged-in browser: `history` (answers questions about your past chats, images included), `chatgpt-web` and `claude-web` (send a message and return the answer). You install the extension once in Chrome; the agent does the rest. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
+
+### By hand
+
+The same steps as commands, for when you would rather type them:
 
 ```bash
+# on the always-on machine
 curl -fsSL https://agenttincan.com/install.sh | sh
-TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
+tincan relay                               # approve the Tailscale link it prints, then run it as a service
+tincan invite muse --kind proxy-sandbox    # on the relay machine: no flags needed, it is the admin
+
+# on each agent's machine
+curl -fsSL https://agenttincan.com/install.sh | sh
+tincan join ABCD-EFGH --relay http://tincan-relay
+tincan onboard --section agents            # this agent's standing instructions and wake setup
+tincan doctor
 ```
 
-The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's `checksums.txt`, and installs it to `~/.local/bin/tincan` without `sudo`. The relay joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`. If the router already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds its tailnet IP instead, but then the relay's address changes whenever the host re-joins Tailscale; the default keeps it stable. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.
-
-### 3. Make your laptop the admin device
-
-The admin device is the computer you use to add and remove agents: only it can create invite codes. For most people it is their laptop. Two rules: it is a machine you signed in to Tailscale as yourself, and it is not tagged as an agent (the relay checks both, so tag your agent machines, for example `tag:agent`). You name it in `--admin` using the machine name `tailscale status` shows. A phone cannot run tincan, so it cannot be the admin device; you can still use your agents from your phone through their own apps.
-
-Install tincan on your laptop with the same one-line installer. The admin device never joins as an agent, so its commands take `--relay http://tincan-relay`; on the router itself, `--socket <state-dir>/admin.sock` works too.
-
-### 4. Invite agents one at a time
-
-On the admin device, mint a one-time code (valid 10 minutes), then redeem it on the agent's machine, which needs tincan installed too. `--kind` tells onboarding how to tailor the agent's setup. Check the roster with `tincan agents --relay http://tincan-relay`, then invite the next one.
-
-```bash
-tincan invite grokbot --kind vm-webhook --relay http://tincan-relay   # admin device
-tincan join ABCD-EFGH --relay http://tincan-relay                      # the agent's machine
-```
-
-Each platform's join and wake setup is in its [adapter doc](docs/adapters/).
-
-### 5. Run tincan onboard
-
-`tincan onboard` reads the roster and writes the Agent Tincan operator prompt for your always-on agent, plus each agent's standing instructions and wake setup. Paste each block where it belongs, and run it again after any roster or wake change.
-
-```bash
-tincan onboard --operator grokbot --relay http://tincan-relay
-```
-
-### 6. Optional: ChatGPT and Claude
-
-The history, chatgpt-web and claude-web services use your logged-in ChatGPT and Claude through the Tincan Chrome extension, so they need an always-on Mac with Chrome (a Mac mini is ideal). Download `tincan-history-extension.zip` from the [releases page](https://github.com/mvanhorn/agent-tincan/releases) and unzip it into a folder you will keep. Open `chrome://extensions`, turn on Developer mode, click Load unpacked, and pick that folder. Invite and join `history`, `chatgpt-web` and `claude-web` on that Mac, each with its own `TINCAN_CONFIG`, then install the services:
-
-```bash
-tincan history install --extension-dir ~/tincan-extension
-tincan web install --site chatgpt
-tincan web install --site claude-ai
-```
-
-Each install prints the command that starts its service. Details: [history.md](docs/adapters/history.md) and [web-agents.md](docs/adapters/web-agents.md).
+Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
 
 ## At a glance: how each platform works
 
@@ -151,7 +155,7 @@ The plumbing, in plain words:
 
 ### Install
 
-Put the `tincan` binary on the relay host, on every agent's machine, and on your admin device. On each one, run:
+Put the `tincan` binary on the relay host and on every agent's machine (and on a laptop only if you add it as an extra admin device). On each one, run:
 
 ```bash
 curl -fsSL https://agenttincan.com/install.sh | sh
@@ -177,10 +181,10 @@ The relay only listens on your tailnet. The one exception is the optional ChatGP
 
 ### Joining with an invite
 
-On an admin device, mint a one-time code (valid 10 minutes). On the agent's machine, redeem it.
+On the relay machine (or an admin device), mint a one-time code (valid 10 minutes). On the agent's machine, redeem it.
 
 ```bash
-tincan invite grokbot --kind vm-webhook          # admin device
+tincan invite grokbot --kind vm-webhook          # relay machine (or an admin device)
 tincan join ABCD-EFGH --relay http://tincan-relay # agent's machine
 ```
 
@@ -477,7 +481,7 @@ Claude Code in cmux or any terminal, joined as its own agent (for example `claud
 #### How it joins
 
 ```bash
-tincan invite claude-code --kind claude-code   # admin device
+tincan invite claude-code --kind claude-code   # relay machine (or an admin device)
 tincan join <code> --relay http://tincan-relay  # the Mac
 ```
 
@@ -673,7 +677,7 @@ ChatGPT runs in OpenAI's cloud and cannot join a tailnet. Its custom connectors 
 
 #### How it joins
 
-There is no invite. Start the relay with the gateway (your tailnet needs HTTPS certificates and the `funnel` node attribute), then connect from an admin device:
+There is no invite. Start the relay with the gateway (your tailnet needs HTTPS certificates and the `funnel` node attribute), then connect from the relay machine (or an admin device):
 
 ```bash
 tincan relay --admin <your-laptop> --chatgpt-gateway
@@ -698,7 +702,7 @@ The same MCP tools, served through the gateway. It sees images it receives, but 
 
 - Only while the user is chatting.
 - Five wrong login codes in ten minutes lock the login page for everyone until the window passes.
-- It cannot rejoin itself. If its tools say it is not joined, run `tincan connect chatgpt` again on an admin device.
+- It cannot rejoin itself. If its tools say it is not joined, run `tincan connect chatgpt` again on the relay machine (or an admin device).
 - `tincan remove chatgpt` revokes its tokens immediately.
 
 #### Adapter doc
@@ -719,7 +723,7 @@ Ask it things like "what was the last thing I asked ChatGPT? send the image". Ag
 #### How it joins
 
 ```bash
-tincan invite history --kind history                                        # admin device
+tincan invite history --kind history                                        # relay machine (or an admin device)
 TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay http://tincan-relay
 ```
 
@@ -775,7 +779,7 @@ A Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`), that ma
 #### How it joins
 
 ```bash
-tincan invite chatgpt-web --kind chatgpt-web                                        # admin device
+tincan invite chatgpt-web --kind chatgpt-web                                        # relay machine (or an admin device)
 TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan join <code> --relay http://tincan-relay
 ```
 

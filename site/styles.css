@@ -828,3 +828,12 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
   overflow-wrap: anywhere;
 }
 .prose .updated { color: var(--ink-soft); }
+
+/* Paste-this prompts in Get started */
+.prompt { position: relative; margin: 4px 0 14px; }
+.prompt pre { margin: 0; padding: 18px 20px; padding-right: 96px; background: var(--ink); color: var(--bg); border: 0; border-radius: 12px; white-space: pre-wrap; }
+.prompt pre code { color: inherit; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.9375rem; line-height: 1.55; }
+.prompt .copy { position: absolute; top: 12px; right: 12px; min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25); background: transparent; color: var(--bg); font: 600 0.8125rem/1 var(--font-body); cursor: pointer; }
+.prompt .copy:hover { background: rgba(255,255,255,0.1); }
+.prompt .copy:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+@media (max-width: 560px) { .prompt pre { padding-right: 20px; padding-top: 54px; } }

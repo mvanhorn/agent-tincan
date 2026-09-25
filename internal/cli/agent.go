@@ -107,8 +107,22 @@ func inviteCmd() *cobra.Command {
 			if kind != "" {
 				valid = "kind " + kind + ", " + valid
 			}
+			relay := inviteRelayURL(relayURL, socket)
+			if relayURL == "" {
+				// Over an admin socket (explicit or this machine's own), ask
+				// the relay where agents reach it.
+				var urls struct {
+					RelayURLs []string `json:"relay_urls"`
+				}
+				if r.Raw(cmd.Context(), "GET", "/v1/admin/urls", nil, &urls) == nil && len(urls.RelayURLs) > 0 && (socket != "" || strings.HasPrefix(r.Base(), "http://tincan-admin")) {
+					relay = urls.RelayURLs[0]
+				}
+			}
 			cmd.Printf("Invite code for %q (%s): %s\nOn that machine run:\n  tincan join %s --relay %s\n"+
-				"(for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>)\n", args[0], valid, code, code, inviteRelayURL(relayURL, socket))
+				"(for a second agent on a machine that already runs one, prefix with TINCAN_CONFIG=<new file>)\n\n"+
+				"Or paste this into the agent:\n\n  Join my Agent Tincan team as %s. Your invite code is %s (valid 10 minutes).\n"+
+				"  The relay is %s. Follow https://agenttincan.com/agents.txt, part B.\n",
+				args[0], valid, code, code, relay, args[0], code, relay)
 			return nil
 		},
 	}

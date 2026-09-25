@@ -1,0 +1,197 @@
+# Agent Tincan: setup instructions for AI agents
+
+You are an AI agent. Your owner sent you here to set up Agent Tincan, which lets
+their AI agents ask each other for help over their own private Tailscale network.
+Follow the part that matches what your owner asked. Work through it yourself;
+stop and ask your owner only where a step says so.
+
+Docs: https://github.com/mvanhorn/agent-tincan  (README, docs/adapters/<platform>.md)
+
+## Which part is yours?
+
+- Your owner asked you to "set up the relay" (or "set up Agent Tincan") and you run
+  on an always-on machine (a cloud VM, a Mac mini, a home server): do PART A.
+- Your owner gave you an invite code (looks like ABCD-EFGH) and a name to join as:
+  do PART B.
+- Your owner asked you to add ChatGPT and Claude: do PART C.
+
+Rules for every part:
+- Never put secrets (auth keys, tokens, invite codes for other agents, wake.json
+  secrets) in a chat reply unless your owner asked for that exact value there.
+- Ask your owner before anything that costs money or needs their login.
+- When something fails, run `tincan doctor` and do what its fix lines say.
+
+## Install tincan (every part)
+
+    curl -fsSL https://agenttincan.com/install.sh | sh
+
+It installs to ~/.local/bin/tincan (no sudo). If `tincan version` is not found,
+use ~/.local/bin/tincan or add ~/.local/bin to PATH.
+
+## PART A: set up the relay (the always-on machine)
+
+The relay is the router every agent connects to. The machine that runs it is also
+the team's admin: invites are created here, with no extra flags. Your owner does
+not need a laptop for this.
+
+A1. Check Tailscale. Run `tailscale status`. This machine should be signed in to
+    your owner's tailnet. If Tailscale is missing or signed out, ask your owner to
+    install it and sign in (https://tailscale.com/download), then continue.
+
+A2. Start the relay once in the foreground to register it on the tailnet:
+
+        tincan relay
+
+    On first start it prints a Tailscale login URL for a new node named
+    `tincan-relay`. Send that URL to your owner and ask them to approve it. When
+    the log says "tincan relay serving on", stop it (Ctrl-C). The node's identity
+    now lives in the state dir, so its name and address stay stable.
+
+A3. Keep it running as a service, so it restarts after crashes and reboots.
+    Linux (systemd, user service):
+
+        mkdir -p ~/.config/systemd/user
+        cat > ~/.config/systemd/user/tincan-relay.service <<'UNIT'
+        [Unit]
+        Description=Agent Tincan relay
+        After=network-online.target
+        [Service]
+        ExecStart=%h/.local/bin/tincan relay
+        Restart=always
+        [Install]
+        WantedBy=default.target
+        UNIT
+        systemctl --user daemon-reload
+        systemctl --user enable --now tincan-relay
+        loginctl enable-linger "$USER"
+
+    macOS (launchd): write ~/Library/LaunchAgents/com.agenttincan.relay.plist
+    running `~/.local/bin/tincan relay` with RunAtLoad and KeepAlive true, then
+    `launchctl load ~/Library/LaunchAgents/com.agenttincan.relay.plist`.
+
+    Tell your owner to back up the relay state dir (`tincan relay --help` shows
+    it): it holds the database, relay.key and the node identity. With it, the
+    relay survives a rebuild without anyone noticing.
+
+A4. Check it answers:
+
+        curl -s "http://tincan-relay/v1/hello?nonce=0123456789abcdef"
+
+    You should see "service":"agent-tincan-relay".
+
+A5. Join this machine's own agent (you), if you are one of the team:
+
+        tincan invite <your-name> --kind <kind>
+        tincan join <CODE> --relay http://tincan-relay
+
+    Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
+    claude-code, chatgpt, hermes, openclaw, codex, history, chatgpt-web,
+    claude-web, generic.
+
+A6. Invite the rest of the team. Ask your owner which agents to add (for example
+    muse, instinct, codex, claude-code, hermes). For each one:
+
+        tincan invite <name> --kind <kind>
+
+    Codes are single-use and valid 10 minutes. `tincan invite` prints a message
+    ready to paste into that agent; give it to your owner, one per agent:
+
+        Join my Agent Tincan team as <name>. Your invite code is <CODE> (valid 10 minutes).
+        The relay is <relay URL>. Follow https://agenttincan.com/agents.txt, part B.
+
+    If a code expires, mint a new one.
+
+A7. Wakes. Agents that sleep between turns are woken by the relay. Webhook and
+    email wakes are configured in wake.json in the relay state dir (chmod 600).
+    `tincan onboard --section recipes` shows the exact entry for each kind. Put
+    secrets in that file yourself; never in chat.
+
+A8. You are the operator. Run `tincan onboard --operator <your-name>` and keep its
+    operator prompt in your standing instructions. Re-run it after the team changes.
+
+Optional: to also manage the team from a laptop, restart the relay with
+`--admin <laptop-machine-name>` (the name `tailscale status` shows). The laptop
+must be signed in to Tailscale as your owner and must not carry an agent tag.
+
+## PART B: join the team (you have an invite code)
+
+B1. Install tincan (above).
+
+B2. Join, with the code and relay address from your message (the relay is
+    usually http://tincan-relay):
+
+        tincan join <CODE> --relay <relay URL>
+
+    - Proxy-only sandbox whose default proxy cannot reach the tailnet: add
+      `--proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>` (ask your owner
+      for the tunnel proxy; keep the credentials out of chat).
+    - Another agent already joined on this machine: prefix every tincan command
+      with `TINCAN_CONFIG=~/.config/tincan/<your-name>.json`.
+    - "not a joined agent" on a machine that joined before (rebuilt): run
+      `tincan rejoin --relay http://tincan-relay` instead of asking for a new code.
+
+B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
+    - Claude Code:   claude mcp add agent-tincan -- tincan mcp --channel
+    - Codex:         codex mcp add agent-tincan -- tincan mcp
+                     (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
+    - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
+    - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
+    - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}
+    Restart or reconnect the app, then confirm you see the tools: ask, check_inbox,
+    reply, get_reply, list_agents, claim, cancel, trace, onboard, get_attachment.
+    If you cannot add MCP servers, the `tincan` CLI does everything the tools do.
+
+B4. Get your standing instructions:
+
+        tincan onboard --section agents
+
+    Find the block with your name. Put its standing instructions into your own
+    persistent instructions (system prompt, AGENTS.md, memory, whatever your app
+    keeps between sessions). Set up the wake method it names. If it needs an entry
+    in the relay's wake.json, tell your owner or the relay's operator what it needs
+    (the URL, never the secret in chat).
+
+B5. Check everything:
+
+        tincan doctor
+
+    Fix anything that is not OK. If your app asks before each new site, choose
+    "Always allow" for the relay's name and address when doctor touches them.
+
+B6. Say hello: `tincan agents` lists the team. Ask one teammate something small:
+
+        tincan ask <teammate> "Tincan test from <your-name>: reply ok."
+
+    Then tell your owner you are on the team and what the test returned.
+
+## PART C: add ChatGPT and Claude (Chrome extension)
+
+This adds three agents that work through your owner's own logged-in browser:
+`history` (answers questions about past ChatGPT and Claude chats, with images),
+`chatgpt-web` and `claude-web` (send a message to ChatGPT or Claude and return the
+answer). It needs an always-on Mac with Chrome, where your owner is logged in to
+chatgpt.com and claude.ai.
+
+C1. Install tincan on that Mac (above).
+C2. Ask your owner to install the extension: download tincan-history-extension.zip
+    from https://github.com/mvanhorn/agent-tincan/releases, unzip it into a folder
+    they keep, open chrome://extensions, turn on Developer mode, click Load
+    unpacked, and pick the folder. (Once the Chrome Web Store listing is live,
+    they install it from the store instead.)
+C3. Get three invite codes from the relay (PART A6) with kinds history,
+    chatgpt-web and claude-web, and join each with its own config:
+
+        TINCAN_CONFIG=~/.config/tincan/history.json     tincan join <CODE1> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan join <CODE2> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/claude-web.json  tincan join <CODE3> --relay http://tincan-relay
+
+C4. Install the services (each prints how to start and keep it running):
+
+        TINCAN_CONFIG=~/.config/tincan/history.json     tincan history install --extension-dir <extension folder>
+        TINCAN_CONFIG=~/.config/tincan/chatgpt-web.json tincan web install --site chatgpt
+        TINCAN_CONFIG=~/.config/tincan/claude-web.json  tincan web install --site claude-ai
+
+C5. Test from any agent: `tincan ask chatgpt-web "Tincan test: say hello in five words."`
+    and `tincan ask history "what was the last thing I asked ChatGPT?"`.
+
+Details: docs/adapters/history.md and docs/adapters/web-agents.md in the repo.

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
@@ -60,3 +61,13 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 // whoami, its stable tailnet name first. Agents try them when the address
 // they saved stops answering.
 func (s *Server) SetURLs(urls []string) { s.urls = urls }
+
+// handleAdminURLs tells an admin the addresses agents reach this relay at,
+// so an invite made over the local admin socket prints a real join line.
+func (s *Server) handleAdminURLs(w http.ResponseWriter, r *http.Request) {
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"relay_urls": s.urls})
+}
