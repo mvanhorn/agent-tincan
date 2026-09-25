@@ -117,7 +117,8 @@ type Relay struct {
 	// answering at base, the client looks for the peer that proves it
 	// holds this key and moves there (see relocate).
 	key        string
-	persist    bool // save a found address to the config file
+	known      []string // relay's advertised addresses, tried first
+	persist    bool     // save a found address to the config file
 	findMu     sync.Mutex
 	lastFind   time.Time
 	findRelays func(ctx context.Context, base string) []string // tests replace it
@@ -157,6 +158,7 @@ func NewRelayFor(c Config) (*Relay, error) {
 	}
 	r.agent = c.Agent
 	r.key = c.RelayKey
+	r.known = c.RelayURLs
 	// Only a relay URL that came from the config file is rewritten there;
 	// TINCAN_RELAY overrides it for this process only.
 	r.persist = os.Getenv("TINCAN_RELAY") == ""

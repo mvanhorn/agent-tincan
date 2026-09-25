@@ -95,8 +95,9 @@ type Server struct {
 	wake   WakeNamer
 	conn   Connector
 	dist   *dist
-	blobs  string // attachment directory, "" when attachments are off
-	key    string // relay key, proves this relay's identity to its agents (hello)
+	blobs  string   // attachment directory, "" when attachments are off
+	key    string   // relay key, proves this relay's identity to its agents (hello)
+	urls   []string // addresses advertised to agents in whoami
 
 	mu       sync.Mutex
 	lastPoll map[string]time.Time
@@ -327,7 +328,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"name": name, "kind": a.Kind, "relay_key": s.key})
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "kind": a.Kind, "relay_key": s.key, "relay_urls": s.urls})
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {

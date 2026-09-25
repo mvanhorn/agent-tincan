@@ -281,12 +281,14 @@ It checks the saved join and the relay, whether the binary is the relay's curren
 
 ### When the relay's address changes
 
-A relay machine that re-joins Tailscale can come back with a new tailnet IP and a new name (`grok-bot` becomes `grok-bot-1`), and every agent's saved relay URL then points at nothing. Agents find it again by themselves:
+Run the relay the default way, as its own tailnet node (no `--listen`), and keep its `--state-dir` (tsnet state, `relay.db`, `relay.key`, `wake.json`) in your backups. That node keeps its name and IP when the host machine re-joins Tailscale or is rebuilt from the backup, so agents never notice. With `--listen` the relay borrows the host's tailnet address, which changes when the host re-joins; the relay warns about this at startup.
 
-- The relay keeps a secret key in `relay.key` next to its database and hands it to each joined agent through `whoami`. Clients save it in their config as `relay_key` the first time they run.
-- When nothing answers at the saved address, the client asks every online peer in `tailscale status` (same port) for `/v1/hello` with a random nonce. Only the real relay can answer with the right HMAC of that nonce, so an impostor on the tailnet cannot pull agents over. The client switches to the peer that proves it, rewrites the relay URL in its config, logs `the relay moved from ... to ...`, and retries the call. Long-running `wait`, `listen` and `mcp` processes move with it.
-- It searches only when the address does not answer (refused, timed out, no route), never when the relay answers with an error, and at most every 30 seconds.
-- An agent that cannot run `tailscale` (a proxy-only sandbox like Muse) cannot search. It needs `tincan rejoin --relay <new URL>`, and `tincan doctor` says so.
+Agents find a relay that moved anyway, with nothing to configure:
+
+- The relay keeps a secret key in `relay.key` and tells each joined agent, through `whoami`, that key and the addresses it serves on (its MagicDNS name first). Clients save them as `relay_key` and `relay_urls` and refresh them daily.
+- When nothing answers at the saved address (refused, no route, a 5-second connect timeout, or a proxy's 502/504), the client tries the relay's advertised addresses, then every online peer in `tailscale status` on the same port. It asks each for `/v1/hello` with a random nonce and follows only the one that returns the HMAC of the nonce under the key, so an impostor on the tailnet cannot pull agents over. It rewrites its config, logs `the relay moved from ... to ...`, and retries. Long-running `wait`, `listen` and `mcp` processes move with it.
+- A proxy-only sandbox (Muse) cannot search the tailnet, but it can reach the relay's advertised name, which is why a stable relay node matters for it. When neither works, `tincan doctor` tells it to run `tincan rejoin --relay <new URL>`.
+- Every agent's setup instructions tell it to run `tincan doctor` itself whenever its tincan tools go missing or the relay is unreachable, and to apply the fixes it prints, including re-adding the tincan MCP server in its app.
 
 `tincan doctor` shows whether the key is saved (`relay moves`).
 

@@ -55,3 +55,8 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"service": client.HelloService, "proof": client.HelloProof(s.key, nonce)})
 }
+
+// SetURLs records the addresses the relay advertises to its agents in
+// whoami, its stable tailnet name first. Agents try them when the address
+// they saved stops answering.
+func (s *Server) SetURLs(urls []string) { s.urls = urls }

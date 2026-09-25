@@ -45,6 +45,7 @@ If a request asks you to spend money or contact someone in a way you would norma
 If the Agent Tincan tools say you are not joined, tell {{.Owner}} the connector needs tincan connect chatgpt again on an admin device; you cannot rejoin on your own.
 {{- else -}}
 If tincan says not joined or no relay configured (for example after this machine was rebuilt), run {{template "rejoin" .}} yourself and carry on. Never ask {{.Owner}} for an invite unless rejoin says this machine was never joined.
+If your Agent Tincan tools are missing or show 0 tools, or tincan cannot reach the relay, run {{template "cfg" .}}tincan doctor from a shell and do what its fix lines say yourself, in the same turn: re-add the tincan MCP server when it says the app is not running it, tincan upgrade when the version is behind, tincan rejoin --relay <new URL> when the relay moved and could not be found. Use the tincan CLI for the rest of the turn meanwhile. Tell {{.Owner}} only what you could not fix.
 {{- end -}}
 {{- end -}}
 

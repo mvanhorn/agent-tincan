@@ -18,7 +18,7 @@ func fakeRelay(t *testing.T, key string) string {
 		case "/v1/hello":
 			_ = json.NewEncoder(w).Encode(map[string]string{"service": HelloService, "proof": HelloProof(key, r.URL.Query().Get("nonce"))})
 		case "/v1/whoami":
-			_ = json.NewEncoder(w).Encode(map[string]string{"name": "muse", "relay_key": key})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "muse", "relay_key": key, "relay_urls": []string{"http://tincan-relay.example.ts.net"}})
 		case "/v1/agents":
 			_ = json.NewEncoder(w).Encode(map[string]any{"agents": []AgentInfo{{Name: "muse"}}})
 		default:
@@ -113,5 +113,43 @@ func TestLearnRelayKeySavesIt(t *testing.T) {
 	_ = json.Unmarshal(raw, &c)
 	if c.RelayKey != "k-learned" || c.Relay != url {
 		t.Fatalf("config %+v", c)
+	}
+}
+
+func TestRelayFoundAtItsAdvertisedNameWithoutTailscale(t *testing.T) {
+	const key = "k-real"
+	old := deadURL(t)
+	named := fakeRelay(t, key)
+	savedConfig(t, Config{Relay: old, RelayKey: key, RelayURLs: []string{named}})
+	r, _ := NewRelayFor(Config{Relay: old, RelayKey: key, RelayURLs: []string{named}})
+	r.findRelays = func(context.Context, string) []string { return nil } // a proxy-only sandbox
+	if _, err := r.Agents(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Base() != named {
+		t.Fatalf("base %s, want the advertised %s", r.Base(), named)
+	}
+}
+
+func TestProxyGatewayErrorsMeanUnreachable(t *testing.T) {
+	for _, code := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
+		if !unreachable(&APIError{Code: code}) {
+			t.Errorf("%d through a proxy should count as the relay not answering", code)
+		}
+	}
+}
+
+func TestLearnRelayInfoSavesURLsAndRefreshes(t *testing.T) {
+	url := fakeRelay(t, "k")
+	savedConfig(t, Config{Relay: url})
+	r, _ := NewRelayFor(Config{Relay: url})
+	LearnRelayKey(t.Context(), r)
+	c, _ := LoadConfig()
+	if c.RelayKey != "k" || c.RelayInfoAt.IsZero() || NeedsRelayInfo(c) {
+		t.Fatalf("config %+v", c)
+	}
+	c.RelayInfoAt = c.RelayInfoAt.Add(-2 * relayInfoEvery)
+	if !NeedsRelayInfo(c) {
+		t.Fatal("day-old relay info should be refreshed")
 	}
 }

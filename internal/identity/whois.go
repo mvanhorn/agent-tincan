@@ -3,6 +3,8 @@ package identity
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"tailscale.com/client/local"
@@ -95,3 +97,29 @@ func shortName(fqdn string) string {
 }
 
 var _ NodeStatus = (*LocalResolver)(nil)
+
+// SelfURLs are the relay URLs this tailnet node answers on for port: its
+// MagicDNS name first (it outlives an IP change), then its IPv4 address.
+func (r *LocalResolver) SelfURLs(ctx context.Context, port int) []string {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil || st.Self == nil {
+		return nil
+	}
+	hostPort := func(h string) string {
+		if port == 80 {
+			return "http://" + h
+		}
+		return "http://" + net.JoinHostPort(h, strconv.Itoa(port))
+	}
+	var out []string
+	if name := strings.TrimSuffix(st.Self.DNSName, "."); name != "" {
+		out = append(out, hostPort(name))
+	}
+	for _, ip := range st.Self.TailscaleIPs {
+		if ip.Is4() {
+			out = append(out, hostPort(ip.String()))
+			break
+		}
+	}
+	return out
+}

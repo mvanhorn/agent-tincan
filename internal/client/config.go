@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config is an agent's saved connection to its relay.
@@ -16,6 +17,11 @@ type Config struct {
 	// RelayKey is the relay's secret, learned from whoami. With it the
 	// client can find its relay again after the relay's address changes.
 	RelayKey string `json:"relay_key,omitempty"`
+	// RelayURLs are the addresses the relay advertises for itself (its
+	// stable tailnet name first), tried before searching the tailnet.
+	RelayURLs []string `json:"relay_urls,omitempty"`
+	// RelayInfoAt is when RelayKey and RelayURLs were last refreshed.
+	RelayInfoAt time.Time `json:"relay_info_at,omitzero"`
 }
 
 // ConfigPath is where the agent config lives. A second agent on the same

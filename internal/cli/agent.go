@@ -24,9 +24,9 @@ func connect() (*client.Relay, client.Config, error) {
 		return nil, cfg, errors.New("no relay configured: run `tincan join <code> --relay http://tincan-relay` or set TINCAN_RELAY")
 	}
 	r, err := client.NewRelayFor(cfg)
-	if err == nil && cfg.RelayKey == "" {
-		// Learn the relay key once, so this agent can find the relay
-		// again if the relay's address changes.
+	if err == nil && client.NeedsRelayInfo(cfg) {
+		// Learn the relay key and addresses (and refresh them daily), so
+		// this agent can find the relay again if its address changes.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		client.LearnRelayKey(ctx, r)
 		cancel()

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -53,7 +54,7 @@ func TestRejoinNameAndProxyAreSaved(t *testing.T) {
 	if _, err := run(t, Root(), "rejoin", "--relay", m.URL("muse"), "--name", "grokbot"); err == nil {
 		t.Fatal("rejoin as another machine's agent should fail")
 	}
-	if cfg2, _ := client.LoadConfig(); cfg2 != cfg {
+	if cfg2, _ := client.LoadConfig(); !reflect.DeepEqual(cfg2, cfg) {
 		t.Fatalf("config changed on failure: %+v", cfg2)
 	}
 }

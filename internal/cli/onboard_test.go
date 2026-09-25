@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ func useConfig(t *testing.T, cfg client.Config) {
 	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "client.json"))
 	t.Setenv("TINCAN_RELAY", "")
 	t.Setenv("TINCAN_PROXY", "")
-	if cfg != (client.Config{}) {
+	if !reflect.DeepEqual(cfg, client.Config{}) {
 		if err := client.SaveConfig(cfg); err != nil {
 			t.Fatal(err)
 		}

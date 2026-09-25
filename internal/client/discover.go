@@ -81,11 +81,19 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 		return ""
 	}
 	base := r.Base()
+	// The relay's own advertised addresses (its stable name) come first;
+	// they work for agents that cannot search the tailnet.
+	var cands []string
+	for _, u := range r.known {
+		if u = strings.TrimRight(u, "/"); u != "" && u != base {
+			cands = append(cands, u)
+		}
+	}
 	find := r.findRelays
 	if find == nil {
 		find = tailnetCandidates
 	}
-	cands := find(ctx, base)
+	cands = append(cands, find(ctx, base)...)
 	if len(cands) == 0 {
 		return ""
 	}
@@ -141,7 +149,9 @@ func (r *Relay) proves(ctx context.Context, base string) bool {
 func unreachable(err error) bool {
 	var api *APIError
 	if errors.As(err, &api) {
-		return false
+		// Through a proxy (Muse), a relay that no longer answers comes
+		// back as the proxy's 502 or 504; the relay never sends those.
+		return api.Code == http.StatusBadGateway || api.Code == http.StatusGatewayTimeout
 	}
 	var op *net.OpError
 	var dns *net.DNSError
@@ -240,32 +250,36 @@ func loadSavedConfig() (Config, error) {
 	return c, json.Unmarshal(raw, &c)
 }
 
-// LearnRelayKey saves the relay key from whoami when the config lacks it,
-// so this client can find the relay again if its address changes. It is
-// quiet on failure: the key is only needed later.
+// relayInfoEvery is how often a client refreshes what the relay says about
+// itself (its key and addresses).
+var relayInfoEvery = 24 * time.Hour
+
+// NeedsRelayInfo reports whether c should ask the relay about itself.
+func NeedsRelayInfo(c Config) bool {
+	return c.RelayKey == "" || time.Since(c.RelayInfoAt) > relayInfoEvery
+}
+
+// LearnRelayKey saves the relay key and the relay's advertised addresses
+// from whoami, so this client can find the relay again if its address
+// changes. It is quiet on failure: the information is only needed later.
 func LearnRelayKey(ctx context.Context, r *Relay) {
-	r.findMu.Lock()
-	known := r.key != ""
-	r.findMu.Unlock()
-	if known {
-		return
-	}
 	var out struct {
-		RelayKey string `json:"relay_key"`
+		RelayKey  string   `json:"relay_key"`
+		RelayURLs []string `json:"relay_urls"`
 	}
 	if r.callOnce(ctx, r.api, "GET", "/v1/whoami", nil, &out) != nil || out.RelayKey == "" {
 		return
 	}
 	r.findMu.Lock()
-	r.key = out.RelayKey
+	r.key, r.known = out.RelayKey, out.RelayURLs
 	r.findMu.Unlock()
 	if !r.persist {
 		return
 	}
 	c, err := loadSavedConfig()
-	if err != nil || c.RelayKey == out.RelayKey || strings.TrimRight(c.Relay, "/") != r.Base() {
+	if err != nil || strings.TrimRight(c.Relay, "/") != r.Base() {
 		return
 	}
-	c.RelayKey = out.RelayKey
+	c.RelayKey, c.RelayURLs, c.RelayInfoAt = out.RelayKey, out.RelayURLs, time.Now().UTC()
 	_ = SaveConfig(c)
 }

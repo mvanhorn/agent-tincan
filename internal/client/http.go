@@ -8,6 +8,7 @@
 package client
 
 import (
+	"net"
 	"net/http"
 	"time"
 )
@@ -28,6 +29,9 @@ const (
 	// exceed the relay's hold time plus network slack.
 	PollClient
 )
+
+// dialTimeout bounds connecting to the relay (or the proxy in front of it).
+const dialTimeout = 5 * time.Second
 
 // DefaultPollHold is how long the relay holds a long-poll open before it
 // answers "nothing pending". U1 tunes this below Muse's proxy idle timeout.
@@ -96,6 +100,10 @@ func proxyTransport() http.RoundTripper {
 	}
 	cloned := tr.Clone()
 	cloned.Proxy = http.ProxyFromEnvironment
+	// A relay that moved leaves its old tailnet address silent. Give up
+	// on connecting after dialTimeout so the client looks for the relay
+	// instead of waiting out the whole request timeout.
+	cloned.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
 	return cloned
 }
 

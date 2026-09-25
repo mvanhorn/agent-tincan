@@ -178,6 +178,14 @@ func runRelay(ctx context.Context, f relayFlags) error {
 
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), f.directoryConfig())
 	srv := relay.New(dir, st, relay.Config{})
+	urls := who.SelfURLs(ctx, f.port)
+	srv.SetURLs(urls)
+	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))
+	if f.listen != "" {
+		log.Printf("warning: with --listen the relay's address is this host's tailnet address, which changes if the host re-joins Tailscale. "+
+			"Agents with tailscale find it again by themselves; proxy-only agents may need tincan rejoin. "+
+			"Without --listen the relay is its own tailnet node (%s) and keeps its name while --state-dir is kept.", f.hostname)
+	}
 	srv.SetPreparer(policy.New(st, policy.Config{}))
 	if f.dist != "" {
 		if fi, err := os.Stat(f.dist); err != nil || !fi.IsDir() {

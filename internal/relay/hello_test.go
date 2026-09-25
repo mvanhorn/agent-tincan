@@ -16,11 +16,16 @@ import (
 
 func TestHelloProvesTheKeyAgentsLearn(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
+	m.Server.SetURLs([]string{"http://tincan-relay.example.ts.net", "http://100.0.0.50"})
 	var who struct {
-		RelayKey string `json:"relay_key"`
+		RelayKey  string   `json:"relay_key"`
+		RelayURLs []string `json:"relay_urls"`
 	}
 	if err := m.Client(t, "muse").Raw(t.Context(), "GET", "/v1/whoami", nil, &who); err != nil || len(who.RelayKey) != 64 {
 		t.Fatalf("whoami key %q %v", who.RelayKey, err)
+	}
+	if len(who.RelayURLs) != 2 || who.RelayURLs[0] != "http://tincan-relay.example.ts.net" {
+		t.Fatalf("whoami urls %v, want the advertised name first", who.RelayURLs)
 	}
 	// hello needs no join: a client looking for its moved relay asks
 	// before the relay knows its new address is the same machine.
