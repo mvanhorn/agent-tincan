@@ -192,8 +192,10 @@ func injectedElement(s string) bool {
 
 // claudePromptText turns user-role text into Matt's prompt, or reports
 // false for text Claude Code injected. A custom slash command becomes
-// "/name args".
-func claudePromptText(s string) (string, bool) {
+// "/name args". sdk says the record came in with promptSource "sdk", the
+// way the Desktop app's injections arrive; only those can be dropped as an
+// unlisted injected element, so a prompt Matt typed or queued never is.
+func claudePromptText(s string, sdk bool) (string, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return "", false
@@ -214,7 +216,7 @@ func claudePromptText(s string) (string, bool) {
 			return "", false
 		}
 	}
-	if injectedElement(s) {
+	if sdk && injectedElement(s) {
 		return "", false
 	}
 	return s, true
@@ -287,7 +289,7 @@ func (c *ClaudeCode) parse(e claudeEntry, all, images bool) (thread, bool, error
 					}
 				}
 			}
-			text, ok := claudePromptText(strings.Join(texts, "\n"))
+			text, ok := claudePromptText(strings.Join(texts, "\n"), r.PromptSource == "sdk")
 			if !ok && nImages == 0 {
 				return true
 			}

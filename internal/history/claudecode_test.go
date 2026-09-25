@@ -170,7 +170,7 @@ func TestClaudeCodeMissingRootIsAClearError(t *testing.T) {
 }
 
 func TestClaudeCodeSlashCommandWithArgsIsAPrompt(t *testing.T) {
-	text, ok := claudePromptText("<command-message>ce-plan is running</command-message>\n<command-name>/ce-plan</command-name>\n<command-args>add a fox mode</command-args>")
+	text, ok := claudePromptText("<command-message>ce-plan is running</command-message>\n<command-name>/ce-plan</command-name>\n<command-args>add a fox mode</command-args>", false)
 	if !ok || text != "/ce-plan add a fox mode" {
 		t.Fatalf("slash command = %q %v", text, ok)
 	}
@@ -182,8 +182,8 @@ func TestClaudeCodeSlashCommandWithArgsIsAPrompt(t *testing.T) {
 		"[Request interrupted by user]",
 		"   ",
 	} {
-		if got, ok := claudePromptText(s); ok {
-			t.Errorf("claudePromptText(%q) = %q, want skipped", s, got)
+		if got, ok := claudePromptText(s, false); ok {
+			t.Errorf("claudePromptText(%q, false) = %q, want skipped", s, got)
 		}
 	}
 }
@@ -213,8 +213,8 @@ func TestClaudeCodeInjectedElementIsNotAPrompt(t *testing.T) {
 		"<create-pr-command>open a PR for this branch</create-pr-command>",
 		"<some-new-kind id=\"7\">\nwhatever the Desktop app adds next\n</some-new-kind>",
 	} {
-		if got, ok := claudePromptText(s); ok {
-			t.Errorf("claudePromptText(%q) = %q, want skipped", s, got)
+		if got, ok := claudePromptText(s, true); ok {
+			t.Errorf("claudePromptText(%q, true) = %q, want skipped", s, got)
 		}
 	}
 	for _, s := range []string{
@@ -227,8 +227,21 @@ func TestClaudeCodeInjectedElementIsNotAPrompt(t *testing.T) {
 		"<b>Note</b>: fix <b>today</b>",
 		"<my-notes>first</my-notes> and <my-notes>second</my-notes>",
 	} {
-		if got, ok := claudePromptText(s); !ok || got != s {
-			t.Errorf("claudePromptText(%q) = %q %v, want the prompt", s, got, ok)
+		if got, ok := claudePromptText(s, true); !ok || got != s {
+			t.Errorf("claudePromptText(%q, true) = %q %v, want the prompt", s, got, ok)
 		}
+	}
+}
+
+// Only a record that came in as sdk (how the Desktop app injects) can be
+// dropped as an unlisted injected element; the same text typed, queued or
+// with no promptSource is the owner's prompt.
+func TestClaudeCodeInjectedElementNeedsSDKSource(t *testing.T) {
+	s := "<review-notes>\nlook at the relay retry loop\n</review-notes>"
+	if got, ok := claudePromptText(s, false); !ok || got != s {
+		t.Fatalf("typed %q dropped: %q %v", s, got, ok)
+	}
+	if _, ok := claudePromptText(s, true); ok {
+		t.Fatalf("sdk %q kept as a prompt", s)
 	}
 }

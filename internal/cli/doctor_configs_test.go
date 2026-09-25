@@ -235,3 +235,60 @@ func TestDoctorRelayMovesOldRelayAndSaveFailure(t *testing.T) {
 		t.Fatalf("read-only config: %+v", c)
 	}
 }
+
+// In Claude Code a project server with the same name as a user-level one
+// overrides it, which is the path `--scope user` advice creates: not a
+// duplicate. A differently named pair still loads together.
+func TestConfigSameNameUserAndProjectIsAnOverride(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "tincan")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := `{"command":"` + exe + `","args":["mcp","--channel"]}`
+	same := filepath.Join(dir, "same.json")
+	diff := filepath.Join(dir, "diff.json")
+	_ = os.WriteFile(same, []byte(`{"mcpServers":{"agent-tincan":`+entry+`},"projects":{"/a":{"mcpServers":{"agent-tincan":`+entry+`}}}}`), 0o600)
+	_ = os.WriteFile(diff, []byte(`{"mcpServers":{"agent-tincan":`+entry+`},"projects":{"/a":{"mcpServers":{"tincan":`+entry+`}}}}`), 0o600)
+	byFile := map[string][]mcpConfigEntry{}
+	for _, e := range findMCPConfigs([]string{same, diff}) {
+		byFile[e.File] = append(byFile[e.File], e)
+	}
+	for _, e := range byFile[same] {
+		if e.broken {
+			t.Fatalf("same-name override flagged: %+v", e)
+		}
+	}
+	flagged := 0
+	for _, e := range byFile[diff] {
+		if e.broken {
+			flagged++
+		}
+	}
+	if flagged != 2 {
+		t.Fatalf("differently named user and project servers: %d flagged, want 2: %+v", flagged, byFile[diff])
+	}
+}
+
+// PyYAML reads YAML 1.1 booleans, so Hermes' enabled: False / no / off all
+// turn a server off; an entry whose shape tincan cannot read warns instead
+// of failing.
+func TestYamlServersBooleansAndUnreadEntries(t *testing.T) {
+	for _, v := range []string{"False", "no", "off", "NO"} {
+		es := yamlServers("mcp_servers:\n  tincan:\n    command: tincan\n    args: [mcp]\n    enabled: " + v + "\n")
+		if len(es) != 1 || !es[0].broken {
+			t.Fatalf("enabled: %s not read as off: %+v", v, es)
+		}
+	}
+	es := yamlServers("mcp_servers:\n  tincan:\n    command: tincan\n    args: [mcp]\n    enabled: yes\n")
+	if len(es) != 1 || es[0].broken {
+		t.Fatalf("enabled: yes read as off: %+v", es)
+	}
+	es = yamlServers("mcp_servers:\n  tincan:\n    url: something-tincan-reads-no-command-from\n")
+	if len(es) != 1 || !es[0].unread {
+		t.Fatalf("unreadable entry: %+v", es)
+	}
+	if c := configCheck(es, ""); c.Status != "warn" {
+		t.Fatalf("unreadable entry should warn, got %+v", c)
+	}
+}

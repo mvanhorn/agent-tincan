@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -115,6 +116,12 @@ type Server struct {
 	// client's version header, loaded from the store at start and written
 	// back whenever it changes.
 	versions map[string]string
+	// storedVersion is the build last written to the store for each agent,
+	// and versionWritten when. The write is throttled like last-seen, so two
+	// builds running under one name (an old listen or MCP process next to an
+	// upgraded CLI) do not write to the store on every alternating call.
+	storedVersion  map[string]string
+	versionWritten map[string]time.Time
 }
 
 // persistEvery bounds how often an agent's activity is written to the store.
@@ -123,8 +130,11 @@ const persistEvery = time.Minute
 // New builds a relay server.
 func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
-	return &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
-		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st)}
+	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
+		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
+		versionWritten: map[string]time.Time{}}
+	s.storedVersion = maps.Clone(s.versions)
+	return s
 }
 
 // loadVersions reads the build each agent last reported, so a restarted
@@ -348,9 +358,14 @@ func (s *Server) seen(ctx context.Context, agent, version string) {
 	if write {
 		s.persisted[agent] = now
 	}
-	writeVersion := version != "" && s.versions[agent] != version
-	if writeVersion {
+	if version != "" {
 		s.versions[agent] = version
+	}
+	vw, wrote := s.versionWritten[agent]
+	writeVersion := version != "" && s.storedVersion[agent] != version && (!wrote || now.Sub(vw) >= persistEvery)
+	if writeVersion {
+		s.storedVersion[agent] = version
+		s.versionWritten[agent] = now
 	}
 	s.mu.Unlock()
 	if !write && !writeVersion {
@@ -894,6 +909,8 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.lastSeen, in.Name)
 	delete(s.persisted, in.Name)
 	delete(s.versions, in.Name)
+	delete(s.storedVersion, in.Name)
+	delete(s.versionWritten, in.Name)
 	s.mu.Unlock()
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": in.Name, "cancelled": len(ids)})

@@ -30,6 +30,12 @@ func useConfig(t *testing.T, cfg client.Config) {
 	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "client.json"))
 	t.Setenv("TINCAN_RELAY", "")
 	t.Setenv("TINCAN_PROXY", "")
+	// Admin and roster commands fall back to a local relay's admin socket
+	// under the user config dir; point it at an empty dir so a relay running
+	// on the test machine is never reached.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	if !reflect.DeepEqual(cfg, client.Config{}) {
 		if err := client.SaveConfig(cfg); err != nil {
 			t.Fatal(err)

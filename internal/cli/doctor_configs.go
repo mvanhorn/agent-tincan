@@ -23,6 +23,7 @@ type mcpConfigEntry struct {
 	Args     []string `json:"args,omitempty"`
 	Problems []string `json:"problems,omitempty"`
 	broken   bool     // a problem that stops the app from running tincan
+	unread   bool     // names tincan, but tincan could not read its command
 }
 
 // mcpConfigFiles are the MCP config files of the apps tincan agents run in.
@@ -89,19 +90,41 @@ func findMCPConfigs(extra []string) []mcpConfigEntry {
 		// everywhere plus the one for the current project. Entries under
 		// different projects never load together, so a server added in two
 		// directories is not two servers.
-		everywhere, mostInProject, perScope := 0, 0, map[string]int{}
+		// A project server with the same name as a user-level one
+		// overrides it (Claude Code: local and project scope win over
+		// user), so only differently named servers count as extra.
+		var global []string
+		perScope, names := map[string]int{}, map[string]map[string]bool{}
 		for _, e := range es {
 			if e.Scope == "" {
-				everywhere++
+				global = append(global, e.Name)
 				continue
 			}
 			perScope[e.Scope]++
-			mostInProject = max(mostInProject, perScope[e.Scope])
+			if names[e.Scope] == nil {
+				names[e.Scope] = map[string]bool{}
+			}
+			names[e.Scope][e.Name] = true
+		}
+		inScope := func(scope string) int {
+			n := perScope[scope]
+			for _, g := range global {
+				if !names[scope][g] {
+					n++
+				}
+			}
+			return n
 		}
 		for i := range es {
-			together := everywhere + mostInProject
+			together := len(global)
 			if es[i].Scope != "" {
-				together = everywhere + perScope[es[i].Scope]
+				together = inScope(es[i].Scope)
+			} else {
+				for scope := range perScope {
+					if !names[scope][es[i].Name] {
+						together = max(together, inScope(scope))
+					}
+				}
 			}
 			if together > 1 {
 				es[i].Problems = append(es[i].Problems, fmt.Sprintf("one of %d tincan servers this file loads together; keep one", together))
@@ -238,6 +261,9 @@ func yamlServers(s string) []mcpConfigEntry {
 	inArgs := false
 	flush := func() {
 		if cur != nil && mentionsTincan(*cur) {
+			// A shape this reader does not follow (a flow mapping, an
+			// anchor) leaves no command and no args: say so, do not fail.
+			cur.unread = cur.Command == "" && len(cur.Args) == 0 && !cur.broken
 			out = append(out, *cur)
 		}
 		cur = nil
@@ -304,12 +330,12 @@ func yamlServers(s string) []mcpConfigEntry {
 				}
 			}
 		case "enabled":
-			if value == "false" {
+			if yamlFalse(value) {
 				cur.Problems = append(cur.Problems, "disabled")
 				cur.broken = true
 			}
 		case "disabled":
-			if value == "true" {
+			if yamlTrue(value) {
 				cur.Problems = append(cur.Problems, "disabled")
 				cur.broken = true
 			}
@@ -317,6 +343,24 @@ func yamlServers(s string) []mcpConfigEntry {
 	}
 	flush()
 	return out
+}
+
+// yamlFalse and yamlTrue read YAML 1.1 booleans the way PyYAML (Hermes)
+// does: false/no/off and true/yes/on, in any case.
+func yamlFalse(v string) bool {
+	switch strings.ToLower(v) {
+	case "false", "no", "off":
+		return true
+	}
+	return false
+}
+
+func yamlTrue(v string) bool {
+	switch strings.ToLower(v) {
+	case "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // yamlScalar is a YAML scalar without its trailing comment or its quotes.
@@ -345,9 +389,14 @@ func configCheck(es []mcpConfigEntry, exe string) check {
 	if exe != "" {
 		self, _ = filepath.EvalSymlinks(exe)
 	}
-	broken, differs := 0, 0
+	broken, differs, unread := 0, 0, 0
 	for i := range es {
 		e := &es[i]
+		if e.unread {
+			e.Problems = append(e.Problems, "could not read its command and args; check this entry by hand")
+			unread++
+			continue
+		}
 		if strings.Contains(e.Name, " ") {
 			e.Problems = append(e.Problems, "the name has a space; name it tincan")
 			e.broken = true
@@ -381,6 +430,8 @@ func configCheck(es []mcpConfigEntry, exe string) check {
 		return check{name, "fail", fmt.Sprintf("%d of %d tincan entries will not start tincan mcp (listed below)", broken, len(es)), "Fix or remove those entries; see \"To fix the app's tincan connection\" below."}
 	case differs > 0:
 		return check{name, "warn", fmt.Sprintf("%d of %d tincan entries run a different tincan binary than this one", differs, len(es)), "Point them at " + self + ", or upgrade that binary too."}
+	case unread > 0:
+		return check{name, "warn", fmt.Sprintf("could not read %d of %d tincan entries (listed below)", unread, len(es)), "Check that each runs this tincan with args [\"mcp\"]."}
 	}
 	return check{name, "ok", fmt.Sprintf("%d tincan entr%s, each runs this binary with mcp", len(es), map[bool]string{true: "y", false: "ies"}[len(es) == 1]), ""}
 }

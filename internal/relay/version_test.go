@@ -112,3 +112,38 @@ func TestRemoveForgetsAgentVersionAndActivity(t *testing.T) {
 		t.Fatalf("rejoined muse still carries the removed agent's state: %+v", a)
 	}
 }
+
+// Two builds calling under one name (an old listen or MCP process next to an
+// upgraded CLI) write the store at most once a minute, not on every
+// alternating call; the roster still shows the latest build at once.
+func TestAlternatingBuildsThrottleVersionWrites(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_790_000_000, 0)}
+	h := newHarness(t, Config{Now: clk.Now})
+	stored := func() string {
+		vs, err := h.st.AgentVersions(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return vs["grokbot"]
+	}
+	whoamiAs(t, h, grokAddr, "0.5.1")
+	if got := stored(); got != "0.5.1" {
+		t.Fatalf("first build not stored: %q", got)
+	}
+	whoamiAs(t, h, grokAddr, "0.5.3")
+	whoamiAs(t, h, grokAddr, "0.5.1")
+	whoamiAs(t, h, grokAddr, "0.5.3")
+	if got := stored(); got != "0.5.1" {
+		t.Fatalf("store rewritten within a minute: %q", got)
+	}
+	if a := agentInfo(t, h, macAddr, "grokbot"); a.Version != "0.5.3" {
+		t.Fatalf("roster shows %q, want the latest build", a.Version)
+	}
+	clk.mu.Lock()
+	clk.t = clk.t.Add(persistEvery)
+	clk.mu.Unlock()
+	whoamiAs(t, h, grokAddr, "0.5.3")
+	if got := stored(); got != "0.5.3" {
+		t.Fatalf("store did not catch up after a minute: %q", got)
+	}
+}
