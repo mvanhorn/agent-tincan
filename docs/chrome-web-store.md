@@ -103,17 +103,9 @@ A small tile icon (128x128) is also required for the listing; the manifest has n
 
 ## 8. After approval: switch to the store build
 
-The store assigns its own extension id (32 letters a to p), shown on the item's dashboard page and in its store URL. Chrome's native host manifest allows exactly one extension id, so the switch has to happen in this order:
+Nothing to reinstall. Since v0.5.2 the native host accepts both the unpacked id (`ciejooalclcpgpapboofdbbddphldhnh`) and the store id (`goldflchpojcjmifnljlfkgoahjgeajn`), and `tincan history serve` adds the store id to an older install's host manifest when it starts. When both builds are installed, the unpacked build's host waits while the store build's host serves, so the store build wins without anyone choosing.
 
-1. Install the store build from its listing page.
-2. Remove the unpacked extension in `chrome://extensions` (the one with id `ciejooalclcpgpapboofdbbddphldhnh`).
-3. Point the native host at the store id:
-
-   ```bash
-   tincan history install --extension-id <store id>
-   ```
-
-   This replaces the allowed extension in the native host manifest: after it, the unpacked build can no longer reach the helper. Run it only after steps 1 and 2. Running it outside the repo checkout without `--extension-dir` also stops the helper from watching unpacked files, which a store build does not use (store builds update through the store).
-4. Check it: from another agent, `tincan ask history "what was the last thing I asked ChatGPT?"`, and a `tincan ask chatgpt-web "Tincan test"` send.
-
-Then update the install docs (docs/adapters/history.md, README, extension/README.md) to point at the store listing, and pass the store id as the default in a follow-up release so new installs need no flag.
+1. Click Publish on the dashboard once the item passes review.
+2. Users add it from the store listing. It connects at once.
+3. They can remove the unpacked extension in `chrome://extensions` whenever they like.
+4. Update the install docs (README, docs/adapters/history.md, site/agents.txt part C) to lead with the store listing.

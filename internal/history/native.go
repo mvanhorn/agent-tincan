@@ -62,6 +62,22 @@ const NativeHostName = "com.agenttincan.history"
 // derived from the "key" in extension/manifest.json.
 const DefaultExtensionID = "ciejooalclcpgpapboofdbbddphldhnh"
 
+// StoreExtensionID is the id of the Chrome Web Store listing (item
+// goldflchpojcjmifnljlfkgoahjgeajn). The host allows it alongside the
+// unpacked id, so installing the store build needs no reinstall, and when
+// both are installed the store build's connection wins (see NativeHost.Origin).
+const StoreExtensionID = "goldflchpojcjmifnljlfkgoahjgeajn"
+
+// AllowedOrigins lists the extension origins the native host accepts: the
+// unpacked build, the store build, and extra when it is a third id.
+func AllowedOrigins(extra string) []string {
+	out := []string{"chrome-extension://" + DefaultExtensionID + "/", "chrome-extension://" + StoreExtensionID + "/"}
+	if extra != "" && extra != DefaultExtensionID && extra != StoreExtensionID {
+		out = append(out, "chrome-extension://"+extra+"/")
+	}
+	return out
+}
+
 // Message size limits. Chrome refuses messages over 1 MB from a native host;
 // messages from the extension to the host may be up to 64 MiB.
 const (
@@ -858,6 +874,9 @@ func ListenSocket(path string) (net.Listener, error) {
 // the history service (unix socket) and the extension (In and Out, the
 // native messaging pipe).
 type NativeHost struct {
+	// Origin is the chrome-extension:// origin Chrome passed, which says
+	// which build (unpacked or store) started this host.
+	Origin     string
 	SocketPath string
 	In         io.Reader
 	Out        io.Writer
@@ -908,19 +927,36 @@ func (h *NativeHost) Run(ctx context.Context) error {
 		h.SendTimeout = SendHostTimeout
 	}
 	h.pending = map[int64]chan []byte{}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	readErr := make(chan error, 1)
+	go func() { readErr <- h.readChrome(); cancel() }()
+
+	// With both builds installed, the store build serves: an unpacked
+	// build's host waits while a store host holds the socket, and takes
+	// over only if that host goes away.
+	for !h.fromStore() && storeHostAlive(h.SocketPath) {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(storeYieldRecheck):
+		}
+	}
 	ln, err := ListenSocket(h.SocketPath)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	originFile := h.SocketPath + ".origin"
+	_ = os.WriteFile(originFile, []byte(h.Origin), 0o600)
+	defer func() {
+		if b, err := os.ReadFile(originFile); err == nil && string(b) == h.Origin {
+			_ = os.Remove(originFile)
+		}
+	}()
 	defer os.Remove(h.SocketPath)
 	defer ln.Close()
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
-
-	readErr := make(chan error, 1)
-	go func() { readErr <- h.readChrome(); cancel() }()
 	if h.ExtensionDir != "" {
 		go h.recheck(ctx)
 	}
@@ -943,6 +979,29 @@ func (h *NativeHost) Run(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// storeYieldRecheck is how often an unpacked build's host checks whether the
+// store build's host is still serving.
+var storeYieldRecheck = 30 * time.Second
+
+func (h *NativeHost) fromStore() bool {
+	return strings.Contains(h.Origin, StoreExtensionID)
+}
+
+// storeHostAlive reports whether the socket is held by a live host that the
+// store build started.
+func storeHostAlive(socket string) bool {
+	b, err := os.ReadFile(socket + ".origin")
+	if err != nil || !strings.Contains(string(b), StoreExtensionID) {
+		return false
+	}
+	c, err := net.DialTimeout("unix", socket, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // readChrome routes frames from the extension to the waiting request.

@@ -37,6 +37,8 @@ The only human step is installing the Tincan Chrome extension from the Chrome We
 1. Download `tincan-history-extension.zip` from the release page and unzip it into a folder you will keep, for example `~/tincan-extension`. Chrome loads it from there every time, so do not delete it. (From a repo checkout, `extension/` works the same way; see `extension/README.md`.)
 2. Open `chrome://extensions`, turn on Developer mode, click Load unpacked, and pick that folder.
 
+When the store listing goes live, add it from the store: tincan accepts the store build right away and prefers it over the unpacked one, so there is nothing to reinstall. Remove the unpacked copy whenever you like.
+
 Then, on the Mac:
 
 ```bash

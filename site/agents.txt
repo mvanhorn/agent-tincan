@@ -173,11 +173,19 @@ answer). It needs an always-on Mac with Chrome, where your owner is logged in to
 chatgpt.com and claude.ai.
 
 C1. Install tincan on that Mac (above).
-C2. Ask your owner to install the extension: download tincan-history-extension.zip
-    from https://github.com/mvanhorn/agent-tincan/releases, unzip it into a folder
-    they keep, open chrome://extensions, turn on Developer mode, click Load
-    unpacked, and pick the folder. (Once the Chrome Web Store listing is live,
-    they install it from the store instead.)
+C2. Ask your owner to install the Tincan extension in Chrome. Check first whether
+    the Chrome Web Store listing is live:
+    https://chromewebstore.google.com/detail/goldflchpojcjmifnljlfkgoahjgeajn
+    - Live: they click "Add to Chrome".
+    - Not live yet (it is in review): the developer build. Download
+      tincan-history-extension.zip from
+      https://github.com/mvanhorn/agent-tincan/releases, unzip it into a folder
+      they keep, open chrome://extensions, turn on Developer mode, click Load
+      unpacked, and pick the folder.
+    Both builds work with the same tincan install. When the store version goes
+    live later, your owner only has to add it from the store: tincan accepts it
+    right away and prefers it over the developer build automatically. Then they
+    can remove the developer build from chrome://extensions whenever they like.
 C3. Get three invite codes from the relay (PART A6) with kinds history,
     chatgpt-web and claude-web, and join each with its own config:
 

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -163,7 +164,7 @@ func InstallNativeHost(o InstallOptions) (InstallResult, error) {
 		Description:    "Agent Tincan history bridge",
 		Path:           res.WrapperPath,
 		Type:           "stdio",
-		AllowedOrigins: []string{"chrome-extension://" + o.ExtensionID + "/"},
+		AllowedOrigins: AllowedOrigins(o.ExtensionID),
 	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -184,3 +185,36 @@ func InstallNativeHost(o InstallOptions) (InstallResult, error) {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// EnsureStoreOrigin adds the store build's origin to an existing host
+// manifest that predates it, so an install from before the store listing
+// accepts the store build without a reinstall. A missing manifest is left
+// alone. It reports whether it changed the file.
+func EnsureStoreOrigin(goos, home string) (bool, error) {
+	mdir, err := NativeManifestDir(goos, home)
+	if err != nil {
+		return false, err
+	}
+	path := filepath.Join(mdir, NativeHostName+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var m HostManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return false, err
+	}
+	want := "chrome-extension://" + StoreExtensionID + "/"
+	if slices.Contains(m.AllowedOrigins, want) {
+		return false, nil
+	}
+	m.AllowedOrigins = append(m.AllowedOrigins, want)
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	return true, writeFileAtomic(path, append(b, '\n'), 0o644)
+}

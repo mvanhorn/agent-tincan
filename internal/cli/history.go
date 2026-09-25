@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -237,6 +239,16 @@ func historyServeCmd() *cobra.Command {
 			if cfg.Agent != "" && cfg.Agent != "history" {
 				return wrongHistoryAgent(configPath+" is joined as", cfg.Agent)
 			}
+			// An install from before the Chrome Web Store listing allows only
+			// the unpacked extension; add the store build so it works the
+			// moment it is installed.
+			if home, err := os.UserHomeDir(); err == nil {
+				if changed, err := history.EnsureStoreOrigin(runtime.GOOS, home); err != nil {
+					log.Printf("history: could not add the store extension to the native host manifest: %v", err)
+				} else if changed {
+					log.Printf("history: the native host now also accepts the Chrome Web Store build")
+				}
+			}
 			if allowPath == "" {
 				allowPath = history.DefaultAllowlistPath()
 			}
@@ -311,7 +323,14 @@ func historyNativeHostCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			origin := ""
+			for _, a := range os.Args {
+				if strings.HasPrefix(a, "chrome-extension://") {
+					origin = a
+				}
+			}
 			host := &history.NativeHost{
+				Origin:       origin,
 				SocketPath:   history.DefaultSocketPath(),
 				In:           os.Stdin,
 				Out:          os.Stdout,

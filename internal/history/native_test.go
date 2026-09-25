@@ -188,7 +188,8 @@ func TestInstallNativeHost(t *testing.T) {
 			if m.Name != NativeHostName || m.Type != "stdio" || m.Path != res.WrapperPath || m.Description == "" {
 				t.Fatalf("manifest %+v", m)
 			}
-			if len(m.AllowedOrigins) != 1 || m.AllowedOrigins[0] != "chrome-extension://"+DefaultExtensionID+"/" {
+			if len(m.AllowedOrigins) != 2 || m.AllowedOrigins[0] != "chrome-extension://"+DefaultExtensionID+"/" ||
+				m.AllowedOrigins[1] != "chrome-extension://"+StoreExtensionID+"/" {
 				t.Fatalf("allowed_origins %v", m.AllowedOrigins)
 			}
 			st, err := os.Stat(res.WrapperPath)
