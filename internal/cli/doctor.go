@@ -121,6 +121,9 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 			client.LearnRelayKey(ctx, r)
 			if saved, _ := client.LoadConfig(); saved.RelayKey != "" {
 				add(check{"relay moves", "ok", "the relay key is saved, so this agent finds the relay by itself if its address changes", ""})
+				if len(saved.RelayURLs) > 0 {
+					add(addressCheck(ctx, r, saved.RelayURLs))
+				}
 			} else {
 				add(check{"relay moves", "warn", "the relay did not hand out its key (relay older than 0.5.0-rc12), so this agent cannot find the relay by itself if its address changes", "Upgrade the relay, then run tincan doctor again."})
 			}
@@ -164,6 +167,25 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		rep.Fix = hostFix(exe)
 	}
 	return rep
+}
+
+// addressCheck asks each address the relay advertises to prove it is this
+// relay. Besides the report, it makes a sandbox that approves each new site
+// ask for the relay's name and IP now, at setup, not after a move.
+func addressCheck(ctx context.Context, r *client.Relay, urls []string) check {
+	var ok, bad []string
+	for _, u := range urls {
+		if r.Proves(ctx, u) {
+			ok = append(ok, u)
+		} else {
+			bad = append(bad, u)
+		}
+	}
+	if len(bad) == 0 {
+		return check{"relay addresses", "ok", "reachable at every address the relay advertises: " + strings.Join(ok, ", "), ""}
+	}
+	return check{"relay addresses", "warn", "not reachable from here: " + strings.Join(bad, ", "),
+		"If this agent's app asks before each new site, allow these addresses always; otherwise it cannot follow the relay to them after a move."}
 }
 
 func versionCheck(ctx context.Context, r *client.Relay, exe string) check {

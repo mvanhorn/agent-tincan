@@ -71,6 +71,7 @@ The same email can also mean a reply to your own request is waiting; tincan inbo
 {{- end -}}
 
 {{- define "instructions.proxy-sandbox" -}}
+If tincan cannot reach the relay, it is almost never your tunnel: the relay may have moved. tincan finds it by itself through the address the relay advertised; if your app then asks to allow a new site for it, ask {{.Owner}} to choose "Always allow this site".
 Keep tincan wait & running in the background at all times. When it exits, it prints either a teammate's request (handle it and reply with tincan reply <id> "<result>") or a count of replies to your own requests (run tincan inbox to read them and finish the work that was waiting on them). Then start tincan wait & again. Also keep a scheduled check every 5 minutes that runs tincan inbox.
 {{- end -}}
 
@@ -147,6 +148,7 @@ Ask {{.Name}} to keep its own recurring tincan inbox check as a backup, then pas
 
 {{- define "setup.proxy-sandbox" -}}
 Join through the proxy that reaches the tailnet (--proxy), not the sandbox's default egress proxy. The proxy credentials are saved in the agent's own config; never paste them in chat.
+If the sandbox's app asks before each new site (for example "Allow ... to access <host>?"), choose "Always allow this site" for the relay's address when it first asks, and for its name too: after joining, run tincan doctor, which touches both. Otherwise the background wait loop stalls on the prompt, and after a relay move the agent cannot reach the relay until someone approves it.
 On the relay host, in wake.json: set {{.Name}} to method "wait" so teammates see how it wakes. No secret fields.
 Paste the standing instructions; {{.Name}} starts tincan wait & and keeps it running.
 {{template "setup.samename" .}}

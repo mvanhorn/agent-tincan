@@ -114,6 +114,16 @@ func (r *Relay) FindRelay(ctx context.Context) string {
 	return <-found
 }
 
+// Proves reports whether the relay at base answers hello with a valid
+// proof of this client's relay key. tincan doctor uses it to check each
+// address the relay advertises.
+func (r *Relay) Proves(ctx context.Context, base string) bool {
+	r.findMu.Lock()
+	known := r.key != ""
+	r.findMu.Unlock()
+	return known && r.proves(ctx, strings.TrimRight(base, "/"))
+}
+
 // proves reports whether the relay at base answers hello with a valid
 // proof of the relay key.
 func (r *Relay) proves(ctx context.Context, base string) bool {
