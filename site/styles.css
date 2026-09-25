@@ -850,3 +850,7 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
 .sound-btn[aria-pressed="true"] .mute { display: none; }
 .sound-btn:hover { background: rgba(16,17,20,0.96); }
 .sound-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+/* The chat demo carousel, below the fold in Why it matters */
+.why-demo { display: flex; justify-content: center; margin: 8px 0 48px; }
+.why-demo .hero-demo { max-width: 560px; }

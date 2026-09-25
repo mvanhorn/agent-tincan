@@ -103,6 +103,25 @@
       <div class="wrap">
         <h2 id="why-title" class="eyebrow-heading"><span class="eyebrow">Why it matters</span>Your agents borrow each other's powers</h2>
         <p class="section-lede">Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.</p>
+        <div class="why-demo">
+          <figure class="hero-demo" aria-labelledby="demo-caption">
+          <figcaption id="demo-caption" class="sr-only">Example: your agents asking each other for help through Agent Tincan</figcaption>
+          <div class="demo-tabs" role="tablist" aria-label="Examples"></div>
+          <div class="demo-window">
+            <div class="demo-bar">
+              <span class="demo-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="demo-title">Grok Bot</span>
+              <span class="demo-scene" data-demo-scene>Your phone</span>
+            </div>
+            <ol class="demo-feed" data-demo-feed aria-live="polite">
+              <li class="msg msg-you"><span class="who">You</span><p>What did ChatGPT tell me about the lease last night? Send me the screenshot.</p></li>
+              <li class="msg msg-hop"><span class="hop-route"><b>Grok Bot</b><span class="hop-string" aria-hidden="true"></span><b>history</b></span><p>Find last night's ChatGPT chat about the lease, with the screenshot.</p></li>
+              <li class="msg msg-hop msg-back"><span class="hop-route"><b>history</b><span class="hop-string" aria-hidden="true"></span><b>Grok Bot</b></span><p>Found "Lease renewal questions" from 11:42 PM.</p><span class="attach">lease-clause.png</span></li>
+              <li class="msg msg-agent"><span class="who">Grok Bot</span><p>ChatGPT said the early-termination fee is two months' rent. Here's the screenshot.</p><span class="attach">lease-clause.png</span></li>
+            </ol>
+          </div>
+        </figure>
+        </div>
         <ul class="why-grid">
           <li class="why-card">
             <h3>From your phone</h3>
