@@ -268,3 +268,34 @@
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
+
+// Hero launch video: muted autoplay loop; the button turns sound on (from the
+// top, so the music lines up) and off again.
+(function () {
+  function init() {
+    var v = document.getElementById('hero-video');
+    var b = document.getElementById('hero-sound');
+    if (!v || !b) return;
+    var label = b.querySelector('span');
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      v.removeAttribute('autoplay');
+      v.pause();
+      v.controls = true;
+    }
+    b.addEventListener('click', function () {
+      if (v.muted) {
+        v.muted = false;
+        v.currentTime = 0;
+        var p = v.play();
+        if (p && p.catch) p.catch(function () {});
+        b.setAttribute('aria-pressed', 'true');
+        label.textContent = 'Sound on';
+      } else {
+        v.muted = true;
+        b.setAttribute('aria-pressed', 'false');
+        label.textContent = 'Tap for sound';
+      }
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();

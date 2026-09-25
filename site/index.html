@@ -81,22 +81,12 @@
           </div>
         </div>
 
-        <figure class="hero-demo" aria-labelledby="demo-caption">
-          <figcaption id="demo-caption" class="sr-only">Example: your agents asking each other for help through Agent Tincan</figcaption>
-          <div class="demo-tabs" role="tablist" aria-label="Examples"></div>
-          <div class="demo-window">
-            <div class="demo-bar">
-              <span class="demo-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-              <span class="demo-title">Grok Bot</span>
-              <span class="demo-scene" data-demo-scene>Your phone</span>
-            </div>
-            <ol class="demo-feed" data-demo-feed aria-live="polite">
-              <li class="msg msg-you"><span class="who">You</span><p>What did ChatGPT tell me about the lease last night? Send me the screenshot.</p></li>
-              <li class="msg msg-hop"><span class="hop-route"><b>Grok Bot</b><span class="hop-string" aria-hidden="true"></span><b>history</b></span><p>Find last night's ChatGPT chat about the lease, with the screenshot.</p></li>
-              <li class="msg msg-hop msg-back"><span class="hop-route"><b>history</b><span class="hop-string" aria-hidden="true"></span><b>Grok Bot</b></span><p>Found "Lease renewal questions" from 11:42 PM.</p><span class="attach">lease-clause.png</span></li>
-              <li class="msg msg-agent"><span class="who">Grok Bot</span><p>ChatGPT said the early-termination fee is two months' rent. Here's the screenshot.</p><span class="attach">lease-clause.png</span></li>
-            </ol>
-          </div>
+        <figure class="hero-video">
+          <video id="hero-video" src="/launch.mp4" poster="/launch-poster.jpg" autoplay muted loop playsinline preload="auto" aria-label="Agent Tincan launch video: your agents ask each other for help"></video>
+          <button class="sound-btn" id="hero-sound" type="button" aria-pressed="false">
+            <svg viewBox="0 0 40 34" aria-hidden="true" focusable="false"><path d="M3 11 H11 L21 3 V31 L11 23 H3 Z" fill="currentColor"/><path class="waves" d="M27 10 Q32 17 27 24 M31 5 Q39 17 31 29" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/><path class="mute" d="M27 11 L37 23 M37 11 L27 23" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg>
+            <span>Tap for sound</span>
+          </button>
         </figure>
       </div>
     </section>

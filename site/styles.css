@@ -837,3 +837,16 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
 .prompt .copy:hover { background: rgba(255,255,255,0.1); }
 .prompt .copy:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 @media (max-width: 560px) { .prompt pre { padding-right: 20px; padding-top: 54px; } }
+
+/* Hero launch video: autoplays muted on loop, tap for sound */
+.hero-video { position: relative; margin: 0; width: 100%; max-width: 540px; justify-self: center; }
+.hero-video video { display: block; width: 100%; max-width: 100%; aspect-ratio: 1 / 1; border-radius: var(--radius); background: #101114; box-shadow: var(--shadow); }
+.sound-btn { position: absolute; left: 16px; bottom: 16px; display: inline-flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 18px 8px 14px;
+  border: 2.5px solid #E8500A; border-radius: 999px; background: rgba(16,17,20,0.88); color: #E8500A;
+  font: 700 0.9375rem/1 var(--font-display); letter-spacing: 0.02em; cursor: pointer; }
+.sound-btn svg { width: 22px; height: 19px; }
+.sound-btn .waves { display: none; }
+.sound-btn[aria-pressed="true"] .waves { display: inline; }
+.sound-btn[aria-pressed="true"] .mute { display: none; }
+.sound-btn:hover { background: rgba(16,17,20,0.96); }
+.sound-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
