@@ -12,7 +12,7 @@ make store
 
 This writes `dist/tincan-history-extension-store.zip` and prints its sha256. It holds exactly the files Chrome loads (`manifest.json`, `background.js`, `ops.js`, `send.js`), with the manifest's `key` field removed: the Web Store rejects a manifest with a `key` because it assigns the id itself. `extension/manifest.json` and the release zip (`make extension`) keep the key, so the unpacked install keeps its fixed id `ciejooalclcpgpapboofdbbddphldhnh`. `TestStoreZip` in `internal/history` checks the zip.
 
-Each store upload needs a higher `version` in the manifest than the last one published.
+The listing was submitted on September 24, 2026 as item `goldflchpojcjmifnljlfkgoahjgeajn` (publisher MVH). Each store upload needs a higher `version` in the manifest than the last one published.
 
 ## 2. Create the item
 

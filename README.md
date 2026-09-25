@@ -55,7 +55,7 @@ curl -fsSL https://agenttincan.com/install.sh | sh
 TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 ```
 
-The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's `checksums.txt`, and installs it to `~/.local/bin/tincan` without `sudo`. The relay joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`. If the router already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds its tailnet IP instead. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.
+The installer picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), checks it against the release's `checksums.txt`, and installs it to `~/.local/bin/tincan` without `sudo`. The relay joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`. If the router already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds its tailnet IP instead, but then the relay's address changes whenever the host re-joins Tailscale; the default keeps it stable. Run the relay as its own OS user under systemd or launchd, so it restarts and agents cannot read its state.
 
 ### 3. Make your laptop the admin device
 
@@ -163,7 +163,7 @@ Step by step, including the relay and your first two agents: [docs/quickstart.md
 
 ### The relay
 
-One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead.
+One always-on Linux or macOS machine runs `tincan relay`. By default it joins your tailnet as its own node, `tincan-relay`, so agents reach it at `http://tincan-relay`. If the host already runs Tailscale, `--listen <tailscale-ip> --port 8787` binds the host's tailnet IP instead. Prefer the default: with `--listen` the relay's address follows the host's, which changes if the host re-joins Tailscale (agents find it again, but sandboxes that approve each site may need a new approval).
 
 ```bash
 TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
@@ -896,7 +896,7 @@ Releases are cut by hand; CI does not publish them. From a clean checkout of the
 ```bash
 git tag v0.5.0 && git push origin v0.5.0
 make release-mac # make dist (four static binaries, checksums.txt, extension zip in dist/), then sign and notarize the macOS binaries
-gh release create v0.5.0 --prerelease --title v0.5.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
+gh release create v0.5.0 --title v0.5.0 dist/tincan_* dist/checksums.txt dist/tincan-history-extension.zip
 ```
 
 `make dist` stamps the version from `git describe`, so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:

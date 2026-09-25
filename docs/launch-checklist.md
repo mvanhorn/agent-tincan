@@ -1,50 +1,32 @@
-# Launch checklist (morning of September 24, 2026)
+# Launch checklist (September 25, 2026)
 
-Status: ready to launch. Release v0.5.0-rc6 is live on the relay, this Mac and the Mac mini. agenttincan.com is live. Every launch test passed on the final build except Muse's attachment test, which needs Muse upgraded (step 1 below). The release stays an rc until you are happy with that; promoting it is one tag.
+Status: ready. Release v0.5.0 is on the relay and every agent. agenttincan.com is live with the new hero demo. The Chrome Web Store listing is in review.
 
 ## What is live
 
-- Relay on the Grok Bot VM: v0.5.0-rc6, serving release binaries for `tincan upgrade`.
-- This Mac: claude-code, codex (listener with the updated wake script), history, chatgpt-web, claude-web, all on v0.5.0-rc6. The Tincan Chrome extension (0.3.2 after its self-reload) is connected.
-- Mac mini: hermes on v0.5.0-rc6, gateway restarted.
-- https://agenttincan.com and https://agenttincan.com/privacy (Vercel project agenttincan). No install or repo links while the repo is private.
+- Relay on the Grok Bot VM (grok-bot-1, http://100.96.137.127:8787), serving release binaries for `tincan upgrade`.
+- Agents: grokbot, claude-code, codex, history, chatgpt-web, claude-web (this Mac), hermes (Mac mini), muse, instinct. All upgraded through the relay.
+- https://agenttincan.com and https://agenttincan.com/privacy. The repo's About link points at agenttincan.com.
+- Chrome Web Store: "Agent Tincan History", publisher MVH, item id `goldflchpojcjmifnljlfkgoahjgeajn`, submitted for review with manual publish. After it passes review it waits up to 30 days for Publish.
 
-## Tests run on the final build (v0.5.0-rc6)
+## New since the last checklist (v0.5.0-rc7 to v0.5.0)
 
-| Area | Result |
-|---|---|
-| claude-web and chatgpt-web answer (FIG) | pass, 13 s each |
-| chatgpt-web image generation (blue square) | pass, 47 s, PNG attached |
-| history: last ChatGPT prompt with its image | pass, byte-identical image |
-| Grok Bot demo (Grok Bot asks history, gets the image) | pass; image arrives through `tincan attachment get` until Grok Bot's connector refreshes (step 2) |
-| Hermes receives an attachment | pass, uses get_attachment |
-| No new ChatGPT rate limits during testing | pass (requests spaced 2 minutes apart) |
+- `tincan mcp` accepts Content-Length framed stdio as well as newline JSON (Grok Bot's host) (#32).
+- `tincan doctor` finds why an agent's tincan tools are missing and prints the fix; every `tincan mcp` records its launches for it (#33).
+- Relay moves heal themselves: the relay proves its identity with a key agents learn at `whoami`, advertises its name and IP, and clients follow it when the saved address stops answering, including through a proxy (#34, #35).
+- Every agent's instructions tell it to run `tincan doctor` and apply its fixes itself; sandboxes that approve each site are told to always-allow the relay (#35, #37).
+- The site's hero plays four real use cases as a chat (#36).
 
-Earlier tonight, also passed: allowlist live (grokbot allowed; muse declined directly and via codex), Codex unattended wake (found its prior thread and folder via tincan history, ran gh), long answers with end markers, Claude thinking pauses, conversation threading, send journal, fresh-customer install walked from the docs in isolation (relay, invites, joins, attachments, reply wakes, history install, the production extension in a throwaway Chrome, Linux systemd install in a container).
+## Launch steps
 
-## Fixed tonight
-
-- PR #18: fresh-install gaps (install docs for binaries and the extension, owner-neutral text, command output on stdout, invite prints the real relay URL, `tincan agents` on an admin device, macOS socket path, Codex recipe uses the wake script, service PATH, Linux units, relay --listen validation, a new invite retires older unused codes, `make dist`), and the web agents' rate-limit handling (see incidents).
-- PR #17, #19: the site, the privacy policy page, and the Chrome Web Store package (`make store`).
-- PR #20: extension icons (required by the store).
-
-## Incidents to know about
-
-- ChatGPT rate limit: around 12:27 AM the chatgpt-web agent's 2-second polling made chatgpt.com rate-limit your account (HTTP 429) for a while. I stopped the service within minutes. The fix (PR #18) polls gently (5 s, 8 s, 12 s, then 20 s), honors Retry-After, backs off from 30 s to 5 minutes, and shares a cooldown so nothing hammers the site again. Retests afterwards produced no rate limits. If ChatGPT felt slow for you overnight, that was why.
-- Keychain prompt: during the fresh-install test a throwaway Chrome briefly showed a macOS keychain dialog on your screen; it closed with that Chrome. Your real Chrome, its profile and your files were never touched.
-
-## Your steps this morning
-
-1. Muse: tell Muse yourself "run tincan upgrade and restart your tincan wait loop". Its safety filter declines maintenance requests that come from other agents. Until then Muse (0.4.0-rc3) cannot receive attachments.
-2. Grok Bot: refresh or reconnect its tincan MCP connector in the Grok Bot app. The binary exposes get_attachment, but the platform caches the old tool list; until refreshed, Grok Bot fetches images through the CLI (works, just not inline).
-3. Chrome Web Store (optional for launch): follow docs/chrome-web-store.md. Build with `make store` (last build sha256 cb637f7d1a2e4d3769d1ffeafe4d20841383558002e5979703b905b1bc35d7bf; it changes on each rebuild). Review usually takes days, so launch uses the unpacked install. Do not switch the native host to the store id until the store build is installed.
-4. Done: every joined agent, hermes included, may use history, chatgpt-web and claude-web by default (no allowlist files). To restrict one later, write its ~/.config/tincan/<agent>-allow.txt with the names allowed.
-5. When you are ready to open the repo: make it public, then add install links to agenttincan.com (site/index.html) and redeploy with `cd site && vercel deploy --prod`.
-6. Promote the release when happy: tag v0.5.0 on main, `make dist`, create the GitHub release with the dist files, and ask Grok Bot to update the relay the usual way.
+1. Make the repo public (GitHub settings). The history scan found no secrets (gitleaks: only a test value and the extension's public manifest key).
+2. Right after: fresh install from the one-liner, `curl -fsSL https://agenttincan.com/install.sh | sh`, which downloads from GitHub releases and so only works once the repo is public.
+3. When the store listing passes review: click Publish, install it from the store, remove the unpacked extension, then run `tincan history install --extension-id goldflchpojcjmifnljlfkgoahjgeajn`. Only in that order: the native host allows one extension id.
 
 ## Known limits (disclose, not blockers)
 
 - OpenClaw has never run live.
-- The time-based attachment sweeps (24 hours for orphans, 7 days after a request finishes) are covered by unit tests only.
-- ChatGPT image turns are verified against real image generation; other tool-using turns (web search, code) are unverified live.
-- `tincan agents` does not show each agent's version yet, so an out-of-date agent is not flagged automatically.
+- `tincan agents` does not show each agent's version yet.
+- Upgrading tincan does not restart `tincan mcp` servers already running inside apps; each picks up the new build when its app restarts or reconnects the server.
+- The relay on the Grok Bot VM runs with `--listen`, so its address follows the VM's. Moving it to its own tsnet node (the default) needs a one-time Tailscale login approval.
+- The time-based attachment sweeps are covered by unit tests only.
