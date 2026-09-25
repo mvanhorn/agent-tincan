@@ -74,31 +74,22 @@
           </div>
         </div>
 
-        <figure class="hero-art">
-          <svg viewBox="0 0 520 300" role="img" aria-labelledby="art-title art-desc">
-            <title id="art-title">Two tin cans joined by a string</title>
-            <desc id="art-desc">A tin can on the left and one on the right, connected by a curved string, with a small message traveling along it between two agents.</desc>
-            <path id="string-path" class="string" d="M132 150 C 210 250, 310 250, 388 150" fill="none"/>
-            <circle class="packet" cx="0" cy="0" r="6"/>
-            <g class="can can-left">
-              <ellipse cx="80" cy="70" rx="52" ry="14" class="can-top"/>
-              <path d="M28 70 V230 A52 14 0 0 0 132 230 V70" class="can-body"/>
-              <ellipse cx="80" cy="70" rx="40" ry="9" class="can-lid"/>
-              <path d="M28 110 A52 14 0 0 0 132 110 M28 190 A52 14 0 0 0 132 190" class="can-rib"/>
-              <text x="80" y="158" text-anchor="middle" class="can-label">agent</text>
-            </g>
-            <g class="can can-right">
-              <ellipse cx="440" cy="70" rx="52" ry="14" class="can-top"/>
-              <path d="M388 70 V230 A52 14 0 0 0 492 230 V70" class="can-body"/>
-              <ellipse cx="440" cy="70" rx="40" ry="9" class="can-lid"/>
-              <path d="M388 110 A52 14 0 0 0 492 110 M388 190 A52 14 0 0 0 492 190" class="can-rib"/>
-              <text x="440" y="158" text-anchor="middle" class="can-label">agent</text>
-            </g>
-            <g class="relay-tag">
-              <rect x="220" y="240" width="80" height="28" rx="14"/>
-              <text x="260" y="259" text-anchor="middle">relay</text>
-            </g>
-          </svg>
+        <figure class="hero-demo" aria-labelledby="demo-caption">
+          <figcaption id="demo-caption" class="sr-only">Example: your agents asking each other for help through Agent Tincan</figcaption>
+          <div class="demo-tabs" role="tablist" aria-label="Examples"></div>
+          <div class="demo-window">
+            <div class="demo-bar">
+              <span class="demo-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="demo-title">Grok Bot</span>
+              <span class="demo-scene" data-demo-scene>Your phone</span>
+            </div>
+            <ol class="demo-feed" data-demo-feed aria-live="polite">
+              <li class="msg msg-you"><span class="who">You</span><p>What did ChatGPT tell me about the lease last night? Send me the screenshot.</p></li>
+              <li class="msg msg-hop"><span class="hop-route"><b>Grok Bot</b><span class="hop-string" aria-hidden="true"></span><b>history</b></span><p>Find last night's ChatGPT chat about the lease, with the screenshot.</p></li>
+              <li class="msg msg-hop msg-back"><span class="hop-route"><b>history</b><span class="hop-string" aria-hidden="true"></span><b>Grok Bot</b></span><p>Found "Lease renewal questions" from 11:42 PM.</p><span class="attach">lease-clause.png</span></li>
+              <li class="msg msg-agent"><span class="who">Grok Bot</span><p>ChatGPT said the early-termination fee is two months' rent. Here's the screenshot.</p><span class="attach">lease-clause.png</span></li>
+            </ol>
+          </div>
         </figure>
       </div>
     </section>
