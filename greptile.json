@@ -1,0 +1,90 @@
+{
+  "statusCheck": true,
+  "triggerOnUpdates": true,
+  "customContext": {
+    "files": [
+      {
+        "scope": ["internal/relay/**", "internal/identity/**", "internal/policy/**", "internal/wake/**", "internal/history/**", "internal/gateway/**", "extension/**"],
+        "path": "docs/trust-model.md"
+      },
+      {
+        "scope": ["internal/envelope/**", "internal/relay/**", "internal/client/**"],
+        "path": "docs/protocol.md"
+      }
+    ],
+    "rules": [
+      {
+        "scope": [".github/workflows/**"],
+        "rule": "P0. A workflow that combines a pull_request_target trigger with a checkout step whose ref points at PR-head code (github.event.pull_request.head.sha, github.event.pull_request.head.ref, or refs/pull/<n>/merge) runs untrusted head code with base-context secrets and OIDC tokens, which attackers exfiltrate from runner memory. agent-tincan's workflows run on pull_request and do not check out untrusted refs. Flag any new pull_request_target workflow that overrides the checkout ref; recommend switching to pull_request or removing the ref override so checkout defaults to the base commit."
+      },
+      {
+        "scope": [".github/workflows/**"],
+        "rule": "P0. id-token: write mints OIDC tokens used to publish to npm, Sigstore, AWS, etc. agent-tincan has no workflow that needs OIDC: releases are built, signed and notarized locally by a maintainer (make release-mac). Any new workflow granting id-token: write, or any new workflow step that uses repository secrets on pull_request events from forks, is an attack shape. Flag and recommend removing it unless a publishing workflow is genuinely being introduced with maintainer sign-off."
+      },
+      {
+        "scope": [".github/workflows/**"],
+        "rule": "P0. Setting GOPROXY, GOFLAGS, GONOSUMCHECK, GOSUMDB, or GONOSUMDB inside a workflow env block (workflow, job, or step level) lets PR authors redirect Go module resolution to an attacker proxy or suppress checksum verification. agent-tincan uses none of these overrides. Flag any addition. Also flag any new third-party action (anything outside the actions/ org) that is not pinned to a full commit SHA; the existing third-party actions are SHA-pinned with a version comment."
+      },
+      {
+        "scope": ["internal/relay/**/*.go", "internal/identity/**/*.go", "internal/policy/**/*.go"],
+        "rule": "P0. Every request is attributed to an agent by Tailscale WhoIs on the connection (Server.agent -> directory ResolveAgent); the X-Tincan-Agent header only picks among agents already bound to that node, and the envelope's from field is ignored. Flag any handler or code path that takes the sender's identity from the request body, a query parameter, or a header without going through Server.agent, that writes a caller-supplied from/sender value into a stored request or reply, or that lets a node act as an agent bound to a different node. Also flag any path where the request chain or parent comes from the client instead of the relay's own records."
+      },
+      {
+        "scope": ["internal/relay/**/*.go", "internal/identity/**/*.go", "internal/cli/relay.go"],
+        "rule": "P0. Admin powers (invite, remove, connect, trace every chain, audit verify, admin urls) belong only to admin devices and the relay's local admin socket. A caller is an admin device only when WhoIs reports its short machine name in the --admin list, the node has no Tailscale tags, and, if --admin-login is set, its owning login is in that list. Flag any new admin-capable route registered outside adminRoutes or reachable by a joined agent, any relaxation of the tagged-node or login checks, any use of owner login alone as proof of admin, and any change that widens the local admin socket's file mode beyond 0600 or moves it off the relay host."
+      },
+      {
+        "scope": ["internal/identity/**/*.go", "internal/store/**/*.go"],
+        "rule": "P0. Automatic re-admission of a rebuilt machine (rebind) is safe only under all of these: the new node is untagged, its machine name matches the recorded one ignoring a trailing -<digits> suffix, it is owned by the same recorded Tailscale login (an agent with no recorded login is never rebound), the old node is offline or gone, and when the request names an agent it names that agent. Failure to check whether the old node is online must return 503, not allow. Flag any change that drops or weakens one of these conditions, rebinds a tagged node, or skips writing the rebind audit event."
+      },
+      {
+        "scope": ["internal/wake/**/*.go", "internal/relay/**/*.go"],
+        "rule": "P0. Wake nudges (webhook, email, and any new method) carry only counts and a fixed instruction, never request or reply text, attachment names, or the asker's message. Delivery never depends on wake: a request is stored in the relay queue before any wake is attempted, and a failed, skipped or budget-limited wake must leave it queued and write a wake_failed or wake_skipped audit event. Flag any wake payload that includes message content, and any path where a wake failure drops, expires or fails a request."
+      },
+      {
+        "scope": ["internal/**/*.go", "cmd/**/*.go"],
+        "rule": "P0. Secrets must never be logged, returned in API responses or errors, written into audit details, or placed in URLs: relay.key and hello proofs, wake.json webhook secrets and AgentMail keys, Tailscale auth keys, invite codes (except the one returned to the admin who minted it), OAuth tokens from the ChatGPT gateway, and browser cookies. Files that hold secrets or private state are written 0600 in 0700 directories. Flag any log.Printf, fmt.Errorf, JSON response or audit DetailJSON that includes one of these values, and any os.WriteFile or MkdirAll for such files with a wider mode."
+      },
+      {
+        "scope": ["internal/history/**/*.go", "extension/**"],
+        "rule": "P0. The history agent and the web agents (chatgpt-web, claude-web) act on the owner's own ChatGPT and Claude accounts. Their access check runs in Go before any model sees a request, uses the relay-recorded chain and sender (never the request body), and fails closed: an unreadable allowlist or a bad name in it declines everyone. Retrieved chat content is never sent to a model; history replies are filled from a fixed template. Flag any change that moves the allowlist check after a model call, reads the asker from the request text, treats an allowlist read error as allow-all, or passes retrieved chat content into a prompt."
+      },
+      {
+        "scope": ["extension/**"],
+        "rule": "P0. The Chrome extension accepts only its fixed set of native-messaging operations and passes message text as data to fixed functions in an isolated content script, inserting it as text. It opens and closes its own background tab, never scripts a tab the owner opened, checks the site session before sending, and never reads or exports cookies or tokens. Flag eval, new Function, innerHTML or insertAdjacentHTML with message or page content, a new operation name, scripting of tabs the extension did not open, any cookies permission or cookie read, and any new entry in manifest.json permissions or host_permissions (currently nativeMessaging, alarms, scripting; chatgpt.com, *.oaiusercontent.com, claude.ai)."
+      },
+      {
+        "scope": ["internal/history/native*.go"],
+        "rule": "P0. The native messaging host manifest's allowed_origins must name only the Tincan extension IDs: the Chrome Web Store build goldflchpojcjmifnljlfkgoahjgeajn (StoreExtensionID) and the unpacked developer build ciejooalclcpgpapboofdbbddphldhnh (DefaultExtensionID). Flag any new origin, wildcard, or ID taken from user input, config, or the environment."
+      },
+      {
+        "scope": ["internal/**/*.go", "cmd/**/*.go"],
+        "rule": "The relay listens only on the tailnet (tsnet) or an explicit --listen address, plus the local admin socket; the optional ChatGPT gateway is the one public surface and serves only MCP tools and OAuth on its own Funnel hostname. Outbound, tincan talks to the relay, to wake endpoints the operator configured in wake.json, and to the AgentMail API. Flag any new public listener or Funnel use outside internal/gateway, any new outbound HTTP call to a hard-coded external host, and any telemetry or phone-home. tincan upgrade downloads only from the relay's --dist and verifies sha256."
+      },
+      {
+        "scope": ["internal/**/*.go", "cmd/**/*.go"],
+        "rule": "tincan legitimately reads some local agent files as part of its job: doctor and onboard read and write MCP config for Claude Code, Codex, Hermes and OpenClaw to check or add the agent-tincan server; the history agent reads local Codex and Claude Code session history. Judge any new file read against that surface. Flag P0 when code newly reads ~/.aws, ~/.ssh, ~/.kube, ~/.netrc, browser profile or cookie stores, keychains, or env vars such as AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, GITHUB_TOKEN, NPM_TOKEN or ACTIONS_ID_TOKEN_REQUEST_URL, and when config writes touch anything beyond the agent-tincan MCP entry."
+      },
+      {
+        "scope": ["internal/store/**/*.go"],
+        "rule": "The audit table is append-only and hash-chained; tincan audit-verify detects edits. Flag any UPDATE or DELETE on audit rows, any change to how the chain hash is computed without a verification path for existing rows, and any SQL built by string concatenation or fmt.Sprintf with values (use ? parameters). Schema changes must migrate existing relay databases in place: a relay upgraded over an old state dir must keep its agents, queue and audit log."
+      },
+      {
+        "scope": ["internal/envelope/**/*.go", "internal/relay/**/*.go", "internal/client/**/*.go", "internal/mcpserver/**/*.go"],
+        "rule": "P1. Agents on one mesh run different tincan builds, and the relay upgrades separately from them. The /v1 protocol must stay compatible both ways: new JSON fields and headers are optional, and the relay handles clients that omit them (for example an empty X-Tincan-Version); existing routes, fields, status values and MCP tool names are not removed or renamed; a new client degrades cleanly against an older relay. Flag breaking wire changes, new required fields, and MCP tool schema changes that break existing callers."
+      },
+      {
+        "scope": ["site/install.sh"],
+        "rule": "P0. install.sh is piped to sh by users. It downloads only from the project's GitHub releases over https, verifies the binary against the release's checksums.txt before installing, installs to ~/.local/bin without sudo, and does not fetch or run any other remote script. Flag any change that skips or weakens checksum verification, adds sudo, adds a new download host, or evaluates downloaded content."
+      },
+      {
+        "scope": ["internal/**/*.go"],
+        "rule": "P2. Bug fixes should come with a test that fails without the fix, and new behavior with tests. Flag behavior changes in internal/relay, internal/wake, internal/policy, internal/identity or internal/store that add no test. Advisory: recommend the test, do not block."
+      },
+      {
+        "scope": ["internal/cli/**/*.go", "internal/mcpserver/**/*.go", "internal/onboard/**/*.go"],
+        "rule": "P2. User and agent-facing behavior is documented in README.md, docs/, docs/adapters/<platform>.md and site/agents.txt (the setup steps agents follow). Flag a PR that adds or renames a command, flag, MCP tool, wake method or setup step without updating the matching doc. Advisory."
+      }
+    ]
+  }
+}
