@@ -946,6 +946,21 @@ func (s *Server) Online(agent string) bool {
 	return !last.IsZero() && s.cfg.Now().Sub(last) < 5*time.Second
 }
 
+// QueuedCount returns how many requests to agent are still waiting to be
+// delivered. The waker asks this when it re-checks a wake it skipped because
+// agent looked online. A failed count reports one, since a spare nudge costs
+// less than a stranded request.
+func (s *Server) QueuedCount(agent string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := s.store.CountQueued(ctx, agent)
+	if err != nil {
+		log.Printf("queued requests for %s: %v", agent, err)
+		return 1
+	}
+	return n
+}
+
 // UnseenReplies returns how many replies to agent's own requests it has not
 // read yet. The waker asks this when a reply's grace period ends. A failed
 // count reports one, since a spare nudge costs less than a missed reply.

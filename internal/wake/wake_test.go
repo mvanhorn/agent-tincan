@@ -284,3 +284,35 @@ func TestRequeuedWakesEvenWhenRecentlyOnline(t *testing.T) {
 		t.Fatalf("wakes = %d, want 1 for the requeued webhook agent", rc.count())
 	}
 }
+
+// A webhook agent counts as online for a few seconds after its last poll, so
+// a request queued just as its session ends skips the wake. Nobody is left to
+// take it, so the waker checks again later and wakes it if it is still queued.
+func TestOnlineSkipRechecksAndWakesWhenStillQueued(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	var stillQueued atomic.Int32
+	stillQueued.Store(1)
+	w := New(Config{"hermes": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:      time.Millisecond,
+		OnlineRecheck: 20 * time.Millisecond,
+		Online:        func(string) bool { return true },
+		Queued:        func(string) int { return int(stillQueued.Load()) },
+	})
+	queued(w, "hermes", 1) // session polled a moment ago, then ended
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("wakes = %d, want 1: the request is still queued after the recheck", rc.count())
+	}
+	if !strings.Contains(rc.bodies[0], "1") {
+		t.Errorf("nudge should count the waiting request: %s", rc.bodies[0])
+	}
+
+	// A poller that really held it leaves nothing queued: no wake.
+	stillQueued.Store(0)
+	queued(w, "hermes", 1)
+	w.Flush()
+	if rc.count() != 1 {
+		t.Fatalf("wakes = %d, want still 1 once the poller took the request", rc.count())
+	}
+}

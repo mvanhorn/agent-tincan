@@ -179,6 +179,12 @@ type Options struct {
 	AgentMailAPI string        // default https://api.agentmail.to/v0
 	HTTP         *http.Client
 	Online       func(agent string) bool // skip request wakes for agents already polling
+	// Queued counts agent's requests still waiting to be delivered. With
+	// it, a wake skipped because agent looked online is re-checked after
+	// OnlineRecheck and sent if a request is still waiting: a session that
+	// polled a moment ago may have ended without taking it.
+	Queued        func(agent string) int
+	OnlineRecheck time.Duration // default 30s
 	// ReplyGrace is how long a reply may go unread before the asker is
 	// woken; default DefaultReplyGrace.
 	ReplyGrace time.Duration
@@ -202,6 +208,7 @@ type nudge struct {
 	timer    *time.Timer // fires the nudge
 	due      time.Time   // when timer fires (wall clock)
 	retry    int         // next step of Options.ReplyRetries to schedule
+	recheck  bool        // a request wake was skipped as online; count Queued at fire time
 }
 
 // Waker implements relay.Events, relay.Requeuer, relay.Replier and
@@ -229,6 +236,9 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	}
 	if opts.RetryDelay == 0 {
 		opts.RetryDelay = 5 * time.Second
+	}
+	if opts.OnlineRecheck == 0 {
+		opts.OnlineRecheck = 30 * time.Second
 	}
 	if opts.ReplyGrace == 0 {
 		opts.ReplyGrace = DefaultReplyGrace
@@ -300,7 +310,15 @@ func (w *Waker) schedule(agent string, checkOnline bool) {
 		return
 	}
 	if checkOnline && w.opts.Online != nil && w.opts.Online(agent) {
-		return // its poller already has it
+		// Its poller should have it, but a session that just polled may be
+		// ending: look again later and wake only if it is still waiting.
+		if w.opts.Queued != nil {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			w.nudgeFor(agent).recheck = true
+			w.arm(agent, w.opts.OnlineRecheck)
+		}
+		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -359,6 +377,9 @@ func (w *Waker) fire(agent string) {
 	w.mu.Unlock()
 	if p == nil {
 		return
+	}
+	if p.recheck && p.requests == 0 && w.opts.Queued != nil {
+		p.requests = w.opts.Queued(agent) // zero when a poller took them
 	}
 	replies := p.replies
 	if w.opts.UnseenReplies != nil {

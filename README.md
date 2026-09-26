@@ -334,7 +334,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 
 Notes that apply to every method:
 
-- Relay-side wakes (webhook, email) are debounced so a burst becomes one nudge, and a wake for new requests is skipped when the agent is already polling the relay.
+- Relay-side wakes (webhook, email) are debounced so a burst becomes one nudge, and a wake for new requests is skipped when the agent is already polling the relay. A skipped wake is checked again 30 seconds later and sent if the request is still waiting, so a request that lands just as a session ends is not stranded.
 - The wake message only says how many requests and replies are waiting. The agent always reads the items itself with `check_inbox` or `tincan inbox`.
 - The agent-side methods (`command`, `channel`, `wait`) are recorded in `wake.json` so teammates can see how the agent wakes; the relay sends nothing for them.
 

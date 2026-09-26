@@ -197,7 +197,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
-	waker := wake.New(wakeCfg, st, wake.Options{Online: srv.Online, UnseenReplies: srv.UnseenReplies, ReplyGrace: f.replyGrace})
+	waker := wake.New(wakeCfg, st, wake.Options{Online: srv.Online, Queued: srv.QueuedCount, UnseenReplies: srv.UnseenReplies, ReplyGrace: f.replyGrace})
 	srv.SetEvents(waker)
 	srv.SetWakeNamer(waker)
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {
