@@ -134,54 +134,69 @@ func WindowOf(days, maxConvs int) (Window, error) {
 	return w, nil
 }
 
+// maxWindowFileBytes bounds how much of the window file is read.
+const maxWindowFileBytes = 64 << 10
+
 // LoadWindow reads the owner's window file: one JSON object,
 // {"days": N, "max": N}, either field optional. A missing file is the zero
-// Window, which means the default. Anything else that is not exactly that
-// shape with in-bounds values is an error, so a typo never silently
-// widens or narrows the window.
+// Window, which means the default. Only an omitted field takes the
+// default: an explicit null, a top-level null, or anything else that is
+// not exactly that shape with in-bounds values is an error, so a typo
+// never silently widens or narrows the window.
 func LoadWindow(path string) (Window, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Window{}, nil
 	}
 	if err != nil {
 		return Window{}, err
 	}
-	if len(b) > 64<<10 {
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxWindowFileBytes+1))
+	if err != nil {
+		return Window{}, err
+	}
+	if len(b) > maxWindowFileBytes {
 		return Window{}, errors.New("file too large")
 	}
-	var f struct {
-		Days *int `json:"days"`
-		Max  *int `json:"max"`
+	// Raw fields tell an omitted field (nil) from an explicit null.
+	var file *struct {
+		Days json.RawMessage `json:"days"`
+		Max  json.RawMessage `json:"max"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&f); err != nil {
+	if err := dec.Decode(&file); err != nil {
 		return Window{}, fmt.Errorf(`want {"days": N, "max": N}: %v`, err)
 	}
 	if dec.More() {
 		return Window{}, errors.New("more than one object")
 	}
-	var w Window
-	if f.Days != nil {
-		if *f.Days == 0 {
-			return Window{}, fmt.Errorf("days must be between %d and %d", MinWindowDays, MaxWindowDays)
-		}
-		if w, err = WindowOf(*f.Days, 0); err != nil {
-			return Window{}, err
-		}
+	if file == nil {
+		return Window{}, errors.New(`want {"days": N, "max": N}, got null`)
 	}
-	if f.Max != nil {
-		if *f.Max == 0 {
-			return Window{}, fmt.Errorf("max must be between %d and %d", MinWindowMax, MaxWindowMax)
-		}
-		m, err := WindowOf(0, *f.Max)
-		if err != nil {
-			return Window{}, err
-		}
-		w.Max = m.Max
+	days, err := windowField("days", file.Days, MinWindowDays, MaxWindowDays)
+	if err != nil {
+		return Window{}, err
 	}
-	return w, nil
+	maxConvs, err := windowField("max", file.Max, MinWindowMax, MaxWindowMax)
+	if err != nil {
+		return Window{}, err
+	}
+	return WindowOf(days, maxConvs)
+}
+
+// windowField is one window file field: 0 when omitted, else an integer
+// in [lo, hi]. An explicit null is an error, not the default.
+func windowField(name string, raw json.RawMessage, lo, hi int) (int, error) {
+	if raw == nil {
+		return 0, nil
+	}
+	var n int
+	if bytes.Equal(raw, []byte("null")) || json.Unmarshal(raw, &n) != nil || n < lo || n > hi {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, lo, hi)
+	}
+	return n, nil
 }
 
 // DescribeWindow phrases the owner's window at path, as LoadWindow

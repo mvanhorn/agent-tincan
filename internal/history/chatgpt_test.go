@@ -468,6 +468,47 @@ func manyChatsFake(n int, needle string) *fakeChannel {
 	}}
 }
 
+// A live List says why it came back short: the list cap used up by web
+// agent chats is a count limit, conversations older than the window an
+// age limit, and a list that fits is not limited.
+func TestChatGPTListReportsItsLimit(t *testing.T) {
+	ctx := context.Background()
+
+	// 20 of the newest chats are the web agents', so asking for 90 of the
+	// owner's needs 110, past the cap of 100: only 80 come back.
+	used := filepath.Join(t.TempDir(), "used.json")
+	for i := range 20 {
+		if err := recordWebUsed(used, fmt.Sprintf("c%03d", i), liveNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := newTestChatGPT(manyChatsFake(150, ""))
+	r.AgentChats = used
+	page, err := r.List(ctx, 90, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Conversations) != 80 || page.Limited != LimitCount {
+		t.Fatalf("got %d conversations, limited %q; want 80, cut by the list cap", len(page.Conversations), page.Limited)
+	}
+
+	// Chats are a minute apart, so a one hour window ages out all but 60.
+	r = newTestChatGPT(manyChatsFake(150, ""))
+	page, err = r.List(ctx, 100, Options{Window: Window{MaxAge: time.Hour}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Conversations) != 60 || page.Limited != LimitAge {
+		t.Fatalf("got %d conversations, limited %q; want 60, cut by age", len(page.Conversations), page.Limited)
+	}
+
+	r = newTestChatGPT(manyChatsFake(150, ""))
+	page, err = r.List(ctx, 10, Options{})
+	if err != nil || len(page.Conversations) != 10 || page.Limited != LimitNone {
+		t.Fatalf("got %d conversations, limited %q, %v; want 10, complete", len(page.Conversations), page.Limited, err)
+	}
+}
+
 func TestChatGPTOwnerWindowClampsToTheListCap(t *testing.T) {
 	ctx := context.Background()
 	search := Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"needle"}}

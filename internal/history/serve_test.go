@@ -781,6 +781,11 @@ func TestServeBadWindowFileFailsClosed(t *testing.T) {
 		"zero days":     writeWindowFile(t, `{"days": 0}`),
 		"too many days": writeWindowFile(t, `{"days": 3651}`),
 		"max too big":   writeWindowFile(t, `{"max": 201}`),
+		"null":          writeWindowFile(t, `null`),
+		"null max":      writeWindowFile(t, `{"max": null}`),
+		"null days":     writeWindowFile(t, `{"days": null}`),
+		"both null":     writeWindowFile(t, `{"days": null, "max": null}`),
+		"too large":     writeWindowFile(t, `{"days": 90}`+strings.Repeat(" ", 64<<10)),
 		"unreadable":    unreadable,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -868,9 +873,26 @@ func TestLoadWindow(t *testing.T) {
 	if err != nil || w != (Window{Max: 1, MaxAge: 24 * time.Hour}) {
 		t.Fatalf("lower bounds: %+v, %v", w, err)
 	}
-	for _, bad := range []string{``, `[]`, `{"days": -1}`, `{"max": 0}`, `{"days": "90"}`, `{"days": 90} {"days": 1}`, `{"days": 1.5}`} {
-		if _, err := LoadWindow(writeWindowFile(t, bad)); err == nil {
-			t.Errorf("accepted %q", bad)
+	w, err = LoadWindow(writeWindowFile(t, `{"max": 7}`))
+	if err != nil || w != (Window{Max: 7}) {
+		t.Fatalf("omitted days: %+v, %v", w, err)
+	}
+	// An omitted field means the default; an explicit null is malformed, as
+	// is a top-level null, so none of them silently falls back.
+	for _, bad := range []string{``, `[]`, `{"days": -1}`, `{"max": 0}`, `{"days": "90"}`, `{"days": 90} {"days": 1}`, `{"days": 1.5}`,
+		`null`, ` null `, `{"max": null}`, `{"days": null}`, `{"days": null, "max": null}`, `{"days": 7, "max": null}`, `null {}`} {
+		if w, err := LoadWindow(writeWindowFile(t, bad)); err == nil {
+			t.Errorf("accepted %q as %+v", bad, w)
 		}
+	}
+	// The read itself is bounded: a file over 64 KiB is refused even when
+	// it starts with a valid object.
+	if w, err := LoadWindow(writeWindowFile(t, `{"days": 90}`+strings.Repeat(" ", 64<<10))); err == nil {
+		t.Errorf("accepted an oversized file as %+v", w)
+	}
+	// Exactly 64 KiB is still read.
+	exact := `{"days": 90}`
+	if w, err := LoadWindow(writeWindowFile(t, exact+strings.Repeat(" ", 64<<10-len(exact)))); err != nil || w != (Window{MaxAge: 90 * 24 * time.Hour}) {
+		t.Errorf("64 KiB file: %+v, %v", w, err)
 	}
 }

@@ -211,6 +211,47 @@ func TestHistoryDaysWidensTheWindowAndLimitsAreNoted(t *testing.T) {
 	}
 }
 
+// limitNote suggests --max only when a larger --max could read more, and
+// phrases a listing and a one day window on their own terms.
+func TestLimitNote(t *testing.T) {
+	const prefix = "tincan history: results may be incomplete: "
+	day := 24 * time.Hour
+	count := func(maxConvs int) history.Page {
+		return history.Page{Limited: history.LimitCount, Window: history.Window{Max: maxConvs, MaxAge: 30 * day}}
+	}
+	for _, tc := range []struct {
+		name    string
+		page    history.Page
+		source  history.Source
+		listing bool
+		want    string
+	}{
+		{"complete", history.Page{Window: history.Window{Max: 50, MaxAge: 30 * day}}, history.SourceCodex, false, ""},
+		{"local count can widen", count(50), history.SourceCodex, false,
+			prefix + "only the last 50 conversations were read (use --max to widen it)."},
+		{"local count at the max", count(history.MaxWindowMax), history.SourceClaudeCode, false,
+			prefix + "only the last 200 conversations were read (200 is the most --max allows)."},
+		{"live count can widen", count(50), history.SourceChatGPT, false,
+			prefix + "only the last 50 conversations were read (use --max to widen it)."},
+		{"chatgpt at the list cap", count(history.MaxListCount), history.SourceChatGPT, false,
+			prefix + "only the last 100 conversations were read (ChatGPT and claude.ai read at most 100)."},
+		{"claude.ai at the list cap", count(history.MaxListCount), history.SourceClaudeAI, false,
+			prefix + "only the last 100 conversations were read (ChatGPT and claude.ai read at most 100)."},
+		{"local source past the list cap", count(history.MaxListCount), history.SourceCodex, false,
+			prefix + "only the last 100 conversations were read (use --max to widen it)."},
+		{"listing", count(history.MaxListCount), history.SourceChatGPT, true,
+			prefix + "only the newest 100 conversations could be listed."},
+		{"age", history.Page{Limited: history.LimitAge, Window: history.Window{Max: 50, MaxAge: 30 * day}}, history.SourceCodex, false,
+			prefix + "only conversations from the last 30 days were read (use --days to widen it)."},
+		{"one day", history.Page{Limited: history.LimitAge, Window: history.Window{Max: 50, MaxAge: day}}, history.SourceChatGPT, true,
+			prefix + "only conversations from the last 1 day were read (use --days to widen it)."},
+	} {
+		if got := limitNote(tc.page, tc.source, tc.listing); got != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // runSplit is run with stdout and stderr kept apart.
 func runSplit(t *testing.T, cmd *cobra.Command, args ...string) (stdout, stderr string, err error) {
 	t.Helper()

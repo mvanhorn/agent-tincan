@@ -117,7 +117,7 @@ func historyCmd() *cobra.Command {
 			} else {
 				printHistory(cmd, convs, cmd.Flags().Changed("list"))
 			}
-			if note := limitNote(page, cmd.Flags().Changed("list")); note != "" {
+			if note := limitNote(page, r.Source(), cmd.Flags().Changed("list")); note != "" {
 				cmd.PrintErrln(note)
 			}
 			return nil
@@ -149,16 +149,30 @@ func windowFlags(cmd *cobra.Command, days, maxConvs int) (history.Window, error)
 }
 
 // limitNote is the stderr line for a page the window cut short, or "".
-func limitNote(page history.Page, listing bool) string {
+// It suggests --max only when a larger --max could read more.
+func limitNote(page history.Page, source history.Source, listing bool) string {
 	const prefix = "tincan history: results may be incomplete: "
 	switch page.Limited {
 	case history.LimitCount:
 		if listing {
 			return fmt.Sprintf(prefix+"only the newest %d conversations could be listed.", history.MaxListCount)
 		}
-		return fmt.Sprintf(prefix+"only the last %d conversations were read (use --max to widen it).", page.Window.Max)
+		n := page.Window.Max
+		live := source == history.SourceChatGPT || source == history.SourceClaudeAI
+		hint := "use --max to widen it"
+		switch {
+		case live && n >= history.MaxListCount:
+			hint = fmt.Sprintf("ChatGPT and claude.ai read at most %d", history.MaxListCount)
+		case n >= history.MaxWindowMax:
+			hint = fmt.Sprintf("%d is the most --max allows", history.MaxWindowMax)
+		}
+		return fmt.Sprintf(prefix+"only the last %d conversations were read (%s).", n, hint)
 	case history.LimitAge:
-		return fmt.Sprintf(prefix+"only conversations from the last %d days were read (use --days to widen it).", int(page.Window.MaxAge.Hours()/24))
+		days := "1 day"
+		if n := int(page.Window.MaxAge.Hours() / 24); n != 1 {
+			days = fmt.Sprintf("%d days", n)
+		}
+		return fmt.Sprintf(prefix+"only conversations from the last %s were read (use --days to widen it).", days)
 	}
 	return ""
 }
