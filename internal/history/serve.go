@@ -169,8 +169,13 @@ func LoadWindow(path string) (Window, error) {
 	if err := dec.Decode(&file); err != nil {
 		return Window{}, fmt.Errorf(`want {"days": N, "max": N}: %v`, err)
 	}
-	if dec.More() {
-		return Window{}, errors.New("more than one object")
+	// Only whitespace may follow the object: More does not see a stray
+	// closing bracket.
+	if len(bytes.TrimSpace(b[dec.InputOffset():])) > 0 {
+		return Window{}, errors.New("unexpected text after the object")
+	}
+	if err := uniqueKeys(b); err != nil {
+		return Window{}, err
 	}
 	if file == nil {
 		return Window{}, errors.New(`want {"days": N, "max": N}, got null`)
@@ -184,6 +189,33 @@ func LoadWindow(path string) (Window, error) {
 		return Window{}, err
 	}
 	return WindowOf(days, maxConvs)
+}
+
+// uniqueKeys rejects an object that names a key twice. The decoder keeps
+// the last value, so {"days": 7, "days": 90} would silently widen a
+// narrowed window.
+func uniqueKeys(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil // not an object; the typed decode reports it
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, _ := t.(string)
+		if seen[key] {
+			return fmt.Errorf("%q is set more than once", key)
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // windowField is one window file field: 0 when omitted, else an integer

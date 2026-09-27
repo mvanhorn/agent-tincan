@@ -776,17 +776,19 @@ func TestServeBadWindowFileFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, path := range map[string]string{
-		"malformed":     writeWindowFile(t, `{"days": 90`),
-		"unknown field": writeWindowFile(t, `{"days": 90, "weeks": 2}`),
-		"zero days":     writeWindowFile(t, `{"days": 0}`),
-		"too many days": writeWindowFile(t, `{"days": 3651}`),
-		"max too big":   writeWindowFile(t, `{"max": 201}`),
-		"null":          writeWindowFile(t, `null`),
-		"null max":      writeWindowFile(t, `{"max": null}`),
-		"null days":     writeWindowFile(t, `{"days": null}`),
-		"both null":     writeWindowFile(t, `{"days": null, "max": null}`),
-		"too large":     writeWindowFile(t, `{"days": 90}`+strings.Repeat(" ", 64<<10)),
-		"unreadable":    unreadable,
+		"malformed":      writeWindowFile(t, `{"days": 90`),
+		"unknown field":  writeWindowFile(t, `{"days": 90, "weeks": 2}`),
+		"zero days":      writeWindowFile(t, `{"days": 0}`),
+		"too many days":  writeWindowFile(t, `{"days": 3651}`),
+		"max too big":    writeWindowFile(t, `{"max": 201}`),
+		"null":           writeWindowFile(t, `null`),
+		"null max":       writeWindowFile(t, `{"max": null}`),
+		"null days":      writeWindowFile(t, `{"days": null}`),
+		"both null":      writeWindowFile(t, `{"days": null, "max": null}`),
+		"too large":      writeWindowFile(t, `{"days": 90}`+strings.Repeat(" ", 64<<10)),
+		"trailing brace": writeWindowFile(t, `{"days": 90}}`),
+		"duplicate days": writeWindowFile(t, `{"days": 7, "days": 90}`),
+		"unreadable":     unreadable,
 	} {
 		t.Run(name, func(t *testing.T) {
 			rig := newServeRig(t, true)
@@ -880,7 +882,8 @@ func TestLoadWindow(t *testing.T) {
 	// An omitted field means the default; an explicit null is malformed, as
 	// is a top-level null, so none of them silently falls back.
 	for _, bad := range []string{``, `[]`, `{"days": -1}`, `{"max": 0}`, `{"days": "90"}`, `{"days": 90} {"days": 1}`, `{"days": 1.5}`,
-		`null`, ` null `, `{"max": null}`, `{"days": null}`, `{"days": null, "max": null}`, `{"days": 7, "max": null}`, `null {}`} {
+		`null`, ` null `, `{"max": null}`, `{"days": null}`, `{"days": null, "max": null}`, `{"days": 7, "max": null}`, `null {}`,
+		`{"days": 90}}`, `{"days": 90}]`, `{"days": 90} x`, `{"days": 7, "days": 90}`, `{"max": 1, "max": 200}`} {
 		if w, err := LoadWindow(writeWindowFile(t, bad)); err == nil {
 			t.Errorf("accepted %q as %+v", bad, w)
 		}
