@@ -201,6 +201,36 @@ type Options struct {
 	// All includes automated runs. The history service's scratch dir is
 	// excluded regardless.
 	All bool
+	// Window is the owner's recency window. Its non-zero fields override
+	// the reader's own Window, and fields left zero fall back to it and
+	// then to DefaultWindow. Only the owner sets it (a CLI flag or the
+	// history service's window file); nothing in a request can.
+	Window Window
+}
+
+// Limit says why a page may be missing conversations.
+type Limit string
+
+// Limit reasons. A page is limited only when its answer is incomplete:
+// the scan stopped at the window's edge while older conversations were
+// left unread.
+const (
+	// LimitNone means the answer is complete.
+	LimitNone Limit = ""
+	// LimitCount means the scan stopped at the window's Max conversations
+	// (or, for a live source, the list cap).
+	LimitCount Limit = "count"
+	// LimitAge means the scan stopped at the window's MaxAge.
+	LimitAge Limit = "age"
+)
+
+// Page is a reader's answer: the conversations, whether the window cut
+// them short, and the window actually applied after defaults and any
+// source cap.
+type Page struct {
+	Conversations []Conversation
+	Limited       Limit
+	Window        Window
 }
 
 // Reader is one source adapter.
@@ -208,9 +238,9 @@ type Reader interface {
 	Source() Source
 	// List returns up to count conversations, newest first, without
 	// messages, within the recency age cap.
-	List(ctx context.Context, count int, opts Options) ([]Conversation, error)
+	List(ctx context.Context, count int, opts Options) (Page, error)
 	// Read answers q.
-	Read(ctx context.Context, q Query, opts Options) ([]Conversation, error)
+	Read(ctx context.Context, q Query, opts Options) (Page, error)
 }
 
 // Window is the recency window for latest and search: the Max most recent
@@ -233,6 +263,19 @@ func (w Window) orDefault() Window {
 		w.MaxAge = d.MaxAge
 	}
 	return w
+}
+
+// effectiveWindow is the window a read applies: the owner's window from
+// opts where set, else the reader's own, else DefaultWindow.
+func effectiveWindow(reader Window, opts Options) Window {
+	w := reader
+	if opts.Window.Max > 0 {
+		w.Max = opts.Window.Max
+	}
+	if opts.Window.MaxAge > 0 {
+		w.MaxAge = opts.Window.MaxAge
+	}
+	return w.orDefault()
 }
 
 // Admit reports whether the conversation at position n (0 is newest,
@@ -569,8 +612,13 @@ type thread struct {
 // for excluded threads, which do not count toward the window. pick stops
 // at the window's edge and as soon as the answer cannot change. With
 // q.WithImages only turns that have images are selected, so the scan goes
-// back through the window until it finds them.
-func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, load func(i int) (thread, bool, error)) ([]Conversation, error) {
+// back through the window until it finds them. more says the candidates
+// are a truncated list with older conversations beyond n.
+//
+// The page is limited when the scan stops before the answer is settled:
+// at the window's edge (count or age), or at the end of a truncated list
+// (count).
+func pick(q Query, w Window, now time.Time, n int, more bool, bound func(i int) time.Time, load func(i int) (thread, bool, error)) (Page, error) {
 	w = w.orDefault()
 	want := q.count()
 	type hit struct {
@@ -578,21 +626,32 @@ func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, 
 		t    turn
 	}
 	var hits []hit
+	// settled reports whether no candidate updated at or before next can
+	// change the answer.
+	settled := func(next time.Time) bool {
+		if len(hits) < want {
+			return false
+		}
+		return q.Mode == ModeSearch || !hits[want-1].t.prompt.Time.Before(next)
+	}
+	limited := LimitNone
 	admitted := 0
-	for i := range n {
+	i := 0
+	for ; i < n; i++ {
 		b := bound(i)
+		if settled(b) {
+			break
+		}
 		if !w.Admit(admitted, b, now) {
-			break
-		}
-		if q.Mode == ModeLatest && len(hits) >= want && !hits[want-1].t.prompt.Time.Before(b) {
-			break
-		}
-		if q.Mode == ModeSearch && len(hits) >= want {
+			limited = LimitAge
+			if admitted >= w.Max {
+				limited = LimitCount
+			}
 			break
 		}
 		th, ok, err := load(i)
 		if err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		if !ok {
 			continue
@@ -630,6 +689,9 @@ func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, 
 			}
 		}
 	}
+	if i == n && n > 0 && more && !settled(bound(n-1)) {
+		limited = LimitCount
+	}
 	out := make([]Conversation, 0, len(hits))
 	for _, h := range hits {
 		c := h.conv
@@ -639,7 +701,7 @@ func pick(q Query, w Window, now time.Time, n int, bound func(i int) time.Time, 
 		out = append(out, c)
 	}
 	capImages(out)
-	return out, nil
+	return Page{Conversations: out, Limited: limited, Window: w}, nil
 }
 
 // sortHits is an insertion sort; hit lists are tiny.

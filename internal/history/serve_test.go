@@ -41,24 +41,30 @@ func (f *fakeExtractor) questions() []string {
 	return append([]string(nil), f.seen...)
 }
 
-// fakeReader answers every Read with fixed conversations (or an error).
+// fakeReader answers every Read with fixed conversations (or an error),
+// and records the queries and options it was given.
 type fakeReader struct {
 	mu      sync.Mutex
 	source  Source
 	convs   []Conversation
 	err     error
 	queries []Query
+	opts    []Options
+	// limited is the page's limit reason.
+	limited Limit
+	// maxCap caps the applied Max, as a live source's list cap does.
+	maxCap int
 	// block makes Read wait for its context to end and return its error.
 	block bool
 }
 
 func (f *fakeReader) Source() Source { return f.source }
 
-func (f *fakeReader) List(context.Context, int, Options) ([]Conversation, error) {
-	return nil, errors.New("not used")
+func (f *fakeReader) List(context.Context, int, Options) (Page, error) {
+	return Page{}, errors.New("not used")
 }
 
-func (f *fakeReader) Read(ctx context.Context, q Query, _ Options) ([]Conversation, error) {
+func (f *fakeReader) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	f.mu.Lock()
 	block := f.block
 	f.mu.Unlock()
@@ -66,14 +72,16 @@ func (f *fakeReader) Read(ctx context.Context, q Query, _ Options) ([]Conversati
 		<-ctx.Done()
 		f.mu.Lock()
 		f.queries = append(f.queries, q)
+		f.opts = append(f.opts, opts)
 		f.mu.Unlock()
-		return nil, ctx.Err()
+		return Page{}, ctx.Err()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queries = append(f.queries, q)
+	f.opts = append(f.opts, opts)
 	if f.err != nil {
-		return nil, f.err
+		return Page{}, f.err
 	}
 	// Hand out a copy so SaveImages on one request never touches the next.
 	out := make([]Conversation, len(f.convs))
@@ -84,7 +92,11 @@ func (f *fakeReader) Read(ctx context.Context, q Query, _ Options) ([]Conversati
 		}
 		out[i] = c
 	}
-	return out, nil
+	w := effectiveWindow(Window{}, opts)
+	if f.maxCap > 0 {
+		w.Max = min(w.Max, f.maxCap)
+	}
+	return Page{Conversations: out, Limited: f.limited, Window: w}, nil
 }
 
 func (f *fakeReader) reads() int {

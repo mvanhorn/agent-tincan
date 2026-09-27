@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -251,5 +252,92 @@ func TestScanJSONLSkipsMalformedAndHugeLinesAndStopsEarly(t *testing.T) {
 	want := []string{`{"a":1}`, "not json", `{"a":2}`, `{"a":3}`}
 	if strings.Join(seen, "|") != strings.Join(want, "|") {
 		t.Fatalf("seen = %q", seen)
+	}
+}
+
+// convsOf drops a page down to its conversations, for tests that only
+// look at those.
+func convsOf(p Page, err error) ([]Conversation, error) { return p.Conversations, err }
+
+// pickThreads is a candidate list for pick: one thread per update time,
+// newest first, each with one prompt at that time.
+func pickThreads(times ...time.Time) (int, func(int) time.Time, func(int) (thread, bool, error)) {
+	bound := func(i int) time.Time { return times[i] }
+	load := func(i int) (thread, bool, error) {
+		id := fmt.Sprintf("conv-%d", i)
+		return thread{
+			conv:  Conversation{ID: id, Title: "shared topic " + id, UpdatedAt: times[i]},
+			turns: []turn{{prompt: Message{Role: RoleUser, Text: "shared topic prompt " + id, Time: times[i]}}},
+		}, true, nil
+	}
+	return len(times), bound, load
+}
+
+func TestPickSearchCutByCountIsLimited(t *testing.T) {
+	now := fixtureNow
+	n, bound, load := pickThreads(now.Add(-time.Hour), now.Add(-2*time.Hour))
+	q := Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"shared"}, Count: 2}
+	w := Window{Max: 1, MaxAge: DefaultWindow().MaxAge}
+	page, err := pick(q, w, now, n, false, bound, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Conversations) != 1 || page.Limited != LimitCount {
+		t.Fatalf("got %d hits, limited %q; want 1 hit cut by count", len(page.Conversations), page.Limited)
+	}
+	if page.Window != w {
+		t.Fatalf("applied window = %+v, want %+v", page.Window, w)
+	}
+	// A window that holds both is a complete answer.
+	page, err = pick(q, Window{Max: 2}, now, n, false, bound, load)
+	if err != nil || len(page.Conversations) != 2 || page.Limited != LimitNone {
+		t.Fatalf("wide window: %d hits, limited %q, %v", len(page.Conversations), page.Limited, err)
+	}
+	if page.Window != (Window{Max: 2, MaxAge: DefaultWindow().MaxAge}) {
+		t.Fatalf("applied window = %+v, want defaults filled in", page.Window)
+	}
+}
+
+func TestPickLatestWithStaleSecondConversationIsComplete(t *testing.T) {
+	now := fixtureNow
+	n, bound, load := pickThreads(now.Add(-time.Hour), now.Add(-40*24*time.Hour))
+	page, err := pick(Query{Source: SourceCodex, Mode: ModeLatest}, Window{}, now, n, false, bound, load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Conversations) != 1 || page.Limited != LimitNone {
+		t.Fatalf("got %d, limited %q; want the newest prompt, complete", len(page.Conversations), page.Limited)
+	}
+	// Asking for two prompts when the second is past the age cap is cut short.
+	page, err = pick(Query{Source: SourceCodex, Mode: ModeLatest, Count: 2}, Window{}, now, n, false, bound, load)
+	if err != nil || len(page.Conversations) != 1 || page.Limited != LimitAge {
+		t.Fatalf("latest 2: %d, limited %q, %v; want 1 cut by age", len(page.Conversations), page.Limited, err)
+	}
+}
+
+func TestPickRunningOutOfATruncatedListIsLimitedByCount(t *testing.T) {
+	now := fixtureNow
+	n, bound, load := pickThreads(now.Add(-time.Hour), now.Add(-2*time.Hour))
+	q := Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"nothing matches this"}}
+	page, err := pick(q, Window{}, now, n, true, bound, load)
+	if err != nil || page.Limited != LimitCount {
+		t.Fatalf("truncated candidate list: limited %q, %v; want count", page.Limited, err)
+	}
+	page, err = pick(q, Window{}, now, n, false, bound, load)
+	if err != nil || page.Limited != LimitNone {
+		t.Fatalf("complete candidate list: limited %q, %v; want none", page.Limited, err)
+	}
+}
+
+func TestOptionsWindowOverridesReaderWindow(t *testing.T) {
+	reader := Window{Max: 3, MaxAge: time.Hour}
+	if got := effectiveWindow(reader, Options{}); got != reader {
+		t.Fatalf("no owner window: %+v", got)
+	}
+	if got := effectiveWindow(reader, Options{Window: Window{MaxAge: 90 * 24 * time.Hour}}); got != (Window{Max: 3, MaxAge: 90 * 24 * time.Hour}) {
+		t.Fatalf("owner days only: %+v", got)
+	}
+	if got := effectiveWindow(Window{}, Options{Window: Window{Max: 7}}); got != (Window{Max: 7, MaxAge: DefaultWindow().MaxAge}) {
+		t.Fatalf("owner max only: %+v", got)
 	}
 }

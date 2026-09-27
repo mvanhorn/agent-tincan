@@ -413,22 +413,26 @@ func (c *Codex) load(e codexEntry, all bool, p codexParse) (thread, bool, error)
 }
 
 // List implements Reader.
-func (c *Codex) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
+func (c *Codex) List(ctx context.Context, count int, opts Options) (Page, error) {
 	if err := checkListCount(count); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	cands, err := c.candidates(ctx, opts.All)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	w, now := c.Window.orDefault(), c.now()
-	var out []Conversation
+	w, now := effectiveWindow(c.Window, opts), c.now()
+	page := Page{Window: w}
 	for _, e := range cands {
-		if len(out) >= count || !w.fresh(e.updated, now) {
+		if len(page.Conversations) >= count {
+			break
+		}
+		if !w.fresh(e.updated, now) {
+			page.Limited = LimitAge
 			break
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		p := codexParse{metaOnly: true}
 		if !e.inIndex {
@@ -436,28 +440,28 @@ func (c *Codex) List(ctx context.Context, count int, opts Options) ([]Conversati
 		}
 		th, ok, err := c.load(e, opts.All, p)
 		if err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		if ok {
-			out = append(out, th.conv)
+			page.Conversations = append(page.Conversations, th.conv)
 		}
 	}
-	return out, nil
+	return page, nil
 }
 
 // Read implements Reader.
-func (c *Codex) Read(ctx context.Context, q Query, opts Options) ([]Conversation, error) {
+func (c *Codex) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	if err := q.Validate(); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if err := checkSource(SourceCodex, q); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	p := codexParse{images: q.wantsImages()}
 	if q.Mode == ModeConversation {
 		cands, err := c.candidates(ctx, true)
 		if err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		for _, e := range cands {
 			if e.id != q.ConversationID {
@@ -465,20 +469,20 @@ func (c *Codex) Read(ctx context.Context, q Query, opts Options) ([]Conversation
 			}
 			th, ok, err := c.load(e, opts.All, p)
 			if err != nil {
-				return nil, err
+				return Page{}, err
 			}
 			if !ok {
 				break
 			}
-			return []Conversation{conversationMessages(th, q.wantsImages())}, nil
+			return Page{Conversations: []Conversation{conversationMessages(th, q.wantsImages())}, Window: effectiveWindow(c.Window, opts)}, nil
 		}
-		return nil, fmt.Errorf("codex: %w: %s", ErrNotFound, q.ConversationID)
+		return Page{}, fmt.Errorf("codex: %w: %s", ErrNotFound, q.ConversationID)
 	}
 	cands, err := c.candidates(ctx, opts.All)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	return pick(q, c.Window, c.now(), len(cands),
+	return pick(q, effectiveWindow(c.Window, opts), c.now(), len(cands), false,
 		func(i int) time.Time { return cands[i].updated },
 		func(i int) (thread, bool, error) {
 			if err := ctx.Err(); err != nil {

@@ -41,7 +41,7 @@ func newTestClaudeAI(ch Channel) *ClaudeAI {
 
 func TestClaudeAIList(t *testing.T) {
 	r := newTestClaudeAI(claudeFake(t))
-	convs, err := r.List(context.Background(), 10, Options{})
+	convs, err := convsOf(r.List(context.Background(), 10, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestClaudeAIList(t *testing.T) {
 	if !convs[0].UpdatedAt.Equal(time.Date(2026, 9, 22, 11, 0, 0, 0, time.UTC)) {
 		t.Fatalf("updated %v", convs[0].UpdatedAt)
 	}
-	convs, err = r.List(context.Background(), 1, Options{})
+	convs, err = convsOf(r.List(context.Background(), 1, Options{}))
 	if err != nil || len(convs) != 1 {
 		t.Fatalf("count 1: %v %v", convs, err)
 	}
@@ -60,7 +60,7 @@ func TestClaudeAIList(t *testing.T) {
 func TestClaudeAILatestWithImages(t *testing.T) {
 	fake := claudeFake(t)
 	r := newTestClaudeAI(fake)
-	convs, err := r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WantImages: true}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +92,14 @@ func TestClaudeAILatestWithImages(t *testing.T) {
 
 func TestClaudeAISearchConversationAndNotFound(t *testing.T) {
 	r := newTestClaudeAI(claudeFake(t))
-	convs, err := r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeSearch, Terms: []string{"Portland"}}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeSearch, Terms: []string{"Portland"}}, Options{}))
 	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
 		t.Fatalf("search %+v %v", convs, err)
 	}
 	if convs[0].Messages[0].Text != "make me a packing list for a rainy weekend in Portland" || convs[0].Messages[1].Text != "Rain jacket, boots, umbrella." {
 		t.Fatalf("index-ordered messages %+v", convs[0].Messages)
 	}
-	convs, err = r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-000000000001"}, Options{})
+	convs, err = convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-000000000001"}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,11 +110,11 @@ func TestClaudeAISearchConversationAndNotFound(t *testing.T) {
 	if got := strings.Join(texts, "|"); got != "what lives in tide pools|Anemones, hermit crabs and sea stars.|what is this creature in my photo?|That looks like an ochre sea star." {
 		t.Fatalf("conversation %q", got)
 	}
-	_, err = r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-00000000dead"}, Options{})
+	_, err = convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-00000000dead"}, Options{}))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing: %v", err)
 	}
-	if _, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest}, Options{}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest}, Options{})); err == nil {
 		t.Fatal("claude-ai reader answered a chatgpt query")
 	}
 }
@@ -132,7 +132,7 @@ func TestClaudeAIUnavailableMessages(t *testing.T) {
 	for _, c := range cases {
 		r := NewClaudeAI(&Client{Channel: c.ch, Timeout: time.Second})
 		r.Now = func() time.Time { return liveNow }
-		_, err := r.List(context.Background(), 5, Options{})
+		_, err := convsOf(r.List(context.Background(), 5, Options{}))
 		if !errors.Is(err, c.kind) || err.Error() != c.want {
 			t.Errorf("got %v, want %q", err, c.want)
 		}
@@ -149,7 +149,7 @@ func TestLiveImageFetchFailureDropsImageOnly(t *testing.T) {
 		return inner(req)
 	}
 	r := newTestClaudeAI(fake)
-	convs, err := r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WantImages: true}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,11 +172,11 @@ func TestClaudeAIWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
 		{"uuid":"w0000000-0000-4000-8000-000000000001","text":"will it rain tomorrow","sender":"human","index":0,"created_at":"2026-09-22T11:30:00Z","attachments":[],"files":[]},
 		{"uuid":"w0000000-0000-4000-8000-000000000002","text":"Probably not.","sender":"assistant","index":1,"created_at":"2026-09-22T11:30:05Z","attachments":[],"files":[]}]}`)
 	r := newTestClaudeAI(fake)
-	convs, err := r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{}))
 	if err != nil || ids(convs) != newer {
 		t.Fatalf("plain latest = %s, %v; want the newer text-only conversation", ids(convs), err)
 	}
-	convs, err = r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WithImages: true}, Options{})
+	convs, err = convsOf(r.Read(context.Background(), Query{Source: SourceClaudeAI, Mode: ModeLatest, WithImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,27 +200,27 @@ func TestClaudeAISkipsWebAgentConversations(t *testing.T) {
 	r.AgentChats = used
 	ctx := context.Background()
 
-	convs, err := r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{})
+	convs, err := convsOf(r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{}))
 	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000002" || convs[0].Automated {
 		t.Fatalf("latest skips the web agent's chat: %+v %v", convs, err)
 	}
-	convs, err = r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{All: true})
+	convs, err = convsOf(r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{All: true}))
 	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000001" || !convs[0].Automated {
 		t.Fatalf("latest with all: %+v %v", convs, err)
 	}
-	list, err := r.List(ctx, 10, Options{})
+	list, err := convsOf(r.List(ctx, 10, Options{}))
 	if err != nil || len(list) != 1 || list[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
 		t.Fatalf("list skips the web agent's chat: %+v %v", list, err)
 	}
-	list, err = r.List(ctx, 1, Options{})
+	list, err = convsOf(r.List(ctx, 1, Options{}))
 	if err != nil || len(list) != 1 || list[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
 		t.Fatalf("list of 1 still fills its count past the skipped chat: %+v %v", list, err)
 	}
-	list, err = r.List(ctx, 10, Options{All: true})
+	list, err = convsOf(r.List(ctx, 10, Options{All: true}))
 	if err != nil || len(list) != 2 || !list[0].Automated || list[1].Automated {
 		t.Fatalf("list with all: %+v %v", list, err)
 	}
-	convs, err = r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-000000000001"}, Options{})
+	convs, err = convsOf(r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeConversation, ConversationID: "c1a0d000-0000-4000-8000-000000000001"}, Options{}))
 	if err != nil || len(convs) != 1 {
 		t.Fatalf("by id: %+v %v", convs, err)
 	}
@@ -268,7 +268,7 @@ func TestClaudeAIWebAgentChatsDoNotUseUpTheWindow(t *testing.T) {
 
 	// The newest chat is the web agent's; a window of one still reaches
 	// Matt's own newest chat behind it, as List already did.
-	convs, err := r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{})
+	convs, err := convsOf(r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{}))
 	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
 		t.Fatalf("latest past the web agent's chat: %+v %v", convs, err)
 	}
@@ -278,12 +278,12 @@ func TestClaudeAIWebAgentChatsDoNotUseUpTheWindow(t *testing.T) {
 	if asked != 2 {
 		t.Fatalf("list asked for %d conversations, want the window plus the web agent's one", asked)
 	}
-	convs, err = r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeSearch, Terms: []string{"packing"}}, Options{})
+	convs, err = convsOf(r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeSearch, Terms: []string{"packing"}}, Options{}))
 	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000002" {
 		t.Fatalf("search past the web agent's chat: %+v %v", convs, err)
 	}
 	// With all, the web agent's chat is the one inside the window.
-	convs, err = r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{All: true})
+	convs, err = convsOf(r.Read(ctx, Query{Source: SourceClaudeAI, Mode: ModeLatest}, Options{All: true}))
 	if err != nil || len(convs) != 1 || convs[0].ID != "c1a0d000-0000-4000-8000-000000000001" || !convs[0].Automated {
 		t.Fatalf("latest with all: %+v %v", convs, err)
 	}

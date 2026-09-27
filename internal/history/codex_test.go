@@ -58,7 +58,7 @@ func userTurn(t *testing.T, c Conversation) Message {
 
 func TestCodexLatestIsMattsNewestDesktopPromptWithTurnImages(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, WantImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestCodexLatestIsMattsNewestDesktopPromptWithTurnImages(t *testing.T) {
 
 func TestCodexLatestWithoutWantImagesReturnsNoImageBytes(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestCodexLatestWithoutWantImagesReturnsNoImageBytes(t *testing.T) {
 
 func TestCodexLatestWithAllIncludesExecWakeButNeverScratch(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{All: true})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{All: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,14 +129,14 @@ func TestCodexExecRolloutListedInIndexIsStillExcluded(t *testing.T) {
 	}
 	_, _ = f.WriteString(`{"id":"` + codexC + `","thread_name":"Wake","updated_at":"2026-09-22T08:01:01.000000Z"}` + "\n")
 	_ = f.Close()
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ids(got) != codexA {
 		t.Fatalf("latest = %s, want A (exec originator excluded even when indexed)", ids(got))
 	}
-	list, _ := r.List(context.Background(), 20, Options{})
+	list, _ := convsOf(r.List(context.Background(), 20, Options{}))
 	if strings.Contains(ids(list), codexC) {
 		t.Fatalf("list without --all includes exec run: %s", ids(list))
 	}
@@ -144,7 +144,7 @@ func TestCodexExecRolloutListedInIndexIsStillExcluded(t *testing.T) {
 
 func TestCodexLatestCountAcrossSessionsAndDays(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, Count: 4}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, Count: 4}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestCodexLatestCountAcrossSessionsAndDays(t *testing.T) {
 
 func TestCodexSearchSelectsMatchingTurnAndItsReplyImages(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"Fox", "logo"}, WantImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"Fox", "logo"}, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestCodexSearchSelectsMatchingTurnAndItsReplyImages(t *testing.T) {
 
 func TestCodexSearchByTitleFallsBackToLatestTurn(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"landing page"}}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"landing page"}}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestCodexSearchByTitleFallsBackToLatestTurn(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 	// H's rollout was pruned; its index title still matches, with no turns.
-	got, err = r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"pruned"}}, Options{})
+	got, err = convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"pruned"}}, Options{}))
 	if err != nil || ids(got) != codexH || len(got[0].Messages) != 0 {
 		t.Fatalf("title search = %+v, %v", got, err)
 	}
@@ -207,7 +207,7 @@ func TestCodexSearchByTitleFallsBackToLatestTurn(t *testing.T) {
 func TestCodexSearchRespectsRecencyWindow(t *testing.T) {
 	r := codexFixture(t)
 	// E matches but is 33 days old.
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"mascot"}}, Options{All: true})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"mascot"}}, Options{All: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestCodexSearchRespectsRecencyWindow(t *testing.T) {
 	}
 	// With a window of one conversation, B (second newest) is just outside.
 	r.Window = Window{Max: 1, MaxAge: DefaultWindow().MaxAge}
-	got, err = r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"flaky"}}, Options{})
+	got, err = convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"flaky"}}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,15 +224,60 @@ func TestCodexSearchRespectsRecencyWindow(t *testing.T) {
 		t.Fatalf("match outside the window returned: %+v", got)
 	}
 	r.Window = Window{Max: 2, MaxAge: DefaultWindow().MaxAge}
-	got, _ = r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"flaky"}}, Options{})
+	got, _ = convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"flaky"}}, Options{}))
 	if ids(got) != codexB {
 		t.Fatalf("match inside a window of 2 = %s", ids(got))
 	}
 }
 
+func TestCodexOwnerWindowReachesPastTheDefaultAge(t *testing.T) {
+	r := codexFixture(t)
+	ctx := context.Background()
+	q := Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"mascot"}}
+	// E is the only match and is 33 days old: the default window stops
+	// before it, and says the age cap cut the answer short.
+	page, err := r.Read(ctx, q, Options{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Conversations) != 0 || page.Limited != LimitAge {
+		t.Fatalf("default window: %s, limited %q; want nothing, cut by age", ids(page.Conversations), page.Limited)
+	}
+	if page.Window != DefaultWindow() {
+		t.Fatalf("applied window = %+v, want the default", page.Window)
+	}
+	// The latest prompt is settled well inside the window: no limit note.
+	page, err = r.Read(ctx, Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
+	if err != nil || ids(page.Conversations) != codexA || page.Limited != LimitNone {
+		t.Fatalf("latest: %s, limited %q, %v", ids(page.Conversations), page.Limited, err)
+	}
+	// The owner's window overrides the reader's own field.
+	r.Window = Window{Max: 50, MaxAge: 24 * time.Hour}
+	wide := Window{MaxAge: 40 * 24 * time.Hour}
+	page, err = r.Read(ctx, q, Options{All: true, Window: wide})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids(page.Conversations) != codexE || page.Limited != LimitNone {
+		t.Fatalf("40 day window: %s, limited %q; want E, complete", ids(page.Conversations), page.Limited)
+	}
+	if page.Window != (Window{Max: 50, MaxAge: 40 * 24 * time.Hour}) {
+		t.Fatalf("applied window = %+v", page.Window)
+	}
+	// List honors the owner's age cap too.
+	list, err := r.List(ctx, 20, Options{Window: wide})
+	if err != nil || !strings.Contains(ids(list.Conversations), codexE) || list.Limited != LimitNone {
+		t.Fatalf("list with 40 days: %s, limited %q, %v", ids(list.Conversations), list.Limited, err)
+	}
+	list, err = r.List(ctx, 20, Options{})
+	if err != nil || strings.Contains(ids(list.Conversations), codexE) || list.Limited != LimitAge {
+		t.Fatalf("list with the reader's 1 day: %s, limited %q, %v", ids(list.Conversations), list.Limited, err)
+	}
+}
+
 func TestCodexLegacyUserMessageFormat(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"legacy"}, WantImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"legacy"}, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +292,7 @@ func TestCodexLegacyUserMessageFormat(t *testing.T) {
 
 func TestCodexListShowsThreadsWithCwd(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.List(context.Background(), 20, Options{})
+	got, err := convsOf(r.List(context.Background(), 20, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +313,7 @@ func TestCodexListShowsThreadsWithCwd(t *testing.T) {
 			t.Fatalf("list should carry no messages: %+v", c)
 		}
 	}
-	got, _ = r.List(context.Background(), 2, Options{})
+	got, _ = convsOf(r.List(context.Background(), 2, Options{}))
 	if ids(got) != codexA+","+codexB {
 		t.Fatalf("list 2 = %s", ids(got))
 	}
@@ -276,7 +321,7 @@ func TestCodexListShowsThreadsWithCwd(t *testing.T) {
 
 func TestCodexListAllIncludesExecRunsNotScratch(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.List(context.Background(), 20, Options{All: true})
+	got, err := convsOf(r.List(context.Background(), 20, Options{All: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +339,7 @@ func TestCodexListAllIncludesExecRunsNotScratch(t *testing.T) {
 
 func TestCodexConversationByID(t *testing.T) {
 	r := codexFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexA, WantImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexA, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,23 +358,23 @@ func TestCodexConversationByID(t *testing.T) {
 		t.Fatal("cwd missing")
 	}
 	// Exec runs need --all; scratch threads are never shown.
-	if _, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexC}, Options{}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexC}, Options{})); err == nil {
 		t.Fatal("exec conversation returned without --all")
 	}
-	if got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexC}, Options{All: true}); err != nil || ids(got) != codexC {
+	if got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexC}, Options{All: true})); err != nil || ids(got) != codexC {
 		t.Fatalf("exec conversation with --all = %+v, %v", got, err)
 	}
-	if _, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexD}, Options{All: true}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: codexD}, Options{All: true})); err == nil {
 		t.Fatal("scratch conversation returned")
 	}
-	if _, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: "../../x"}, Options{}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: "../../x"}, Options{})); err == nil {
 		t.Fatal("path-like id accepted")
 	}
 }
 
 func TestCodexMissingHomeIsAClearError(t *testing.T) {
 	r := &Codex{Home: filepath.Join(t.TempDir(), "nope"), Now: func() time.Time { return fixtureNow }}
-	_, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
+	_, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{}))
 	if err == nil || !strings.Contains(err.Error(), "no Codex history found in "+r.Home) {
 		t.Fatalf("err = %v", err)
 	}
@@ -374,12 +419,12 @@ func codexAddTextThread(t *testing.T, r *Codex) string {
 func TestCodexWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
 	r := codexFixture(t)
 	newer := codexAddTextThread(t, r)
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest}, Options{}))
 	if err != nil || ids(got) != newer {
 		t.Fatalf("plain latest = %s, %v; want the newer text-only thread", ids(got), err)
 	}
 	// with_images alone implies want_images.
-	got, err = r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, WithImages: true}, Options{})
+	got, err = convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeLatest, WithImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +447,7 @@ func TestCodexWithImagesSearchSkipsMatchingTurnsWithoutImages(t *testing.T) {
 	r := codexFixture(t)
 	codexAddTextThread(t, r)
 	// "rename" matches only the text-only thread, so nothing qualifies.
-	got, err := r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"rename"}, WithImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceCodex, Mode: ModeSearch, Terms: []string{"rename"}, WithImages: true}, Options{}))
 	if err != nil || len(got) != 0 {
 		t.Fatalf("search = %+v, %v; want nothing", got, err)
 	}

@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -119,7 +121,7 @@ func newTestChatGPT(ch Channel) *ChatGPT {
 
 func TestChatGPTList(t *testing.T) {
 	r := newTestChatGPT(chatgptFake(t))
-	convs, err := r.List(context.Background(), 10, Options{})
+	convs, err := convsOf(r.List(context.Background(), 10, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +157,7 @@ func imageSHAs(c Conversation, role Role) []string {
 func TestChatGPTLatestWithImages(t *testing.T) {
 	fake := chatgptFake(t)
 	r := newTestChatGPT(fake)
-	convs, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, WantImages: true}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +203,7 @@ func TestChatGPTLatestWithImages(t *testing.T) {
 func TestChatGPTLatestWithoutImagesFetchesNoFiles(t *testing.T) {
 	fake := chatgptFake(t)
 	r := newTestChatGPT(fake)
-	convs, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, Count: 2}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, Count: 2}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +226,7 @@ func TestChatGPTLatestWithoutImagesFetchesNoFiles(t *testing.T) {
 
 func TestChatGPTSearchAndConversation(t *testing.T) {
 	r := newTestChatGPT(chatgptFake(t))
-	convs, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"sourdough"}, WantImages: true}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"sourdough"}, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +236,7 @@ func TestChatGPTSearchAndConversation(t *testing.T) {
 	if got := imageSHAs(convs[0], RoleUser); len(got) != 1 || got[0] != "file_00000000abcd1234" {
 		t.Fatalf("sediment pointer image %v", got)
 	}
-	convs, err = r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "6a1f0c2e-1111-4a2b-9c3d-000000000001"}, Options{})
+	convs, err = convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "6a1f0c2e-1111-4a2b-9c3d-000000000001"}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +251,7 @@ func TestChatGPTSearchAndConversation(t *testing.T) {
 	if strings.Contains(all, "ABANDONED") || strings.Contains(all, "prompt\"") {
 		t.Fatal("abandoned branch or tool call leaked")
 	}
-	_, err = r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "6a1f0c2e-1111-4a2b-9c3d-00000000dead"}, Options{})
+	_, err = convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "6a1f0c2e-1111-4a2b-9c3d-00000000dead"}, Options{}))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing conversation: %v", err)
 	}
@@ -312,7 +314,7 @@ func TestClientRejectsBadOpsBeforeSending(t *testing.T) {
 		t.Fatalf("rejected ops were sent: %v", fake.ops())
 	}
 	r := newTestChatGPT(fake)
-	if _, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "a.b"}, Options{}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "a.b"}, Options{})); err == nil {
 		t.Fatal("dotted id accepted by the chatgpt reader")
 	}
 }
@@ -339,7 +341,7 @@ func TestSourceUnavailableMessages(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			r := NewChatGPT(&Client{Channel: c.ch, Timeout: 50 * time.Millisecond})
 			r.Now = func() time.Time { return liveNow }
-			_, err := r.List(context.Background(), 5, Options{})
+			_, err := convsOf(r.List(context.Background(), 5, Options{}))
 			if !errors.Is(err, c.kind) {
 				t.Fatalf("kind: got %v, want %v", err, c.kind)
 			}
@@ -411,11 +413,11 @@ func TestChatGPTWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
 		"w-u1":{"id":"w-u1","message":{"id":"w-u1","author":{"role":"user"},"create_time":"2026-09-22T10:59:00Z","content":{"content_type":"text","parts":["will it rain tomorrow"]},"metadata":{},"recipient":"all"},"parent":"w-root","children":["w-a1"]},
 		"w-a1":{"id":"w-a1","message":{"id":"w-a1","author":{"role":"assistant"},"create_time":"2026-09-22T11:00:00Z","content":{"content_type":"text","parts":["Probably not."]},"metadata":{},"recipient":"all"},"parent":"w-u1","children":[]}}}`)
 	r := newTestChatGPT(fake)
-	convs, err := r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest}, Options{})
+	convs, err := convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest}, Options{}))
 	if err != nil || ids(convs) != newer {
 		t.Fatalf("plain latest = %s, %v; want the newer text-only conversation", ids(convs), err)
 	}
-	convs, err = r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, WithImages: true}, Options{})
+	convs, err = convsOf(r.Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeLatest, WithImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,5 +429,90 @@ func TestChatGPTWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
 	}
 	if got := imageSHAs(convs[0], RoleAssistant); len(got) != 1 || got[0] != "file-Gen3rated456" {
 		t.Fatalf("generated images %v", got)
+	}
+}
+
+// manyChatsFake is a ChatGPT with n conversations, c000 newest, one minute
+// apart. Only conversation needle's prompt contains "needle".
+func manyChatsFake(n int, needle string) *fakeChannel {
+	id := func(i int) string { return fmt.Sprintf("c%03d", i) }
+	at := func(i int) string { return liveNow.Add(-time.Duration(i+1) * time.Minute).Format(time.RFC3339) }
+	return &fakeChannel{handle: func(req NativeRequest) ([]NativeResponse, error) {
+		if err := ValidateOp(req.Op, req.Args); err != nil {
+			return []NativeResponse{{Error: &NativeError{Code: "bad_request", Message: err.Error()}}}, nil
+		}
+		switch req.Op {
+		case OpChatGPTList:
+			var items []map[string]any
+			for i := range min(n, req.Args.Count) {
+				items = append(items, map[string]any{"id": id(i), "title": "chat " + id(i), "update_time": at(i)})
+			}
+			b, _ := json.Marshal(map[string]any{"items": items})
+			return []NativeResponse{{OK: true, Result: b}}, nil
+		case OpChatGPTDetail:
+			var i int
+			if _, err := fmt.Sscanf(req.Args.ID, "c%03d", &i); err != nil {
+				return []NativeResponse{{Error: &NativeError{Code: "not_found", Message: "404"}}}, nil
+			}
+			text := "prompt " + req.Args.ID
+			if req.Args.ID == needle {
+				text += " needle"
+			}
+			detail := fmt.Sprintf(`{"title":"chat %[1]s","update_time":%[2]q,"conversation_id":%[1]q,"current_node":"u1","mapping":{
+				"root":{"id":"root","message":null,"parent":null,"children":["u1"]},
+				"u1":{"id":"u1","message":{"id":"u1","author":{"role":"user"},"create_time":%[2]q,"content":{"content_type":"text","parts":[%[3]q]},"metadata":{},"recipient":"all"},"parent":"root","children":[]}}}`,
+				req.Args.ID, at(i), text)
+			return []NativeResponse{{OK: true, Result: json.RawMessage(detail)}}, nil
+		}
+		return nil, errors.New("unexpected op")
+	}}
+}
+
+func TestChatGPTOwnerWindowClampsToTheListCap(t *testing.T) {
+	ctx := context.Background()
+	search := Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"needle"}}
+	owner := Options{Window: Window{Max: 150}}
+
+	// More than 100 of the newest chats are the web agents': the clamp keeps
+	// a max of 100 (never the default 50) and says the list cap cut it short.
+	used := filepath.Join(t.TempDir(), "used.json")
+	for i := range 101 {
+		if err := recordWebUsed(used, fmt.Sprintf("c%03d", i), liveNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ch := manyChatsFake(150, "c130")
+	r := newTestChatGPT(ch)
+	r.AgentChats = used
+	page, err := r.Read(ctx, search, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Conversations) != 0 || page.Limited != LimitCount {
+		t.Fatalf("got %s, limited %q; want nothing, cut by count", ids(page.Conversations), page.Limited)
+	}
+	if page.Window != (Window{Max: MaxListCount, MaxAge: DefaultWindow().MaxAge}) {
+		t.Fatalf("applied window = %+v, want the live cap of %d", page.Window, MaxListCount)
+	}
+	ch.mu.Lock()
+	asked := ch.calls[0].Args.Count
+	ch.mu.Unlock()
+	if asked != MaxListCount {
+		t.Fatalf("list asked for %d, want %d", asked, MaxListCount)
+	}
+
+	// With 20 owned chats, a match 70 of the owner's chats deep is found:
+	// a window reset to 50 would miss it.
+	used2 := filepath.Join(t.TempDir(), "used.json")
+	for i := range 20 {
+		if err := recordWebUsed(used2, fmt.Sprintf("c%03d", i), liveNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r = newTestChatGPT(manyChatsFake(150, "c090"))
+	r.AgentChats = used2
+	page, err = r.Read(ctx, search, owner)
+	if err != nil || ids(page.Conversations) != "c090" || page.Window.Max != MaxListCount {
+		t.Fatalf("got %s, window %+v, %v; want c090 inside a max of 100", ids(page.Conversations), page.Window, err)
 	}
 }

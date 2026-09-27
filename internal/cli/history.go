@@ -75,12 +75,12 @@ func historyCmd() *cobra.Command {
 				return err
 			}
 			opts := history.Options{All: all}
-			var convs []history.Conversation
+			var page history.Page
 			if cmd.Flags().Changed("list") {
 				if list <= 0 || list > 200 {
 					return errors.New("--list must be between 1 and 200")
 				}
-				convs, err = r.List(cmd.Context(), list, opts)
+				page, err = r.List(cmd.Context(), list, opts)
 			} else {
 				q := history.Query{Source: r.Source(), Mode: history.ModeLatest, WantImages: imagesDir != ""}
 				switch {
@@ -92,14 +92,15 @@ func historyCmd() *cobra.Command {
 				if err := q.Validate(); err != nil {
 					return err
 				}
-				convs, err = r.Read(cmd.Context(), q, opts)
+				page, err = r.Read(cmd.Context(), q, opts)
 				if err == nil && imagesDir != "" {
-					err = history.SaveImages(imagesDir, convs)
+					err = history.SaveImages(imagesDir, page.Conversations)
 				}
 			}
 			if err != nil {
 				return err
 			}
+			convs := page.Conversations
 			if asJSON {
 				if convs == nil {
 					convs = []history.Conversation{}

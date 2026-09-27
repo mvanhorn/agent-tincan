@@ -331,7 +331,7 @@ func TestLiveReadRateLimitFailsFast(t *testing.T) {
 		return err
 	})
 	c := &Client{Channel: ch, Cooldown: &SiteCooldown{}}
-	_, err := NewChatGPT(c).List(context.Background(), 5, Options{})
+	_, err := convsOf(NewChatGPT(c).List(context.Background(), 5, Options{}))
 	if !errors.Is(err, ErrRateLimited) || !strings.Contains(err.Error(), "ChatGPT is rate-limiting this account right now; try again later") {
 		t.Fatalf("err = %v", err)
 	}
@@ -341,14 +341,14 @@ func TestLiveReadRateLimitFailsFast(t *testing.T) {
 	if left := c.CooldownRemaining(SourceChatGPT); left <= 50*time.Second || left > time.Minute {
 		t.Fatalf("cooldown %s, want the Retry-After", left)
 	}
-	_, err = NewChatGPT(c).Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "abc-1"}, Options{})
+	_, err = convsOf(NewChatGPT(c).Read(context.Background(), Query{Source: SourceChatGPT, Mode: ModeConversation, ConversationID: "abc-1"}, Options{}))
 	if !errors.Is(err, ErrRateLimited) || calls[SourceChatGPT] != 1 {
 		t.Fatalf("during the cooldown: %v after %d calls", err, calls[SourceChatGPT])
 	}
 	if got := readFailure(Query{Source: SourceChatGPT}, err); got != "Sorry, ChatGPT is rate-limiting this account right now; try again later." {
 		t.Fatalf("readFailure = %q", got)
 	}
-	if _, err := NewClaudeAI(c).List(context.Background(), 5, Options{}); !errors.Is(err, ErrRateLimited) || calls[SourceClaudeAI] != 1 {
+	if _, err := convsOf(NewClaudeAI(c).List(context.Background(), 5, Options{})); !errors.Is(err, ErrRateLimited) || calls[SourceClaudeAI] != 1 {
 		t.Fatalf("claude.ai held back by ChatGPT's cooldown: %v %d", err, calls[SourceClaudeAI])
 	}
 	// Closing a tab does not touch the site and still runs.

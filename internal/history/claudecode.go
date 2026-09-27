@@ -328,45 +328,49 @@ func (c *ClaudeCode) parse(e claudeEntry, all, images bool) (thread, bool, error
 }
 
 // List implements Reader.
-func (c *ClaudeCode) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
+func (c *ClaudeCode) List(ctx context.Context, count int, opts Options) (Page, error) {
 	if err := checkListCount(count); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	cands, err := c.candidates(ctx)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	w, now := c.Window.orDefault(), c.now()
-	var out []Conversation
+	w, now := effectiveWindow(c.Window, opts), c.now()
+	page := Page{Window: w}
 	for _, e := range cands {
-		if len(out) >= count || !w.fresh(e.updated, now) {
+		if len(page.Conversations) >= count {
+			break
+		}
+		if !w.fresh(e.updated, now) {
+			page.Limited = LimitAge
 			break
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		th, ok, err := c.parse(e, opts.All, false)
 		if err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		if ok && len(th.turns) > 0 {
-			out = append(out, th.conv)
+			page.Conversations = append(page.Conversations, th.conv)
 		}
 	}
-	return out, nil
+	return page, nil
 }
 
 // Read implements Reader.
-func (c *ClaudeCode) Read(ctx context.Context, q Query, opts Options) ([]Conversation, error) {
+func (c *ClaudeCode) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	if err := q.Validate(); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if err := checkSource(SourceClaudeCode, q); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	cands, err := c.candidates(ctx)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if q.Mode == ModeConversation {
 		for _, e := range cands {
@@ -375,15 +379,15 @@ func (c *ClaudeCode) Read(ctx context.Context, q Query, opts Options) ([]Convers
 			}
 			th, ok, err := c.parse(e, opts.All, q.wantsImages())
 			if err != nil {
-				return nil, err
+				return Page{}, err
 			}
 			if ok {
-				return []Conversation{conversationMessages(th, q.wantsImages())}, nil
+				return Page{Conversations: []Conversation{conversationMessages(th, q.wantsImages())}, Window: effectiveWindow(c.Window, opts)}, nil
 			}
 		}
-		return nil, fmt.Errorf("claude-code: %w: %s", ErrNotFound, q.ConversationID)
+		return Page{}, fmt.Errorf("claude-code: %w: %s", ErrNotFound, q.ConversationID)
 	}
-	return pick(q, c.Window, c.now(), len(cands),
+	return pick(q, effectiveWindow(c.Window, opts), c.now(), len(cands), false,
 		func(i int) time.Time { return cands[i].updated },
 		func(i int) (thread, bool, error) {
 			if err := ctx.Err(); err != nil {

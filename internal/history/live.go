@@ -80,10 +80,19 @@ func (l *live) detail(ctx context.Context, id string) (thread, error) {
 // agentOwned returns the conversations the web agents sent into.
 func (l *live) agentOwned() map[string]bool { return loadWebUsed(l.agentChats) }
 
+// applied is the window a live read uses: the effective window with Max
+// capped at the extension's list cap. The cap never takes Max to zero or
+// below, which orDefault would silently reset to the default.
+func (l *live) applied(opts Options) Window {
+	w := effectiveWindow(l.window, opts)
+	w.Max = min(w.Max, MaxListCount)
+	return w
+}
+
 // List implements Reader.List.
-func (l *live) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
+func (l *live) List(ctx context.Context, count int, opts Options) (Page, error) {
 	if err := checkListCount(count); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	owned := l.agentOwned()
 	// Skipped web agent chats must not use up the count, so ask for
@@ -94,12 +103,15 @@ func (l *live) List(ctx context.Context, count int, opts Options) ([]Conversatio
 	}
 	convs, err := l.list(ctx, fetch)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	w, now := l.window.orDefault(), l.clock()
-	out := convs[:0]
+	w, now := l.applied(opts), l.clock()
+	full := len(convs) >= min(fetch, MaxListCount)
+	page := Page{Window: w}
+	aged := false
 	for _, c := range convs {
 		if !w.fresh(c.UpdatedAt, now) {
+			aged = true
 			continue
 		}
 		if owned[c.ID] {
@@ -108,34 +120,43 @@ func (l *live) List(ctx context.Context, count int, opts Options) ([]Conversatio
 			}
 			c.Automated = true
 		}
-		out = append(out, c)
-		if len(out) == count {
+		page.Conversations = append(page.Conversations, c)
+		if len(page.Conversations) == count {
 			break
 		}
 	}
-	return out, nil
+	if len(page.Conversations) < count {
+		switch {
+		case aged:
+			page.Limited = LimitAge
+		case full:
+			page.Limited = LimitCount
+		}
+	}
+	return page, nil
 }
 
 // Read implements Reader.Read.
-func (l *live) Read(ctx context.Context, q Query, opts Options) ([]Conversation, error) {
+func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	if err := q.Validate(); err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if err := checkSource(l.source, q); err != nil {
-		return nil, err
+		return Page{}, err
 	}
+	w := l.applied(opts)
 	if q.Mode == ModeConversation {
 		if !validNativeID(q.ConversationID) {
-			return nil, fmt.Errorf("invalid %s conversation id %q", l.source, q.ConversationID)
+			return Page{}, fmt.Errorf("invalid %s conversation id %q", l.source, q.ConversationID)
 		}
 		th, err := l.detail(ctx, q.ConversationID)
 		if err != nil {
-			return nil, err
+			return Page{}, err
 		}
 		out := []Conversation{conversationMessages(th, q.wantsImages())}
-		return l.resolve(ctx, out), nil
+		return Page{Conversations: l.resolve(ctx, out), Window: w}, nil
 	}
-	w, owned := l.window.orDefault(), l.agentOwned()
+	owned := l.agentOwned()
 	// The web agents' chats are skipped below without using up a window
 	// slot, so ask for enough extra to cover them, as List does.
 	fetch := w.Max
@@ -144,9 +165,11 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) ([]Conversation,
 	}
 	cands, err := l.list(ctx, fetch)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	out, err := pick(q, w, l.clock(), len(cands),
+	// A full list may have older conversations behind it.
+	more := len(cands) >= min(fetch, MaxListCount)
+	page, err := pick(q, w, l.clock(), len(cands), more,
 		func(i int) time.Time { return cands[i].UpdatedAt },
 		func(i int) (thread, bool, error) {
 			if err := ctx.Err(); err != nil {
@@ -170,9 +193,10 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) ([]Conversation,
 			return th, len(th.turns) > 0, nil
 		})
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
-	return l.resolve(ctx, out), nil
+	page.Conversations = l.resolve(ctx, page.Conversations)
+	return page, nil
 }
 
 // resolve fetches the bytes of every placeholder image in convs. An image

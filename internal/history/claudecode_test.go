@@ -34,7 +34,7 @@ func claudeFixture(t *testing.T) *ClaudeCode {
 
 func TestClaudeCodeLatestSkipsSDKSubagentsScratchAndToolResults(t *testing.T) {
 	r := claudeFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest, WantImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestClaudeCodeLatestSkipsSDKSubagentsScratchAndToolResults(t *testing.T) {
 
 func TestClaudeCodeSearchDecodesImagesOnSelectedTurnOnly(t *testing.T) {
 	r := claudeFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"diagram"}, WantImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"diagram"}, WantImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestClaudeCodeSearchDecodesImagesOnSelectedTurnOnly(t *testing.T) {
 
 func TestClaudeCodeSearchExclusionsAndAll(t *testing.T) {
 	r := claudeFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"fox"}}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"fox"}}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestClaudeCodeSearchExclusionsAndAll(t *testing.T) {
 	if ids(got) != ccS4 {
 		t.Fatalf("search fox = %s, want S4", ids(got))
 	}
-	got, err = r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"fox"}}, Options{All: true})
+	got, err = convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"fox"}}, Options{All: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,12 +104,12 @@ func TestClaudeCodeSearchExclusionsAndAll(t *testing.T) {
 
 func TestClaudeCodeRecencyWindow(t *testing.T) {
 	r := claudeFixture(t)
-	got, _ := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"pelicans"}}, Options{})
+	got, _ := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"pelicans"}}, Options{}))
 	if ids(got) != ccS6 {
 		t.Fatalf("pelicans = %s", ids(got))
 	}
 	r.Window = Window{Max: 1, MaxAge: DefaultWindow().MaxAge}
-	got, _ = r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"pelicans"}}, Options{})
+	got, _ = convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeSearch, Terms: []string{"pelicans"}}, Options{}))
 	if len(got) != 0 {
 		t.Fatalf("match outside the window returned: %s", ids(got))
 	}
@@ -117,7 +117,7 @@ func TestClaudeCodeRecencyWindow(t *testing.T) {
 
 func TestClaudeCodeList(t *testing.T) {
 	r := claudeFixture(t)
-	got, err := r.List(context.Background(), 10, Options{})
+	got, err := convsOf(r.List(context.Background(), 10, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestClaudeCodeList(t *testing.T) {
 	if got[0].Title != "Relay design" || got[1].Title == "" {
 		t.Fatalf("titles = %q %q", got[0].Title, got[1].Title)
 	}
-	got, _ = r.List(context.Background(), 10, Options{All: true})
+	got, _ = convsOf(r.List(context.Background(), 10, Options{All: true}))
 	if want := strings.Join([]string{ccS2, ccS1, ccS6, ccS4}, ","); ids(got) != want {
 		t.Fatalf("list --all = %s, want %s", ids(got), want)
 	}
@@ -135,7 +135,7 @@ func TestClaudeCodeList(t *testing.T) {
 
 func TestClaudeCodeConversationByID(t *testing.T) {
 	r := claudeFixture(t)
-	got, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: ccS1}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: ccS1}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,20 +147,20 @@ func TestClaudeCodeConversationByID(t *testing.T) {
 	if strings.Join(roles, "|") != want {
 		t.Fatalf("messages = %q", roles)
 	}
-	if _, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: ccS2}, Options{}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: ccS2}, Options{})); err == nil {
 		t.Fatal("sdk-cli session returned without --all")
 	}
-	if _, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: ccS3}, Options{All: true}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: ccS3}, Options{All: true})); err == nil {
 		t.Fatal("scratch session returned")
 	}
-	if _, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: "agent-fake"}, Options{All: true}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeConversation, ConversationID: "agent-fake"}, Options{All: true})); err == nil {
 		t.Fatal("subagent transcript returned")
 	}
 }
 
 func TestClaudeCodeMissingRootIsAClearError(t *testing.T) {
 	r := &ClaudeCode{Root: filepath.Join(t.TempDir(), "nope"), Now: func() time.Time { return fixtureNow }}
-	if _, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest}, Options{}); err == nil {
+	if _, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest}, Options{})); err == nil {
 		t.Fatal("missing root: want error")
 	}
 	var reader Reader = r
@@ -191,7 +191,7 @@ func TestClaudeCodeSlashCommandWithArgsIsAPrompt(t *testing.T) {
 func TestClaudeCodeWithImagesPicksOlderTurnThatHasImages(t *testing.T) {
 	r := claudeFixture(t)
 	// The newest prompt in S1 has no image; the earlier one attached red.
-	got, err := r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest, WithImages: true}, Options{})
+	got, err := convsOf(r.Read(context.Background(), Query{Source: SourceClaudeCode, Mode: ModeLatest, WithImages: true}, Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}

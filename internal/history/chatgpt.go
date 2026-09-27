@@ -46,12 +46,12 @@ func (r *ChatGPT) live() *live {
 }
 
 // List implements Reader.
-func (r *ChatGPT) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
+func (r *ChatGPT) List(ctx context.Context, count int, opts Options) (Page, error) {
 	return r.live().List(ctx, count, opts)
 }
 
 // Read implements Reader.
-func (r *ChatGPT) Read(ctx context.Context, q Query, opts Options) ([]Conversation, error) {
+func (r *ChatGPT) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	return r.live().Read(ctx, q, opts)
 }
 

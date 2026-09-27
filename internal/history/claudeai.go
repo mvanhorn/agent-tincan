@@ -46,12 +46,12 @@ func (r *ClaudeAI) live() *live {
 }
 
 // List implements Reader.
-func (r *ClaudeAI) List(ctx context.Context, count int, opts Options) ([]Conversation, error) {
+func (r *ClaudeAI) List(ctx context.Context, count int, opts Options) (Page, error) {
 	return r.live().List(ctx, count, opts)
 }
 
 // Read implements Reader.
-func (r *ClaudeAI) Read(ctx context.Context, q Query, opts Options) ([]Conversation, error) {
+func (r *ClaudeAI) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	return r.live().Read(ctx, q, opts)
 }
 

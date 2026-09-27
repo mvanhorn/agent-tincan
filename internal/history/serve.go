@@ -283,12 +283,13 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 			s.onImageDir(dir)
 		}
 	}
-	convs, err := r.Read(ctx, q, Options{})
+	page, err := r.Read(ctx, q, Options{})
 	if err != nil {
 		s.logf("request %s: read %s: %v", req.ID, q.Source, err)
 		s.reply(ctx, req, readFailure(q, err), envelope.StatusFailed, nil)
 		return
 	}
+	convs := page.Conversations
 
 	// 4. Images, then the templated reply.
 	var paths []string

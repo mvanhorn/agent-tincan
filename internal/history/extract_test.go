@@ -233,6 +233,21 @@ func TestParseExtractionTolerance(t *testing.T) {
 	}
 }
 
+// A request cannot widen the window: only the owner sets it, through
+// Options, so any window field in a query is not the schema.
+func TestParseExtractionRejectsAWindow(t *testing.T) {
+	for _, raw := range []string{
+		`{"source":"codex","mode":"search","terms":["relay"],"window":{"days":3650,"max":200}}`,
+		`{"source":"codex","mode":"latest","days":90}`,
+		`{"source":"codex","mode":"latest","max":200}`,
+		`{"source":"codex","mode":"latest","Window":{"Max":200}}`,
+	} {
+		if _, err := parseExtraction([]byte(raw)); !errors.Is(err, ErrUnclearQuestion) {
+			t.Errorf("parseExtraction(%s) = %v, want ErrUnclearQuestion", raw, err)
+		}
+	}
+}
+
 func TestCodexExtractorWithImages(t *testing.T) {
 	logDir, x := fakeCodex(t, `{"source":"claude-code","mode":"latest","terms":[],"conversation_id":"","count":1,"want_images":false,"with_images":true}`)
 	q, err := x.Extract(context.Background(), "what did Matt ask in his most recent Claude Code session that included a screenshot? send the image")
