@@ -117,7 +117,8 @@ type WebAgent struct {
 	ClaudeStablePolls int
 	ClaudeStableFor   time.Duration
 	// PresenceInterval is how often the agent refreshes its relay presence
-	// while it handles a request (DefaultPresenceInterval when zero).
+	// while it handles a request (client.DefaultPresenceInterval when
+	// zero).
 	PresenceInterval time.Duration
 	Log              io.Writer
 

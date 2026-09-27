@@ -16,7 +16,10 @@ var Version = "0.0.1-dev"
 func main() {
 	cli.Version = Version
 	if err := cli.Root().ExecuteContext(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, "tincan:", err)
-		os.Exit(1)
+		code, silent := cli.ExitStatus(err)
+		if !silent {
+			fmt.Fprintln(os.Stderr, "tincan:", err)
+		}
+		os.Exit(code)
 	}
 }

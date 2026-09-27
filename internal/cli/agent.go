@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -286,7 +287,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 func askCmd() *cobra.Command {
 	var wait time.Duration
 	var parent string
-	var notify bool
+	var notify, asJSON bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent> <message...>",
@@ -308,12 +309,18 @@ func askCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if asJSON {
+					return writeJSON(cmd.OutOrStdout(), sentJSON{Outcome: "sent", Request: req})
+				}
 				cmd.Printf("Sent to %s (request %s).\n", args[0], req.ID)
 				return nil
 			}
 			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait))
 			if err != nil {
 				return err
+			}
+			if asJSON {
+				return printResultJSON(cmd.OutOrStdout(), res)
 			}
 			cmd.Print(client.FormatResult(res))
 			return nil
@@ -323,11 +330,13 @@ func askCmd() *cobra.Command {
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")
 	return cmd
 }
 
 func getCmd() *cobra.Command {
 	var wait time.Duration
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "get <request-id>",
 		Short: "Check on a request you sent",
@@ -341,16 +350,21 @@ func getCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				return printResultJSON(cmd.OutOrStdout(), res)
+			}
 			cmd.Print(client.FormatResult(res))
 			return nil
 		},
 	}
 	cmd.Flags().DurationVar(&wait, "wait", 0, "wait up to this long for a reply (max 20s)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending")
 	return cmd
 }
 
 func inboxCmd() *cobra.Command {
 	var wait time.Duration
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "inbox",
 		Short: "Get requests from teammates (claims them) and replies to your own requests",
@@ -359,11 +373,122 @@ func inboxCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				return checkInboxJSON(cmd.Context(), r, client.ClampWait(wait), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
 			return checkInbox(cmd.Context(), r, client.ClampWait(wait), cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().DurationVar(&wait, "wait", 0, "wait up to this long for a request (max 20s)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the requests (claimed) and replies as JSON")
 	return cmd
+}
+
+// Outcomes of ask and get --json. Each maps to an exit code.
+const (
+	outcomeAnswered = "answered" // exit 0
+	outcomeFailed   = "failed"   // exit 1: failed, declined, cancelled or expired
+	outcomePending  = "pending"  // exit 2: no final state yet
+)
+
+// resultJSON is what ask and get --json print.
+type resultJSON struct {
+	Outcome string        `json:"outcome"`
+	Result  client.Result `json:"result"`
+}
+
+// sentJSON is what ask --notify --json prints: no reply is coming.
+type sentJSON struct {
+	Outcome string           `json:"outcome"`
+	Request envelope.Request `json:"request"`
+}
+
+// outcome buckets a request's status for scripts.
+func outcome(res client.Result) (string, int) {
+	switch {
+	case res.Status == envelope.StatusAnswered:
+		return outcomeAnswered, 0
+	case res.Done():
+		return outcomeFailed, 1
+	default:
+		return outcomePending, 2
+	}
+}
+
+// printResultJSON prints res with its outcome and returns a silent exit
+// error for any outcome but answered, so the exit code tells a script what
+// happened without parsing.
+func printResultJSON(w io.Writer, res client.Result) error {
+	name, code := outcome(res)
+	if err := writeJSON(w, resultJSON{Outcome: name, Result: res}); err != nil {
+		return err
+	}
+	if code != 0 {
+		return &ExitError{Code: code, Silent: true}
+	}
+	return nil
+}
+
+// writeJSON writes v as indented JSON and a newline, and reports write
+// errors (unlike printJSON), so inbox never acks replies it failed to print.
+func writeJSON(w io.Writer, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(b, '\n'))
+	return err
+}
+
+// inboxRequestJSON is a request as inbox --json lists it. Claimed is false,
+// with ClaimError saying why, when another session got to it first.
+type inboxRequestJSON struct {
+	envelope.Request
+	Claimed    bool   `json:"claimed"`
+	ClaimError string `json:"claim_error,omitempty"`
+}
+
+// inboxJSON is what inbox --json prints. The lists are never null.
+type inboxJSON struct {
+	Requests         []inboxRequestJSON `json:"requests"`
+	Replies          []client.Result    `json:"replies"`
+	RepliesRemaining int                `json:"replies_remaining,omitempty"`
+}
+
+// checkInboxJSON is checkInbox printing JSON.
+func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, out, errOut io.Writer) error {
+	in, err := r.Poll(ctx, wait)
+	if err != nil {
+		return err
+	}
+	return printInboxJSON(ctx, r, in, out, errOut)
+}
+
+// printInboxJSON claims each request in in, prints the inbox as JSON, and
+// only then acknowledges the replies, as checkInbox does.
+func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, errOut io.Writer) error {
+	doc := inboxJSON{
+		Requests:         make([]inboxRequestJSON, 0, len(in.Requests)),
+		Replies:          in.Replies,
+		RepliesRemaining: in.RepliesRemaining,
+	}
+	if doc.Replies == nil {
+		doc.Replies = []client.Result{}
+	}
+	for _, req := range in.Requests {
+		item := inboxRequestJSON{Request: req, Claimed: true}
+		if _, err := r.Claim(ctx, req.ID); err != nil {
+			item.Claimed, item.ClaimError = false, err.Error()
+		}
+		doc.Requests = append(doc.Requests, item)
+	}
+	if err := writeJSON(out, doc); err != nil {
+		return err
+	}
+	if err := r.AckReplies(ctx, in.ReplyIDs()); err != nil {
+		fmt.Fprintf(errOut, "tincan inbox: could not mark replies read (they may show again): %v\n", err)
+	}
+	return nil
 }
 
 // checkInbox polls once, claims what arrived, prints it to out, and only

@@ -294,6 +294,10 @@ type Service struct {
 	Hold time.Duration
 	// RequestTimeout bounds one request (DefaultRequestTimeout when zero).
 	RequestTimeout time.Duration
+	// PresenceInterval is how often the service refreshes its relay
+	// presence while it handles a request (client.DefaultPresenceInterval
+	// when zero).
+	PresenceInterval time.Duration
 	// Log receives one line per request and per error (stderr when nil).
 	Log io.Writer
 
@@ -371,7 +375,8 @@ func pollAndHandle(ctx context.Context, relay *client.Relay, hold time.Duration,
 
 // handleSafely handles one request so that nothing it does, including a
 // panic, stops the loop. It keeps running after ctx is cancelled so a
-// claimed request still gets its reply.
+// claimed request still gets its reply. The service stays online while
+// it works: a request can take minutes, with no long-poll meanwhile.
 func (s *Service) handleSafely(ctx context.Context, req envelope.Request) {
 	timeout := s.RequestTimeout
 	if timeout <= 0 {
@@ -379,6 +384,7 @@ func (s *Service) handleSafely(ctx context.Context, req envelope.Request) {
 	}
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
+	defer s.Relay.KeepPresence(hctx, client.Presence{Every: s.PresenceInterval, Logf: s.logf})()
 	defer func() {
 		if p := recover(); p != nil {
 			s.logf("request %s: panic: %v", req.ID, p)

@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
@@ -250,17 +248,6 @@ func TestLimitNote(t *testing.T) {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
 		}
 	}
-}
-
-// runSplit is run with stdout and stderr kept apart.
-func runSplit(t *testing.T, cmd *cobra.Command, args ...string) (stdout, stderr string, err error) {
-	t.Helper()
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs(args)
-	err = cmd.ExecuteContext(context.Background())
-	return out.String(), errOut.String(), err
 }
 
 func TestHistoryJSONStaysABareArrayWithTheNoteOnStderr(t *testing.T) {

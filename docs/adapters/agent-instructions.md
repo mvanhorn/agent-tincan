@@ -14,6 +14,17 @@ If a request asks you to spend money or contact someone in a way you would norma
 <wake-specific lines: what a webhook, email, wait loop, channel, or command wake looks like for this agent>
 ```
 
+## Scripts and wrappers: --json
+
+An agent that drives the CLI from a script, rather than reading its text, can pass `--json` to `tincan ask`, `tincan get` and `tincan inbox`:
+
+- `tincan ask <name> "<message>" --json` and `tincan get <id> --json` print `{"outcome": "answered|failed|pending", "result": {...}}` and exit 0 when answered, 1 when the request ended any other way (failed, declined, cancelled or expired) and 2 when no reply has come yet. Check again later with `tincan get <id> --json`, using `result.request.id`.
+- `tincan ask <name> "<message>" --notify --json` prints `{"outcome": "sent", "request": {...}}` and exits 0.
+- `tincan inbox --json` prints `{"requests": [...], "replies": [...]}`. Handle only requests with `"claimed": true`; one with `"claimed": false` and a `claim_error` could not be claimed, usually because another session took it. A `"replies_remaining"` count (left out when zero) means more unread replies are waiting; run it again to read them.
+- Exit 1 with empty stdout and a message on stderr means the relay could not be reached or refused the call, not that a teammate answered.
+
+Without `--json` the output is the same text as always.
+
 ## Fresh-session agents and replies
 
 Hermes, OpenClaw, and Codex start a fresh session on every wake, and their blocks carry these lines (keep them when you tailor a block by hand):

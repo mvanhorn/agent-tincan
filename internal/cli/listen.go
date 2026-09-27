@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -44,6 +46,20 @@ turn when a background command exits (Muse), use "tincan wait" instead.`,
 	return cmd
 }
 
+// listen's timing and log. Tests override them.
+var (
+	// listenPresenceEvery is how often listen refreshes the agent's relay
+	// presence while its command runs and during the cooldown after it.
+	listenPresenceEvery = client.DefaultPresenceInterval
+	// listenPresenceCap bounds that refresh for one nudge, so an agent
+	// whose command hangs falls offline again.
+	listenPresenceCap = 30 * time.Minute
+	// listenCooldown is the wait after a nudge before listen looks again.
+	listenCooldown = 30 * time.Second
+	// listenLog receives listen's own log lines.
+	listenLog io.Writer = os.Stderr
+)
+
 func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) error {
 	backoff := time.Second
 	for {
@@ -67,21 +83,43 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 		if n == 0 {
 			continue
 		}
-		c := exec.CommandContext(ctx, "sh", "-c", execCmd)
-		c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(n))
-		c.Stdout, c.Stderr = os.Stdout, os.Stderr
-		if err := c.Run(); err != nil {
-			// A failed nudge is retried on the next loop; nothing was taken.
-			os.Stderr.WriteString("tincan listen: command failed: " + err.Error() + "\n")
+		if err := nudge(ctx, r, execCmd, n, once); err != nil {
+			return err
 		}
 		if once {
 			return nil
 		}
-		// Give the agent time to pick them up before nudging again.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(30 * time.Second):
-		}
 	}
+}
+
+// nudge runs the command for n waiting items and then, unless once, waits
+// out the cooldown. The agent stays online throughout, up to
+// listenPresenceCap: it is busy with what it was nudged about, not gone.
+func nudge(ctx context.Context, r *client.Relay, execCmd string, n int, once bool) error {
+	defer r.KeepPresence(ctx, client.Presence{
+		Every: listenPresenceEvery,
+		Cap:   listenPresenceCap,
+		Logf:  listenLogf,
+	})()
+	c := exec.CommandContext(ctx, "sh", "-c", execCmd)
+	c.Env = append(os.Environ(), "TINCAN_WAITING="+strconv.Itoa(n))
+	c.Stdout, c.Stderr = os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		// A failed nudge is retried on the next loop; nothing was taken.
+		listenLogf("command failed: %v", err)
+	}
+	if once {
+		return nil
+	}
+	// Give the agent time to pick them up before nudging again.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(listenCooldown):
+		return nil
+	}
+}
+
+func listenLogf(format string, args ...any) {
+	_, _ = fmt.Fprintf(listenLog, "tincan listen: "+format+"\n", args...)
 }

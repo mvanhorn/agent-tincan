@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 // DefaultWebPollSchedule is how the conversation is read while the reply
@@ -38,12 +40,6 @@ const (
 // maxErrorBackoff caps the backoff after other transient read failures
 // (an HTTP 5xx, a flaky read).
 const maxErrorBackoff = 2 * time.Minute
-
-// DefaultPresenceInterval is how often a web agent busy with a request
-// tells the relay it is still there (a peek that claims nothing), so it
-// does not show offline during a long wait. It is well inside the relay's
-// online window (its poll hold plus 30s).
-const DefaultPresenceInterval = 30 * time.Second
 
 // webClock is the reply wait's time source.
 type webClock interface {
@@ -77,34 +73,9 @@ func (w *WebAgent) clk() webClock {
 // keepPresence refreshes the agent's relay presence every
 // PresenceInterval until the returned stop is called. While a request
 // waits minutes for its reply the agent is not long-polling and would
-// otherwise show offline. The refresh is a peek with no hold, which claims
-// nothing, so requests that arrive meanwhile stay queued for the next
-// poll.
+// otherwise show offline. See client.Relay.KeepPresence.
 func (w *WebAgent) keepPresence(ctx context.Context) (stop func()) {
-	every := w.PresenceInterval
-	if every <= 0 {
-		every = DefaultPresenceInterval
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		t := time.NewTicker(every)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				pctx, pcancel := context.WithTimeout(ctx, 15*time.Second)
-				if _, err := w.Relay.Peek(pctx, 0); err != nil && ctx.Err() == nil {
-					w.logf("presence: %v", err)
-				}
-				pcancel()
-			}
-		}
-	}()
-	return func() { cancel(); <-done }
+	return w.Relay.KeepPresence(ctx, client.Presence{Every: w.PresenceInterval, Logf: w.logf})
 }
 
 // pollDelay is the wait before the next detail read once reads have

@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -263,5 +264,60 @@ func TestAgentLastSeenUsesNewerOfPollAndActivity(t *testing.T) {
 		if got := (client.AgentInfo{LastPoll: tc.poll, LastActive: tc.active}).LastSeen(now); got != tc.want {
 			t.Errorf("LastSeen(poll %v, active %v) = %q, want %q", tc.poll, tc.active, got, tc.want)
 		}
+	}
+}
+
+// KeepPresence refreshes with peeks that hold nothing and take nothing,
+// never a poll, and stops for good when stop returns or the cap passes.
+func TestKeepPresencePeeksUntilStoppedOrCapped(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.String())
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+	count := func() int { mu.Lock(); defer mu.Unlock(); return len(calls) }
+	r, _ := client.NewRelay(ts.URL, "")
+
+	stop := r.KeepPresence(t.Context(), client.Presence{Every: 5 * time.Millisecond})
+	time.Sleep(60 * time.Millisecond)
+	stop()
+	n := count()
+	if n == 0 {
+		t.Fatal("no presence refresh")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if count() != n {
+		t.Fatal("presence refreshes went on after stop returned")
+	}
+	mu.Lock()
+	for _, c := range calls {
+		if c != "GET /v1/poll?peek=1&hold=0&replies=keep" {
+			t.Errorf("presence made %q, want only a peek with no hold", c)
+		}
+	}
+	mu.Unlock()
+
+	var logMu sync.Mutex
+	var logged []string
+	stop = r.KeepPresence(t.Context(), client.Presence{Every: 5 * time.Millisecond, Cap: 30 * time.Millisecond, Logf: func(f string, a ...any) {
+		logMu.Lock()
+		logged = append(logged, fmt.Sprintf(f, a...))
+		logMu.Unlock()
+	}})
+	defer stop()
+	time.Sleep(120 * time.Millisecond)
+	capped := count()
+	time.Sleep(30 * time.Millisecond)
+	if count() != capped {
+		t.Fatal("presence refreshes went on past the cap")
+	}
+	logMu.Lock()
+	defer logMu.Unlock()
+	if len(logged) != 1 || !strings.Contains(logged[0], "stopped keeping this agent online after 30ms") {
+		t.Fatalf("cap log = %q", logged)
 	}
 }
