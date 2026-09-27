@@ -47,7 +47,7 @@ func historyReader(source string) (history.Reader, error) {
 }
 
 func historyCmd() *cobra.Command {
-	var list int
+	var list, days, maxConvs int
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
@@ -55,7 +55,9 @@ func historyCmd() *cobra.Command {
 		Short: "Read the owner's ChatGPT, claude.ai, Codex or Claude Code history",
 		Long: "Read the owner's ChatGPT, claude.ai, Codex or Claude Code history. With no mode flag it shows the latest prompt the owner typed.\n" +
 			"Unattended runs (codex exec wakes, Claude Code SDK sessions, and chats the chatgpt-web and claude-web agents sent into) are left out unless --all is given.\n" +
-			"chatgpt and claude-ai are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.",
+			"chatgpt and claude-ai are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
+			"Latest and search look back through the last 50 conversations, up to 30 days; --max and --days widen or narrow that\n" +
+			"(ChatGPT and claude.ai read at most 100). When that window cut the answer short, a note says so on stderr.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			modes := 0
@@ -74,7 +76,11 @@ func historyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := history.Options{All: all}
+			window, err := windowFlags(cmd, days, maxConvs)
+			if err != nil {
+				return err
+			}
+			opts := history.Options{All: all, Window: window}
 			var page history.Page
 			if cmd.Flags().Changed("list") {
 				if list <= 0 || list > 200 {
@@ -105,9 +111,15 @@ func historyCmd() *cobra.Command {
 				if convs == nil {
 					convs = []history.Conversation{}
 				}
-				return printJSON(cmd, convs)
+				if err := printJSON(cmd, convs); err != nil {
+					return err
+				}
+			} else {
+				printHistory(cmd, convs, cmd.Flags().Changed("list"))
 			}
-			printHistory(cmd, convs, cmd.Flags().Changed("list"))
+			if note := limitNote(page, cmd.Flags().Changed("list")); note != "" {
+				cmd.PrintErrln(note)
+			}
 			return nil
 		},
 	}
@@ -116,10 +128,39 @@ func historyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&latest, "latest", false, "show the latest prompt and its reply (default)")
 	cmd.Flags().StringVar(&search, "search", "", "find recent conversations whose title or a prompt contains every word")
 	cmd.Flags().StringVar(&id, "id", "", "show one conversation by id")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	cmd.Flags().IntVar(&days, "days", 0, "look back this many days (1-3650, default 30)")
+	cmd.Flags().IntVar(&maxConvs, "max", 0, "look back through this many conversations for --latest and --search (1-200, default 50)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON (a bare array; a limit note goes to stderr)")
 	cmd.Flags().StringVar(&imagesDir, "images-dir", "", "save the selected turn's images here (created 0700, files 0600)")
 	cmd.AddCommand(historyInstallCmd(), historyNativeHostCmd(), historyServeCmd())
 	return cmd
+}
+
+// windowFlags is the owner window from --days and --max. Only flags that
+// were given are set; each must be inside the bounds.
+func windowFlags(cmd *cobra.Command, days, maxConvs int) (history.Window, error) {
+	if cmd.Flags().Changed("days") && (days < history.MinWindowDays || days > history.MaxWindowDays) {
+		return history.Window{}, fmt.Errorf("--days must be between %d and %d", history.MinWindowDays, history.MaxWindowDays)
+	}
+	if cmd.Flags().Changed("max") && (maxConvs < history.MinWindowMax || maxConvs > history.MaxWindowMax) {
+		return history.Window{}, fmt.Errorf("--max must be between %d and %d", history.MinWindowMax, history.MaxWindowMax)
+	}
+	return history.WindowOf(days, maxConvs)
+}
+
+// limitNote is the stderr line for a page the window cut short, or "".
+func limitNote(page history.Page, listing bool) string {
+	const prefix = "tincan history: results may be incomplete: "
+	switch page.Limited {
+	case history.LimitCount:
+		if listing {
+			return fmt.Sprintf(prefix+"only the newest %d conversations could be listed.", history.MaxListCount)
+		}
+		return fmt.Sprintf(prefix+"only the last %d conversations were read (use --max to widen it).", page.Window.Max)
+	case history.LimitAge:
+		return fmt.Sprintf(prefix+"only conversations from the last %d days were read (use --days to widen it).", int(page.Window.MaxAge.Hours()/24))
+	}
+	return ""
 }
 
 func historyInstallCmd() *cobra.Command {
@@ -212,7 +253,7 @@ func defaultHistoryConfig() string {
 }
 
 func historyServeCmd() *cobra.Command {
-	var configPath, allowPath, codexBin string
+	var configPath, allowPath, windowPath, codexBin string
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the history agent: answer teammates' history questions over the relay",
@@ -223,6 +264,8 @@ func historyServeCmd() *cobra.Command {
 			"  3. the matching source is read (ChatGPT and claude.ai through the Tincan Chrome extension);\n" +
 			"  4. the reply is filled in from a fixed template, with the images attached.\n" +
 			"Retrieved chat content is never sent to an LLM. The allowlist file is reread for every request.\n" +
+			"The owner's window file ({\"days\": N, \"max\": N}) sets how far back lookups go and is also reread for every request;\n" +
+			"no file means the last 50 conversations, up to 30 days, and a file that is not valid fails every request until it is fixed.\n" +
 			"Normally started by the service definition tincan history install writes. See docs/adapters/history.md.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -257,6 +300,10 @@ func historyServeCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("history allowlist: %w", err)
 			}
+			if windowPath == "" {
+				windowPath = history.DefaultWindowPath()
+			}
+			windowPath = expandHome(windowPath)
 			// The service's own config file, not ConfigPath(), is where the
 			// relay key and a moved relay's address are saved.
 			r, err := client.NewRelayForFile(cfg, configPath)
@@ -274,11 +321,12 @@ func historyServeCmd() *cobra.Command {
 			ext := history.NewCodexExtractor()
 			ext.Binary = codexBin
 			svc := &history.Service{
-				Relay:     r,
-				Extractor: ext,
-				Readers:   readers,
-				Allowlist: history.FileAllowlist(allowPath),
-				Log:       cmd.ErrOrStderr(),
+				Relay:      r,
+				Extractor:  ext,
+				Readers:    readers,
+				Allowlist:  history.FileAllowlist(allowPath),
+				WindowFile: windowPath,
+				Log:        cmd.ErrOrStderr(),
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
@@ -297,6 +345,8 @@ func historyServeCmd() *cobra.Command {
 				return wrongHistoryAgent("the relay knows the machine using "+configPath+" as", me.Name)
 			}
 			cmd.PrintErrf("tincan history: serving as %s on %s (%s)\n", me.Name, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
+			w, werr := history.LoadWindow(windowPath)
+			cmd.PrintErrf("tincan history: %s\n", history.DescribeWindow(windowPath, w, werr))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrln("tincan history: stopped")
@@ -307,6 +357,7 @@ func historyServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "the history agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/history.json)")
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to read history, one per line (default: ~/.config/tincan/history-allow.txt; missing or * means every joined agent)")
+	cmd.Flags().StringVar(&windowPath, "window-file", "", `the owner's lookup window, {"days": N, "max": N} (default: ~/.config/tincan/history-window.json; missing means 30 days and 50 conversations)`)
 	cmd.Flags().StringVar(&codexBin, "codex", "codex", "codex binary used for the tool-less query step")
 	return cmd
 }

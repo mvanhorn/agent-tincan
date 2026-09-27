@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
@@ -92,9 +94,9 @@ func TestHistoryListText(t *testing.T) {
 func TestHistorySearchWritesImages(t *testing.T) {
 	historyEnv(t)
 	dir := filepath.Join(t.TempDir(), "imgs")
-	out, err := run(t, Root(), "history", "codex", "--search", "fox logo", "--images-dir", dir, "--json")
+	out, stderr, err := runSplit(t, Root(), "history", "codex", "--search", "fox logo", "--images-dir", dir, "--json")
 	if err != nil {
-		t.Fatalf("%v\n%s", err, out)
+		t.Fatalf("%v\n%s%s", err, out, stderr)
 	}
 	var convs []history.Conversation
 	if err := json.Unmarshal([]byte(out), &convs); err != nil {
@@ -145,11 +147,101 @@ func TestHistoryBadArgs(t *testing.T) {
 		{"history", "codex", "--latest", "--search", "fox"},
 		{"history", "codex", "--id", "../../etc"},
 		{"history", "codex", "--list", "0"},
+		{"history", "codex", "--max", "0"},
+		{"history", "codex", "--max", "201"},
+		{"history", "codex", "--days", "0"},
+		{"history", "codex", "--days", "3651"},
 	}
 	for _, args := range cases {
 		if out, err := run(t, Root(), args...); err == nil {
 			t.Errorf("%v: want error, got output:\n%s", args, out)
 		}
+	}
+}
+
+// ageMascot makes the fixture's "Old mascot" Codex thread 60 days old.
+func ageMascot(t *testing.T, codexHome string) {
+	t.Helper()
+	p := filepath.Join(codexHome, "session_index.jsonl")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = bytes.ReplaceAll(b, []byte("2026-08-20T09:00:05"), []byte("2026-07-24T09:00:05"))
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryDaysWidensTheWindowAndLimitsAreNoted(t *testing.T) {
+	codexHome, _ := historyEnv(t)
+	ageMascot(t, codexHome)
+	out, err := run(t, Root(), "history", "codex", "--search", "mascot")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out, "Old mascot") || !strings.Contains(out, "Nothing found.") {
+		t.Fatalf("the default 30 days found a 60 day old thread:\n%s", out)
+	}
+	if !strings.Contains(out, "only conversations from the last 30 days were read") || !strings.Contains(out, "--days") {
+		t.Fatalf("no limit note for an age-limited search:\n%s", out)
+	}
+	out, err = run(t, Root(), "history", "codex", "--search", "mascot", "--days", "90")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Old mascot") {
+		t.Fatalf("--days 90 missed the 60 day old thread:\n%s", out)
+	}
+	if strings.Contains(out, "were read") {
+		t.Fatalf("a complete answer carries a limit note:\n%s", out)
+	}
+	// A search cut short by --max names that limit.
+	out, err = run(t, Root(), "history", "codex", "--search", "mascot", "--days", "90", "--max", "1")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "only the last 1 conversations were read") || !strings.Contains(out, "--max") {
+		t.Fatalf("no count note:\n%s", out)
+	}
+	// --days reaches --list too.
+	out, err = run(t, Root(), "history", "codex", "--list", "20", "--days", "90")
+	if err != nil || !strings.Contains(out, "Old mascot") {
+		t.Fatalf("--list with --days 90: %v\n%s", err, out)
+	}
+}
+
+// runSplit is run with stdout and stderr kept apart.
+func runSplit(t *testing.T, cmd *cobra.Command, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs(args)
+	err = cmd.ExecuteContext(context.Background())
+	return out.String(), errOut.String(), err
+}
+
+func TestHistoryJSONStaysABareArrayWithTheNoteOnStderr(t *testing.T) {
+	historyEnv(t)
+	stdout, stderr, err := runSplit(t, Root(), "history", "codex", "--search", "mascot", "--json")
+	if err != nil {
+		t.Fatalf("%v\n%s%s", err, stdout, stderr)
+	}
+	var convs []history.Conversation
+	if err := json.Unmarshal([]byte(stdout), &convs); err != nil || len(convs) != 0 {
+		t.Fatalf("stdout is not an empty JSON array: %v\n%s", err, stdout)
+	}
+	if strings.Contains(stdout, "were read") {
+		t.Fatalf("limit note on stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "only conversations from the last 30 days were read") {
+		t.Fatalf("stderr missing the limit note: %q", stderr)
+	}
+	// A complete answer prints no note.
+	stdout, stderr, err = runSplit(t, Root(), "history", "codex", "--json")
+	if err != nil || stderr != "" {
+		t.Fatalf("latest: %v, stderr %q\n%s", err, stderr, stdout)
 	}
 }
 
@@ -370,6 +462,31 @@ func TestServeStartupLineDescribesAllowlist(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("%s with %s: output missing %q:\n%s", c.name, filepath.Base(allow), want, out)
 			}
+		}
+	}
+}
+
+// The history service's startup line says which window it reads with.
+func TestHistoryServeStartupLineDescribesWindow(t *testing.T) {
+	dir := t.TempDir()
+	allow := filepath.Join(dir, "allow.txt")
+	missing := filepath.Join(dir, "missing.json")
+	set := filepath.Join(dir, "window.json")
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(set, []byte(`{"days": 90, "max": 150}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte(`{"days": 0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for file, want := range map[string]string{
+		missing: "window: the last 50 conversations, up to 30 days (default, no file at " + missing + ")",
+		set:     "window " + set + ": the last 150 conversations, up to 90 days (ChatGPT and claude.ai read at most 100)",
+		bad:     "window file " + bad + " is not valid",
+	} {
+		out := startupLine(t, "history", "history", "serve", "--allowlist", allow, "--window-file", file)
+		if !strings.Contains(out, want) {
+			t.Errorf("%s: output missing %q:\n%s", filepath.Base(file), want, out)
 		}
 	}
 }

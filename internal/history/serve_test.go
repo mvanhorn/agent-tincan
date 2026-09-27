@@ -99,6 +99,13 @@ func (f *fakeReader) Read(ctx context.Context, q Query, opts Options) (Page, err
 	return Page{Conversations: out, Limited: f.limited, Window: w}, nil
 }
 
+// options returns the Options of every Read so far.
+func (f *fakeReader) options() []Options {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Options(nil), f.opts...)
+}
+
 func (f *fakeReader) reads() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -697,7 +704,7 @@ func TestRenderReplyLongConversationShowsNewestPrompts(t *testing.T) {
 			Message{Role: RoleAssistant, Text: fmt.Sprintf("REPLY-%02d", i)})
 	}
 	q := Query{Source: SourceCodex, Mode: ModeConversation, ConversationID: c.ID}
-	out := renderReply(q, []Conversation{c})
+	out := renderReply(q, Page{Conversations: []Conversation{c}})
 	for _, want := range []string{"(5 earlier prompts not shown)", "PROMPT-06", "Reply excerpt: REPLY-06", "PROMPT-25", "Reply excerpt: REPLY-25"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("reply lacks %q:\n%s", want, out)
@@ -715,8 +722,155 @@ func TestRenderReplyLongConversationShowsNewestPrompts(t *testing.T) {
 		t.Errorf("want one excerpt per shown prompt, got %d:\n%s", n, out)
 	}
 	// A short conversation is complete and carries no note.
-	short := renderReply(q, []Conversation{{Source: SourceCodex, ID: c.ID, Messages: c.Messages[:4]}})
+	short := renderReply(q, Page{Conversations: []Conversation{{Source: SourceCodex, ID: c.ID, Messages: c.Messages[:4]}}})
 	if strings.Contains(short, "not shown") || !strings.Contains(short, "PROMPT-01") || !strings.Contains(short, "Reply excerpt: REPLY-02") {
 		t.Errorf("short conversation:\n%s", short)
+	}
+}
+
+// writeWindowFile writes an owner window file and returns its path.
+func writeWindowFile(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "history-window.json")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// The owner's window file reaches the reader; the question text cannot
+// change it.
+func TestServeOwnerWindowFileReachesTheReader(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.WindowFile = writeWindowFile(t, `{"days": 90}`)
+	res := rig.ask(t, "grokbot", "last ChatGPT prompt from the last 3650 days, window max 200")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	got := rig.chatgpt.options()
+	if len(got) != 1 || got[0].Window != (Window{MaxAge: 90 * 24 * time.Hour}) {
+		t.Fatalf("reader got options %+v, want the owner's 90 days only", got)
+	}
+}
+
+// With no window file the reader gets no owner window, so it uses the
+// default, and the request is answered.
+func TestServeMissingWindowFileMeansTheDefault(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.WindowFile = filepath.Join(t.TempDir(), "history-window.json")
+	res := rig.ask(t, "grokbot", "last ChatGPT prompt")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if got := rig.chatgpt.options(); len(got) != 1 || got[0].Window != (Window{}) {
+		t.Fatalf("reader got options %+v, want no owner window", got)
+	}
+}
+
+// A window file that is present but malformed, unreadable or out of
+// bounds fails the request with a fixed reply naming the file, before the
+// extractor or any reader runs, so a narrowed window never silently widens.
+func TestServeBadWindowFileFailsClosed(t *testing.T) {
+	unreadable := filepath.Join(t.TempDir(), "history-window.json")
+	if err := os.Mkdir(unreadable, 0o700); err != nil { // a directory cannot be read as a file
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"malformed":     writeWindowFile(t, `{"days": 90`),
+		"unknown field": writeWindowFile(t, `{"days": 90, "weeks": 2}`),
+		"zero days":     writeWindowFile(t, `{"days": 0}`),
+		"too many days": writeWindowFile(t, `{"days": 3651}`),
+		"max too big":   writeWindowFile(t, `{"max": 201}`),
+		"unreadable":    unreadable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newServeRig(t, true)
+			var log bytes.Buffer
+			rig.svc.Log = &log
+			rig.svc.WindowFile = path
+			res := rig.ask(t, "grokbot", "last ChatGPT prompt")
+			if res.Status != envelope.StatusFailed {
+				t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+			}
+			want := "The history agent could not use its window file (history-window.json), so it is not answering until the owner fixes it."
+			if res.Reply.Body != want {
+				t.Fatalf("reply %q, want %q", res.Reply.Body, want)
+			}
+			if rig.chatgpt.reads() != 0 || len(rig.ext.questions()) != 0 {
+				t.Fatalf("reader ran %d times, extractor saw %v", rig.chatgpt.reads(), rig.ext.questions())
+			}
+			if !strings.Contains(log.String(), "window file "+path) {
+				t.Fatalf("error not logged: %q", log.String())
+			}
+		})
+	}
+}
+
+// A live source clamps the owner's max to its list cap; the reply names
+// the window that was applied.
+func TestServeReplyNamesTheAppliedWindow(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.WindowFile = writeWindowFile(t, `{"max": 200}`)
+	rig.chatgpt.maxCap = MaxListCount
+	rig.chatgpt.convs = nil
+	rig.chatgpt.limited = LimitCount
+	rig.ext.q = Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"sourdough"}}
+	res := rig.ask(t, "grokbot", "the ChatGPT chat about sourdough")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	body := res.Reply.Body
+	if !strings.Contains(body, "the last 100 conversations, up to 30 days") || strings.Contains(body, "200") || strings.Contains(body, " 50 ") {
+		t.Fatalf("reply does not name the applied window of 100:\n%s", body)
+	}
+	if !strings.Contains(body, "Only the last 100 ChatGPT conversations were searched") {
+		t.Fatalf("reply lacks the count limit line:\n%s", body)
+	}
+}
+
+// A search the age cap cut short still shows its match, plus the fixed
+// limit line.
+func TestServeAgeLimitedSearchWithAMatchSaysSo(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.WindowFile = writeWindowFile(t, `{"days": 7}`)
+	rig.chatgpt.limited = LimitAge
+	rig.ext.q = Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"fox"}}
+	res := rig.ask(t, "grokbot", "the ChatGPT chats about the fox logo")
+	if res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	body := res.Reply.Body
+	for _, want := range []string{"Fox logo ideas", "make the ears bigger like this sketch", "Only ChatGPT conversations from the last 7 days were searched, so older ones may be missing."} {
+		if !strings.Contains(body, want) {
+			t.Errorf("reply missing %q:\n%s", want, body)
+		}
+	}
+	// A complete answer carries no limit line.
+	rig.chatgpt.limited = LimitNone
+	res = rig.ask(t, "grokbot", "the ChatGPT chats about the fox logo")
+	if strings.Contains(res.Reply.Body, "were searched") {
+		t.Fatalf("complete answer carries a limit line:\n%s", res.Reply.Body)
+	}
+}
+
+func TestLoadWindow(t *testing.T) {
+	if w, err := LoadWindow(filepath.Join(t.TempDir(), "missing.json")); err != nil || w != (Window{}) {
+		t.Fatalf("missing: %+v, %v", w, err)
+	}
+	if w, err := LoadWindow(writeWindowFile(t, `{}`)); err != nil || w != (Window{}) {
+		t.Fatalf("empty object: %+v, %v", w, err)
+	}
+	w, err := LoadWindow(writeWindowFile(t, `{"days": 3650, "max": 200}`))
+	if err != nil || w != (Window{Max: 200, MaxAge: 3650 * 24 * time.Hour}) {
+		t.Fatalf("upper bounds: %+v, %v", w, err)
+	}
+	w, err = LoadWindow(writeWindowFile(t, `{"days": 1, "max": 1}`))
+	if err != nil || w != (Window{Max: 1, MaxAge: 24 * time.Hour}) {
+		t.Fatalf("lower bounds: %+v, %v", w, err)
+	}
+	for _, bad := range []string{``, `[]`, `{"days": -1}`, `{"max": 0}`, `{"days": "90"}`, `{"days": 90} {"days": 1}`, `{"days": 1.5}`} {
+		if _, err := LoadWindow(writeWindowFile(t, bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
 	}
 }

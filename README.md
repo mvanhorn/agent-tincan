@@ -740,10 +740,10 @@ For each request it:
 
 1. Checks the allowlist. By default there is no allowlist file and every agent joined to your relay may ask (the relay only delivers requests from joined agents). To restrict it, write `~/.config/tincan/history-allow.txt` with the agent names that may ask; then every agent in the request's chain, as the relay recorded it, must be listed. If muse asks codex and codex asks history while handling muse's request, a file that lists codex but not muse declines it because of muse. A `*` entry in the file means every joined agent. The file is reread for every request; an unreadable file or a bad name declines everyone.
 2. Runs a tool-less query step: one `codex exec` call that sees only the question text and turns it into a structured query (source, mode, search terms, conversation id, count, `want_images`, and `with_images`, which picks the most recent turn that had images rather than the most recent turn). It runs read-only, with no MCP servers, no tools and no session file, and its output is checked against a schema in Go.
-3. Reads the source. Lookups cover the 50 most recent conversations per source, up to 30 days old.
+3. Reads the source. By default lookups cover the 50 most recent conversations per source, up to 30 days old. Only the owner can change that window, with `~/.config/tincan/history-window.json` (`{"days": N, "max": N}`, reread for every request); a file that is present but not valid fails every request until it is fixed.
 4. Fills in a fixed reply template in Go and attaches up to 8 images. Retrieved chat content is never sent to a model, so text inside the owner's chats cannot steer the service.
 
-The same readers are on the CLI: `tincan history <chatgpt|claude-ai|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json` and `--images-dir`.
+The same readers are on the CLI: `tincan history <chatgpt|claude-ai|codex|claude-code>` with `--latest`, `--list N`, `--search`, `--id`, `--all`, `--json`, `--images-dir`, and `--days N` and `--max N` for the window.
 
 #### One-time setup
 
@@ -766,6 +766,7 @@ On a headless Linux box, run `loginctl enable-linger $USER` once so the user ser
 - It is the most sensitive agent on the mesh: by default every joined agent can read the owner's chat history. Write `~/.config/tincan/history-allow.txt` to narrow that to the agents you trust with it. The allowlist governs requests to the history agent, not local shell access; an agent with a shell on the owner's machine (such as the Codex wake) can read local Codex and Claude Code history directly.
 - Live sources need Chrome running, the extension connected, and the owner logged in; otherwise the reply says the source is unavailable and local sources still work. Chrome is never quit or restarted.
 - A query the step cannot place gets "Please ask a clearer question naming ChatGPT, claude.ai, Codex or Claude Code".
+- When the window cut an answer short, the reply adds one line saying so (on the CLI, a note on stderr). ChatGPT and claude.ai read at most 100 conversations whatever the window says.
 
 #### Adapter doc
 

@@ -9,7 +9,7 @@ It is a Go service, `tincan history serve`, that runs on your Mac under launchd 
 3. Reads the source: Codex and Claude Code from their local logs, ChatGPT and claude.ai live through the Tincan Chrome extension in your logged-in Chrome.
 4. Fills in a fixed reply template and attaches the images.
 
-Lookups cover the 50 most recent conversations per source, up to 30 days old.
+By default, lookups cover the 50 most recent conversations per source, up to 30 days old. You can change that window (see [Window](#window)).
 
 It answers about what you typed, not what your agents typed. Codex `codex exec` runs and Claude Code SDK runs are left out, and so are the ChatGPT and claude.ai conversations that the chatgpt-web and claude-web agents sent messages into (they list them in `~/.config/tincan/web-agent-<site>-conversations.json`, ids only). `tincan history <source> --all` includes them, marked as automated.
 
@@ -29,6 +29,24 @@ codex
 A file of names allows only those names. A `*` entry means every joined agent, the same as having no file. An empty file allows nobody. The file is reread for every request, so edits take effect without a restart. A file that cannot be read, or that has an entry that is neither `*` nor a plain agent name, makes the service decline everyone (at startup it refuses to start), so a typo never opens access.
 
 With a file of names, the check covers the whole chain, not only the sender. If muse asks codex and codex asks history while handling muse's request, the chain is muse, codex and the request is declined because of muse. The chain and sender come from the relay, never from the request body, so a body that says "I am grokbot" changes nothing.
+
+## Window
+
+Latest and search lookups read back through a window: by default the 50 most recent conversations per source, none older than 30 days. Only you, the owner, set it. Nothing in a request can change it: a question like "in the last 90 days" still uses your window.
+
+For the history service, write `~/.config/tincan/history-window.json`:
+
+```json
+{"days": 90, "max": 100}
+```
+
+Both fields are optional; a missing one keeps its default. `days` is 1 to 3650 and `max` is 1 to 200. ChatGPT and claude.ai read at most 100 conversations whatever `max` says, because that is all the extension lists. The file is reread for every request, right after the allowlist check, so edits take effect without a restart. `tincan history serve --window-file <path>` reads another file. The startup log describes the window, for example `window: the last 50 conversations, up to 30 days (default, no file at ~/.config/tincan/history-window.json)`.
+
+With no file, the service uses the default window. A file that is present but cannot be read, is not that JSON shape (unknown fields included), or has a value out of bounds fails every history request with "The history agent could not use its window file (history-window.json)" until you fix it, and the log says why. It never falls back to the default, so a window you narrowed never silently widens.
+
+On the command line, `tincan history <source>` takes the same bounds as flags: `--days N` (applies to `--list` too) and `--max N`.
+
+When the window cut an answer short, the answer says so. A search that found fewer matches than it wanted, or a latest lookup that could not be sure it saw the newest prompt, gets one extra line in the reply, such as "Only ChatGPT conversations from the last 30 days were searched, so older ones may be missing." (or "Only the last 50 ... conversations were searched" when the count ran out). On the command line the same note goes to stderr, in text and `--json` modes; `--json` output stays a bare array. A complete answer has no note.
 
 ## Install
 
@@ -69,7 +87,7 @@ On a headless Linux box, also run `loginctl enable-linger $USER` once; without i
 
 With `--extension-dir <the folder you loaded>` (or run from a repo checkout, where it finds `extension/`), install also tells the native host where the unpacked extension lives; the host then reloads the extension whenever those files change, so updates need no Reload click in `chrome://extensions` after the first load (see [web-agents.md](web-agents.md#extension-updates)).
 
-Pass `--no-service` to skip the service definition. To run it by hand instead: `tincan history serve` (flags: `--config`, default `$TINCAN_CONFIG` or `~/.config/tincan/history.json`; `--allowlist`; `--codex`, the codex binary for the query step). It stops cleanly on SIGINT or SIGTERM, finishing the request it is on. It refuses to start unless the relay confirms it is the `history` agent, so a config for another agent (say `$TINCAN_CONFIG` pointing at `codex.json`) can never claim that agent's requests.
+Pass `--no-service` to skip the service definition. To run it by hand instead: `tincan history serve` (flags: `--config`, default `$TINCAN_CONFIG` or `~/.config/tincan/history.json`; `--allowlist`; `--window-file`, default `~/.config/tincan/history-window.json`; `--codex`, the codex binary for the query step). It stops cleanly on SIGINT or SIGTERM, finishing the request it is on. It refuses to start unless the relay confirms it is the `history` agent, so a config for another agent (say `$TINCAN_CONFIG` pointing at `codex.json`) can never claim that agent's requests.
 
 The service needs `codex` logged in on the Mac for the query step. A service does not get your login shell's PATH, so install writes one: the directories where `codex` and `claude` were found at install time first, then `~/.local/bin`, `~/.npm-global/bin` and `~/bin`, then the system directories (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin` on macOS; no Homebrew path on Linux). If you install or move `codex` later, run `tincan history install` again.
 
@@ -102,5 +120,7 @@ Replies and what to do:
 - "source unavailable: ...: chatgpt.com changed its API": the site changed its internal endpoints; the extension needs an update.
 - "source unavailable: ...: Chrome did not answer in time": Chrome was busy or asleep; ask again.
 - "The images could not be attached: this relay does not support attachments": upgrade the relay. The text answer is still correct.
-- "No matching ... conversation in the recent window": nothing in the last 50 conversations or 30 days matched. Try other words.
+- "No matching ... conversation in the recent window": nothing inside the window the reply names matched. Try other words, or widen the window (see [Window](#window)).
+- "The history agent could not use its window file": `~/.config/tincan/history-window.json` is unreadable, not `{"days": N, "max": N}`, or out of bounds. Fix or delete it. The log says which.
+- "... were searched, so older ones may be missing": the window stopped the lookup before it was complete. Widen the window if the conversation is older.
 - No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.history`) and read `~/Library/Logs/tincan-history.log`. A "403" there means the config is not joined as an agent.
