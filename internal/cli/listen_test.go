@@ -188,10 +188,13 @@ func TestListenOnceStopsPresence(t *testing.T) {
 	if err := listen(t.Context(), r, "sleep 0.2", true); err != nil {
 		t.Fatal(err)
 	}
-	during := len(f.presencePeeks())
-	if during == 0 {
+	if len(f.presencePeeks()) == 0 {
 		t.Fatal("no presence peeks while the command ran")
 	}
+	// A peek already in flight when presence stopped can still reach the
+	// server after listen returns; let it land before taking the baseline.
+	time.Sleep(50 * time.Millisecond)
+	during := len(f.presencePeeks())
 	time.Sleep(100 * time.Millisecond)
 	if after := len(f.presencePeeks()); after != during {
 		t.Fatalf("presence peeks went on after listen returned: %d then %d", during, after)
