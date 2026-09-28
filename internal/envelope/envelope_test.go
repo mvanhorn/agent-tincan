@@ -274,3 +274,5 @@ func TestParsePing(t *testing.T) {
 		t.Fatalf("ping: %+v %v", req, err)
 	}
 }
+
+// stack probe
