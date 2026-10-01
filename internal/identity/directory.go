@@ -8,7 +8,10 @@ package identity
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -67,6 +70,10 @@ type Agent struct {
 }
 
 // Invite is a pending one-time code.
+//
+// Code carries the raw code only at mint time, on the way to the admin that
+// asked for it. Everything persisted (see PutInvite) holds only the digest
+// produced by hashInviteCode, never the raw code.
 type Invite struct {
 	Code    string
 	Name    string
@@ -89,8 +96,12 @@ type Store interface {
 	SetAgentKind(ctx context.Context, name, kind string) (bool, error)
 	// PutInvite stores inv and retires any earlier unredeemed code for the
 	// same name, so re-inviting a name leaves only the newest code valid.
+	// Callers pass inv.Code already digested (see hashInviteCode); the raw
+	// code never reaches the store. Implementations persist the value
+	// opaquely — they hold no pepper and perform no hashing.
 	PutInvite(ctx context.Context, inv Invite) error
 	// TakeInvite removes and returns the invite, so a code works once.
+	// Callers pass the digest produced by hashInviteCode, not the raw code.
 	TakeInvite(ctx context.Context, code string) (Invite, bool, error)
 }
 
@@ -104,24 +115,61 @@ type Config struct {
 	AdminLogins []string
 	// NoAutoRebind turns off re-admitting rebuilt machines (see ResolveAgent).
 	NoAutoRebind bool
+	// InvitePepper is the relay-local secret used to digest invite codes
+	// before they are persisted (see hashInviteCode). When empty, NewDirectory
+	// generates an ephemeral one: fine for tests and single-process relays,
+	// but a production relay must pass a pepper persisted in its state dir so
+	// outstanding invites survive a restart.
+	InvitePepper []byte
 	// Now overrides the clock in tests.
 	Now func() time.Time
 }
 
 // Directory maps tailnet nodes to agent names.
 type Directory struct {
-	store Store
-	who   Resolver
-	cfg   Config
-	mu    sync.Mutex // serializes join so a name moves atomically
+	store        Store
+	who          Resolver
+	cfg          Config
+	invitePepper []byte
+	mu           sync.Mutex // serializes join so a name moves atomically
 }
 
-// NewDirectory builds a Directory.
+// NewDirectory builds a Directory. A configured InvitePepper must be exactly
+// 32 bytes; anything else panics, so a misconfigured key fails fast instead
+// of silently weakening the digest.
 func NewDirectory(store Store, who Resolver, cfg Config) *Directory {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Directory{store: store, who: who, cfg: cfg}
+	pepper := cfg.InvitePepper
+	if len(pepper) == 0 {
+		// Ephemeral pepper: outstanding invites are lost on restart, which is
+		// acceptable for tests. Production relays pass a persisted pepper.
+		pepper = make([]byte, 32)
+		if _, err := rand.Read(pepper); err != nil {
+			panic(fmt.Sprintf("identity: cannot generate invite pepper: %v", err))
+		}
+	} else {
+		if len(pepper) != 32 {
+			panic(fmt.Sprintf("identity: invite pepper has %d bytes, want 32", len(pepper)))
+		}
+		// Copy: the Directory must not retain the caller's buffer, which the
+		// caller could mutate after minting and silently invalidate
+		// outstanding invites.
+		pepper = append([]byte(nil), pepper...)
+	}
+	return &Directory{store: store, who: who, cfg: cfg, invitePepper: pepper}
+}
+
+// hashInviteCode returns the hex HMAC-SHA256 of the normalized code under the
+// relay's invite pepper. Only this digest is ever persisted; the raw code is
+// shown once to the admin that minted it and never stored. The pepper makes
+// the 40-bit code space unsearchable to anyone holding only the database.
+func hashInviteCode(pepper []byte, code string) string {
+	norm := strings.ToUpper(strings.TrimSpace(code))
+	mac := hmac.New(sha256.New, pepper)
+	mac.Write([]byte(norm))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // Attribute returns the agent name for the node behind remoteAddr when the
@@ -253,7 +301,9 @@ func (d *Directory) InviteKind(ctx context.Context, remoteAddr, name, kind strin
 	if err != nil {
 		return "", err
 	}
-	inv := Invite{Code: code, Name: name, Kind: kind, Expires: d.cfg.Now().Add(InviteTTL)}
+	// Persist only the digest; the raw code is returned once to the admin and
+	// never stored.
+	inv := Invite{Code: hashInviteCode(d.invitePepper, code), Name: name, Kind: kind, Expires: d.cfg.Now().Add(InviteTTL)}
 	if err := d.store.PutInvite(ctx, inv); err != nil {
 		return "", err
 	}
@@ -271,7 +321,8 @@ func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, 
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	inv, ok, err := d.store.TakeInvite(ctx, strings.ToUpper(strings.TrimSpace(code)))
+	// Look up by digest: the store never sees the raw code.
+	inv, ok, err := d.store.TakeInvite(ctx, hashInviteCode(d.invitePepper, code))
 	if err != nil {
 		return "", err
 	}

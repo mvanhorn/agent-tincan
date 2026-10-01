@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS agents (
   version   TEXT
 );
 CREATE TABLE IF NOT EXISTS invites (
-  code    TEXT PRIMARY KEY,
+  code    TEXT PRIMARY KEY, -- hex HMAC digest of the one-time code, never the raw code
   name    TEXT NOT NULL,
   expires INTEGER NOT NULL,
   kind    TEXT
@@ -141,6 +141,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateInvites(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate invites: %w", err)
+	}
+	if err := s.migrateInviteCodeHash(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate invite code hash: %w", err)
 	}
 	if err := s.migrateReplySeen(); err != nil {
 		db.Close()
@@ -350,6 +354,20 @@ func (s *Store) migrateInvites() error {
 	return err
 }
 
+// migrateInviteCodeHash invalidates invites minted before codes were stored
+// as digests. Those rows hold raw one-time codes, so they cannot be carried
+// forward; every invite is at most ten minutes old (see identity.InviteTTL),
+// so an admin simply mints a fresh one. Only legacy-shaped rows are deleted:
+// a valid digest is always 64 lowercase hex chars, so rows already in that
+// shape (mixed tables, restored backups) are preserved. The single DELETE
+// keeps detection and removal atomic — no concurrent insert can slip between
+// them. The invites.code column keeps its name but now holds the hex HMAC
+// digest — see identity.hashInviteCode.
+func (s *Store) migrateInviteCodeHash() error {
+	_, err := s.db.Exec(`DELETE FROM invites WHERE length(code) != 64 OR code GLOB '*[^0-9a-f]*'`)
+	return err
+}
+
 // agentsShape reports whether the agents table has a kind column and whether
 // node_id carries a UNIQUE constraint.
 func (s *Store) agentsShape() (hasKind, uniqueNode bool, err error) {
@@ -544,7 +562,8 @@ func nullable(v string) any {
 }
 
 // PutInvite stores inv and retires any earlier unredeemed code for the same
-// name, so only the newest invite for a name works.
+// name, so only the newest invite for a name works. Callers pass the digest
+// from identity.hashInviteCode in inv.Code; the raw code is never persisted.
 func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -561,6 +580,9 @@ func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {
 	return tx.Commit()
 }
 
+// TakeInvite removes and returns the invite for a code digest, so a code
+// works once. Callers pass the digest from identity.hashInviteCode; the raw
+// code never reaches the database.
 func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, bool, error) {
 	var inv identity.Invite
 	var exp int64

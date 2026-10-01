@@ -12,6 +12,38 @@
 - Clarification does not add a trust boundary: only a request's claimed target can ask for input, and only its original sender can answer. Questions and answers stay on the same request, with the same chain and hop rules. They are bodies like other messages: readable by the relay, absent from wake messages, and represented only by byte lengths in clarification audit details.
 - Search has the same visibility as trace: joined agents can search requests and replies only in chains they took part in; admins can search every chain. Visibility is unchanged. Search indexes existing stored bodies, not attachment contents, and results include only attachment names. A `search` audit event records the result count, never query text.
 
+## Invitation storage and upgrades
+
+The relay persists HMAC-SHA256 digests of one-time invitation codes, not the
+codes themselves. The admin still receives a code once and `tincan join`
+accepts it unchanged; existing clients do not need to upgrade together.
+
+The HMAC uses a 32-byte relay-local `invite-pepper` file in `--state-dir`.
+Keep this file private (0600) and preserve it when moving or restoring relay
+state. A missing file is created on startup; if `relay.db` already exists,
+the relay warns because a newly created key cannot redeem invitations minted
+with a lost key. First upgrade from raw-code storage also creates this file.
+
+Startup publishes a fully written, synced file without replacing an existing
+winner, so concurrent initializers use the same completed key. On Linux and
+macOS, existing keys are opened without following the final symlink, then
+validated and read through that same file handle. Non-regular files, permissions
+that allow group/other access, and lengths other than 32 bytes are rejected.
+Other platforms currently fail closed rather than using an unsafe fallback.
+A filesystem without hard-link support cannot perform first-time creation.
+
+Upgrading invalidates outstanding legacy invitations; mint new ones after the
+upgrade. Existing digest-shaped invitations survive reopening with the same
+key. Agents, messages and the audit log are not reset. Deleting legacy rows is
+not secure erasure of old SQLite pages, journals or backups. Do not run old and
+new relay versions against the same state concurrently.
+
+This is defence in depth for disclosure of the database **without** the key.
+It does not encrypt messages or protect against access to both the database
+and key, a compromised relay host, or another process running as the relay
+user. Keep the state directory and its parents under the operator's control;
+this is not a hostile-filesystem sandbox or a power-loss durability guarantee.
+
 ## Rebuilt machines
 
 Rebuilding a sandbox or VM usually creates a new Tailscale node: a new stable node ID and IP under the same machine name, or that name with a `-1` style suffix if the old node has not expired yet. The relay re-admits such a machine as its old agent on its first call, with no new invite, when all of these hold:

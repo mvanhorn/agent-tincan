@@ -449,8 +449,10 @@ func TestInviteKindOnSQLite(t *testing.T) {
 	}
 }
 
-// An invites table from before invite kinds gains the column on open and
-// keeps its pending codes.
+// An invites table from before invite kinds gains the column on open; its
+// legacy raw codes are invalidated by the digest migration (a declared
+// compatibility break — see TestInvitesTableGainsKindColumn), while a new
+// digest row keeps its kind across reopening.
 func TestOldInvitesTableMigratesOnOpen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	old, err := sql.Open("sqlite", path)
@@ -469,15 +471,16 @@ func TestOldInvitesTableMigratesOnOpen(t *testing.T) {
 
 	s, c := open(t, path)
 	ctx := context.Background()
-	if inv, ok, err := s.TakeInvite(ctx, "AAAA-BBBB"); err != nil || !ok || inv.Name != "muse" || inv.Kind != "" {
-		t.Fatalf("old invite after migration = %+v, %v, %v", inv, ok, err)
+	if inv, ok, err := s.TakeInvite(ctx, "AAAA-BBBB"); err != nil || ok {
+		t.Fatalf("legacy raw invite after migration = %+v, %v, %v; want it invalidated", inv, ok, err)
 	}
-	if err := s.PutInvite(ctx, identity.Invite{Code: "CCCC-DDDD", Name: "codex", Kind: "codex", Expires: c.t}); err != nil {
+	digest := strings.Repeat("c4", 32) // stand-in for a real 64-hex-char digest
+	if err := s.PutInvite(ctx, identity.Invite{Code: digest, Name: "codex", Kind: "codex", Expires: c.t}); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
 	s2, _ := open(t, path)
-	if inv, ok, _ := s2.TakeInvite(ctx, "CCCC-DDDD"); !ok || inv.Kind != "codex" {
+	if inv, ok, _ := s2.TakeInvite(ctx, digest); !ok || inv.Kind != "codex" {
 		t.Fatalf("kind after reopen = %+v", inv)
 	}
 }

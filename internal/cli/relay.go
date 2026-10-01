@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -133,6 +135,106 @@ func (f relayFlags) directoryConfig() identity.Config {
 	return identity.Config{Admins: f.admins, AdminLogins: f.adminLogins, NoAutoRebind: f.noRebind}
 }
 
+// loadOrCreateInvitePepper returns the relay's invite-code pepper, creating
+// and persisting a fresh 256-bit one on first run. A private temporary file
+// is fully written, synced and closed before an atomic, no-replace link
+// publishes it. Exactly one writer wins; others read its complete key.
+// Filesystems without hard-link support fail closed. An existing file is
+// validated before use — it must be a regular file (never a symlink),
+// exactly 32 bytes, and inaccessible to group/other — and anything else
+// fails closed. A missing key beside an existing database is never silently
+// replaced: it is either a first upgrade (expected) or an accidental loss
+// (outstanding invites are stranded), and the operator is told which.
+func loadOrCreateInvitePepper(stateDir string) ([]byte, error) {
+	path := filepath.Join(stateDir, "invite-pepper")
+	if b, err := readInvitePepperFile(path); err == nil {
+		return b, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, fmt.Errorf("generate invite pepper: %w", err)
+	}
+	// Never expose a partially written file at the final name. O_EXCL at
+	// that name elects one writer but still lets concurrent readers see an
+	// empty file before its first write. CreateTemp uses owner-only mode.
+	f, err := os.CreateTemp(stateDir, ".invite-pepper-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary invite pepper: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("write invite pepper: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("sync invite pepper: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close invite pepper: %w", err)
+	}
+	// Link is atomic and does not replace an existing destination. Rename
+	// would let a losing initializer overwrite the winner on Unix.
+	if err := os.Link(f.Name(), path); err != nil {
+		if os.IsExist(err) {
+			winner, readErr := readInvitePepperFile(path)
+			if readErr != nil {
+				return nil, fmt.Errorf("read the winning invite pepper: %w", readErr)
+			}
+			return winner, nil
+		}
+		return nil, fmt.Errorf("publish invite pepper: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "relay.db")); err == nil {
+		log.Printf("warning: created a fresh invite pepper next to an existing relay.db: " +
+			"on a first upgrade from raw-code invites this is expected (legacy invites are invalidated); " +
+			"if the old invite-pepper file was lost, outstanding invites are stranded — restore it from backup")
+	}
+	return b, nil
+}
+
+// readInvitePepperFile reads an existing pepper key, refusing symlinks,
+// non-regular files, wrong permissions, and wrong lengths. A missing file
+// returns an os.IsNotExist error so the caller can create it.
+func readInvitePepperFile(path string) ([]byte, error) {
+	return readInvitePepperFileWithOpen(path, openInvitePepperFile)
+}
+
+// The opener is passed explicitly so validation can be exercised against
+// the actual opened file without timing-dependent filesystem tests.
+func readInvitePepperFileWithOpen(path string, open func(string) (*os.File, error)) ([]byte, error) {
+	f, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Validate the handle that will be read, never a separately resolved path.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("invite pepper %s is not a regular file", path)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("invite pepper %s is accessible beyond its owner (mode %04o): refusing to use it", path, perm)
+	}
+	if fi.Size() != 32 {
+		return nil, fmt.Errorf("invite pepper %s has %d bytes, want 32", path, fi.Size())
+	}
+	// Bound reads even if another process changes the file after Stat.
+	b, err := io.ReadAll(io.LimitReader(f, 33))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != 32 {
+		return nil, fmt.Errorf("invite pepper %s has %d bytes, want 32", path, len(b))
+	}
+	return b, nil
+}
+
 func defaultStateDir() string {
 	if dir, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(dir, "tincan-relay")
@@ -175,6 +277,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err := os.MkdirAll(f.stateDir, 0o700); err != nil {
 		return err
 	}
+	pepper, err := loadOrCreateInvitePepper(f.stateDir)
+	if err != nil {
+		return err
+	}
 	st, err := store.Open(filepath.Join(f.stateDir, "relay.db"))
 	if err != nil {
 		return err
@@ -200,7 +306,9 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		log.Printf("no --admin machines set: invites only work from the local admin socket")
 	}
 
-	dir := identity.NewDirectory(st, identity.WithVirtual(who), f.directoryConfig())
+	dirCfg := f.directoryConfig()
+	dirCfg.InvitePepper = pepper
+	dir := identity.NewDirectory(st, identity.WithVirtual(who), dirCfg)
 	srv := relay.New(dir, st, f.relayConfig())
 	urls := who.SelfURLs(ctx, f.port)
 	srv.SetURLs(urls)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -88,8 +89,10 @@ func TestAgentsTableGainsLoginColumn(t *testing.T) {
 }
 
 // An invites table from before invites carried a kind gains the column on
-// open: a pending code survives with no kind, and a kind stored afterwards
-// reads back after reopening.
+// open. Pending raw codes do NOT survive: the digest migration invalidates
+// them — a declared compatibility break, since invites live at most ten
+// minutes and the admin simply mints a fresh one. New digest rows round-trip
+// through reopening, including past the migration running again on open.
 func TestInvitesTableGainsKindColumn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	old, err := sql.Open("sqlite", path)
@@ -108,15 +111,16 @@ func TestInvitesTableGainsKindColumn(t *testing.T) {
 
 	s, c := open(t, path)
 	ctx := context.Background()
-	if inv, ok, err := s.TakeInvite(ctx, "OLDC-ODE2"); err != nil || !ok || inv.Name != "instinct" || inv.Kind != "" {
-		t.Fatalf("old invite after migration = %+v, %v, %v", inv, ok, err)
+	if inv, ok, err := s.TakeInvite(ctx, "OLDC-ODE2"); err != nil || ok {
+		t.Fatalf("legacy raw invite after migration = %+v, %v, %v; want it invalidated", inv, ok, err)
 	}
-	if err := s.PutInvite(ctx, identity.Invite{Code: "NEWC-ODE3", Name: "muse", Kind: "hermes", Expires: c.t.Add(identity.InviteTTL)}); err != nil {
+	digest := strings.Repeat("a3", 32) // stand-in for a real 64-hex-char digest
+	if err := s.PutInvite(ctx, identity.Invite{Code: digest, Name: "muse", Kind: "hermes", Expires: c.t.Add(identity.InviteTTL)}); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
 	s2, _ := open(t, path)
-	if inv, ok, err := s2.TakeInvite(ctx, "NEWC-ODE3"); err != nil || !ok || inv.Kind != "hermes" || inv.Name != "muse" {
-		t.Fatalf("invite after reopen = %+v, %v, %v", inv, ok, err)
+	if inv, ok, err := s2.TakeInvite(ctx, digest); err != nil || !ok || inv.Kind != "hermes" || inv.Name != "muse" {
+		t.Fatalf("digest invite after reopen = %+v, %v, %v", inv, ok, err)
 	}
 }
