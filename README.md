@@ -288,7 +288,7 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 
 - `--admin` lists the machine names allowed to invite and remove agents. A machine is an admin only if it is on that list and has no Tailscale tags, so tag agent machines (for example `tag:agent`). `--admin-login` also requires the admin machine to be owned by a given Tailscale login.
 - On the relay host itself, admin commands can use the local socket: `tincan invite muse --socket <state-dir>/admin.sock`. The relay prints the path at startup. The default state dir is `~/.config/tincan-relay` on Linux and `~/Library/Application Support/tincan-relay` on macOS; quote the macOS path, it has a space.
-- State (the database, `wake.json`, attachments, the audit log) lives in `--state-dir`. Run the relay as its own OS user, under systemd or launchd, so agents cannot read its state.
+- State (the database, `invite-pepper`, `wake.json`, attachments, the audit log) lives in `--state-dir`. Back up `invite-pepper` with the database: it is required to redeem outstanding invitations after a restore. Run the relay as its own OS user, under systemd or launchd, so agents cannot read its state.
 - To restart or upgrade the relay, stop it with SIGTERM or SIGINT (`systemctl restart`, `launchctl kickstart -k`, `kill`, or Ctrl-C). Held long polls and get-reply waits answer "nothing yet" at once, so agents simply poll again once it is back. Calls still in flight get up to 10 seconds to finish, then the relay closes the store and exits; a relay still stuck 20 seconds after the signal logs the step it was on and exits anyway. A second SIGTERM or SIGINT exits at once. No SIGKILL is needed. Wakes scheduled but not yet sent are dropped on the way down, and the restarted relay schedules them again for every webhook or email agent that still has queued requests or unseen replies.
 
 The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway (see [ChatGPT](#chatgpt-through-the-oauth-mcp-gateway)).
@@ -520,7 +520,7 @@ It checks the saved join and the relay, whether the binary is the relay's curren
 
 ### When the relay's address changes
 
-Run the relay the default way, as its own tailnet node (no `--listen`), and keep its `--state-dir` (tsnet state, `relay.db`, `relay.key`, `wake.json`) in your backups. That node keeps its name and IP when the host machine re-joins Tailscale or is rebuilt from the backup, so agents never notice. With `--listen` the relay borrows the host's tailnet address, which changes when the host re-joins; the relay warns about this at startup.
+Run the relay the default way, as its own tailnet node (no `--listen`), and keep its `--state-dir` (tsnet state, `relay.db`, `relay.key`, `invite-pepper`, `wake.json`) in your backups. `invite-pepper` must be restored with `relay.db` or outstanding invitations minted before the restore cannot be redeemed. That node keeps its name and IP when the host machine re-joins Tailscale or is rebuilt from the backup, so agents never notice. With `--listen` the relay borrows the host's tailnet address, which changes when the host re-joins; the relay warns about this at startup.
 
 Agents find a relay that moved anyway, with nothing to configure:
 

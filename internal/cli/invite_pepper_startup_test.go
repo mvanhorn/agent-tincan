@@ -2,11 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
 // Only disposable test state is used; never print the fixture contents.
@@ -107,5 +111,59 @@ func TestInvitePepperIncompleteFileRemainsRejected(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatal("failed validation created temporary files")
+	}
+}
+
+type fileBackedInviteResolver struct {
+	node identity.Node
+}
+
+func (r fileBackedInviteResolver) WhoIs(context.Context, string) (identity.Node, error) {
+	return r.node, nil
+}
+
+// The production persistence boundary must survive a relay restart: mint with
+// the SQLite store and persisted pepper, close both, reopen them, and redeem
+// the raw code through a fresh Directory.
+func TestFileBackedInviteRoundTripAcrossRelayRestart(t *testing.T) {
+	ctx := context.Background()
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(stateDir, "relay.db")
+	who := fileBackedInviteResolver{node: identity.Node{ID: "node-muse", Name: "muse"}}
+
+	pepper, err := loadOrCreateInvitePepper(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstStore, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := identity.NewDirectory(firstStore, who, identity.Config{InvitePepper: pepper})
+	code, err := first.Invite(ctx, identity.LocalAdmin, "muse")
+	if err != nil {
+		firstStore.Close()
+		t.Fatal(err)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedPepper, err := loadOrCreateInvitePepper(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pepper, restartedPepper) {
+		t.Fatal("restart loaded a different invite pepper")
+	}
+	secondStore, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondStore.Close()
+	second := identity.NewDirectory(secondStore, who, identity.Config{InvitePepper: restartedPepper})
+	name, err := second.Join(ctx, "100.64.0.2:1234", code)
+	if err != nil || name != "muse" {
+		t.Fatalf("join after SQLite and relay restart = %q, %v", name, err)
 	}
 }
