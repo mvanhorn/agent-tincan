@@ -50,11 +50,15 @@ A1. Check Tailscale. Run `tailscale status`. This machine should be signed in to
 
     On Grok Bot, or any host that is wiped and keeps only your home folder, do
     not use the default Tailscale install: every wipe would create a new device
-    for your owner to approve. Ask your owner once for a reusable, pre-approved
-    auth key with your tag (for example tag:grokbot), saved as your secret env
-    var TS_AUTHKEY (never in chat). Then follow docs/adapters/grokbot.md:
-    userspace tailscaled with its state in ~/.config/tailscale, started by
-    examples/grokbot/tincan-up.sh, which you run hourly on this machine.
+    for your owner to approve. Ask your owner once for a one-off (not
+    reusable), pre-approved auth key with your tag (for example tag:grokbot),
+    saved as your secret env var TS_AUTHKEY (never in chat). Then follow
+    docs/adapters/grokbot.md: userspace tailscaled with its state in
+    ~/.config/tailscale, started by examples/grokbot/tincan-up.sh, which you
+    run hourly on this machine. After the first login, ask your owner to
+    remove TS_AUTHKEY; your identity now survives wipes. If the script exits 3,
+    ask your owner for a fresh one-off key. Do not run the relay as your own
+    user: that would give you the owner's admin rights.
 
 A2. Start the relay once in the foreground to register it on the tailnet:
 

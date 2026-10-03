@@ -2,7 +2,7 @@
 
 > **Read this first.** Grok Bot computers are regularly, often daily, wiped and restored onto a fresh machine. Only the home folder and the workspace come back. System folders (`/var/lib`, `/usr/local`, `/var/run`), root-owned 0600 files and `~/.local/state` do not.
 >
-> If you set up Tailscale the default way (installed as a system package, state in `/var/lib/tailscale`, signed in through a browser), every wipe makes a new device that someone has to approve in the Tailscale admin. That turns into a daily chore. **Set it up once with a reusable, pre-approved, tagged auth key and keep Tailscale's state in the home folder.** After that the box rejoins on its own, as the same device.
+> If you set up Tailscale the default way (installed as a system package, state in `/var/lib/tailscale`, signed in through a browser), every wipe makes a new device that someone has to approve in the Tailscale admin. That turns into a daily chore. **Set it up once with a one-off, pre-approved, tagged auth key and keep Tailscale's state in the home folder.** After that the box rejoins on its own, as the same device, and the key is no longer needed.
 
 The same setup works on any sandbox host that keeps only the user's home folder between rebuilds.
 
@@ -15,7 +15,7 @@ The same setup works on any sandbox host that keeps only the user's home folder 
 | Relay state, if the relay runs here | `~/.config/tincan-relay/` (the default `--state-dir`) | yes |
 | Grok Bot's tincan config | `~/.config/tincan/` | yes |
 | tailscaled socket and log | `~/.cache/tailscale/` | recreated each start |
-| Auth key | Grok Bot secret `TS_AUTHKEY` | yes, never on disk |
+| Auth key | Grok Bot secret `TS_AUTHKEY`, only until the first login | not needed after the first login; remove it |
 
 ## 1. Make a tag and an auth key (once, in the Tailscale admin)
 
@@ -25,17 +25,23 @@ Add a tag that an admin owns to the tailnet policy:
 "tagOwners": { "tag:grokbot": ["autogroup:admin"] }
 ```
 
-If your policy is not allow-all, also let `tag:grokbot` reach the relay (TCP 80).
+Limit what the tag can reach. Grok Bot only needs the relay, so allow `tag:grokbot` to reach the relay on tcp:80 (or the port your relay listens on) and nothing else. For example, with the relay's tag or tailnet IP in place of `<relay>`:
+
+```json
+"acls": [{ "action": "accept", "src": ["tag:grokbot"], "dst": ["<relay>:80"] }]
+```
 
 Then go to Settings > Keys > Generate auth key:
 
-- **Reusable: on.** The key is used again whenever the node identity is lost.
+- **Reusable: off.** A one-off key enrolls this box once. Grok Bot's shell can read its own environment, so a key left there could be leaked, and a reusable one would let whoever holds it add more tagged devices with no approval.
 - **Pre-approved: on.** This one matters most. If your tailnet has device approval turned on, a key without it still leaves every new device waiting for approval, which is the daily chore again.
 - **Ephemeral: off.** An ephemeral node is removed when it goes offline, and a wipe takes it offline.
 - **Tags: `tag:grokbot`.**
-- Expiry: up to 90 days. It only matters when the identity is lost. Tagged devices have node key expiry off by default, so a box that keeps its state keeps working after the auth key expires. Put the renewal date in your calendar.
+- Expiry: short, a day is enough. The key is only used for the first login. Tagged devices have node key expiry off by default, so a box that keeps its state keeps working after the auth key expires.
 
 Add the key to Grok Bot as a secret environment variable named `TS_AUTHKEY`. Never put it in a file, a script or a chat. The key must start with `tskey-auth-`. An API access token or OAuth client secret will not work.
+
+After the first successful login, remove `TS_AUTHKEY` from Grok Bot's secrets. The identity now lives in `~/.config/tailscale` and survives wipes, so the key is not needed again. If the identity is ever lost, the script exits 3 and the owner issues a fresh one-off key.
 
 ## 2. Run tailscaled as your user (no systemd, no root)
 
@@ -54,18 +60,19 @@ One port serves both SOCKS5 and HTTP. Every `tailscale` command needs `--socket=
 
 [`examples/grokbot/tincan-up.sh`](../../examples/grokbot/tincan-up.sh) lives in the agent-tincan repo. Copy it to `~/.local/bin/` and make it executable. It is idempotent and needs no sudo. It:
 
-1. Installs `tailscale` and `tailscaled` into `~/.local/lib/tailscale` if they are missing. It downloads the static build from pkgs.tailscale.com and checks its sha256. Set `TS_VERSION` to pin a version.
+1. Installs `tailscale` and `tailscaled` into `~/.local/lib/tailscale` if they are missing. It downloads the static build from pkgs.tailscale.com and checks its sha256. Set `TS_VERSION` to pin a version. If the installed version differs from `TS_VERSION`, it installs the pinned one and restarts tailscaled.
 2. Starts tailscaled as above if nothing answers on the socket.
-3. Runs `tailscale up` only when the node is logged out, and only with `TS_AUTHKEY`. It passes the key as `--auth-key=file:<temp file>`, a 0600 file it deletes right away, so the key never appears in the process list. It never starts a browser login. Settings: `TS_HOSTNAME` (default `grokbot`) and `TS_TAGS` (default `tag:grokbot`, which must match the key).
-4. With `START_RELAY=1`, starts `tincan relay` if it is not running.
-5. Runs `tincan doctor`.
+3. Brings the node up. A node that still has its identity but is stopped comes up without a key. A logged-out node logs in only with `TS_AUTHKEY`, passed to `tailscale up` on stdin (`--auth-key=file:/dev/stdin`), so the key is never written to disk or shown in the process list. It never starts a browser login. It then waits for the node to be running. Settings: `TS_HOSTNAME` (default `grokbot`) and `TS_TAGS` (default `tag:grokbot`, which must match the key).
+4. Checks that `tincan` is installed at `~/.local/bin/tincan` (or `TINCAN`). A missing or non-executable `tincan` is unhealthy.
+5. With `START_RELAY=1`, starts `tincan relay` if no relay is running as this user, and checks that it stayed up. `RELAY_ADMIN` sets its `--admin` list. Read section 5 before using this.
+6. Runs `tincan doctor`.
 
 | Exit | Meaning | Fix |
 |---|---|---|
 | 0 | healthy | |
-| 1 | something unhealthy | read the output, run `tincan doctor` |
-| 2 | device waiting for approval | approve it in the admin under Machines, then make a new key with Pre-approved on |
-| 3 | auth key missing, the wrong type, expired or rejected | generate a new key as in step 1 and replace the secret |
+| 1 | something unhealthy, including a missing `tincan` | read the output, run `tincan doctor` |
+| 2 | device waiting for approval | approve it in the admin under Machines; next time make the key with Pre-approved on |
+| 3 | logged out and the auth key is missing, the wrong type, expired, already used or rejected | the owner generates a fresh one-off key as in step 1 and sets the secret, then removes it after the login |
 
 After an ordinary wipe, `~/.config/tailscale` comes back, so the script restarts the same device with the same name and IP. It does not use the key, and nothing needs approval.
 
@@ -80,13 +87,19 @@ tincan join <code> --relay http://tincan-relay --proxy http://localhost:1055   #
 
 Give Grok Bot the tools by adding `tincan mcp` as an MCP server (use the full path `~/.local/bin/tincan`), or let it call the `tincan` CLI from its shell.
 
-## 5. Running the relay here (optional)
+## 5. Where the relay runs
 
-The box is always on, so it can host the relay. Keep the relay's `--state-dir` in the home folder (the default, `~/.config/tincan-relay`). That folder holds the relay's own Tailscale node, so the relay keeps its name and address across wipes.
+Run the relay on a separate always-on host, or at least as a separate OS user, as the [README](../../README.md) says. That is the default for Grok Bot too:
 
-Start the relay with `TS_AUTHKEY` removed from its environment (`env -u TS_AUTHKEY tincan relay`; the script does this). Otherwise, if the relay's state were ever lost, it would quietly register as a new node with Grok Bot's tag instead of asking for a login.
+```bash
+tincan relay --admin <your-laptop>   # on the relay host, as the relay's own user
+```
 
-Normally the relay runs as a separate OS user so the agent cannot read its database or `wake.json`. On a Grok Bot box only the main user's home folder survives a wipe, so in practice the relay runs as the same user as Grok Bot, and Grok Bot can read the relay's state. If that matters to you, host the relay on another always-on machine.
+Do not run the relay as Grok Bot's user. The relay's local admin socket (`admin.sock` in its state dir) is protected only by file mode 0600, so any process running as the relay's user can use it with the owner's authority: invite and remove agents, and approve held requests. That user can also read the relay's database and the webhook and email secrets in `wake.json`. If the relay runs as Grok Bot's user, Grok Bot is effectively the owner.
+
+On a Grok Bot box only the main user's home folder survives a wipe, so a separate relay user there would lose its state on every wipe. Host the relay on another always-on machine instead.
+
+If you run a relay here anyway (`START_RELAY=1`), know that Grok Bot has owner authority over it. Keep its `--state-dir` in the home folder (the default, `~/.config/tincan-relay`); that folder holds the relay's own Tailscale node, so the relay keeps its name and address across wipes. The script starts it with `TS_AUTHKEY` removed from its environment, so if the relay's state were ever lost, it would not quietly register as a new node with Grok Bot's tag.
 
 ## 6. Health check
 
@@ -100,7 +113,7 @@ Exit 0 means healthy. For any other exit code, tell the owner and include the ou
 
 ## If the Tailscale identity is lost anyway
 
-If `~/.config/tailscale` is lost, the script logs in again with the key. It needs no approval, but it creates a new device with a new IP, and the name may get a `-1` suffix while the old device is listed. The relay never re-admits a tagged node on its own (see [the trust model](../trust-model.md#rebuilt-machines)), so `tincan rejoin` will not move the agent to the new device. Delete the old device in the admin, then re-link with a new invite:
+If `~/.config/tailscale` is lost, the script exits 3 because the key was removed after the first login. The owner issues a fresh one-off key and sets `TS_AUTHKEY`, and the script logs in again with it. It needs no approval, but it creates a new device with a new IP, and the name may get a `-1` suffix while the old device is listed. The relay never re-admits a tagged node on its own (see [the trust model](../trust-model.md#rebuilt-machines)), so `tincan rejoin` will not move the agent to the new device. Delete the old device in the admin, then re-link with a new invite:
 
 ```bash
 tincan invite grokbot --socket ~/.config/tincan-relay/admin.sock   # on the relay host
@@ -120,7 +133,7 @@ Workaround: the client looks up `tailscale` on `PATH` first. Put a wrapper there
 exec "$HOME/.local/lib/tailscale/tailscale" --socket="$HOME/.cache/tailscale/tailscaled.sock" "$@"
 ```
 
-A client fix that honors a configured socket is proposed separately.
+A userspace tailscaled on a custom socket must be reachable by tincan, whichever way you do it. If your tincan build reads a `TS_SOCKET` environment variable for its Tailscale calls, setting `TS_SOCKET` for tincan processes is the supported way. The wrapper keeps working either way.
 
 ## Wake
 
