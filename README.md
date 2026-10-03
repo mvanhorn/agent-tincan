@@ -615,7 +615,7 @@ Run the relay on the VM as its own OS user, separate from the one Grok Bot's too
 ```bash
 tincan relay --admin <your-laptop>
 tincan invite grokbot --kind vm-webhook --socket <state-dir>/admin.sock   # on the VM
-tincan join <code> --relay http://tincan-relay                             # as Grok Bot's user
+tincan join <code> --relay http://tincan-relay --proxy http://localhost:1055   # as Grok Bot's user (userspace Tailscale)
 ```
 
 #### How it wakes
@@ -640,6 +640,8 @@ It follows a quiet rule. It runs a silent standing check every 30 minutes, fixes
 
 - Keep the relay's OS user separate from the agent's so the database and `wake.json` stay out of the agent's reach.
 - A 401 or 403 in the relay log for a webhook means `bearer_token` does not match the receiver. Fix it in `wake.json`, never in chat.
+- Grok Bot's machine is wiped and restored often, usually daily, and only the home folder and workspace come back. With a default Tailscale install, every wipe creates a new device you have to approve. Run tailscaled in userspace as Grok Bot's user, with its state in `~/.config/tailscale`, and log in with a reusable, pre-approved, tagged auth key kept in the `TS_AUTHKEY` secret. The box then rejoins as the same device with no approval. Setup and a startup script: [docs/adapters/grokbot.md](docs/adapters/grokbot.md).
+- The box is tagged, so the relay never re-admits it automatically. Normally that does not matter, because the identity survives a wipe. If it is lost, re-link with a new `tincan invite` and `tincan join --replace`.
 
 #### Adapter doc
 

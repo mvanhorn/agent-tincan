@@ -48,6 +48,14 @@ A1. Check Tailscale. Run `tailscale status`. This machine should be signed in to
     your owner's tailnet. If Tailscale is missing or signed out, ask your owner to
     install it and sign in (https://tailscale.com/download), then continue.
 
+    On Grok Bot, or any host that is wiped and keeps only your home folder, do
+    not use the default Tailscale install: every wipe would create a new device
+    for your owner to approve. Ask your owner once for a reusable, pre-approved
+    auth key with your tag (for example tag:grokbot), saved as your secret env
+    var TS_AUTHKEY (never in chat). Then follow docs/adapters/grokbot.md:
+    userspace tailscaled with its state in ~/.config/tailscale, started by
+    examples/grokbot/tincan-up.sh, which you run hourly on this machine.
+
 A2. Start the relay once in the foreground to register it on the tailnet:
 
         tincan relay
@@ -153,6 +161,10 @@ B2. Join, with the code and relay address from your message (the relay is
     - Proxy-only sandbox whose default proxy cannot reach the tailnet: add
       `--proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>` (ask your owner
       for the tunnel proxy; keep the credentials out of chat).
+    - Userspace Tailscale (Grok Bot and other wiped hosts): add
+      `--proxy http://localhost:1055`, tailscaled's local proxy. Your machine is
+      tagged, so rejoin cannot re-admit it. If its Tailscale identity was lost,
+      ask your owner for a new invite and join with `--replace`.
     - Another agent already joined on this machine: prefix every tincan command
       with `TINCAN_CONFIG=~/.config/tincan/<your-name>.json`.
     - "not a joined agent" on a machine that joined before (rebuilt): run
