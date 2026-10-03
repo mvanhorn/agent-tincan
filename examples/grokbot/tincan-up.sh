@@ -134,12 +134,29 @@ fi
 
 # 5. Optional: the relay, if this host runs it. TS_AUTHKEY is stripped so a lost relay
 #    state never silently registers the relay as a new node with this host's tag.
-relay_running() { pgrep -u "$(id -u)" -f '(^|/)tincan relay( |$)' >/dev/null; }
+#    The relay this script starts is tracked by its PID, so a TINCAN with another file name is
+#    still recognized; a relay started by hand as `tincan relay` is recognized by name.
+RELAY_STATE="$HOME/.config/tincan-relay"
+RELAY_PID="$HOME/.cache/tincan-relay.pid"
+relay_running() {
+  local pid args
+  pid=$(cat "$RELAY_PID" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) ;; *)
+    if kill -0 "$pid" 2>/dev/null; then
+      args=$(ps -p "$pid" -o args= 2>/dev/null || true)
+      case "$args" in *" relay --state-dir $RELAY_STATE"*) return 0;; esac
+    fi;;
+  esac
+  pgrep -u "$(id -u)" -f '(^|/)tincan relay( |$)' >/dev/null
+}
 if [ "$START_RELAY" = 1 ] && ! relay_running; then
-  relay_args=(relay --state-dir "$HOME/.config/tincan-relay")
+  relay_args=(relay --state-dir "$RELAY_STATE")
   [ -n "$RELAY_ADMIN" ] && relay_args+=(--admin "$RELAY_ADMIN")
-  ( exec 9>&-; cd "$HOME" && env -u TS_AUTHKEY nohup "$TINCAN" "${relay_args[@]}" \
-      >>"$HOME/.cache/tincan-relay.log" 2>&1 </dev/null & )
+  rm -f "$RELAY_PID"
+  ( exec 9>&-; cd "$HOME" || exit 1
+    env -u TS_AUTHKEY nohup "$TINCAN" "${relay_args[@]}" \
+      >>"$HOME/.cache/tincan-relay.log" 2>&1 </dev/null &
+    echo "$!" > "$RELAY_PID" )
   started=0
   for _ in $(seq 10); do sleep 1; if relay_running; then started=1; break; fi; done
   # Give it a moment more and check it did not exit right after starting.
