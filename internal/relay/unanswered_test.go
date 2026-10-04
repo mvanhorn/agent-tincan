@@ -379,7 +379,7 @@ func TestFailedRemoveKeepsWakeState(t *testing.T) {
 	now := time.Now()
 	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
 		HTTP: hook.Client(), ReplyGrace: time.Millisecond, ReplyRetries: []time.Duration{},
-		UnseenReplies: h.srv.UnseenReplies, Queued: h.srv.QueuedCount, Now: func() time.Time { return now },
+		WakeGrace: -1, UnseenReplies: h.srv.UnseenReplies, Queued: h.srv.QueuedCount, Now: func() time.Time { return now },
 	})
 	defer w.Stop()
 	h.srv.SetWakeNamer(w)
@@ -397,8 +397,8 @@ func TestFailedRemoveKeepsWakeState(t *testing.T) {
 	default:
 		t.Fatal("no wake re-armed for the unseen reply")
 	}
-	if wk, ok := w.LastWake("grokbot"); !ok || !wk.At.Equal(now) || wk.Result != envelope.WakeOK {
-		t.Fatalf("wake after a failed remove not recorded: %+v, %v", wk, ok)
+	if wk, ok := w.LastWake("grokbot"); !ok || !wk.At.Equal(stored.At) || wk.Result != stored.Result {
+		t.Fatalf("silent 2xx after a failed remove moved last wake: %+v, %v; want %+v", wk, ok, stored)
 	}
 }
 

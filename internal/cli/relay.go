@@ -119,7 +119,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
 	cmd.Flags().IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
-	cmd.Flags().DurationVar(&f.wakeGrace, "wake-grace", relay.DefaultWakeGrace, "how long a webhook or email agent may go without checking in after a wake before it shows as unanswered")
+	cmd.Flags().DurationVar(&f.wakeGrace, "wake-grace", relay.DefaultWakeGrace, "how long a webhook or email agent may go without checking in after a wake before it shows as unanswered and the relay sends the same wake again")
 	cmd.Flags().DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
@@ -139,6 +139,18 @@ func (f relayFlags) relayConfig() relay.Config {
 // directoryConfig maps the relay flags onto the identity directory.
 func (f relayFlags) directoryConfig() identity.Config {
 	return identity.Config{Admins: f.admins, AdminLogins: f.adminLogins, NoAutoRebind: f.noRebind}
+}
+
+// wakerOptions maps relay flags and the live server onto the waker.
+func wakerOptions(f relayFlags, srv *relay.Server) wake.Options {
+	return wake.Options{
+		Online:        srv.Online,
+		Queued:        srv.QueuedCount,
+		UnseenReplies: srv.UnseenReplies,
+		LastPoll:      srv.LastPoll,
+		ReplyGrace:    f.replyGrace,
+		WakeGrace:     f.wakeGrace,
+	}
 }
 
 // loadOrCreateInvitePepper returns the relay's invite-code pepper, creating
@@ -353,7 +365,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
-	waker := wake.New(wakeCfg, st, wake.Options{Online: srv.Online, Queued: srv.QueuedCount, UnseenReplies: srv.UnseenReplies, ReplyGrace: f.replyGrace})
+	waker := wake.New(wakeCfg, st, wakerOptions(f, srv))
 	srv.SetEvents(waker)
 	srv.SetWakeNamer(waker)
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {

@@ -144,6 +144,48 @@ func TestOpenClawRetryReusesIdempotencyKey(t *testing.T) {
 	}
 }
 
+// A request follow-up is a new fire, so it mints a new Idempotency-Key; the
+// 5s HTTP retry inside one fire still reuses its key.
+func TestOpenClawFollowUpUsesNewIdempotencyKey(t *testing.T) {
+	h := &openclawHook{token: "tok"}
+	ts := h.server(t)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"claw": {Method: Webhook, Format: FormatOpenClaw, URL: ts.URL + "/hooks/agent", BearerToken: "tok"}}, nil, Options{
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Millisecond,
+		WakeGrace:  20 * time.Millisecond,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return time.Time{} },
+	})
+	h.fail.Store(1)
+	queued(w, "claw", 1)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(h.snapshot()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	first := h.snapshot()
+	if len(first) < 2 {
+		t.Fatalf("hook calls = %d, want fail then retry", len(first))
+	}
+	if first[0].idem == "" || first[0].idem != first[1].idem {
+		t.Errorf("in-fire retry key %q != first key %q", first[1].idem, first[0].idem)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for len(h.snapshot()) < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	calls := h.snapshot()
+	if len(calls) < 3 {
+		t.Fatalf("hook calls = %d, want a follow-up", len(calls))
+	}
+	if calls[2].idem == calls[0].idem {
+		t.Errorf("follow-up reused key %q", calls[2].idem)
+	}
+	queuedN.Store(0)
+	w.Flush()
+}
+
 // deliver: true opts back in to OpenClaw's completion announcement.
 func TestOpenClawDeliverOptIn(t *testing.T) {
 	h := &openclawHook{token: "tok"}

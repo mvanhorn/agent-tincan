@@ -41,7 +41,8 @@ type Config struct {
 	// roster and whoami so a client behind it stands out; "" hides it.
 	Version string
 	// WakeGrace is how long a relay-woken agent may go without polling
-	// after a wake before it shows as unanswered; default DefaultWakeGrace.
+	// after a wake before it shows as unanswered and the waker sends the
+	// same webhook or email again; default DefaultWakeGrace.
 	WakeGrace time.Duration
 }
 
@@ -620,16 +621,7 @@ func (s *Server) recipientWake(ctx context.Context, agent string) *envelope.Targ
 	if a, found, err := s.dir.Agent(ctx, agent); err == nil && found && wk.At.Before(a.JoinedAt) {
 		return nil // sent to an earlier agent of the same name
 	}
-	s.mu.Lock()
-	last := s.lastPoll[agent]
-	s.mu.Unlock()
-	if last.Before(wk.At) {
-		// No poll since the wake in this run of the relay: one persisted
-		// before a restart may still have answered it.
-		if p, err := s.store.AgentLastPoll(ctx, agent); err == nil && p.After(last) {
-			last = p
-		}
-	}
+	last := s.LastPoll(agent)
 	t := s.wakeTarget(wk, last, s.cfg.Now())
 	return &t
 }
@@ -1059,7 +1051,7 @@ type WakeResumer interface {
 }
 
 // DefaultWakeGrace is how long a woken agent has to poll before the roster
-// shows it as unanswered.
+// shows it as unanswered and the waker sends the same path again.
 const DefaultWakeGrace = 10 * time.Minute
 
 // relayWoken reports whether the relay itself wakes agents on method.
@@ -1425,6 +1417,21 @@ func (s *Server) UnseenReplies(agent string) int {
 		return 1
 	}
 	return n
+}
+
+// LastPoll is agent's last inbox poll, including peek: the later of this
+// process's memory and the poll persisted for a restart. The waker uses it
+// as proof of life for request follow-up.
+func (s *Server) LastPoll(agent string) time.Time {
+	s.mu.Lock()
+	last := s.lastPoll[agent]
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if p, err := s.store.AgentLastPoll(ctx, agent); err == nil && p.After(last) {
+		return p
+	}
+	return last
 }
 
 // touch records a poll by agent. The store copy tells a restarted relay

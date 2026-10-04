@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 // --notes-ttl defaults to 30 days, reaches the relay config, and must be
@@ -40,6 +43,16 @@ func TestRelayWakeGraceFlag(t *testing.T) {
 	}
 	if got := (relayFlags{notesTTL: time.Hour, wakeGrace: 2 * time.Minute}).relayConfig().WakeGrace; got != 2*time.Minute {
 		t.Fatalf("relay config wake grace = %v, want 2m", got)
+	}
+	opts := wakerOptions(relayFlags{wakeGrace: 2 * time.Minute, replyGrace: 45 * time.Second}, new(relay.Server))
+	if opts.WakeGrace != 2*time.Minute {
+		t.Fatalf("waker WakeGrace = %v, want 2m", opts.WakeGrace)
+	}
+	if opts.LastPoll == nil {
+		t.Fatal("waker LastPoll callback missing")
+	}
+	if wake.DefaultWakeGrace != relay.DefaultWakeGrace {
+		t.Fatalf("waker default %v, relay default %v", wake.DefaultWakeGrace, relay.DefaultWakeGrace)
 	}
 	bad := relayCmd()
 	if err := bad.Flags().Parse([]string{"--wake-grace", "0s"}); err != nil {

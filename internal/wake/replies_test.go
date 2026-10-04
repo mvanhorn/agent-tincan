@@ -373,6 +373,43 @@ func TestFreshReplyDuringSlowSendKeepsFirstFollowUp(t *testing.T) {
 	}
 }
 
+// A pending reply retry coalesces with a request follow-up into one POST,
+// and the reply ladder does not restart at step zero.
+func TestRequestFollowUpCoalescesWithReplyRetry(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	var n atomic.Int32
+	n.Store(1)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"hermes": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:      time.Millisecond,
+		WakeGrace:     20 * time.Millisecond,
+		ReplyGrace:    time.Millisecond,
+		ReplyRetries:  []time.Duration{time.Hour, 10 * time.Millisecond},
+		UnseenReplies: unseen(&n),
+		Queued:        func(string) int { return int(queuedN.Load()) },
+		LastPoll:      func(string) time.Time { return time.Time{} },
+	})
+	queued(w, "hermes", 1)
+	replied(w, "hermes")
+	waitCalls(t, &rc, 1)
+	if got := message(t, rc.bodies[0]); got != WaitingMessage(1, 1) {
+		t.Fatalf("first message = %q", got)
+	}
+	waitCalls(t, &rc, 2)
+	if got := message(t, rc.bodies[1]); got != WaitingMessage(1, 1) {
+		t.Fatalf("coalesced follow-up = %q", got)
+	}
+	waitCalls(t, &rc, 3)
+	if got := message(t, rc.bodies[2]); got != WaitingMessage(1, 1) {
+		t.Fatalf("next reply step = %q, want it still carrying the request", got)
+	}
+	queuedN.Store(0)
+	n.Store(0)
+	w.Flush()
+}
+
 // A nudge whose webhook send fails still schedules the follow-up, which
 // reaches the agent once the webhook recovers.
 func TestFailedReplyNudgeStillFollowsUp(t *testing.T) {
