@@ -375,6 +375,16 @@ func (w *Waker) Unforget(agent string) {
 	}
 }
 
+// Joined implements relay.WakeReporter: the name is bound again, so
+// Forget's marker no longer blocks wake-grace follow-ups.
+func (w *Waker) Joined(agent string) {
+	w.rememberMu.Lock()
+	defer w.rememberMu.Unlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.removed, agent)
+}
+
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
 func (w *Waker) WakeMethod(agent string) string {
 	if t, ok := w.cfg[agent]; ok && t.Method != "" {
@@ -695,8 +705,13 @@ func (w *Waker) answered(agent string) bool {
 // the first wake time so unanswered stays dated from the start of the
 // episode. The result is updated: a failed follow-up is stored, and a
 // later 2xx replaces that failure, so a restart does not keep showing the
-// earlier error. A 2xx that is already ok is not written again.
+// earlier error. A 2xx that is already ok is not written again. A send that
+// started before the recorded wake is dropped: a slow failure must not
+// overwrite a newer successful send.
 func (w *Waker) rememberSend(ctx context.Context, agent string, wk store.Wake, okSend bool) {
+	if old, ok := w.LastWake(agent); ok && wk.At.Before(old.At) {
+		return
+	}
 	if w.silent(agent) {
 		if old, ok := w.LastWake(agent); ok {
 			wk.At = old.At

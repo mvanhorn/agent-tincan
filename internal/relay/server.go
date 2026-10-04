@@ -1036,11 +1036,14 @@ const ScheduleGrace = 5 * time.Minute
 
 // WakeReporter reports the last wake the relay sent an agent, and whether
 // there was one, and forgets it when the agent is removed. Unforget undoes
-// Forget when the removal fails. Set by package wake through SetWakeNamer.
+// Forget when the removal fails. Joined clears Forget's marker when the
+// name is bound again, so request follow-ups can be scheduled. Set by
+// package wake through SetWakeNamer.
 type WakeReporter interface {
 	LastWake(agent string) (store.Wake, bool)
 	Forget(agent string)
 	Unforget(agent string)
+	Joined(agent string)
 }
 
 // WakeResumer schedules the wakes an agent's waiting work calls for, as a
@@ -1194,6 +1197,9 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
+	}
+	if wr, ok := s.wake.(WakeReporter); ok {
+		wr.Joined(name)
 	}
 	s.record(r.Context(), "joined", "", "", name, "")
 	writeJSON(w, http.StatusOK, map[string]string{"name": name})

@@ -44,6 +44,8 @@ func (f *fakeWaker) Forget(agent string) {
 
 func (f *fakeWaker) Unforget(string) {}
 
+func (f *fakeWaker) Joined(string) {}
+
 func (f *fakeWaker) set(agent string, w store.Wake) {
 	f.mu.Lock()
 	f.wakes[agent] = w
@@ -468,5 +470,43 @@ func TestLastPollUsesStoreWhenMemoryIsOlderThanWake(t *testing.T) {
 	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
 	if out.Target == nil || out.Target.Unanswered {
 		t.Fatalf("store poll after the wake must win: %+v", out.Target)
+	}
+}
+
+// After remove and join under the same name, a silent request wake still
+// gets a wake-grace follow-up.
+func TestRequestFollowUpAfterRemoveAndRejoin(t *testing.T) {
+	h := newHarness(t, Config{})
+	hits := make(chan struct{}, 8)
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits <- struct{}{}
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP:      hook.Client(),
+		Debounce:  time.Millisecond,
+		WakeGrace: 20 * time.Millisecond,
+		Queued:    h.srv.QueuedCount,
+		LastPoll:  h.srv.LastPoll,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusOK, nil)
+	h.joinAt(grokAddr, "grokbot")
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, nil)
+
+	deadline := time.Now().Add(5 * time.Second)
+	n := 0
+	for n < 2 && time.Now().Before(deadline) {
+		select {
+		case <-hits:
+			n++
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if n != 2 {
+		t.Fatalf("webhook calls = %d, want 2 (first wake and follow-up after rejoin)", n)
 	}
 }

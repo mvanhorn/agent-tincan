@@ -30,6 +30,13 @@ type recorder struct {
 	auth   []string
 	sigs   []string
 	fail   atomic.Int32 // fail this many requests first
+	seq    atomic.Int32
+	// holdFirst, if set, parks request 1 until the channel is closed, then
+	// answers 502. firstBegin closes when it is parked; firstDone when it has
+	// answered.
+	holdFirst  chan struct{}
+	firstBegin chan struct{}
+	firstDone  chan struct{}
 }
 
 func (rc *recorder) server(t *testing.T) *httptest.Server {
@@ -41,6 +48,16 @@ func (rc *recorder) server(t *testing.T) *httptest.Server {
 		rc.auth = append(rc.auth, r.Header.Get("Authorization"))
 		rc.sigs = append(rc.sigs, r.Header.Get("X-Hub-Signature-256"))
 		rc.mu.Unlock()
+		n := rc.seq.Add(1)
+		if n == 1 && rc.holdFirst != nil {
+			close(rc.firstBegin)
+			<-rc.holdFirst
+			http.Error(w, "down", http.StatusBadGateway)
+			if rc.firstDone != nil {
+				close(rc.firstDone)
+			}
+			return
+		}
 		if rc.fail.Load() > 0 {
 			rc.fail.Add(-1)
 			http.Error(w, "down", http.StatusBadGateway)
@@ -959,6 +976,92 @@ func TestRequestFollowUpRecoveredResultKeepsWokenAt(t *testing.T) {
 	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(start) || got.Result != envelope.WakeOK {
 		t.Fatalf("reloaded = %+v %v, want ok at %v", got, ok, start)
 	}
+}
+
+// A slow first send that fails after a later send succeeded must not take
+// the successful wake's time or replace ok, including across a store reload.
+func TestLateFailedSendDoesNotReplaceNewerOK(t *testing.T) {
+	var rc recorder
+	rc.holdFirst = make(chan struct{})
+	rc.firstBegin = make(chan struct{})
+	rc.firstDone = make(chan struct{})
+	ts := rc.server(t)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(1_790_000_000, 0)
+	var now atomicTime
+	now.set(start)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{
+		Debounce:   time.Millisecond,
+		RetryDelay: 200 * time.Millisecond,
+		WakeGrace:  skipFollowUp,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return time.Time{} },
+		Now:        now.get,
+	})
+	queued(w, "grokbot", 1)
+	select {
+	case <-rc.firstBegin:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not start")
+	}
+	second := start.Add(time.Second)
+	now.set(second)
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 2)
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(second) || got.Result != envelope.WakeOK {
+		t.Fatalf("after second send = %+v %v, want ok at %v", got, ok, second)
+	}
+	close(rc.holdFirst)
+	select {
+	case <-rc.firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not finish")
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		got, ok := w.LastWake("grokbot")
+		if !ok || got.Result != envelope.WakeOK || !got.At.Equal(second) {
+			t.Fatalf("late failure overwrote the newer ok: %+v %v", got, ok)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	w.Stop()
+	st.Close()
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	w = New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{WakeGrace: skipFollowUp})
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(second) || got.Result != envelope.WakeOK {
+		t.Fatalf("reloaded = %+v %v, want ok at %v", got, ok, second)
+	}
+}
+
+// Forget then Joined (remove and re-join under the same name) still
+// schedules a wake-grace follow-up when the first send stays unanswered.
+func TestJoinedAllowsRequestFollowUp(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:  time.Millisecond,
+		WakeGrace: 20 * time.Millisecond,
+		Queued:    func(string) int { return int(queuedN.Load()) },
+		LastPoll:  func(string) time.Time { return time.Time{} },
+	})
+	w.Forget("grokbot")
+	w.Joined("grokbot")
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 2)
+	drainFollowUp(t, w, &queuedN)
 }
 
 // AE6: an email target gets a second AgentMail send with the count-only body
