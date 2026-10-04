@@ -835,7 +835,130 @@ func TestRequestFollowUpFailedKeepsWokenAt(t *testing.T) {
 	}
 	rc.fail.Store(0)
 	waitCalls(t, &rc, 4) // first ok, two failed attempts, then a recovered follow-up
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		got, ok := w.LastWake("grokbot")
+		if ok && got.Result == envelope.WakeOK {
+			if !got.At.Equal(start) {
+				t.Fatalf("recovered last wake = %+v, want time %v", got, start)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("last wake = %+v %v, want ok keeping %v", got, ok, start)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	drainFollowUp(t, w, &queuedN)
+}
+
+// A failed follow-up is what a reopened store loads: same woken_at, new result.
+func TestRequestFollowUpFailedResultSurvivesReload(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(1_790_000_000, 0)
+	var now atomicTime
+	now.set(start)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Millisecond,
+		WakeGrace:  20 * time.Millisecond,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return time.Time{} },
+		Now:        now.get,
+	})
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 1)
+	rc.fail.Store(100)
+	now.set(start.Add(time.Minute))
+	deadline := time.Now().Add(5 * time.Second)
+	var fail store.Wake
+	for {
+		got, ok := w.LastWake("grokbot")
+		if ok && strings.Contains(got.Result, "502") {
+			if !got.At.Equal(start) {
+				t.Fatalf("last wake = %+v, want time %v", got, start)
+			}
+			fail = got
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("last wake = %+v %v, want a 502 keeping %v", got, ok, start)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	w.Stop()
+	st.Close()
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	w = New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{WakeGrace: skipFollowUp})
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(fail.At) || got.Result != fail.Result {
+		t.Fatalf("reloaded = %+v %v, want %+v", got, ok, fail)
+	}
+}
+
+// A later 2xx while still silent keeps the first woken_at and stores ok, including across reload.
+func TestRequestFollowUpRecoveredResultKeepsWokenAt(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(1_790_000_000, 0)
+	var now atomicTime
+	now.set(start)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Millisecond,
+		WakeGrace:  20 * time.Millisecond,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return time.Time{} },
+		Now:        now.get,
+	})
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 1)
+	rc.fail.Store(2)
+	now.set(start.Add(time.Minute))
+	waitCalls(t, &rc, 4)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, ok := w.LastWake("grokbot")
+		if ok && got.Result == envelope.WakeOK {
+			if !got.At.Equal(start) {
+				t.Fatalf("recovered last wake = %+v, want time %v", got, start)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("last wake = %+v %v, want ok keeping %v", got, ok, start)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	w.Stop()
+	st.Close()
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	w = New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{WakeGrace: skipFollowUp})
+	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(start) || got.Result != envelope.WakeOK {
+		t.Fatalf("reloaded = %+v %v, want ok at %v", got, ok, start)
+	}
 }
 
 // AE6: an email target gets a second AgentMail send with the count-only body

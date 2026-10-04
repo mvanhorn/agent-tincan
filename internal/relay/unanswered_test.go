@@ -431,3 +431,42 @@ func TestWakeDuringOpenPollSurvivesRestart(t *testing.T) {
 		t.Fatalf("after restart, the poll that outlived the wake is lost: %+v", g)
 	}
 }
+
+// A send whose in-memory last poll is already at or after the wake must not
+// read the store: closing it would panic if LastPoll still queried.
+func TestLastPollSkipsStoreWhenMemoryIsAtOrAfterWake(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	woke := clk.Now()
+	fw.set("grokbot", store.Wake{At: woke, Result: envelope.WakeOK})
+	clk.advance(time.Second)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	st := h.srv.store
+	h.srv.store = nil
+	t.Cleanup(func() { h.srv.store = st })
+	if last := h.srv.LastPoll("grokbot"); last.IsZero() {
+		t.Fatal("LastPoll dropped the in-memory poll")
+	}
+	tgt := h.srv.recipientWake(t.Context(), "grokbot")
+	if tgt == nil || tgt.Unanswered || tgt.WakeResult != envelope.WakeOK {
+		t.Fatalf("send wake from memory: %+v", tgt)
+	}
+}
+
+// When this process's last poll is older than the wake, the store still
+// answers if it has a later poll, as after a restart that left memory stale.
+func TestLastPollUsesStoreWhenMemoryIsOlderThanWake(t *testing.T) {
+	h, clk, fw := wakeHarness(t)
+	woke := clk.Now()
+	fw.set("grokbot", store.Wake{At: woke, Result: envelope.WakeOK})
+	clk.advance(time.Second)
+	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	h.srv.mu.Lock()
+	h.srv.lastPoll["grokbot"] = woke.Add(-time.Second)
+	h.srv.mu.Unlock()
+	clk.advance(DefaultWakeGrace + time.Minute)
+	var out envelope.SendResponse
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, &out)
+	if out.Target == nil || out.Target.Unanswered {
+		t.Fatalf("store poll after the wake must win: %+v", out.Target)
+	}
+}

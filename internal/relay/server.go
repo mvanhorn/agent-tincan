@@ -621,7 +621,7 @@ func (s *Server) recipientWake(ctx context.Context, agent string) *envelope.Targ
 	if a, found, err := s.dir.Agent(ctx, agent); err == nil && found && wk.At.Before(a.JoinedAt) {
 		return nil // sent to an earlier agent of the same name
 	}
-	last := s.LastPoll(agent)
+	last := s.lastPollSince(agent, wk.At)
 	t := s.wakeTarget(wk, last, s.cfg.Now())
 	return &t
 }
@@ -1421,11 +1421,23 @@ func (s *Server) UnseenReplies(agent string) int {
 
 // LastPoll is agent's last inbox poll, including peek: the later of this
 // process's memory and the poll persisted for a restart. The waker uses it
-// as proof of life for request follow-up.
+// as proof of life for request follow-up. The store is read only when this
+// process has not seen a poll.
 func (s *Server) LastPoll(agent string) time.Time {
+	return s.lastPollSince(agent, time.Time{})
+}
+
+// lastPollSince is agent's last poll for judging a wake at since. Memory
+// answers when it already has a poll at or after since (or any poll, when
+// since is zero). The store is read only when memory cannot: this process
+// has never recorded a poll, or its poll is still older than the wake.
+func (s *Server) lastPollSince(agent string, since time.Time) time.Time {
 	s.mu.Lock()
 	last := s.lastPoll[agent]
 	s.mu.Unlock()
+	if !last.IsZero() && (since.IsZero() || !last.Before(since)) {
+		return last
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if p, err := s.store.AgentLastPoll(ctx, agent); err == nil && p.After(last) {

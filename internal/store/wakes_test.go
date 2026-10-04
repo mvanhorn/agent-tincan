@@ -98,6 +98,34 @@ func TestAgentLastPoll(t *testing.T) {
 	}
 }
 
+// The same woken_at can replace the result, so a failed follow-up (or a
+// later recovery) is what a restarted relay loads.
+func TestSetLastWakeUpdatesResultAtSameTime(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	at := time.UnixMilli(1_790_000_000_000)
+	if err := s.SetLastWake(ctx, "grokbot", Wake{At: at, Result: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	fail := "hooks.example returned 502 Bad Gateway"
+	if err := s.SetLastWake(ctx, "grokbot", Wake{At: at, Result: fail}); err != nil {
+		t.Fatal(err)
+	}
+	if ws, err := s.LastWakes(ctx); err != nil || !ws["grokbot"].At.Equal(at) || ws["grokbot"].Result != fail {
+		t.Fatalf("after fail = %+v, %v", ws, err)
+	}
+	if err := s.SetLastWake(ctx, "grokbot", Wake{At: at, Result: "ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if ws, err := s.LastWakes(ctx); err != nil || !ws["grokbot"].At.Equal(at) || ws["grokbot"].Result != "ok" {
+		t.Fatalf("after recover = %+v, %v", ws, err)
+	}
+}
+
 // A wake recorded late (a slow send finishing after a newer one) never
 // replaces a newer wake.
 func TestSetLastWakeKeepsNewer(t *testing.T) {

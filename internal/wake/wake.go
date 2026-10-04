@@ -691,20 +691,18 @@ func (w *Waker) answered(agent string) bool {
 	return !poll.IsZero() && !poll.Before(wk.At)
 }
 
-// rememberSend keeps a send result. A 2xx while still silent is not
-// recorded, so unanswered stays dated from the first wake of the episode. A
-// failed send while silent updates the result and keeps that first time.
+// rememberSend keeps a send result. A later send while still silent keeps
+// the first wake time so unanswered stays dated from the start of the
+// episode. The result is updated: a failed follow-up is stored, and a
+// later 2xx replaces that failure, so a restart does not keep showing the
+// earlier error. A 2xx that is already ok is not written again.
 func (w *Waker) rememberSend(ctx context.Context, agent string, wk store.Wake, okSend bool) {
-	if okSend {
-		if w.silent(agent) {
-			return
-		}
-		w.remember(ctx, agent, wk)
-		return
-	}
 	if w.silent(agent) {
 		if old, ok := w.LastWake(agent); ok {
 			wk.At = old.At
+			if okSend && old.Result == envelope.WakeOK {
+				return
+			}
 		}
 	}
 	w.remember(ctx, agent, wk)
