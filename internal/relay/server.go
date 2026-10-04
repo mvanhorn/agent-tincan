@@ -1163,7 +1163,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
 		if info.GoodAt == "" {
-			info.GoodAt = onboard.StockGoodAt(a.Kind)
+			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}
 		stat := stats[a.Name]
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
@@ -1256,8 +1256,8 @@ func (s *Server) handleSetKind(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSetGoodAt records the owner's line saying what a joined agent is good
-// at (admin only). An empty line clears it, so a fixed-job kind shows its
-// stock line again; a body without good_at is refused rather than read as a
+// at (admin only). An empty line clears it, so a kind with a stock line
+// shows it again; a body without good_at is refused rather than read as a
 // clear.
 func (s *Server) handleSetGoodAt(w http.ResponseWriter, r *http.Request) {
 	var in struct {

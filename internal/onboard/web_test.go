@@ -179,7 +179,7 @@ func TestCopilotWebSetup(t *testing.T) {
 			t.Errorf("copilot-web setup missing %q:\n%s", want, setup)
 		}
 	}
-	if !strings.Contains(a.Instructions, "Microsoft Copilot (copilot.com)") || !strings.Contains(a.Instructions, "Sources:") {
+	if !strings.Contains(a.Instructions, "Microsoft Copilot (copilot.com)") || !strings.Contains(a.Instructions, "Sources:") || strings.Contains(a.Instructions, "generated images") {
 		t.Errorf("instructions: %s", a.Instructions)
 	}
 	if r := recipe(t, k, KindCopilotWeb); !strings.Contains(r.Title, "Copilot") {
@@ -189,5 +189,29 @@ func TestCopilotWebSetup(t *testing.T) {
 	g := block(t, build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "grok-web", Wake: "wait"}}}), KindGrokWeb)
 	if other := strings.Join(g.Setup, "\n"); strings.Contains(other, "Microsoft") {
 		t.Errorf("grok-web setup carries Copilot notes:\n%s", other)
+	}
+}
+
+// Only the sites that make images promise them: ChatGPT and Grok attach
+// generated images, Gemini only when they can be fetched, and Claude makes
+// none.
+func TestWebImageClaims(t *testing.T) {
+	for _, kind := range []string{KindChatGPTWeb, KindGrokWeb, KindClaudeWeb, KindGeminiWeb} {
+		in := block(t, build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: kind, Wake: "wait"}}}), kind).Instructions
+		images := strings.Contains(in, "generated images")
+		switch kind {
+		case KindChatGPTWeb, KindGrokWeb:
+			if !images {
+				t.Errorf("%s instructions lost the images clause:\n%s", kind, in)
+			}
+		case KindClaudeWeb:
+			if images {
+				t.Errorf("claude-web instructions claim generated images:\n%s", in)
+			}
+		case KindGeminiWeb:
+			if !strings.Contains(in, "when they can be fetched") {
+				t.Errorf("gemini-web images clause is not best effort:\n%s", in)
+			}
+		}
 	}
 }

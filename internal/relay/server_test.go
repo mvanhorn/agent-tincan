@@ -645,6 +645,25 @@ func goodAts(t *testing.T, h *harness) map[string]string {
 	return m
 }
 
+// An agent joined under a product runtime name without a kind shows that
+// product's stock line, and an owner line replaces it.
+func TestRosterStockGoodAtFromProductName(t *testing.T) {
+	h := newHarness(t, Config{})
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"claude-code"}`, http.StatusOK, &inv)
+	h.do(strangerAddr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	if k := kinds(t, h); k["claude-code"] != "" {
+		t.Fatalf("claude-code joined with kind %q, want none", k["claude-code"])
+	}
+	if g := goodAts(t, h)["claude-code"]; !strings.HasPrefix(g, "Claude Code in a terminal") {
+		t.Fatalf("claude-code stock line = %q", g)
+	}
+	h.do(macAddr, "PUT", "/v1/agents/claude-code/good-at", `{"good_at":"reviews PRs"}`, http.StatusOK, nil)
+	if g := goodAts(t, h)["claude-code"]; g != "reviews PRs" {
+		t.Fatalf("claude-code line after owner set = %q", g)
+	}
+}
+
 // The local admin socket can set a good-at line, and the change is audited
 // with the agent as actor and the new line as detail.
 func TestLocalAdminSocketCanSetGoodAtAndItIsAudited(t *testing.T) {

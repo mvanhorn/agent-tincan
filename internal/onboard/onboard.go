@@ -112,25 +112,36 @@ var defaultWake = map[string]string{
 	KindGeneric:       "none",
 }
 
-// stockGoodAt is the good-at line a fixed-job kind shows when the owner has
-// set none, condensed from that kind's instructions in agent.tmpl. Its keys
-// are exactly the kinds isService reports; general kinds have no stock line.
+// stockGoodAt is the good-at line a kind shows when the owner has set none.
+// Service kinds and product-tool kinds have one; hosting shapes, Hermes and
+// OpenClaw do not, because the owner decides what runs there.
 var stockGoodAt = map[string]string{
-	KindHistory:       "answers questions about the owner's past ChatGPT, Claude, Grok, Gemini, Copilot and Codex chats, images included",
+	KindHistory:       "finds the owner's past ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats and images",
 	KindNotes:         "saves, searches and reads the owner's Agent Notes on their Mac; never edits or deletes one",
-	KindCouncil:       "puts one question to every model on the team, has them rank the answers blind, and returns a verdict",
-	KindChatGPTWeb:    "asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any generated images",
-	KindClaudeWeb:     "asks Claude (claude.ai) in the owner's browser and replies with the answer and any generated images",
-	KindGrokWeb:       "asks Grok (grok.com) in the owner's browser and replies with the answer and any generated images",
-	KindGeminiWeb:     "asks Gemini (gemini.google.com) in the owner's browser and replies with the answer and any generated images",
+	KindCouncil:       "asks web, CLI and webhook agents (not Claude Code) one question, ranks answers blind; slow, held for approval by default",
+	KindChatGPTWeb:    "asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any images ChatGPT made",
+	KindClaudeWeb:     "asks Claude (claude.ai) in the owner's browser and replies with the answer as text; Claude makes no images",
+	KindGrokWeb:       "asks Grok (grok.com) in the owner's browser and replies with the answer and any images Grok made; no videos",
+	KindGeminiWeb:     "asks Gemini (gemini.google.com) in the owner's browser; it can draw on their connected Gmail, Drive and Calendar",
 	KindPerplexityWeb: "asks Perplexity (www.perplexity.ai) in the owner's browser and replies with the answer and its source links",
 	KindCopilotWeb:    "asks Microsoft Copilot (copilot.com) in the owner's browser and replies with the answer and its source links",
-	KindDotWeb:        "asks the owner's OpenAI dot (chatgpt.com/dots), which can act in the owner's connected apps",
+	KindDotWeb:        "asks the owner's OpenAI dot (chatgpt.com/dots), which acts in their connected apps; held for approval by default",
+	KindClaudeCode:    "Claude Code in a terminal on the owner's machine: reads, edits and runs code; answers only while a session is open",
+	KindCodex:         "OpenAI Codex run unattended on the owner's machine: reads code anywhere, edits and runs it in its own work folder",
+	KindGeminiCLI:     "a Gemini coding agent run unattended on the owner's machine: reads, edits and runs code",
+	KindGrokCLI:       "xAI's Grok Build CLI run unattended on the owner's machine: reads code, edits and runs it in its own work folder",
+	KindChatGPT:       "ChatGPT in the owner's ChatGPT app; acts only while the owner is chatting with it, so it cannot pick up asks later",
 }
 
-// StockGoodAt returns the stock good-at line for kind, "" for a kind that
-// has none.
-func StockGoodAt(kind string) string { return stockGoodAt[kind] }
+// StockGoodAt returns the stock good-at line for an agent: its stored kind's
+// line, or with no stored kind the line of the product its name is, "" for
+// none. Unlike resolveKind there is no generic fallback.
+func StockGoodAt(name, kind string) string {
+	if kind == "" {
+		kind = runtimeNames[name]
+	}
+	return stockGoodAt[kind]
+}
 
 // wakeMethodOrder is every wake method, in the order the operator prompt
 // lists them.

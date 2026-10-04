@@ -163,7 +163,9 @@ func goodAtCmd() *cobra.Command {
 		Short: "Set the line saying what an agent is good at (admin devices only)",
 		Long: `Record one short line saying what an agent is good at, shown on its entry in
 "tincan agents" and the list_agents tool so teammates can pick the right one.
-Pass "" as the line to clear it; a fixed-job kind then shows its stock line.`,
+Pass "" as the line to clear it. Services and product tools (Claude Code, Codex,
+Gemini CLI, Grok CLI, the ChatGPT connector) then show their default line;
+hosting shapes, Hermes and OpenClaw show none.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, err := adminRelay(socket, relayURL)

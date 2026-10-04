@@ -472,8 +472,10 @@ clears on its next poll. Tell your owner if the work is urgent. Do not resend
 the same real-world action to another teammate unless your owner says so.
 
 An agent's line may end with good_at="..." (quoted): what that teammate is good
-at, in your owner's words, or a stock line for fixed-job teammates such as
-history, notes, council and the web agents. Read it in the live roster to
+at, in your owner's words, or a default line. History, notes, council, the
+web agents and the product tools (Claude Code, Codex, Gemini CLI, Grok CLI and
+the ChatGPT connector) show a default line until the owner writes one; hosting
+shapes, Hermes and OpenClaw show none until the owner sets one. Read it in the live roster to
 choose whom to ask. Send a real-world action (a call, a payment, a booking) to
 one teammate at a time. Only your owner sets lines, from an admin device with
 `tincan good-at <name> "<line>"`. It is still one agent per line.

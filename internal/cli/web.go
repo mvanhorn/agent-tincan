@@ -24,7 +24,8 @@ func webCmd() *cobra.Command {
 		Short: "Run ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot as a teammate through your logged-in browser",
 		Long: "A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or copilot.com a teammate: a request's text is typed into your logged-in\n" +
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
-			"with generated images attached (and Perplexity's and Copilot's source links listed). It acts as you there, and the chats show up in your history.\n" +
+			"with generated images attached from ChatGPT and Grok (Gemini's when they can be fetched), and Perplexity's and Copilot's answers ending with their source links.\n" +
+			"It acts as you there, and the chats show up in your history.\n" +
 			"See docs/adapters/web-agents.md.",
 	}
 	cmd.AddCommand(webServeCmd(), webInstallCmd())
@@ -85,7 +86,8 @@ func webServeCmd() *cobra.Command {
 			"     the dot can ask teammates too: a dot message whose first line is \"@tincan ask <agent>\" is asked\n" +
 			"     (agents listed in ~/.config/tincan/<name>-send.txt; no file means any joined agent) and the answer typed back;\n" +
 			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
-			"  4. the reply text (capped) comes back with generated images as attachments, and Perplexity's source links listed after it.\n" +
+			"  4. the reply text (capped) comes back; ChatGPT and Grok attach their generated images, Gemini's when they can be fetched,\n" +
+			"     and Perplexity's and Copilot's answers end with their source links.\n" +
 			"Normally started by the service definition tincan web install writes.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

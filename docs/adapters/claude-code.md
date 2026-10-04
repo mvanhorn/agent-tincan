@@ -4,7 +4,7 @@ Claude Code joins as its own agent, for example `claude-code`, from the Mac it r
 
 ## Join
 
-On an admin device, `tincan invite claude-code`. On the Mac:
+On an admin device, `tincan invite claude-code --kind claude-code`. On the Mac:
 
 ```bash
 tincan join <code> --relay http://tincan-relay

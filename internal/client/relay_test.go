@@ -423,7 +423,7 @@ func TestAskCarriesScheduleTarget(t *testing.T) {
 	}
 }
 
-// A fixed-job kind lists with its stock good-at line until an admin sets
+// A service kind lists with its stock good-at line until an admin sets
 // one, and clearing it brings the stock line back (AE1). A general kind lists
 // with no line until an admin sets one. A non-admin cannot set a line (AE3).
 func TestGoodAtLinesThroughClient(t *testing.T) {

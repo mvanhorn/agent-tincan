@@ -61,8 +61,10 @@ type AgentInfo struct {
 	Wake       string    `json:"wake"`
 	Kind       string    `json:"kind,omitempty"` // agent runtime (hermes, codex, ...), empty when unknown
 	// GoodAt is the line saying what the agent is good at: the owner's line,
-	// else the stock line for a fixed-job kind. Empty when neither applies
-	// and from relays that predate it.
+	// else the stock line for a service or product-tool kind (or, with no
+	// stored kind, for the product its name matches). Empty for hosting
+	// shapes, Hermes and OpenClaw until the owner sets one, and from relays
+	// that predate it.
 	GoodAt string `json:"good_at,omitempty"`
 	// Version is the tincan build the agent last called the relay with,
 	// empty when it has not called since the relay learned to record it,

@@ -4,9 +4,9 @@ package history
 // (grok.com), Gemini (gemini.google.com), Perplexity (www.perplexity.ai)
 // and Copilot (copilot.com) teammates: a request's body is typed into the
 // owner's logged-in site through the Tincan Chrome extension, and the
-// reply comes back as the answer, with generated images attached and, on
-// a site whose answers cite the web, its source links. See
-// docs/adapters/web-agents.md.
+// reply comes back as the answer, with generated images attached from
+// ChatGPT, Grok and Gemini and, on a site whose answers cite the web, its
+// source links. See docs/adapters/web-agents.md.
 
 import (
 	"context"
