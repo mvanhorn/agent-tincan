@@ -120,7 +120,7 @@ Before you upgrade:
 
 ## New in v0.11.1
 
-- [Unanswered wakes](#wake-methods): when the relay wakes a webhook or email agent and it does not check in within `--wake-grace` (default 10 minutes), `tincan agents`, `list_agents` and `tincan top` mark it `unanswered`, anyone who asks it is told it was woken and has not checked in, and `tincan doctor` on an admin device lists it with the last wake result. A failed send counts at once. Wake sending itself is unchanged.
+- [Unanswered wakes](#wake-methods): when the relay wakes a webhook or email agent and it does not check in within `--wake-grace` (default 10 minutes), `tincan agents`, `list_agents` and `tincan top` mark it `unanswered`, anyone who asks it is told it was woken and has not checked in, and `tincan doctor` on an admin device lists it with the last wake result. A failed send counts at once.
 - The relay log, the audit log and the roster now show only a safe reason for a failed wake. Before, a failed webhook or AgentMail send could print the webhook URL's path and query token, or the AgentMail key, into the relay log.
 
 Before you upgrade:
@@ -626,7 +626,7 @@ Notes that apply to every method:
 - The wake message only says how many requests and replies are waiting. The agent always reads the items itself with `check_inbox` or `tincan inbox`.
 - The agent-side methods (`command`, `channel`, `wait`, `schedule`) are recorded in `wake.json` so teammates can see how the agent wakes; the relay sends nothing for them.
 
-A wake can be delivered and still start nothing, for example when the receiving app's own job fails. For webhook and email agents the relay remembers the last wake it sent and whether the send worked (`ok`, or a short reason naming the host, such as `hooks.example returned 502 Bad Gateway`, never the wake URL or its credentials). If the agent has not checked in (polled; other calls do not count) within `--wake-grace` of that wake (default 10m, counted from the relay's start after a restart), or the send failed, it is unanswered: `tincan agents`, `list_agents` and `tincan top` mark it, an ask to it says "grokbot was woken at 16:40 and has not checked in yet; the request is queued.", and `tincan doctor` on an admin device warns with the wake result. The agent's next poll clears it. The fix is on the agent's own platform, not in Tincan.
+A wake can be delivered and still start nothing, for example when the receiving app's own job fails. HTTP success on a wake POST means the platform accepted the nudge, not that the agent ran. For webhook and email agents the relay remembers the last wake it sent and whether the send worked (`ok`, or a short reason naming the host, such as `hooks.example returned 502 Bad Gateway`, never the wake URL or its credentials). If the agent has not checked in (polled; other calls do not count) within `--wake-grace` of that wake (default 10m, counted from the relay's start after a restart), or the send failed, it is unanswered: `tincan agents`, `list_agents` and `tincan top` mark it, an ask to it says "grokbot was woken at 16:40 and has not checked in yet; the request is queued.", and `tincan doctor` on an admin device warns with the wake result. The agent's next poll clears it. While work stays queued and the agent has not polled, the relay keeps sending the same webhook or email on that `--wake-grace` interval, inside `max_per_hour` (default 12). A later successful send does not move the unanswered time. The owner still has to repair a dead receiver.
 
 ## Platform guide
 

@@ -16,7 +16,7 @@ Instinct wakes on email. The relay sends a short email through an AgentMail inbo
 { "instinct": { "method": "email", "email_to": "<instinct inbox>", "agentmail_inbox": "<sending inbox>", "agentmail_key": "<AgentMail API key>", "max_per_hour": 12 } }
 ```
 
-The same email can also mean a reply to one of Instinct's own requests is waiting; `tincan inbox` (or `check_inbox`) shows it.
+The same email can also mean a reply to one of Instinct's own requests is waiting; `tincan inbox` (or `check_inbox`) shows it. If a wake email is delivered and Instinct never checks in, the relay sends again on `--wake-grace` until it polls, the queue is empty, or `max_per_hour` is spent. The unanswered mark stays dated from the first silent send.
 
 Also ask the agent to set its own recurring check (for example every 15 minutes) that runs `tincan inbox`, as a backup.
 

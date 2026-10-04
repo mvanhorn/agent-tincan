@@ -196,9 +196,10 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 }
 
 // unansweredCheck lists the webhook and email agents whose last wake went
-// unanswered, with each wake's result, so the owner knows whose platform to
-// look at. Naming other agents' wake results is for the owner, so the check
-// runs only on an admin device and is skipped elsewhere.
+// unanswered, with each wake's result. The relay keeps nudging the same
+// path; the owner still has to repair a dead receiver. Naming other agents'
+// wake results is for the owner, so the check runs only on an admin device
+// and is skipped elsewhere.
 func unansweredCheck(ctx context.Context, r *client.Relay, now time.Time) check {
 	const name = "unanswered wakes"
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -223,7 +224,7 @@ func unansweredCheck(ctx context.Context, r *client.Relay, now time.Time) check 
 		return check{name, "ok", "no webhook or email agent is waiting on an unanswered wake", ""}
 	}
 	return check{name, "warn", strings.Join(stuck, "; "),
-		"Check each named agent's own platform: its webhook receiver, routine or email loop may have stopped. The mark clears on the agent's next check-in."}
+		"The relay keeps sending the same webhook or email until the agent checks in, the queue is empty, or the hourly cap is spent. The mark clears on the agent's next check-in. Also check each named agent's own platform: its webhook receiver, routine or email loop may have stopped."}
 }
 
 // relayUnreachableCheck explains a failed whoami: no key, an error that

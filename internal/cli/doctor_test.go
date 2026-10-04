@@ -263,6 +263,7 @@ func TestUnansweredWakeCheck(t *testing.T) {
 	}{
 		{"unanswered", roster, 200, "warn", []string{
 			"grokbot woken 12m ago, no check-in (webhook ok); instinct woken 3m ago, no check-in (email failed: api.agentmail.to returned 502 Bad Gateway)",
+			"same webhook or email",
 			"next check-in"}},
 		{"none", `{"agents":[{"name":"hermes","wake":"webhook"}]}`, 200, "ok", []string{"no webhook or email agent is waiting on an unanswered wake"}},
 		{"not admin", roster, 403, "ok", []string{"skipped", "admin device"}},

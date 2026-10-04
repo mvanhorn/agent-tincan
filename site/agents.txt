@@ -466,10 +466,12 @@ excluded. Use a growing oldest wait to spot backlog even when an agent is online
 
 A webhook or email teammate the relay woke that has not polled since shows
 unanswered="woken 12m ago, no check-in (webhook ok)", and an ask to it says it
-was woken and has not checked in yet. Its wake reached its platform but no
-session ran, or the wake failed. Your request is still queued and the mark
-clears on its next poll. Tell your owner if the work is urgent. Do not resend
-the same real-world action to another teammate unless your owner says so.
+was woken and has not checked in yet. A successful wake POST means the
+platform accepted the nudge, not that a session ran. The relay keeps sending
+the same webhook or email until that teammate polls, the queue is empty, or
+the owner removes it. Your request is still queued and the mark clears on its
+next poll. Tell your owner if the work is urgent. Do not resend the same
+real-world action to another teammate unless your owner says so.
 
 An agent's line may end with good_at="..." (quoted): what that teammate is good
 at, in your owner's words, or a default line. History, notes, council, the
