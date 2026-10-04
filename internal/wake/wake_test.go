@@ -58,6 +58,18 @@ func (rc *recorder) count() int {
 	return len(rc.bodies)
 }
 
+func (rc *recorder) body(i int) string {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.bodies[i]
+}
+
+func (rc *recorder) path(i int) string {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.paths[i]
+}
+
 func queued(w *Waker, to string, n int) {
 	for i := range n {
 		w.Queued(context.Background(), envelope.Request{ID: "r" + string(rune('a'+i)), To: to, Body: "SECRET call Joe's Garage at 555-0100"})
@@ -649,6 +661,19 @@ func drainFollowUp(t *testing.T, w *Waker, queued *atomic.Int32) {
 	w.Flush()
 }
 
+// atomicTime is a clock or last-poll stamp tests mutate while a nudge timer
+// may be firing.
+type atomicTime struct{ v atomic.Value }
+
+func (a *atomicTime) set(t time.Time) { a.v.Store(t) }
+
+func (a *atomicTime) get() time.Time {
+	if v := a.v.Load(); v != nil {
+		return v.(time.Time)
+	}
+	return time.Time{}
+}
+
 func TestDefaultWakeGrace(t *testing.T) {
 	w := New(Config{}, nil, Options{})
 	if w.opts.WakeGrace != DefaultWakeGrace {
@@ -663,7 +688,8 @@ func TestRequestFollowUpAfterSilent2xx(t *testing.T) {
 	ts := rc.server(t)
 	st := auditStore(t)
 	start := time.Unix(1_790_000_000, 0)
-	now := start
+	var now atomicTime
+	now.set(start)
 	var queuedN atomic.Int32
 	queuedN.Store(1)
 	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{
@@ -671,17 +697,17 @@ func TestRequestFollowUpAfterSilent2xx(t *testing.T) {
 		WakeGrace: 20 * time.Millisecond,
 		Queued:    func(string) int { return int(queuedN.Load()) },
 		LastPoll:  func(string) time.Time { return time.Time{} },
-		Now:       func() time.Time { return now },
+		Now:       now.get,
 	})
 	queued(w, "grokbot", 1)
 	waitCalls(t, &rc, 1)
-	now = start.Add(time.Minute)
+	now.set(start.Add(time.Minute))
 	waitCalls(t, &rc, 2)
 	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(start) || got.Result != envelope.WakeOK {
 		t.Fatalf("last wake = %+v %v, want first send at %v", got, ok, start)
 	}
-	if !strings.Contains(rc.bodies[1], "1 request") || strings.Contains(rc.bodies[1], "SECRET") {
-		t.Fatalf("follow-up body = %s", rc.bodies[1])
+	if !strings.Contains(rc.body(1), "1 request") || strings.Contains(rc.body(1), "SECRET") {
+		t.Fatalf("follow-up body = %s", rc.body(1))
 	}
 	drainFollowUp(t, w, &queuedN)
 }
@@ -691,20 +717,20 @@ func TestRequestFollowUpStopsAfterPoll(t *testing.T) {
 	var rc recorder
 	ts := rc.server(t)
 	start := time.Unix(1_790_000_000, 0)
-	now := start
+	var now, poll atomicTime
+	now.set(start)
 	var queuedN atomic.Int32
 	queuedN.Store(1)
-	var poll time.Time
 	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
 		Debounce:  time.Millisecond,
 		WakeGrace: 20 * time.Millisecond,
 		Queued:    func(string) int { return int(queuedN.Load()) },
-		LastPoll:  func(string) time.Time { return poll },
-		Now:       func() time.Time { return now },
+		LastPoll:  func(string) time.Time { return poll.get() },
+		Now:       now.get,
 	})
 	queued(w, "grokbot", 1)
 	waitCalls(t, &rc, 2)
-	poll = now
+	poll.set(now.get())
 	w.Flush()
 	if rc.count() != 2 {
 		t.Fatalf("webhook calls = %d, want 2 after the poll", rc.count())
@@ -739,7 +765,8 @@ func TestRequestFollowUpRespectsHourlyCap(t *testing.T) {
 	ts := rc.server(t)
 	st := auditStore(t)
 	start := time.Unix(1_790_000_000, 0)
-	now := start
+	var now atomicTime
+	now.set(start)
 	var queuedN atomic.Int32
 	queuedN.Store(1)
 	w := New(Config{"instinct": {Method: Webhook, URL: ts.URL, MaxPerHour: 1}}, st, Options{
@@ -747,7 +774,7 @@ func TestRequestFollowUpRespectsHourlyCap(t *testing.T) {
 		WakeGrace: 20 * time.Millisecond,
 		Queued:    func(string) int { return int(queuedN.Load()) },
 		LastPoll:  func(string) time.Time { return time.Time{} },
-		Now:       func() time.Time { return now },
+		Now:       now.get,
 	})
 	queued(w, "instinct", 1)
 	waitCalls(t, &rc, 1)
@@ -764,7 +791,7 @@ func TestRequestFollowUpRespectsHourlyCap(t *testing.T) {
 	if got, ok := w.LastWake("instinct"); !ok || !got.At.Equal(start) || got.Result != envelope.WakeOK {
 		t.Fatalf("last wake = %+v %v, want the first send", got, ok)
 	}
-	now = start.Add(61 * time.Minute)
+	now.set(start.Add(61 * time.Minute))
 	waitCalls(t, &rc, 2)
 	drainFollowUp(t, w, &queuedN)
 }
@@ -776,7 +803,8 @@ func TestRequestFollowUpFailedKeepsWokenAt(t *testing.T) {
 	ts := rc.server(t)
 	st := auditStore(t)
 	start := time.Unix(1_790_000_000, 0)
-	now := start
+	var now atomicTime
+	now.set(start)
 	var queuedN atomic.Int32
 	queuedN.Store(1)
 	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{
@@ -785,12 +813,12 @@ func TestRequestFollowUpFailedKeepsWokenAt(t *testing.T) {
 		WakeGrace:  20 * time.Millisecond,
 		Queued:     func(string) int { return int(queuedN.Load()) },
 		LastPoll:   func(string) time.Time { return time.Time{} },
-		Now:        func() time.Time { return now },
+		Now:        now.get,
 	})
 	queued(w, "grokbot", 1)
 	waitCalls(t, &rc, 1)
 	rc.fail.Store(2)
-	now = start.Add(time.Minute)
+	now.set(start.Add(time.Minute))
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		got, ok := w.LastWake("grokbot")
@@ -827,15 +855,15 @@ func TestRequestFollowUpByEmail(t *testing.T) {
 		})
 	queued(w, "instinct", 1)
 	waitCalls(t, &rc, 2)
-	if rc.paths[1] != "/v0/inboxes/bot@agentmail.to/messages/send" {
-		t.Fatalf("follow-up path = %q", rc.paths[1])
+	if rc.path(1) != "/v0/inboxes/bot@agentmail.to/messages/send" {
+		t.Fatalf("follow-up path = %q", rc.path(1))
 	}
 	var body map[string]string
-	if err := json.Unmarshal([]byte(rc.bodies[1]), &body); err != nil {
+	if err := json.Unmarshal([]byte(rc.body(1)), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["subject"] != "Agent Tincan: requests waiting" || body["text"] != Message(1) || strings.Contains(rc.bodies[1], "SECRET") {
-		t.Fatalf("follow-up email = %s", rc.bodies[1])
+	if body["subject"] != "Agent Tincan: requests waiting" || body["text"] != Message(1) || strings.Contains(rc.body(1), "SECRET") {
+		t.Fatalf("follow-up email = %s", rc.body(1))
 	}
 	drainFollowUp(t, w, &queuedN)
 }
@@ -893,20 +921,20 @@ func TestForgetDropsRequestFollowUp(t *testing.T) {
 func TestQueuedAfterPollSendsAndFollowUpDoesNot(t *testing.T) {
 	var rc recorder
 	ts := rc.server(t)
-	now := time.Unix(1_790_000_000, 0)
+	var now, poll atomicTime
+	now.set(time.Unix(1_790_000_000, 0))
 	var queuedN atomic.Int32
 	queuedN.Store(1)
-	var poll time.Time
 	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
 		Debounce:  time.Millisecond,
 		WakeGrace: 30 * time.Millisecond,
 		Queued:    func(string) int { return int(queuedN.Load()) },
-		LastPoll:  func(string) time.Time { return poll },
-		Now:       func() time.Time { return now },
+		LastPoll:  func(string) time.Time { return poll.get() },
+		Now:       now.get,
 	})
 	queued(w, "grokbot", 1)
 	waitCalls(t, &rc, 1)
-	poll = now.Add(time.Second)
+	poll.set(now.get().Add(time.Second))
 	w.Flush()
 	if rc.count() != 1 {
 		t.Fatalf("follow-up after poll: calls = %d, want 1", rc.count())

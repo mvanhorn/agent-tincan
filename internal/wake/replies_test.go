@@ -394,15 +394,15 @@ func TestRequestFollowUpCoalescesWithReplyRetry(t *testing.T) {
 	queued(w, "hermes", 1)
 	replied(w, "hermes")
 	waitCalls(t, &rc, 1)
-	if got := message(t, rc.bodies[0]); got != WaitingMessage(1, 1) {
+	if got := message(t, rc.body(0)); got != WaitingMessage(1, 1) {
 		t.Fatalf("first message = %q", got)
 	}
 	waitCalls(t, &rc, 2)
-	if got := message(t, rc.bodies[1]); got != WaitingMessage(1, 1) {
+	if got := message(t, rc.body(1)); got != WaitingMessage(1, 1) {
 		t.Fatalf("coalesced follow-up = %q", got)
 	}
 	waitCalls(t, &rc, 3)
-	if got := message(t, rc.bodies[2]); got != WaitingMessage(1, 1) {
+	if got := message(t, rc.body(2)); got != WaitingMessage(1, 1) {
 		t.Fatalf("next reply step = %q, want it still carrying the request", got)
 	}
 	queuedN.Store(0)

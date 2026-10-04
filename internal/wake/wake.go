@@ -652,6 +652,12 @@ func (w *Waker) followUpLater(agent string, requests int) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.stopped {
+		return
+	}
+	if _, gone := w.removed[agent]; gone {
+		return
+	}
 	p := w.nudgeFor(agent)
 	p.followUp = true
 	w.arm(agent, w.opts.WakeGrace)
