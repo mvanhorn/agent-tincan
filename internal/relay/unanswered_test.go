@@ -510,3 +510,58 @@ func TestRequestFollowUpAfterRemoveAndRejoin(t *testing.T) {
 		t.Fatalf("webhook calls = %d, want 2 (first wake and follow-up after rejoin)", n)
 	}
 }
+
+// An in-flight wake that finishes after remove and join under the same name
+// is the former agent's. The new agent's later unanswered wake is still
+// visible on the roster.
+func TestInFlightWakeAfterRejoinDoesNotHideUnanswered(t *testing.T) {
+	h := newHarness(t, Config{WakeGrace: 30 * time.Millisecond})
+	arrived := make(chan struct{}, 8)
+	release := make(chan struct{})
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		arrived <- struct{}{}
+		<-release
+	}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP:       hook.Client(),
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Second,
+		WakeGrace:  -1,
+		Queued:     h.srv.QueuedCount,
+		LastPoll:   h.srv.LastPoll,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+
+	w.Queued(t.Context(), envelope.Request{To: "grokbot", Urgent: true})
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not start")
+	}
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"grokbot"}`, http.StatusOK, nil)
+	h.joinAt(grokAddr, "grokbot")
+	joined, found, err := h.srv.dir.Agent(t.Context(), "grokbot")
+	if err != nil || !found {
+		t.Fatalf("rejoined grokbot: found %v, %v", found, err)
+	}
+	close(release)
+	w.Flush()
+	if wk, ok := w.LastWake("grokbot"); ok {
+		t.Fatalf("pre-join send was remembered: %+v", wk)
+	}
+
+	h.do(museAddr, "POST", "/v1/send", `{"to":"grokbot","body":"hi"}`, http.StatusCreated, nil)
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wake after rejoin did not send")
+	}
+	time.Sleep(80 * time.Millisecond)
+	g := agentInfo(t, h, macAddr, "grokbot")
+	if !g.Unanswered || g.WokenAt.IsZero() || g.WokenAt.Before(joined.JoinedAt) {
+		t.Fatalf("new agent's unanswered wake hidden: %+v, joined %v", g, joined.JoinedAt)
+	}
+}

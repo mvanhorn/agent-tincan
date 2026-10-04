@@ -1064,6 +1064,59 @@ func TestJoinedAllowsRequestFollowUp(t *testing.T) {
 	drainFollowUp(t, w, &queuedN)
 }
 
+// An in-flight send that finishes after Forget and Joined is the former
+// agent's and is not kept as the new agent's last wake.
+func TestInFlightSendAfterRejoinIsNotRemembered(t *testing.T) {
+	var rc recorder
+	rc.holdFirst = make(chan struct{})
+	rc.firstBegin = make(chan struct{})
+	rc.firstDone = make(chan struct{})
+	ts := rc.server(t)
+	start := time.Unix(1_790_000_000, 0)
+	var now atomicTime
+	now.set(start)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:   time.Millisecond,
+		RetryDelay: time.Second,
+		WakeGrace:  skipFollowUp,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return time.Time{} },
+		Now:        now.get,
+	})
+	queued(w, "grokbot", 1)
+	select {
+	case <-rc.firstBegin:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not start")
+	}
+	now.set(start.Add(time.Second))
+	w.Forget("grokbot")
+	now.set(start.Add(2 * time.Second))
+	w.Joined("grokbot")
+	close(rc.holdFirst)
+	select {
+	case <-rc.firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not finish")
+	}
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if wk, ok := w.LastWake("grokbot"); ok {
+			t.Fatalf("in-flight send after rejoin was remembered: %+v", wk)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	now.set(start.Add(3 * time.Second))
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 2)
+	got, ok := w.LastWake("grokbot")
+	if !ok || !got.At.Equal(start.Add(3*time.Second)) || got.Result != envelope.WakeOK {
+		t.Fatalf("new agent's wake = %+v %v", got, ok)
+	}
+}
+
 // AE6: an email target gets a second AgentMail send with the count-only body
 // and the same subject.
 func TestRequestFollowUpByEmail(t *testing.T) {

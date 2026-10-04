@@ -264,8 +264,13 @@ type Waker struct {
 	last map[string]store.Wake
 	// removed is when each agent was last removed (Forget). A wake whose
 	// send started before then belonged to the removed agent and is not
-	// remembered when it finishes.
+	// remembered when it finishes. Joined leaves this cutoff in place so
+	// an in-flight send of the former agent is not recorded for the new
+	// one.
 	removed map[string]time.Time
+	// unbound is set by Forget until Joined or Unforget. followUpLater
+	// does not re-arm while the name is unbound.
+	unbound map[string]struct{}
 	// rememberMu makes keeping a last wake, store write included, atomic
 	// with Forget, so a removal cannot slip between the check and the write.
 	rememberMu sync.Mutex
@@ -318,7 +323,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		last: last, removed: map[string]time.Time{}, ctx: ctx, cancel: cancel}
+		last: last, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
 }
 
 // LastWake implements relay.WakeReporter: the last wake the relay sent
@@ -340,6 +345,7 @@ func (w *Waker) Forget(agent string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.removed[agent] = w.opts.Now()
+	w.unbound[agent] = struct{}{}
 	delete(w.last, agent)
 	if p := w.pending[agent]; p != nil {
 		if p.timer != nil && p.timer.Stop() {
@@ -370,19 +376,22 @@ func (w *Waker) Unforget(agent string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.removed, agent)
+	delete(w.unbound, agent)
 	if old, ok := w.last[agent]; found && (!ok || wk.At.After(old.At)) {
 		w.last[agent] = wk
 	}
 }
 
 // Joined implements relay.WakeReporter: the name is bound again, so
-// Forget's marker no longer blocks wake-grace follow-ups.
+// wake-grace follow-ups can be scheduled. The Forget cutoff stays, so an
+// in-flight send that started before the removal is not recorded for this
+// agent.
 func (w *Waker) Joined(agent string) {
 	w.rememberMu.Lock()
 	defer w.rememberMu.Unlock()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.removed, agent)
+	delete(w.unbound, agent)
 }
 
 // WakeMethod implements relay.WakeNamer: agents see only the method name.
@@ -665,7 +674,7 @@ func (w *Waker) followUpLater(agent string, requests int) {
 	if w.stopped {
 		return
 	}
-	if _, gone := w.removed[agent]; gone {
+	if _, unbound := w.unbound[agent]; unbound {
 		return
 	}
 	p := w.nudgeFor(agent)
