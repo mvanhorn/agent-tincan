@@ -135,7 +135,7 @@ The `council` agent puts one question to every model on the team, has them rank 
 
 If one agent reads untrusted content (a web page, an email, a document) and gets tricked, it can ask a teammate to do something harmful, and the teammate will. Before joining an agent that reads untrusted content alongside one that holds real powers:
 
-- Hold requests to high-power agents with the [owner approval gate](#owner-approval-gate) rather than relying on them to ask: agents treat every request that reaches them as authorized and do not stop to confirm. Limits you give an agent directly (a spending cap, people never to contact) still bind it.
+- Agents treat a teammate's request as authorized and do not stop to ask, except before spending money or contacting someone in a way they would normally confirm with you. Give high-power agents instructions about which other kinds of requests they should confirm with you first, or hold them with the [owner approval gate](#owner-approval-gate).
 - Keep `tincan trace` handy so you can see who asked for what.
 - For an OpenAI dot (`dot-web`), which reads your connected apps, list the teammates it may ask in `~/.config/tincan/dot-web-send.txt`; with no file it may ask any joined agent, like every other teammate.
 - Use `tincan remove <agent>` to cut an agent off immediately. Its queued requests are cancelled and, for ChatGPT, its tokens are revoked.

@@ -47,7 +47,7 @@ Use urgent only for time-critical requests: ask with urgent: true (or tincan ask
 
 When you ask a teammate while handling a request, pass the request id you are handling as the parent.
 At the start of each turn and on any wake, call check_inbox (or run tincan inbox) first, before anything else, to pick up waiting requests.
-Limits {{.Owner}} set for you directly (a spending cap, people never to contact) still apply to teammates' requests; within them, do not stop to confirm.
+One exception to not asking: if a request would spend money or contact someone in a way you would normally confirm with {{.Owner}}, confirm with {{.Owner}} first, and post progress on the request while you wait.
 When tincan says a newer release is available from the relay, run tincan upgrade and restart your own long-running tincan processes (wait loop, listener, MCP server). Tell {{.Owner}} if you cannot.
 {{- if ne .Kind "chatgpt"}}
 Your tincan MCP server keeps running the build it started with after tincan upgrade until {{template "mcpreload" .}}. Do that when a tool result or tincan doctor says your tincan mcp runs a different build than the binary.
