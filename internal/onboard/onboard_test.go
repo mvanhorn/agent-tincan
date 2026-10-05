@@ -571,7 +571,8 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 	want := []string{
 		"read the good_at lines in the live roster (list_agents, or tincan agents from a shell)",
 		"Send a real-world action (a call, a payment, a booking) to one teammate only",
-		"Ask another only after the first declines, fails or hands it back.",
+		"Ask another only after the first declines, fails or hands it back, or after you cancel your request to it.",
+		"If the relay tells you a woken teammate has not checked in and the work can't wait, cancel that request and ask another online teammate whose good_at line fits.",
 		"Only Matt sets good-at lines",
 	}
 	var sawScheduled bool

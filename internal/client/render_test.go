@@ -299,3 +299,30 @@ func TestFormatResultUnansweredWake(t *testing.T) {
 		t.Fatalf("failed = %q, want %q", got, want)
 	}
 }
+
+// A pending request shows the relay's note, on one line, before the usual
+// pending text; one without a note is unchanged.
+func TestFormatResultRelayNote(t *testing.T) {
+	base := client.Result{Request: envelope.Request{ID: "r1", To: "grokbot"}, Status: envelope.StatusQueued}
+	plain := client.FormatResult(base)
+	noted := base
+	noted.RelayNote = &envelope.Progress{Note: "grokbot was woken at 16:40 UTC and has not checked in (webhook ok).\nThe request is still queued.", At: time.Now(), By: "relay"}
+	got := client.FormatResult(noted)
+	want := "Relay note, 0s ago: grokbot was woken at 16:40 UTC and has not checked in (webhook ok). The request is still queued.\n" + plain
+	if got != want {
+		t.Fatalf("noted = %q, want %q", got, want)
+	}
+}
+
+// A notice from the relay is framed as one, not as a teammate's request to
+// handle and answer.
+func TestFormatRequestRelayNotice(t *testing.T) {
+	got := client.FormatRequest(envelope.Request{ID: "n1", From: client.RelaySender, To: "instinct", Kind: envelope.KindNotify, Body: "About your request r1"})
+	if !strings.Contains(got, "Notice n1 from the Agent Tincan relay (not a teammate). No reply needed.") || !strings.Contains(got, "About your request r1") || strings.Contains(got, "your teammate") {
+		t.Fatalf("notice = %q", got)
+	}
+	ask := client.FormatRequest(envelope.Request{ID: "r2", From: "muse", To: "instinct", Kind: envelope.KindNotify, Body: "fyi"})
+	if !strings.Contains(ask, "Request r2 from muse (your teammate)") {
+		t.Fatalf("teammate notify = %q", ask)
+	}
+}

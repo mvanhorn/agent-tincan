@@ -178,6 +178,11 @@ type Result struct {
 	// Result that an ask returns. Nil unless the recipient checks its inbox
 	// on a schedule, and always nil from a relay that predates schedules.
 	Target *Target `json:"target,omitempty"`
+	// RelayNote is a note the relay itself added to the request, By
+	// "relay": the notice that the target was woken and never checked in,
+	// naming teammates who are online. Only the asker sees it. Older relays
+	// never send it and older clients ignore it.
+	RelayNote *Progress `json:"relay_note,omitempty"`
 }
 
 // SendResponse is the relay's reply to a send: the queued request and, for

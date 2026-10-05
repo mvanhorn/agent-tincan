@@ -204,6 +204,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate wakes: %w", err)
 	}
+	if err := s.migrateWakeNotices(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate wake notices: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -947,7 +951,8 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 type Result = envelope.Result
 
 // Get returns a request for its sender or its target. When it hands the
-// sender a reply, that reply counts as seen.
+// sender a reply, that reply counts as seen. The sender also gets the
+// relay's wake notice on the request, if there is one.
 func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	req, status, err := s.lookup(ctx, id)
 	if err != nil {
@@ -965,8 +970,14 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 			return Result{}, err
 		}
 	}
+	var note *envelope.Progress
+	if req.From == agent {
+		if note, err = s.WakeNotice(ctx, id); err != nil {
+			return Result{}, err
+		}
+	}
 	req.RedactFor(agent)
-	return Result{Request: req, Status: status, Reply: rep, Progress: req.Progress, Exchanges: req.Exchanges}, nil
+	return Result{Request: req, Status: status, Reply: rep, Progress: req.Progress, Exchanges: req.Exchanges, RelayNote: note}, nil
 }
 
 // replyFor returns the stored reply for a request, or nil if none yet.

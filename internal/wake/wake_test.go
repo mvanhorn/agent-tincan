@@ -1253,3 +1253,173 @@ func TestRequestsWaitingDoesNotResetUnansweredClock(t *testing.T) {
 		t.Fatalf("last wake = %+v %v, want the persisted first send", got, ok)
 	}
 }
+
+// followUpIn waits for agent's request follow-up to be armed and returns how
+// long until it fires.
+func followUpIn(t *testing.T, w *Waker, agent string) time.Duration {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		p := w.pending[agent]
+		if p != nil && p.followUp && p.timer != nil {
+			d := time.Until(p.due)
+			w.mu.Unlock()
+			return d
+		}
+		w.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("no follow-up armed")
+	return 0
+}
+
+func TestDefaultUrgentWakeGrace(t *testing.T) {
+	w := New(Config{}, nil, Options{})
+	if w.opts.UrgentWakeGrace != DefaultUrgentWakeGrace || DefaultUrgentWakeGrace != 2*time.Minute {
+		t.Fatalf("UrgentWakeGrace = %v, want %v", w.opts.UrgentWakeGrace, DefaultUrgentWakeGrace)
+	}
+}
+
+// An urgent request still queued after a silent wake is woken again after
+// UrgentWakeGrace, well inside WakeGrace.
+func TestUrgentFollowUpUsesUrgentWakeGrace(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:        time.Millisecond,
+		WakeGrace:       time.Hour,
+		UrgentWakeGrace: 20 * time.Millisecond,
+		Queued:          func(string) int { return int(queuedN.Load()) },
+		UrgentQueued:    func(string) int { return int(queuedN.Load()) },
+		LastPoll:        func(string) time.Time { return time.Time{} },
+	})
+	w.Queued(context.Background(), envelope.Request{ID: "ra", To: "grokbot", Urgent: true})
+	waitCalls(t, &rc, 2)
+	drainFollowUp(t, w, &queuedN)
+}
+
+// Without an urgent request queued the follow-up keeps WakeGrace.
+func TestNonUrgentFollowUpKeepsWakeGrace(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:        time.Millisecond,
+		WakeGrace:       time.Hour,
+		UrgentWakeGrace: 20 * time.Millisecond,
+		Queued:          func(string) int { return 1 },
+		UrgentQueued:    func(string) int { return 0 },
+		LastPoll:        func(string) time.Time { return time.Time{} },
+	})
+	defer w.Stop()
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 1)
+	if d := followUpIn(t, w, "grokbot"); d < 59*time.Minute {
+		t.Fatalf("follow-up in %v, want the 1h WakeGrace", d)
+	}
+}
+
+// An urgent grace longer than WakeGrace never delays a follow-up.
+func TestUrgentWakeGraceNeverLengthens(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:        time.Millisecond,
+		WakeGrace:       time.Hour,
+		UrgentWakeGrace: 2 * time.Hour,
+		Queued:          func(string) int { return 1 },
+		UrgentQueued:    func(string) int { return 1 },
+		LastPoll:        func(string) time.Time { return time.Time{} },
+	})
+	defer w.Stop()
+	w.Queued(context.Background(), envelope.Request{ID: "ra", To: "grokbot", Urgent: true})
+	waitCalls(t, &rc, 1)
+	if d := followUpIn(t, w, "grokbot"); d > time.Hour {
+		t.Fatalf("follow-up in %v, want at most WakeGrace", d)
+	}
+}
+
+// The urgent follow-up stops, as the normal one does, on a poll or an
+// empty queue.
+func TestUrgentFollowUpStops(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(poll *atomicTime, queuedN *atomic.Int32)
+	}{
+		{"poll", func(poll *atomicTime, _ *atomic.Int32) { poll.set(time.Unix(1_790_000_001, 0)) }},
+		{"empty queue", func(_ *atomicTime, queuedN *atomic.Int32) { queuedN.Store(0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rc recorder
+			ts := rc.server(t)
+			var poll atomicTime
+			var queuedN atomic.Int32
+			queuedN.Store(1)
+			var told atomic.Int32
+			w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+				Debounce:        time.Millisecond,
+				WakeGrace:       time.Hour,
+				UrgentWakeGrace: 30 * time.Millisecond,
+				Queued:          func(string) int { return int(queuedN.Load()) },
+				UrgentQueued:    func(string) int { return int(queuedN.Load()) },
+				LastPoll:        func(string) time.Time { return poll.get() },
+				Unanswered:      func(string, store.Wake) { told.Add(1) },
+				Now:             func() time.Time { return time.Unix(1_790_000_000, 0) },
+			})
+			w.Queued(context.Background(), envelope.Request{ID: "ra", To: "grokbot", Urgent: true})
+			waitCalls(t, &rc, 1)
+			tc.stop(&poll, &queuedN)
+			w.Flush()
+			if rc.count() != 1 || told.Load() != 0 {
+				t.Fatalf("after %s: calls = %d, told = %d, want 1 and 0", tc.name, rc.count(), told.Load())
+			}
+		})
+	}
+}
+
+// Unanswered is told on each silent follow-up, with the first wake of the
+// episode, and never for the first send or after the agent polls.
+func TestUnansweredToldOnSilentFollowUp(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	start := time.Unix(1_790_000_000, 0)
+	var now, poll atomicTime
+	now.set(start)
+	var queuedN atomic.Int32
+	queuedN.Store(1)
+	type call struct {
+		agent string
+		wk    store.Wake
+	}
+	calls := make(chan call, 10)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+		Debounce:   time.Millisecond,
+		WakeGrace:  30 * time.Millisecond,
+		Queued:     func(string) int { return int(queuedN.Load()) },
+		LastPoll:   func(string) time.Time { return poll.get() },
+		Unanswered: func(agent string, wk store.Wake) { calls <- call{agent, wk} },
+		Now:        now.get,
+	})
+	queued(w, "grokbot", 1)
+	waitCalls(t, &rc, 1)
+	if len(calls) != 0 {
+		t.Fatal("told on the first send")
+	}
+	now.set(start.Add(time.Minute))
+	select {
+	case c := <-calls:
+		if c.agent != "grokbot" || !c.wk.At.Equal(start) || c.wk.Result != envelope.WakeOK {
+			t.Fatalf("told %+v, want grokbot's first wake", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("not told on the silent follow-up")
+	}
+	poll.set(now.get()) // before that follow-up re-arms
+	waitCalls(t, &rc, 2)
+	w.Flush()
+	if len(calls) != 0 || rc.count() != 2 {
+		t.Fatalf("after the poll: told %d more times, calls = %d", len(calls), rc.count())
+	}
+}

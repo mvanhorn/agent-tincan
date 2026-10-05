@@ -44,6 +44,10 @@ type Config struct {
 	// after a wake before it shows as unanswered and the waker sends the
 	// same webhook or email again; default DefaultWakeGrace.
 	WakeGrace time.Duration
+	// UrgentWakeGrace is the shorter grace the waker uses while an urgent
+	// request is queued, and how long an urgent request waits in silence
+	// before its asker is told; default DefaultUrgentWakeGrace.
+	UrgentWakeGrace time.Duration
 }
 
 func (c *Config) defaults() {
@@ -73,6 +77,9 @@ func (c *Config) defaults() {
 	}
 	if c.WakeGrace == 0 {
 		c.WakeGrace = DefaultWakeGrace
+	}
+	if c.UrgentWakeGrace == 0 {
+		c.UrgentWakeGrace = DefaultUrgentWakeGrace
 	}
 	c.Attachments.defaults()
 }
@@ -1057,6 +1064,10 @@ type WakeResumer interface {
 // shows it as unanswered and the waker sends the same path again.
 const DefaultWakeGrace = 10 * time.Minute
 
+// DefaultUrgentWakeGrace is the wake grace while an urgent request to the
+// agent is queued.
+const DefaultUrgentWakeGrace = 2 * time.Minute
+
 // relayWoken reports whether the relay itself wakes agents on method.
 func relayWoken(method string) bool { return method == "webhook" || method == "email" }
 
@@ -1156,7 +1167,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		if p := persisted[a.Name]; p.After(active) {
 			active = p
 		}
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: !last.IsZero() && now.Sub(last) < s.cfg.PollHold+30*time.Second, Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name]}
 		if info.GoodAt == "" {
 			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}
@@ -1406,6 +1417,20 @@ func (s *Server) QueuedCount(agent string) int {
 	n, err := s.store.CountQueued(ctx, agent)
 	if err != nil {
 		log.Printf("queued requests for %s: %v", agent, err)
+		return 1
+	}
+	return n
+}
+
+// UrgentQueuedCount returns how many of agent's queued requests are urgent.
+// The waker asks it to pick the grace for a request follow-up. A failed
+// count reports one, since a spare nudge costs less than a late urgent one.
+func (s *Server) UrgentQueuedCount(agent string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := s.store.CountUrgentQueued(ctx, agent)
+	if err != nil {
+		log.Printf("urgent queued requests for %s: %v", agent, err)
 		return 1
 	}
 	return n

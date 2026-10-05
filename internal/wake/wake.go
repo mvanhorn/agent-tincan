@@ -24,8 +24,11 @@
 // nudge is nudged again on the ReplyRetries schedule. A request that stays
 // queued after a relay-side wake, with no poll since that wake, is nudged
 // again after WakeGrace, within MaxPerHour, until the agent polls, the
-// queue is empty, or the agent is removed. A later 2xx does not move the
-// last recorded wake while the agent is still silent.
+// queue is empty, or the agent is removed. While an urgent request is
+// queued the follow-up comes after UrgentWakeGrace instead. A later 2xx
+// does not move the last recorded wake while the agent is still silent.
+// Each silent follow-up tells the relay (Options.Unanswered), which lets the
+// askers know once per request.
 //
 // Wake messages carry only counts and an instruction, never request or reply
 // text.
@@ -185,6 +188,11 @@ func checkOpenClaw(t Target) error {
 // relay.DefaultWakeGrace.
 const DefaultWakeGrace = 10 * time.Minute
 
+// DefaultUrgentWakeGrace is WakeGrace while the agent has an urgent request
+// queued: a time-critical ask is re-woken sooner. It matches
+// relay.DefaultUrgentWakeGrace.
+const DefaultUrgentWakeGrace = 2 * time.Minute
+
 // DefaultReplyGrace is how long a reply may sit unread before its asker is
 // woken for it.
 const DefaultReplyGrace = time.Minute
@@ -225,6 +233,18 @@ type Options struct {
 	// default DefaultWakeGrace. A non-positive value after New turns
 	// request follow-up off (tests).
 	WakeGrace time.Duration
+	// UrgentWakeGrace replaces WakeGrace for a follow-up armed while
+	// UrgentQueued reports an urgent request still waiting, when it is
+	// shorter; default DefaultUrgentWakeGrace. A negative value turns the
+	// shorter grace off. Follow-ups share MaxPerHour either way.
+	UrgentWakeGrace time.Duration
+	// UrgentQueued counts agent's queued requests that are urgent. Nil
+	// means none are.
+	UrgentQueued func(agent string) int
+	// Unanswered is told when a request follow-up fires and agent, woken at
+	// wk, has still not polled and still has requests queued: a full grace
+	// went by in silence. The relay uses it to tell those requests' askers.
+	Unanswered func(agent string, wk store.Wake)
 	// LastPoll is the agent's last inbox poll, including peek. A poll at
 	// or after the last recorded wake is proof of life and stops request
 	// follow-up. Nil is treated as never polled.
@@ -301,6 +321,9 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	}
 	if opts.WakeGrace == 0 {
 		opts.WakeGrace = DefaultWakeGrace
+	}
+	if opts.UrgentWakeGrace == 0 {
+		opts.UrgentWakeGrace = DefaultUrgentWakeGrace
 	}
 	if opts.AgentMailAPI == "" {
 		opts.AgentMailAPI = "https://api.agentmail.to/v0"
@@ -580,6 +603,11 @@ func (w *Waker) fire(agent string) {
 	}
 	if p.followUp {
 		w.applyFollowUpStops(agent, p)
+		if p.requests > 0 && w.opts.Unanswered != nil {
+			if wk, ok := w.LastWake(agent); ok {
+				w.opts.Unanswered(agent, wk)
+			}
+		}
 	} else if p.recheck && w.opts.Queued != nil {
 		// Count what is still waiting: zero when a poller took it, and
 		// the whole backlog when requests arrived after the recheck was set.
@@ -660,8 +688,9 @@ func (w *Waker) applyFollowUpStops(agent string, p *nudge) {
 	p.requests = n
 }
 
-// followUpLater re-arms a request wake at WakeGrace while the episode is
-// still silent and queued. Caller must not hold w.mu.
+// followUpLater re-arms a request wake at WakeGrace, or UrgentWakeGrace
+// while an urgent request is queued, while the episode is still silent and
+// queued. Caller must not hold w.mu.
 func (w *Waker) followUpLater(agent string, requests int) {
 	if requests == 0 || w.opts.WakeGrace <= 0 || !w.relaySide(agent) || w.opts.Queued == nil {
 		return
@@ -669,6 +698,7 @@ func (w *Waker) followUpLater(agent string, requests int) {
 	if w.opts.Queued(agent) == 0 || w.answered(agent) {
 		return
 	}
+	grace := w.followUpGrace(agent)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.stopped {
@@ -679,7 +709,19 @@ func (w *Waker) followUpLater(agent string, requests int) {
 	}
 	p := w.nudgeFor(agent)
 	p.followUp = true
-	w.arm(agent, w.opts.WakeGrace)
+	w.arm(agent, grace)
+}
+
+// followUpGrace is how long the next request follow-up waits: WakeGrace,
+// or UrgentWakeGrace when it is shorter and an urgent request is queued.
+func (w *Waker) followUpGrace(agent string) time.Duration {
+	if w.opts.UrgentWakeGrace <= 0 || w.opts.UrgentWakeGrace >= w.opts.WakeGrace || w.opts.UrgentQueued == nil {
+		return w.opts.WakeGrace
+	}
+	if w.opts.UrgentQueued(agent) == 0 {
+		return w.opts.WakeGrace
+	}
+	return w.opts.UrgentWakeGrace
 }
 
 // pollTime is agent's last poll, or zero when LastPoll is unset or it has

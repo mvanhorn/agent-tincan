@@ -43,6 +43,7 @@ type relayFlags struct {
 	replyGrace    time.Duration
 	notesTTL      time.Duration
 	wakeGrace     time.Duration
+	urgentGrace   time.Duration
 	dist          string
 	upgradeExit   bool
 	releaseURL    string
@@ -71,7 +72,10 @@ Wake settings (webhook URLs, email addresses, keys) live in wake.json in the
 state dir, chmod 600. They are never sent to agents. A webhook or email agent
 is also woken when a reply to its own request is still unread after
 --reply-grace. A webhook or email agent that has not checked in by
---wake-grace after a wake shows as unanswered in tincan agents and top.
+--wake-grace after a wake shows as unanswered in tincan agents and top, and
+is woken again every --wake-grace (--urgent-wake-grace while an urgent request
+to it is queued). When a request has waited through such a silent grace, its
+asker is told once, with the teammates online now.
 
 An unanswered request expires after 24 hours, except one to a notes-kind
 agent, which waits --notes-ttl (30 days by default) so a sleeping notes Mac
@@ -100,6 +104,9 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 			if f.wakeGrace <= 0 {
 				return fmt.Errorf("--wake-grace must be positive, got %s", f.wakeGrace)
 			}
+			if f.urgentGrace <= 0 {
+				return fmt.Errorf("--urgent-wake-grace must be positive, got %s", f.urgentGrace)
+			}
 			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
 				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
 			}
@@ -120,6 +127,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	cmd.Flags().IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
 	cmd.Flags().DurationVar(&f.wakeGrace, "wake-grace", relay.DefaultWakeGrace, "how long a webhook or email agent may go without checking in after a wake before it shows as unanswered and the relay sends the same wake again")
+	cmd.Flags().DurationVar(&f.urgentGrace, "urgent-wake-grace", relay.DefaultUrgentWakeGrace, "--wake-grace while an urgent request to the agent is queued, when shorter: how soon a silent webhook or email agent is woken again and the asker is told")
 	cmd.Flags().DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
@@ -133,7 +141,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
-	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace}
+	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace}
 }
 
 // directoryConfig maps the relay flags onto the identity directory.
@@ -144,12 +152,15 @@ func (f relayFlags) directoryConfig() identity.Config {
 // wakerOptions maps relay flags and the live server onto the waker.
 func wakerOptions(f relayFlags, srv *relay.Server) wake.Options {
 	return wake.Options{
-		Online:        srv.Online,
-		Queued:        srv.QueuedCount,
-		UnseenReplies: srv.UnseenReplies,
-		LastPoll:      srv.LastPoll,
-		ReplyGrace:    f.replyGrace,
-		WakeGrace:     f.wakeGrace,
+		Online:          srv.Online,
+		Queued:          srv.QueuedCount,
+		UrgentQueued:    srv.UrgentQueuedCount,
+		UnseenReplies:   srv.UnseenReplies,
+		LastPoll:        srv.LastPoll,
+		Unanswered:      srv.TellAskers,
+		ReplyGrace:      f.replyGrace,
+		WakeGrace:       f.wakeGrace,
+		UrgentWakeGrace: f.urgentGrace,
 	}
 }
 

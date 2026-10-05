@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
 // Wake is the last wake the relay sent an agent: when, and "ok" or the
@@ -109,4 +111,55 @@ func (s *Store) AgentsLastPoll(ctx context.Context) (map[string]time.Time, error
 		out[name] = time.UnixMilli(ms)
 	}
 	return out, rows.Err()
+}
+
+// migrateWakeNotices creates the table of notes the relay added to requests
+// whose relay-woken target never checked in, one row per request. The row
+// is also what keeps the asker's notice to once per request, across
+// restarts. It is a no-op when the table exists.
+func (s *Store) migrateWakeNotices() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS wake_notices (request_id TEXT PRIMARY KEY REFERENCES requests(id), note TEXT NOT NULL, at INTEGER NOT NULL)`)
+	return err
+}
+
+// UnnoticedAsks returns agent's live queued asks that carry no wake notice
+// yet, oldest first. Pings and notifies expect no reply, so they are left
+// out.
+func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Request, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
+		WHERE to_agent = ? AND status = ? AND kind = ? AND expires_at > ? AND id NOT IN (SELECT request_id FROM wake_notices)
+		ORDER BY created_at, rowid`,
+		agent, string(envelope.StatusQueued), string(envelope.KindAsk), s.now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequests(rows)
+}
+
+// AddWakeNotice records note on request id, once. It reports false when the
+// request already has one, so a later follow-up or a restarted relay does
+// not tell the asker again.
+func (s *Store) AddWakeNotice(ctx context.Context, id, note string, at time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO wake_notices (request_id, note, at) VALUES (?, ?, ?) ON CONFLICT(request_id) DO NOTHING`, id, note, at.UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// WakeNotice is the note the relay added to request id, nil when it has
+// none. By is "relay".
+func (s *Store) WakeNotice(ctx context.Context, id string) (*envelope.Progress, error) {
+	var note string
+	var ms int64
+	err := s.db.QueryRowContext(ctx, `SELECT note, at FROM wake_notices WHERE request_id = ?`, id).Scan(&note, &ms)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &envelope.Progress{Note: note, At: time.UnixMilli(ms).UTC(), By: "relay"}, nil
 }
