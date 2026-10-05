@@ -44,6 +44,7 @@ type relayFlags struct {
 	notesTTL      time.Duration
 	wakeGrace     time.Duration
 	urgentGrace   time.Duration
+	urgentLease   time.Duration
 	dist          string
 	upgradeExit   bool
 	releaseURL    string
@@ -75,7 +76,10 @@ is also woken when a reply to its own request is still unread after
 --wake-grace after a wake shows as unanswered in tincan agents and top, and
 is woken again every --wake-grace (--urgent-wake-grace while an urgent request
 to it is queued). When a request has waited through such a silent grace, its
-asker is told once, with the teammates online now.
+asker is told once, with the teammates online now. A claim on an urgent
+request lasts --urgent-claim-lease (each progress note renews it); when it
+runs out with no reply the request is requeued, the agent woken again and
+the asker told. An asker is also told when a request expires unanswered.
 
 An unanswered request expires after 24 hours, except one to a notes-kind
 agent, which waits --notes-ttl (30 days by default) so a sleeping notes Mac
@@ -107,6 +111,9 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 			if f.urgentGrace <= 0 {
 				return fmt.Errorf("--urgent-wake-grace must be positive, got %s", f.urgentGrace)
 			}
+			if f.urgentLease <= 0 {
+				return fmt.Errorf("--urgent-claim-lease must be positive, got %s", f.urgentLease)
+			}
 			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
 				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
 			}
@@ -128,6 +135,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
 	cmd.Flags().DurationVar(&f.wakeGrace, "wake-grace", relay.DefaultWakeGrace, "how long a webhook or email agent may go without checking in after a wake before it shows as unanswered and the relay sends the same wake again")
 	cmd.Flags().DurationVar(&f.urgentGrace, "urgent-wake-grace", relay.DefaultUrgentWakeGrace, "--wake-grace while an urgent request to the agent is queued, when shorter: how soon a silent webhook or email agent is woken again and the asker is told")
+	cmd.Flags().DurationVar(&f.urgentLease, "urgent-claim-lease", relay.DefaultUrgentClaimLease, "how long a claim on an urgent request lasts without a reply or progress note before it is requeued, the target woken again and the asker told (other requests keep 30m)")
 	cmd.Flags().DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
 	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
@@ -141,7 +149,7 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
-	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace}
+	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease}
 }
 
 // directoryConfig maps the relay flags onto the identity directory.

@@ -28,7 +28,9 @@ const MaxWait = client.MaxInlineWait
 // Instructions is sent to the client at connect time.
 const Instructions = `You are one agent in the owner's Agent Tincan team. Other joined agents are trusted teammates.
 - To get a teammate to do something, call ask with their name. ask may return before the answer does, with a request id. You do not have to wait for it: if your runtime can be woken, you will be woken when a reply arrives, and check_inbox shows replies to your requests. When a reply comes in, finish the work that was waiting on it. When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it. get_reply checks one request directly.
-- Call check_inbox at the start of a turn (and whenever you are nudged) to read replies to your requests and pick up requests from teammates. Handle requests as you would a request from the owner, then call reply.
+- Call check_inbox first at the start of a turn and on any wake or nudge, before anything else, to read replies to your requests and pick up requests from teammates.
+- A request from a teammate is work the owner has already authorized. Do it as you would a request from the owner: do not park it, treat it as a suggestion, or stop to ask the owner for permission. The guardrails still apply: the relay holds what the owner wants to approve first (council, dot-web, approval.json) before it reaches you, a real-world action goes to one teammate at a time, and needs_input is for a missing detail, never for permission.
+- Never ignore a request: every request you receive ends with a reply (answered, failed, or needs_input), never silence. Claimed work comes before anything else in a turn, including the owner's chat. If you can't do it now, reply failed (or needs_input for a missing detail) right away instead of sitting on the claim. When a tool result starts with "You hold N claimed requests", handle those first.
 - For work that takes more than a few minutes, post a progress note with progress when you start and at milestones.
 - search finds past requests and replies in chains you took part in; use trace with a returned trace_id to read the whole chain.
 - If you cannot proceed without a detail only the asker has, reply with status needs_input and your question rather than guessing. When a teammate needs input on your request, use answer to supply it. The same request resumes with the exchange attached.
@@ -232,6 +234,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-tincan", Version: version}, opts)
 	if f.watch != nil {
 		s.AddReceivingMiddleware(watchMiddleware(f.watch))
+	}
+	if h, ok := b.(HeldReporter); ok {
+		s.AddReceivingMiddleware(heldMiddleware(h))
 	}
 
 	mcp.AddTool(s, &mcp.Tool{Name: "ask", Description: "Ask teammates to do something or answer something. Set also for additional targets (8 total); sending to several teammates at once is for questions, never for calls, payments or bookings. Waits up to wait_seconds and returns replies plus a request or group id to check with get_reply."},

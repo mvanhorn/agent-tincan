@@ -1423,3 +1423,20 @@ func TestUnansweredToldOnSilentFollowUp(t *testing.T) {
 		t.Fatalf("after the poll: told %d more times, calls = %d", len(calls), rc.count())
 	}
 }
+
+// An urgent request's wake says it is urgent; the body still carries no
+// request text.
+func TestUrgentWakeSaysUrgent(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{Debounce: time.Millisecond, WakeGrace: skipFollowUp})
+	w.Queued(context.Background(), envelope.Request{ID: "ra", To: "grokbot", Urgent: true, Body: "SECRET call Joe's Garage"})
+	w.Flush()
+	var body map[string]string
+	if err := json.Unmarshal([]byte(rc.body(0)), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["message"] != UrgentWaitingMessage(1, 1, 0) || strings.Contains(rc.body(0), "SECRET") {
+		t.Fatalf("urgent wake = %s", rc.body(0))
+	}
+}

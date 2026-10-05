@@ -171,7 +171,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate urgent: %w", err)
 	}
-	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}} {
+	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}} {
 		var exists bool
 		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)", col.name).Scan(&exists); err != nil {
 			db.Close()
@@ -204,9 +204,9 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate wakes: %w", err)
 	}
-	if err := s.migrateWakeNotices(); err != nil {
+	if err := s.migrateRelayNotes(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate wake notices: %w", err)
+		return nil, fmt.Errorf("migrate relay notes: %w", err)
 	}
 	for {
 		more, err := s.backfillSearchBatch()
@@ -857,6 +857,14 @@ func (s *Store) pendingRequests(ctx context.Context, agent, kindCond string, lim
 // notify gets no lease: no reply will ever close it, so a lease would requeue
 // and redeliver it every ClaimLease. A claimed notify simply stays claimed.
 func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration) (envelope.Request, error) {
+	return s.ClaimLeases(ctx, id, agent, lease, lease)
+}
+
+// ClaimLeases is Claim with urgentLease in place of lease for an urgent
+// request, so a claimed urgent request that goes quiet is requeued sooner.
+// claimed_at records when this claim began; claiming again while claimed
+// keeps it.
+func (s *Store) ClaimLeases(ctx context.Context, id, agent string, lease, urgentLease time.Duration) (envelope.Request, error) {
 	req, _, err := s.lookup(ctx, id)
 	if err != nil {
 		return envelope.Request{}, err
@@ -865,9 +873,11 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 		return envelope.Request{}, ErrForbidden
 	}
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 ELSE ? END, updated_at = ?
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
+		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END, updated_at = ?
 		WHERE id = ? AND status IN (?, ?, ?) AND expires_at > ?`,
-		string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(lease).UnixMilli(), now.UnixMilli(), id,
+		string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
+		string(envelope.StatusClaimed), now.UnixMilli(), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli())
 	if err != nil {
 		return envelope.Request{}, err
@@ -881,14 +891,20 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 
 // SetProgress updates only a current claim and renews its lease.
 func (s *Store) SetProgress(ctx context.Context, id, claimer, note string, lease time.Duration) error {
+	return s.SetProgressLeases(ctx, id, claimer, note, lease, lease)
+}
+
+// SetProgressLeases is SetProgress renewing an urgent request's claim by
+// urgentLease instead of lease, the same lease ClaimLeases gave it.
+func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string, lease, urgentLease time.Duration) error {
 	if len(note) > envelope.MaxProgressNote {
 		return envelope.ErrBodyTooLarge
 	}
 	now := s.now()
 	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?,
-		lease_until = CASE WHEN kind = ? THEN 0 ELSE ? END
+		lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END
 		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
-		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(lease).UnixMilli(),
+		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
 		id, claimer, string(envelope.StatusClaimed), now.UnixMilli())
 	if err != nil {
 		return err
@@ -952,7 +968,7 @@ type Result = envelope.Result
 
 // Get returns a request for its sender or its target. When it hands the
 // sender a reply, that reply counts as seen. The sender also gets the
-// relay's wake notice on the request, if there is one.
+// relay's latest note on the request, if there is one.
 func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	req, status, err := s.lookup(ctx, id)
 	if err != nil {
@@ -972,7 +988,7 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 	}
 	var note *envelope.Progress
 	if req.From == agent {
-		if note, err = s.WakeNotice(ctx, id); err != nil {
+		if note, err = s.RelayNote(ctx, id); err != nil {
 			return Result{}, err
 		}
 	}
@@ -1044,15 +1060,20 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 	return ids, rows.Err()
 }
 
-// Transition is one state change made by Sweep.
+// Transition is one state change made by Sweep. Prev is the status the
+// request left, and ClaimedAt when its last claim began (zero if it was
+// never claimed).
 type Transition struct {
-	Held    bool
-	Urgent  bool
-	ID      string
-	TraceID string
-	From    string
-	To      string
-	Status  envelope.Status
+	Held      bool
+	Urgent    bool
+	ID        string
+	TraceID   string
+	From      string
+	To        string
+	Kind      envelope.Kind
+	Status    envelope.Status
+	Prev      envelope.Status
+	ClaimedAt time.Time
 }
 
 // Sweep expires requests past their TTL and returns requests whose delivery
@@ -1060,25 +1081,29 @@ type Transition struct {
 func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	now := s.now().UnixMilli()
 	var out []Transition
-	collect := func(query string, args ...any) error {
-		rows, err := s.db.QueryContext(ctx, query, args...)
+	collect := func(prev envelope.Status, query string, args ...any) error {
+		rows, err := s.db.QueryContext(ctx, query+` RETURNING id, trace_id, from_agent, to_agent, kind, status, urgent, claimed_at`, args...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var t Transition
-			var st string
-			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &st, &t.Urgent); err != nil {
+			t := Transition{Prev: prev}
+			var st, kind string
+			var claimed int64
+			if err := rows.Scan(&t.ID, &t.TraceID, &t.From, &t.To, &kind, &st, &t.Urgent, &claimed); err != nil {
 				return err
 			}
-			t.Status = envelope.Status(st)
+			t.Status, t.Kind = envelope.Status(st), envelope.Kind(kind)
+			if claimed > 0 {
+				t.ClaimedAt = time.UnixMilli(claimed)
+			}
 			out = append(out, t)
 		}
 		return rows.Err()
 	}
-	if err := collect(`UPDATE requests SET status = ?, updated_at = ? WHERE status = ? AND expires_at <= ?
- RETURNING id, trace_id, from_agent, to_agent, status, urgent`, string(envelope.StatusExpired), now, string(envelope.StatusHeld), now); err != nil {
+	if err := collect(envelope.StatusHeld, `UPDATE requests SET status = ?, updated_at = ? WHERE status = ? AND expires_at <= ?`,
+		string(envelope.StatusExpired), now, string(envelope.StatusHeld), now); err != nil {
 		return nil, err
 	}
 	for i := range out {
@@ -1086,18 +1111,25 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	}
 	// A claim past its TTL expires once its lease runs out rather than going
 	// back to the queue, where it would only wake the agent for a request
-	// Deliver rejects.
-	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE (status IN (?, ?, ?) OR (status = ? AND lease_until > 0 AND lease_until <= ?)) AND expires_at <= ?
-		RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
-		string(envelope.StatusExpired), now, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusNeedsInput),
-		string(envelope.StatusClaimed), now, now); err != nil {
+	// Deliver rejects. Each starting status is its own pass so the relay
+	// knows what the request left.
+	for _, prev := range []envelope.Status{envelope.StatusQueued, envelope.StatusDelivered, envelope.StatusNeedsInput} {
+		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ? WHERE status = ? AND expires_at <= ?`,
+			string(envelope.StatusExpired), now, string(prev), now); err != nil {
+			return nil, err
+		}
+	}
+	if err := collect(envelope.StatusClaimed, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+		WHERE status = ? AND lease_until > 0 AND lease_until <= ? AND expires_at <= ?`,
+		string(envelope.StatusExpired), now, string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
-	if err := collect(`UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0
-		WHERE status IN (?, ?) AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ? RETURNING id, trace_id, from_agent, to_agent, status, urgent`,
-		string(envelope.StatusQueued), now, string(envelope.StatusDelivered), string(envelope.StatusClaimed), now); err != nil {
-		return nil, err
+	for _, prev := range []envelope.Status{envelope.StatusDelivered, envelope.StatusClaimed} {
+		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0
+		WHERE status = ? AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ?`,
+			string(envelope.StatusQueued), now, string(prev), now); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

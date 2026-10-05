@@ -574,6 +574,10 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 		"Ask another only after the first declines, fails or hands it back, or after you cancel your request to it.",
 		"If the relay tells you a woken teammate has not checked in and the work can't wait, cancel that request and ask another online teammate whose good_at line fits.",
 		"Only Matt sets good-at lines",
+		"work Matt has already authorized",
+		"needs_input is for a missing detail, never for permission",
+		"Never ignore a request: every request you receive ends with a reply",
+		"Claimed work comes before anything else in a turn, including Matt's chat.",
 	}
 	var sawScheduled bool
 	for _, a := range k.Agents {

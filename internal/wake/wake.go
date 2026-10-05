@@ -261,6 +261,7 @@ type nudge struct {
 	retry    int         // next step of Options.ReplyRetries to schedule
 	recheck  bool        // a request wake was skipped as online; count Queued at fire time
 	followUp bool        // --wake-grace request follow-up; poll/queue stop checks apply
+	urgent   bool        // an urgent request was queued since the last nudge
 }
 
 // Waker implements relay.Events, relay.Requeuer, relay.Replier,
@@ -522,6 +523,7 @@ func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 	p := w.nudgeFor(agent)
 	p.requests++
 	p.followUp = false
+	p.urgent = p.urgent || urgent
 	if urgent {
 		w.arm(agent, 0)
 	} else {
@@ -638,7 +640,13 @@ func (w *Waker) fire(agent string) {
 		w.followUpLater(agent, p.requests)
 		return
 	}
-	msg := WaitingMessage(p.requests, replies)
+	urgent := 0
+	if p.requests > 0 && w.opts.UrgentQueued != nil {
+		urgent = w.opts.UrgentQueued(agent)
+	} else if p.requests > 0 && p.urgent {
+		urgent = 1
+	}
+	msg := UrgentWaitingMessage(p.requests, urgent, replies)
 	key := nudgeKey() // the retry reuses it, so a lost response never runs two turns
 	at := w.opts.Now()
 	err := w.send(ctx, agent, msg, key)
@@ -816,7 +824,7 @@ func (w *Waker) allow(agent string) bool {
 
 // Message is the wake text for n waiting requests.
 func Message(n int) string {
-	return fmt.Sprintf("Agent Tincan: %d %s from your teammates waiting. Run check_inbox (or `tincan inbox`) to pick them up, then reply to each.", n, plural(n, "request", "requests"))
+	return fmt.Sprintf("Agent Tincan: %d %s from your teammates waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.", n, plural(n, "request", "requests"))
 }
 
 // WaitingMessage is the only text a wake ever carries: counts of waiting
@@ -835,9 +843,26 @@ func WaitingMessage(requests, replies int) string {
 	if requests == 1 {
 		then = "reply to it"
 	}
-	return fmt.Sprintf("Agent Tincan: %d %s from your teammates and %d %s waiting. Run check_inbox (or `tincan inbox`) to read the %s and pick up the %s, then %s.",
+	return fmt.Sprintf("Agent Tincan: %d %s from your teammates and %d %s waiting. Run check_inbox (or `tincan inbox`) before other work to read the %s and pick up the %s, then %s.",
 		requests, plural(requests, "request", "requests"), replies, plural(replies, "reply to your request", "replies to your requests"),
 		plural(replies, "reply", "replies"), plural(requests, "request", "requests"), then)
+}
+
+// UrgentWaitingMessage is WaitingMessage when urgent of the waiting
+// requests are urgent: it says so and that they come before anything else
+// this turn. It still carries only counts.
+func UrgentWaitingMessage(requests, urgent, replies int) string {
+	msg := WaitingMessage(requests, replies)
+	if urgent <= 0 || requests <= 0 {
+		return msg
+	}
+	switch {
+	case requests == 1:
+		return msg + " It is URGENT: run check_inbox first and handle it before anything else this turn."
+	case urgent == 1:
+		return msg + " 1 of them is URGENT: run check_inbox first and handle it before anything else this turn."
+	}
+	return msg + fmt.Sprintf(" %d of them are URGENT: run check_inbox first and handle them before anything else this turn.", min(urgent, requests))
 }
 
 func plural(n int, one, many string) string {

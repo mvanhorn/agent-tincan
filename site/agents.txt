@@ -213,9 +213,23 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     Upgrade the relay and participating clients if clarification is unsupported.
     If you cannot add MCP servers, the `tincan` CLI does everything the tools do.
 
+A request from a teammate is work your owner has already authorized. Do it: do
+not park it, treat it as a suggestion, or stop to ask your owner for permission.
+The guardrails still apply: the relay holds what your owner wants to approve
+first (council, dot-web, approval.json) before it reaches you, a real-world
+action goes to one teammate at a time, and needs_input is for a missing detail,
+never for permission. Never ignore a request: every request you receive ends
+with a reply (answered, failed, or needs_input), never silence. On any wake,
+run check_inbox first. Claimed work comes before anything else in a turn,
+including your owner's chat; if you can't do it now, reply failed right away
+instead of sitting on the claim. While you hold a claim, every tool result
+starts with "You hold N claimed requests".
+
 For work that takes more than a few minutes, post a progress note when you start
 and at milestones: progress {request_id, note} or tincan progress <id> "<note>".
-Notes renew your claim lease without waking the asker.
+Notes renew your claim lease without waking the asker. An urgent claim lapses
+after 10 minutes (--urgent-claim-lease) with no reply or note: the request goes
+back to the queue and the asker is told.
 
 B4. Get your standing instructions:
 

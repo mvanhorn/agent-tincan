@@ -16,16 +16,20 @@ import (
 // MaxNoticeTeammates caps the online teammates one wake notice names.
 const MaxNoticeTeammates = 5
 
+// Notes for askers. The relay tells an asker, once, when its ask is stuck:
+// the target was woken and never checked in (TellAskers), the target's
+// claim went stale, or the request expired with no reply (tellSwept). Each
+// note is kept on the request, where get_reply shows it to the asker, and
+// sent to the asker as a notice from the relay, which check_inbox shows and
+// which wakes a webhook or email asker. No note changes the request's
+// status or target.
+
 // TellAskers is the waker's Unanswered hook: agent, which the relay wakes,
 // was woken at wk, and a follow-up found it still silent with requests
 // queued. Each queued ask that has waited a full grace since the later of
 // its creation and the wake (UrgentWakeGrace when urgent, WakeGrace
-// otherwise) gets a note, once per request: it is kept on the request,
-// where get_reply shows it to the asker, and sent to the asker as a notice
-// from the relay, which check_inbox shows and which wakes a webhook or
-// email asker. The request keeps its status and its target; the asker
-// decides whether to cancel it and ask someone else. The note names the
-// teammates online now, other than the asker and agent.
+// otherwise) gets a note, once per request, naming the teammates online
+// now other than the asker and agent.
 func (s *Server) TellAskers(agent string, wk store.Wake) {
 	if s.wake == nil || !relayWoken(s.wake.WakeMethod(agent)) {
 		return
@@ -60,17 +64,95 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 			}
 		}
 		note := s.wakeNote(agent, wk, s.onlineTeammates(roster, now, req.From, agent), now)
-		added, err := s.store.AddWakeNotice(ctx, req.ID, note, now)
-		if err != nil {
-			log.Printf("wake notice %s: %v", req.ID, err)
-			continue
-		}
-		if !added {
-			continue // another follow-up got there first
-		}
-		s.record(ctx, "wake_notice", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"to": req.From, "agent": agent}))
-		s.noticeAsker(ctx, req, note)
+		s.noteAndTell(ctx, req, store.NoteWake, 0, note, now)
 	}
+}
+
+// noteAndTell records note on req for kind and episode and, the first time
+// only, sends it to req's asker. A note that is already there (a second
+// follow-up, a restarted relay) is not sent again.
+func (s *Server) noteAndTell(ctx context.Context, req envelope.Request, kind string, episode int64, note string, now time.Time) {
+	added, err := s.store.AddRelayNote(ctx, req.ID, kind, episode, note, now)
+	if err != nil {
+		log.Printf("relay note %s %s: %v", kind, req.ID, err)
+		return
+	}
+	if !added {
+		return
+	}
+	s.record(ctx, "relay_note", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"kind": kind, "to": req.From, "agent": req.To}))
+	s.noticeAsker(ctx, req, note)
+}
+
+// tellSwept tells askers about what a sweep did to their asks: a claim
+// whose lease ran out with no reply or progress (requeued), and a request
+// that expired with no reply. Pings, notifies, held requests and the
+// relay's own notices are left alone.
+func (s *Server) tellSwept(ctx context.Context, t store.Transition) {
+	if t.Held || t.Kind != envelope.KindAsk || !s.isAgent(ctx, t.From) {
+		return
+	}
+	staleClaim := t.Status == envelope.StatusQueued && t.Prev == envelope.StatusClaimed
+	if !staleClaim && t.Status != envelope.StatusExpired {
+		return
+	}
+	req, _, err := s.store.Request(ctx, t.ID)
+	if err != nil {
+		log.Printf("relay note %s: %v", t.ID, err)
+		return
+	}
+	now := s.cfg.Now()
+	roster, err := s.dir.Agents(ctx)
+	if err != nil {
+		log.Printf("relay note %s: roster: %v", t.ID, err)
+	}
+	online := s.onlineTeammates(roster, now, req.From, req.To)
+	if staleClaim {
+		note := fmt.Sprintf("%s claimed this %s ago and did not reply or post progress before its claim lease ran out; it has been requeued", req.To, ageText(now.Sub(t.ClaimedAt)))
+		if s.wake != nil && relayWoken(s.wake.WakeMethod(req.To)) {
+			note += " and woken again"
+		}
+		note += "." + suggest(online, "If it can't wait, cancel it and ask")
+		s.noteAndTell(ctx, req, store.NoteStaleClaim, t.ClaimedAt.UnixMilli(), note, now)
+		return
+	}
+	var held string
+	switch t.Prev {
+	case envelope.StatusNeedsInput:
+		held = fmt.Sprintf("It was waiting for your answer to %s's question.", req.To)
+	case envelope.StatusClaimed:
+		held = fmt.Sprintf("%s claimed it %s ago and never replied.", req.To, ageText(now.Sub(t.ClaimedAt)))
+	case envelope.StatusDelivered:
+		held = fmt.Sprintf("%s received it but never claimed it.", req.To)
+	default:
+		held = fmt.Sprintf("%s never picked it up.", req.To)
+	}
+	note := fmt.Sprintf("This request expired after %s with no reply. %s", ageText(now.Sub(req.CreatedAt)), held) + suggest(online, "If you still need it, ask again or ask")
+	s.noteAndTell(ctx, req, store.NoteExpired, 0, note, now)
+}
+
+// suggest is " <lead> a teammate who is online and good at this: a, b." or,
+// with no one online, a pointer to list_agents.
+func suggest(online []string, lead string) string {
+	if len(online) == 0 {
+		return " " + lead + " another teammate whose good_at fits; none is online right now, and list_agents shows how each one wakes."
+	}
+	return " " + lead + " a teammate who is online and good at this: " + strings.Join(online, ", ") + "."
+}
+
+// ageText is a short duration for a note: "under a minute", "12m", "2h5m".
+func ageText(d time.Duration) string {
+	if d < time.Minute {
+		return "under a minute"
+	}
+	d = d.Round(time.Minute)
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	if m := int(d%time.Hour) / int(time.Minute); m != 0 {
+		return fmt.Sprintf("%dh%dm", int(d/time.Hour), m)
+	}
+	return fmt.Sprintf("%dh", int(d/time.Hour))
 }
 
 // noticeGrace is how long a queued ask waits in silence before its asker is
@@ -91,10 +173,7 @@ func (s *Server) wakeNote(agent string, wk store.Wake, online []string, now time
 		result = method + " failed: " + wk.Result
 	}
 	note := fmt.Sprintf("%s was woken at %s and has not checked in (%s). The request is still queued.", agent, utcClock(wk.At, now), result)
-	if len(online) == 0 {
-		return note + " If it can't wait, cancel it and ask another teammate whose good_at fits; none is online right now, and list_agents shows how each one wakes."
-	}
-	return note + " If it can't wait, cancel it and ask a teammate who is online and good at this: " + strings.Join(online, ", ") + "."
+	return note + suggest(online, "If it can't wait, cancel it and ask")
 }
 
 // onlineTeammates names up to MaxNoticeTeammates agents on the roster that

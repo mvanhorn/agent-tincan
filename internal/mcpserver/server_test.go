@@ -119,7 +119,7 @@ func TestToolListIsExactlyTheAgentTools(t *testing.T) {
 	if !strings.Contains(mcpserver.Instructions, "When check_inbox shows a reply tied to one of your open requests, finish that request and reply to it.") {
 		t.Fatal("Instructions should tell the agent to finish and reply to the open request a reply is tied to")
 	}
-	for _, want := range []string{"good_at line for each (the owner's, or a default)", "to one teammate only", "only after the first declines, fails or hands it back", "--urgent-wake-grace", "cancel that request and ask another online teammate whose good_at line fits", "cancel the first before you ask the next"} {
+	for _, want := range []string{"good_at line for each (the owner's, or a default)", "to one teammate only", "only after the first declines, fails or hands it back", "--urgent-wake-grace", "cancel that request and ask another online teammate whose good_at line fits", "cancel the first before you ask the next", "work the owner has already authorized", "stop to ask the owner for permission", "needs_input is for a missing detail, never for permission", "Never ignore a request", "including the owner's chat", "on any wake or nudge, before anything else"} {
 		if !strings.Contains(mcpserver.Instructions, want) {
 			t.Errorf("Instructions lack %q", want)
 		}

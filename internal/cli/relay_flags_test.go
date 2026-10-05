@@ -96,3 +96,26 @@ func TestRelayUrgentWakeGraceFlag(t *testing.T) {
 		t.Fatalf("zero --urgent-wake-grace: %v", err)
 	}
 }
+
+// --urgent-claim-lease defaults to 10 minutes, reaches the relay config, and
+// must be positive.
+func TestRelayUrgentClaimLeaseFlag(t *testing.T) {
+	cmd := relayCmd()
+	if err := cmd.Flags().Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := cmd.Flags().GetDuration("urgent-claim-lease"); err != nil || d != 10*time.Minute {
+		t.Fatalf("default --urgent-claim-lease = %v %v, want 10m", d, err)
+	}
+	f := relayFlags{notesTTL: time.Hour, wakeGrace: time.Minute, urgentGrace: time.Minute, urgentLease: 5 * time.Minute}
+	if got := f.relayConfig().UrgentClaimLease; got != 5*time.Minute {
+		t.Fatalf("relay config urgent claim lease = %v, want 5m", got)
+	}
+	bad := relayCmd()
+	if err := bad.Flags().Parse([]string{"--urgent-claim-lease", "0s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bad.RunE(bad, nil); err == nil || !strings.Contains(err.Error(), "--urgent-claim-lease") {
+		t.Fatalf("zero --urgent-claim-lease: %v", err)
+	}
+}

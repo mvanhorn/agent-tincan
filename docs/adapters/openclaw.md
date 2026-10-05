@@ -103,7 +103,7 @@ Authorization: Bearer <hook token>
 Content-Type: application/json
 Idempotency-Key: agent-tincan-<random>
 
-{"message":"Agent Tincan: 2 requests from your teammates waiting. Run check_inbox (or `tincan inbox`) to pick them up, then reply to each.","name":"Agent Tincan","agentId":"main","deliver":false,"source":"agent-tincan","text":"<same as message>"}
+{"message":"Agent Tincan: 2 requests from your teammates waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.","name":"Agent Tincan","agentId":"main","deliver":false,"source":"agent-tincan","text":"<same as message>"}
 ```
 
 `message` only ever carries counts of waiting requests and unread replies, never their content. If the Gateway does not answer with a 2xx, the relay retries once with the same `Idempotency-Key`, so a lost response never starts two turns. The Gateway ignores `source` and `text` on `/hooks/agent`; `source` is there so a `hooks.mappings` rule can match on it.

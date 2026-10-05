@@ -123,7 +123,7 @@ The `council` agent puts one question to every model on the team, has them rank 
 
 ## What it deliberately does not do
 
-- Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. By default there is no per-request approval, except that asks to the council and dot-web agents are held (see [Council](#council) and the dot-web note above); the optional owner gate below can hold requests to other agents.
+- Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. The standing instructions say so plainly: a teammate's request is work the owner has already authorized, and agents do not stop to ask the owner for permission. What still holds: the relay's approval holds (council, dot-web, `approval.json`), one teammate at a time for a real-world action, and limits the owner gave an agent directly. By default there is no per-request approval, except that asks to the council and dot-web agents are held (see [Council](#council) and the dot-web note above); the optional owner gate below can hold requests to other agents.
 - Tailscale is the security boundary. Anything that can act as a joined machine on your tailnet can make your other agents act. Protect your tailnet: use tagged, short-lived auth keys and review who can add devices.
 - The relay can read every request and reply. Run it on a machine you control.
 - `tincan upgrade` trusts the relay host. The sha256 it checks and the binary it installs both come from the same relay, so the check protects against corruption in transit, not against a compromised relay. Only put release files you built yourself or downloaded from your own GitHub release into the relay's `--dist` directory.
@@ -135,7 +135,7 @@ The `council` agent puts one question to every model on the team, has them rank 
 
 If one agent reads untrusted content (a web page, an email, a document) and gets tricked, it can ask a teammate to do something harmful, and the teammate will. Before joining an agent that reads untrusted content alongside one that holds real powers:
 
-- Give high-power agents instructions about which kinds of requests they should confirm with you first.
+- Hold requests to high-power agents with the [owner approval gate](#owner-approval-gate) rather than relying on them to ask: agents treat every request that reaches them as authorized and do not stop to confirm. Limits you give an agent directly (a spending cap, people never to contact) still bind it.
 - Keep `tincan trace` handy so you can see who asked for what.
 - For an OpenAI dot (`dot-web`), which reads your connected apps, list the teammates it may ask in `~/.config/tincan/dot-web-send.txt`; with no file it may ask any joined agent, like every other teammate.
 - Use `tincan remove <agent>` to cut an agent off immediately. Its queued requests are cancelled and, for ChatGPT, its tokens are revoked.

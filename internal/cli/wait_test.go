@@ -127,7 +127,11 @@ func TestChannelAnnouncesRequestWithoutClaiming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := out.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "call the dentist") {
+	// The held-work line comes first once the request is claimed.
+	if len(out.Content) < 2 || !strings.HasPrefix(out.Content[0].(*mcp.TextContent).Text, "You hold 1 claimed request") {
+		t.Fatalf("check_inbox first content = %+v", out.Content[0])
+	}
+	if text := out.Content[1].(*mcp.TextContent).Text; !strings.Contains(text, "call the dentist") {
 		t.Fatalf("check_inbox = %q", text)
 	}
 	res, _ = inst.Get(ctx, sent.ID, 0)

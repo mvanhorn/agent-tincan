@@ -132,7 +132,7 @@ func TestWakeNoticeNotAfterPoll(t *testing.T) {
 	if got := inbox(t, h, instinctAddr); len(got) != 0 {
 		t.Fatalf("told after the target polled: %+v", got)
 	}
-	if n, err := h.st.WakeNotice(context.Background(), ask.ID); err != nil || n != nil {
+	if n, err := h.st.RelayNote(context.Background(), ask.ID); err != nil || n != nil {
 		t.Fatalf("note = %+v, %v", n, err)
 	}
 }

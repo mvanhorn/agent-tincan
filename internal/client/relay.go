@@ -24,6 +24,11 @@ import (
 // from. The relay honors it only for an agent bound to that machine.
 const AgentHeader = "X-Tincan-Agent"
 
+// HeldHeader is set on a relay response to an agent that holds claimed
+// asks it has not replied to: a JSON list of envelope.Held. Older relays
+// never send it and older clients ignore it.
+const HeldHeader = "X-Tincan-Held"
+
 // VersionHeader carries the tincan build the client runs on every relay
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
@@ -188,6 +193,10 @@ type Relay struct {
 	polls    *http.Client
 	agent    string // sent as AgentHeader when set
 	version  string // sent as VersionHeader when set
+
+	heldMu  sync.Mutex
+	held    []envelope.Held // from the last response's HeldHeader
+	heldSeq uint64          // responses seen, so a caller can tell a fresh list from an old one
 
 	// key is the relay key from the saved config. When the relay stops
 	// answering at base, the client looks for the peer that proves it
@@ -574,6 +583,29 @@ func (r *Relay) DownloadDist(ctx context.Context, name string, w io.Writer) erro
 	return nil
 }
 
+// noteHeld keeps the held claims a response reported, none when it carried
+// no HeldHeader.
+func (r *Relay) noteHeld(resp *http.Response) {
+	var held []envelope.Held
+	if v := resp.Header.Get(HeldHeader); v != "" {
+		if err := json.Unmarshal([]byte(v), &held); err != nil {
+			held = nil
+		}
+	}
+	r.heldMu.Lock()
+	r.held, r.heldSeq = held, r.heldSeq+1
+	r.heldMu.Unlock()
+}
+
+// Held is what the relay's last response said this agent holds: asks it
+// claimed and has not replied to. seq counts responses, so a caller can
+// tell whether a call it made brought a fresh list.
+func (r *Relay) Held() (held []envelope.Held, seq uint64) {
+	r.heldMu.Lock()
+	defer r.heldMu.Unlock()
+	return r.held, r.heldSeq
+}
+
 // Raw performs an arbitrary JSON call; used by commands that add endpoints
 // (trace) without growing this client for each one.
 func (r *Relay) Raw(ctx context.Context, method, path string, in, out any) error {
@@ -610,6 +642,7 @@ func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path strin
 		return err
 	}
 	defer resp.Body.Close()
+	r.noteHeld(resp)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return err

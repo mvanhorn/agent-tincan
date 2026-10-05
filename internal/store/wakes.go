@@ -113,23 +113,37 @@ func (s *Store) AgentsLastPoll(ctx context.Context) (map[string]time.Time, error
 	return out, rows.Err()
 }
 
-// migrateWakeNotices creates the table of notes the relay added to requests
-// whose relay-woken target never checked in, one row per request. The row
-// is also what keeps the asker's notice to once per request, across
-// restarts. It is a no-op when the table exists.
-func (s *Store) migrateWakeNotices() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS wake_notices (request_id TEXT PRIMARY KEY REFERENCES requests(id), note TEXT NOT NULL, at INTEGER NOT NULL)`)
+// Relay note kinds: why the relay told an asker about a request.
+const (
+	// NoteWake: the target was woken and never checked in.
+	NoteWake = "wake"
+	// NoteStaleClaim: the target's claim lease ran out with no reply or
+	// progress. Its episode is the claim's start, so each claim is told
+	// once.
+	NoteStaleClaim = "stale_claim"
+	// NoteExpired: the request expired with no reply.
+	NoteExpired = "expired"
+)
+
+// migrateRelayNotes creates the table of notes the relay added to requests
+// for their askers: a woken target that never checked in, a claim that went
+// stale, a request that expired unanswered. The key (request, kind,
+// episode) is also what keeps each note to once, across restarts. It is a
+// no-op when the table exists.
+func (s *Store) migrateRelayNotes() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS relay_notes (request_id TEXT NOT NULL REFERENCES requests(id), kind TEXT NOT NULL, episode INTEGER NOT NULL,
+		note TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (request_id, kind, episode))`)
 	return err
 }
 
-// UnnoticedAsks returns agent's live queued asks that carry no wake notice
+// UnnoticedAsks returns agent's live queued asks that carry no wake note
 // yet, oldest first. Pings and notifies expect no reply, so they are left
 // out.
 func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Request, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
-		WHERE to_agent = ? AND status = ? AND kind = ? AND expires_at > ? AND id NOT IN (SELECT request_id FROM wake_notices)
+		WHERE to_agent = ? AND status = ? AND kind = ? AND expires_at > ? AND id NOT IN (SELECT request_id FROM relay_notes WHERE kind = ?)
 		ORDER BY created_at, rowid`,
-		agent, string(envelope.StatusQueued), string(envelope.KindAsk), s.now().UnixMilli())
+		agent, string(envelope.StatusQueued), string(envelope.KindAsk), s.now().UnixMilli(), NoteWake)
 	if err != nil {
 		return nil, err
 	}
@@ -137,11 +151,12 @@ func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Req
 	return scanRequests(rows)
 }
 
-// AddWakeNotice records note on request id, once. It reports false when the
-// request already has one, so a later follow-up or a restarted relay does
-// not tell the asker again.
-func (s *Store) AddWakeNotice(ctx context.Context, id, note string, at time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO wake_notices (request_id, note, at) VALUES (?, ?, ?) ON CONFLICT(request_id) DO NOTHING`, id, note, at.UnixMilli())
+// AddRelayNote records note on request id for kind and episode, once. It
+// reports false when that note is already there, so a later follow-up, a
+// second sweep, or a restarted relay does not tell the asker again.
+func (s *Store) AddRelayNote(ctx context.Context, id, kind string, episode int64, note string, at time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO relay_notes (request_id, kind, episode, note, at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(request_id, kind, episode) DO NOTHING`, id, kind, episode, note, at.UnixMilli())
 	if err != nil {
 		return false, err
 	}
@@ -149,12 +164,12 @@ func (s *Store) AddWakeNotice(ctx context.Context, id, note string, at time.Time
 	return n == 1, err
 }
 
-// WakeNotice is the note the relay added to request id, nil when it has
-// none. By is "relay".
-func (s *Store) WakeNotice(ctx context.Context, id string) (*envelope.Progress, error) {
+// RelayNote is the latest note the relay added to request id, nil when it
+// has none. By is "relay".
+func (s *Store) RelayNote(ctx context.Context, id string) (*envelope.Progress, error) {
 	var note string
 	var ms int64
-	err := s.db.QueryRowContext(ctx, `SELECT note, at FROM wake_notices WHERE request_id = ?`, id).Scan(&note, &ms)
+	err := s.db.QueryRowContext(ctx, `SELECT note, at FROM relay_notes WHERE request_id = ? ORDER BY at DESC, rowid DESC LIMIT 1`, id).Scan(&note, &ms)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -162,4 +177,30 @@ func (s *Store) WakeNotice(ctx context.Context, id string) (*envelope.Progress, 
 		return nil, err
 	}
 	return &envelope.Progress{Note: note, At: time.UnixMilli(ms).UTC(), By: "relay"}, nil
+}
+
+// HeldClaims returns the asks agent has claimed and not replied to, urgent
+// first and then oldest claim, at most limit. needs_input is not held: the
+// agent already answered with a question.
+func (s *Store) HeldClaims(ctx context.Context, agent string, limit int) ([]envelope.Held, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, urgent, claimed_at FROM requests
+		WHERE to_agent = ? AND status = ? AND kind = ? ORDER BY urgent DESC, claimed_at, rowid LIMIT ?`,
+		agent, string(envelope.StatusClaimed), string(envelope.KindAsk), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []envelope.Held
+	for rows.Next() {
+		var h envelope.Held
+		var ms int64
+		if err := rows.Scan(&h.ID, &h.From, &h.Urgent, &ms); err != nil {
+			return nil, err
+		}
+		if ms > 0 {
+			h.ClaimedAt = time.UnixMilli(ms).UTC()
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }

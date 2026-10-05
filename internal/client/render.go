@@ -56,7 +56,7 @@ func FormatResult(r Result) string {
 	case r.Status == envelope.StatusClaimed && r.Progress != nil:
 		return fmt.Sprintf("Request %s: %s. Check later with get_reply or `tincan get %s`.\n", r.Request.ID, FormatProgress(r.Progress), r.Request.ID)
 	case r.Done():
-		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status)
+		return fmt.Sprintf("Request %s to %s ended: %s\n", r.Request.ID, r.Request.To, r.Status) + relayNote(r.RelayNote)
 	default:
 		return scheduleHint(r.Request.To, r.Target) + wakeHint(r.Request.To, r.Target) + relayNote(r.RelayNote) + fmt.Sprintf("No reply yet from %s. Request id %s (status %s). Check later with get_reply or `tincan get %s`.\n",
 			r.Request.To, r.Request.ID, r.Status, r.Request.ID)
@@ -95,6 +95,28 @@ func wakeHint(to string, t *envelope.Target) string {
 		return fmt.Sprintf("%s's wake at %s failed (%s) and it has not checked in yet; the request is queued.\n", to, at, t.WakeResult)
 	}
 	return fmt.Sprintf("%s was woken at %s and has not checked in yet; the request is queued.\n", to, at)
+}
+
+// FormatHeld is the held-work line for the asks an agent has claimed and
+// not replied to, empty when there are none. It goes before everything else
+// an agent is shown, so the claimed work comes first in its turn.
+func FormatHeld(held []envelope.Held, now time.Time) string {
+	if len(held) == 0 {
+		return ""
+	}
+	items := make([]string, len(held))
+	for i, h := range held {
+		item := h.ID + " from " + h.From
+		if h.Urgent {
+			item += ", URGENT"
+		}
+		if !h.ClaimedAt.IsZero() {
+			item += ", claimed " + ageAgo(now.Sub(h.ClaimedAt))
+		}
+		items[i] = item
+	}
+	return fmt.Sprintf("You hold %d claimed %s (%s). This is owner-authorized work. Handle %s before other work: do it and reply, post progress, or reply failed right away if you can't (needs_input is only for a missing detail).\n",
+		len(held), plural(len(held), "request", "requests"), strings.Join(items, "; "), plural(len(held), "it", "them"))
 }
 
 // relayNote is the note the relay added to a pending request, such as the

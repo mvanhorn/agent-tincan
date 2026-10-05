@@ -219,10 +219,32 @@ func TestWaitingMessage(t *testing.T) {
 		{2, 0, Message(2)},
 		{0, 1, "Agent Tincan: 1 reply to your request is waiting. Run check_inbox (or `tincan inbox`) to read it."},
 		{0, 3, "Agent Tincan: 3 replies to your requests are waiting. Run check_inbox (or `tincan inbox`) to read them."},
-		{1, 2, "Agent Tincan: 1 request from your teammates and 2 replies to your requests waiting. Run check_inbox (or `tincan inbox`) to read the replies and pick up the request, then reply to it."},
+		{1, 2, "Agent Tincan: 1 request from your teammates and 2 replies to your requests waiting. Run check_inbox (or `tincan inbox`) before other work to read the replies and pick up the request, then reply to it."},
 	} {
 		if got := WaitingMessage(tc.requests, tc.replies); got != tc.want {
 			t.Errorf("WaitingMessage(%d, %d) = %q, want %q", tc.requests, tc.replies, got, tc.want)
+		}
+	}
+}
+
+// An urgent wake says so and puts the request before anything else this
+// turn; without urgent requests the text is WaitingMessage's.
+func TestUrgentWaitingMessage(t *testing.T) {
+	if got := Message(2); !strings.Contains(got, "before other work") {
+		t.Errorf("Message(2) = %q, want it to say before other work", got)
+	}
+	for _, tc := range []struct {
+		requests, urgent, replies int
+		want                      string
+	}{
+		{2, 0, 0, Message(2)},
+		{0, 1, 1, WaitingMessage(0, 1)},
+		{1, 1, 0, Message(1) + " It is URGENT: run check_inbox first and handle it before anything else this turn."},
+		{3, 1, 0, Message(3) + " 1 of them is URGENT: run check_inbox first and handle it before anything else this turn."},
+		{3, 2, 1, WaitingMessage(3, 1) + " 2 of them are URGENT: run check_inbox first and handle them before anything else this turn."},
+	} {
+		if got := UrgentWaitingMessage(tc.requests, tc.urgent, tc.replies); got != tc.want {
+			t.Errorf("UrgentWaitingMessage(%d, %d, %d) = %q, want %q", tc.requests, tc.urgent, tc.replies, got, tc.want)
 		}
 	}
 }

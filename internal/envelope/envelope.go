@@ -136,6 +136,15 @@ type Pending struct {
 	From   string `json:"from"`
 }
 
+// Held is a claimed ask the agent has not replied to, as the relay reports
+// it on the agent's own calls so the agent handles it before other work.
+type Held struct {
+	ID        string    `json:"id"`
+	From      string    `json:"from"`
+	Urgent    bool      `json:"urgent,omitempty"`
+	ClaimedAt time.Time `json:"claimed_at,omitzero"`
+}
+
 // ReplyAck identifies a specific reply generation for acknowledgement.
 type ReplyAck struct {
 	ID         string `json:"id"`
@@ -178,10 +187,11 @@ type Result struct {
 	// Result that an ask returns. Nil unless the recipient checks its inbox
 	// on a schedule, and always nil from a relay that predates schedules.
 	Target *Target `json:"target,omitempty"`
-	// RelayNote is a note the relay itself added to the request, By
-	// "relay": the notice that the target was woken and never checked in,
-	// naming teammates who are online. Only the asker sees it. Older relays
-	// never send it and older clients ignore it.
+	// RelayNote is the latest note the relay itself added to the request,
+	// By "relay": that the target was woken and never checked in, that its
+	// claim went stale, or that the request expired with no reply. Only the
+	// asker sees it. Older relays never send it and older clients ignore
+	// it.
 	RelayNote *Progress `json:"relay_note,omitempty"`
 }
 
