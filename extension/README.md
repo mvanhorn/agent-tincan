@@ -212,3 +212,53 @@ listing may assign its own id; pass it with
 - `make extension` writes `dist/tincan-history-extension.zip`.
 - Load unpacked from `chrome://extensions`, then run `tincan history install`
   so Chrome can start the native host.
+
+## Image input transport (gated)
+
+Version 0.6.2 advertises `image_input: {version: 1, sites: []}` in the loaded
+worker hello. The compiled per-site gate is off for every site in both Go and
+the extension. No input site is enabled until live acceptance is recorded in
+`docs/adapters/web-agents.md`. Output downloads retain their separate operations.
+The fixed ChatGPT candidate operations registered in `OPS` are
+`chatgpt.input_begin`, `chatgpt.input_chunk`, `chatgpt.input_abort` and
+`chatgpt.send_images`. They accept a dedicated
+`input` payload of metadata, opaque token, sequence and base64 bytes; no URLs,
+paths, selectors, scripts or browser credentials. The host assigns connection
+identity and rejects service-supplied identities. The worker also binds site and
+connection, verifies hashes and consumes tokens once.
+
+Begin reserves file metadata, chunk supplies ordered bytes, abort cancels the
+transfer, and send_images consumes the token with the usual send arguments
+(message capped at 32 KiB of UTF-8, optional validated conversation id and boolean).
+Files must be nonempty PNG/JPEG. Go validates decoded pixels and MIME agreement,
+rejects animated PNG and caps each image at 40 million pixels. Names are nonempty
+UTF-8, at most 255 bytes, without control characters or path separators. The worker
+checks complete byte counts and SHA-256 checksums before sending.
+
+Chunks carry at most 96 KiB decoded. Limits are one to four files, 10 MiB/file, 20 MiB/ask,
+four concurrent reservations and 40 MiB reserved decoded bytes, including queued
+sends. Pending transfers expire after two idle minutes or ten total minutes.
+Failure or disconnect aborts the connection's transfers; abort cannot delete
+vendor uploads. Disconnect aborts unconsumed uploads, invalidates queued work and clears worker
+unconsumed buffers on host reconnect. Cancelled active sends retain their
+reservation until their cleanup finishes, preventing reconnects from bypassing
+the memory bound. Reload waits for transfers only until the existing
+five-minute deadline, then clears them. Bytes never persist in the worker.
+
+Release packaging still uses `make extension` and `make store`. Extension changes
+bump the manifest version; the store release target skips versions no newer than
+the published version. This change requests no additional browser permissions.
+
+## Session operations
+
+These seven fixed operations accept no arguments and return only `{}` on positive authentication evidence. Typed errors report sign-out or an indeterminate outcome; indeterminate evidence cannot clear a known sign-out. No credentials or account fields are returned. Copilot probes use their own tab and do not queue sends behind the probe.
+
+| Operation | Arguments | What it reads |
+| --- | --- | --- |
+| `chatgpt.session` | None (`{}`) | Reads `GET https://chatgpt.com/api/auth/session` and requires an access token, which stays in the worker. |
+| `dots.session` | None (`{}`) | Uses the same ChatGPT session check; reads no dot thread or messages. |
+| `claudeai.session` | None (`{}`) | Fetches `GET https://claude.ai/api/organizations` fresh and requires a valid organization UUID, preferring an organization with chat capability. |
+| `grok.session` | None (`{}`) | Reads `GET https://grok.com/rest/app-chat/conversations?pageSize=1`; a nonempty conversations list is positive evidence, an empty successful list is `indeterminate`, and HTTP 401 is `not_logged_in`. |
+| `gemini.session` | None (`{}`) | Fetches `https://gemini.google.com/app` fresh and checks its session token and build label; those values stay in worker memory. |
+| `perplexity.session` | None (`{}`) | Reads `GET https://www.perplexity.ai/api/auth/session` and requires a signed-in `user` with an `id`; user fields are not returned. |
+| `copilot.session` | None (`{}`) | Opens its own background tab at `https://copilot.com/chat`, checks the rendered page for a signed-in account using the send gate, then closes the tab without typing or sending. |

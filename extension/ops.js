@@ -55,6 +55,8 @@
 
 export const NATIVE_HOST = 'com.agenttincan.history';
 export const MAX_COUNT = 100;
+// No site has live input acceptance yet. Output support is independent.
+export const IMAGE_INPUT_SITES = Object.freeze([]);
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 // A multiple of 3 so every chunk is whole base64; 512 KiB encoded per
 // message.
@@ -189,6 +191,7 @@ const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SEND_SPEC = Object.freeze({ message: 'message', conversation_id: 'id?', new_chat: 'bool?' });
 const CLOSE_SPEC = Object.freeze({ conversation_id: 'id' });
 const SPEC = Object.freeze({
+  ...Object.fromEntries(['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => [site + '.session', Object.freeze({})])),
   'chatgpt.list': Object.freeze({ count: 'count' }),
   'chatgpt.detail': Object.freeze({ id: 'id' }),
   'chatgpt.file': Object.freeze({ file_id: 'id', conversation_id: 'id?' }),
@@ -222,7 +225,124 @@ const SPEC = Object.freeze({
   'extension.reload': Object.freeze({}),
 });
 
-export const OPS = new Set(Object.keys(SPEC));
+const INPUT_OPS = Object.freeze(['chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.input_abort', 'chatgpt.send_images']);
+export const INPUT_CHUNK_BYTES = 96 * 1024;
+const INPUT_TOTAL_BYTES = 20 * 1024 * 1024;
+
+function inputFiles(files) {
+  if (!Array.isArray(files) || files.length < 1 || files.length > 4) throw bad('expected one to four images');
+  let total = 0;
+  for (const f of files) {
+    if (!isPlainObject(f) || Object.keys(f).sort().join(',') !== 'mime,name,sha256,size') throw bad('invalid image metadata');
+    if (typeof f.name !== 'string' || new TextEncoder().encode(f.name).length > 255 || !f.name || /[\x00-\x1f\x7f/\\]/.test(f.name)) throw bad('invalid image name');
+    if (!['image/png', 'image/jpeg'].includes(f.mime)) throw bad('expected PNG or JPEG');
+    if (!Number.isSafeInteger(f.size) || f.size < 1 || f.size > MAX_FILE_BYTES) throw bad('image exceeds 10 MiB');
+    if (typeof f.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(f.sha256)) throw bad('invalid image checksum');
+    total += f.size;
+  }
+  if (total > INPUT_TOTAL_BYTES) throw bad('images exceed 20 MiB');
+  return total;
+}
+
+function validateInput(op, input) {
+  if (!isPlainObject(input)) throw bad('missing image payload');
+  const verb = op.split('.')[1];
+  const allowed = verb === 'input_begin' ? ['connection', 'files'] : verb === 'input_chunk' ? ['connection', 'token', 'seq', 'data'] : ['connection', 'token'];
+  if (Object.keys(input).some((k) => !allowed.includes(k))) throw bad('unexpected image argument');
+  if (typeof input.connection !== 'string' || !ID_RE.test(input.connection)) throw bad('invalid connection');
+  if (verb === 'input_begin') inputFiles(input.files);
+  else if (!(verb === 'input_abort' && input.token === undefined) && (typeof input.token !== 'string' || !/^[a-f0-9]{32}$/.test(input.token))) throw bad('invalid transfer token');
+  if (verb === 'input_chunk') {
+    if (input.seq === undefined) input = { ...input, seq: 0 };
+    if (!Number.isSafeInteger(input.seq) || input.seq < 0) throw bad('invalid chunk sequence');
+    if (typeof input.data !== 'string' || !input.data || input.data.length > 4 * Math.ceil(INPUT_CHUNK_BYTES / 3) || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.data)) throw bad('invalid chunk encoding');
+  }
+  return input;
+}
+
+// Bytes live only in this worker, reserved before allocation, with no URLs,
+// file paths or page selectors accepted from the native host.
+export function createInputTransfers({ now = Date.now } = {}) {
+  const pending = new Map();
+  function sweep() {
+    for (const [token, p] of pending) if (!p.consumed && (now() - p.touched >= 120000 || now() - p.created >= 600000)) { p.cancelled = true; pending.delete(token); }
+  }
+  function cancel(token, p) {
+    p.cancelled = true;
+    p.bytes = null;
+    if (p.outputFiles) p.outputFiles.length = 0;
+    // A queued/active send may still hold serialized arguments. Keep its
+    // reservation until its finally block runs, even across reconnect.
+    if (!p.consumed) pending.delete(token);
+  }
+  function get(connection, site, token) {
+    sweep();
+    const p = pending.get(token);
+    if (!p || p.consumed || p.connection !== connection || p.site !== site) throw bad('unknown image transfer');
+    p.touched = now();
+    return p;
+  }
+  return {
+    begin(connection, site, files) {
+      sweep();
+      const size = inputFiles(files);
+      const used = [...pending.values()].reduce((n, p) => n + p.size, 0);
+      if (pending.size >= 4 || used + size > 40 * 1024 * 1024) throw bad('image transfer capacity reached');
+      const token = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+      pending.set(token, { connection, site, files: files.map((f) => ({ ...f })), size, bytes: new Uint8Array(size), offset: 0, seq: 0, created: now(), touched: now() });
+      return { token };
+    },
+    chunk(connection, site, a) {
+      validateInput(`${site}.input_chunk`, { ...a, connection });
+      const p = get(connection, site, a.token);
+      if (a.seq !== p.seq) throw bad('image chunk out of order');
+      const raw = atob(a.data);
+      if (btoa(raw) !== a.data || raw.length > INPUT_CHUNK_BYTES || p.offset + raw.length > p.size) throw bad('image chunk exceeds size or is not canonical base64');
+      p.bytes.set(Uint8Array.from(raw, (c) => c.charCodeAt(0)), p.offset);
+      p.offset += raw.length;
+      p.seq++;
+      return { seq: a.seq };
+    },
+    async consume(connection, site, token) {
+      const p = get(connection, site, token);
+      p.consumed = true; // retained reservation bounds queued and active sends
+      try {
+        if (p.offset !== p.size) throw bad('incomplete image transfer');
+        const files = [];
+        p.outputFiles = files;
+        let offset = 0;
+        for (const f of p.files) {
+          const bytes = p.bytes.subarray(offset, offset + f.size);
+          offset += f.size;
+          const hash = await sha256Hex(bytes);
+          if (p.cancelled) throw bad('image transfer disconnected');
+          if (hash !== f.sha256) throw bad('image checksum mismatch');
+          let bin = '';
+          for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
+          files.push({ ...f, data: btoa(bin) });
+        }
+        p.bytes = null;
+        return files;
+      } catch (e) {
+        pending.delete(token);
+        throw e;
+      }
+    },
+    active(token) { const p = pending.get(token); return !!p && !p.cancelled; },
+    release(connection, site, token) {
+      const p = pending.get(token);
+      if (p?.connection === connection && p.site === site) { p.cancelled = true; pending.delete(token); }
+    },
+    abort(connection, site, token) {
+      for (const [key, p] of pending) if (p.connection === connection && p.site === site && (token === undefined || token === key)) cancel(key, p);
+      return { aborted: true };
+    },
+    busy() { sweep(); return pending.size > 0; },
+    clear() { for (const [token, p] of pending) cancel(token, p); },
+  };
+}
+
+export const OPS = new Set([...Object.keys(SPEC), ...INPUT_OPS]);
 
 // MAX_RETRY_AFTER_S caps a Retry-After reported to the host, in seconds.
 export const MAX_RETRY_AFTER_S = 3600;
@@ -249,6 +369,7 @@ export function errorFrame(e) {
   const error = { code: e.code, message: e.message };
   if (e.retryAfter !== undefined) error.retry_after = e.retryAfter;
   if (e.clicked === true) error.clicked = true;
+  if (e.uploaded === true) error.uploaded = true;
   return { ok: false, error };
 }
 
@@ -281,10 +402,16 @@ function isPlainObject(v) {
 export function validate(msg) {
   if (!isPlainObject(msg)) throw bad('request is not an object');
   for (const k of Object.keys(msg)) {
-    if (k !== 'id' && k !== 'op' && k !== 'args') throw bad('unexpected field');
+    if (k !== 'id' && k !== 'op' && k !== 'args' && k !== 'input') throw bad('unexpected field');
   }
   const { id, op, args } = msg;
   if (!Number.isSafeInteger(id) || id < 0) throw bad('invalid request id');
+  if (INPUT_OPS.includes(op)) {
+    const input = validateInput(op, msg.input);
+    const base = validate({ id, op: op.endsWith('.send_images') ? 'chatgpt.send' : 'extension.reload', args });
+    return { ...base, op, input };
+  }
+  if (msg.input !== undefined) throw bad('unexpected image payload');
   if (typeof op !== 'string' || !Object.hasOwn(SPEC, op)) throw bad('unknown operation');
   if (!isPlainObject(args)) throw bad('missing args');
   const spec = SPEC[op];
@@ -348,6 +475,7 @@ export async function helloMessage({ manifest, getURL, fetch, files, permissions
   const m = manifest && typeof manifest === 'object' ? manifest : {};
   const hello = { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files: hashes };
   if (permissions) hello.granted = await grantedSites(permissions);
+  hello.image_input = { version: 1, sites: [...IMAGE_INPUT_SITES] };
   return { id: 0, hello };
 }
 
@@ -655,6 +783,8 @@ function b64(bytes) {
 // bounds how long an error or non-JSON body is read for anti-bot markers
 // (BODY_TEXT_MS unless a test shortens it).
 export function createRunner({ fetch, sender = null, reload = null, permissions = null, sniffMs = BODY_TEXT_MS }) {
+  const transfers = createInputTransfers();
+  let inputEpoch = 0;
   let claudeOrg = null;
   let geminiSession = null;
   // geminiReq is batchexecute's _reqid: a counter, as the app keeps one.
@@ -672,18 +802,19 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     reloadPending = true;
     const start = Date.now();
     const attempt = async () => {
-      const busy = sender && typeof sender.busy === 'function' && sender.busy();
+      const busy = transfers.busy() || (sender && typeof sender.busy === 'function' && sender.busy());
       if (busy) {
         if (Date.now() - start < RELOAD_MAX_WAIT_MS) {
           setTimeout(attempt, RELOAD_RETRY_MS);
           return;
         }
         try {
-          if (typeof sender.closeAllKept === 'function') await sender.closeAllKept();
+          if (sender && typeof sender.closeAllKept === 'function') await sender.closeAllKept();
         } catch {
           // Reload regardless.
         }
       }
+      transfers.clear();
       reload();
     };
     setTimeout(attempt, 200);
@@ -819,9 +950,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   // send.js's grok selectors) is the second gate and runs before anything
   // is typed, so a signed-out page that still answered the list is
   // refused there.
-  async function grokSession() {
+  async function grokSession(requireAccount = false) {
     const r = await grokJSON(`${GROK}/rest/app-chat/conversations?pageSize=1`, {});
     if (!r || !Array.isArray(r.conversations)) throw new OpError('not_logged_in', 'no grok.com session');
+    if (requireAccount && r.conversations.length === 0) throw new OpError('indeterminate', 'empty Grok list carries no account signal');
   }
 
   // grokAsset resolves a generatedImageUrls entry (a path on the image host,
@@ -1050,6 +1182,16 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   }
 
   const handlers = {
+    async 'chatgpt.session'() { await chatgptAuth(); return {}; },
+    async 'dots.session'() { await chatgptAuth(); return {}; },
+    async 'claudeai.session'() { claudeOrg = null; await claudeOrgId(); return {}; },
+    async 'grok.session'() { await grokSession(true); return {}; },
+    async 'gemini.session'() { await geminiAuth(true); return {}; },
+    async 'perplexity.session'() { await perplexitySession(); return {}; },
+    async 'copilot.session'() {
+      if (!sender || typeof sender.session !== 'function') throw new OpError('unsupported', 'upgrade the extension for session probes');
+      return sender.session('copilot');
+    },
     async 'chatgpt.list'(a) {
       const auth = await chatgptAuth();
       return getJSON(`${CHATGPT}/backend-api/conversations?offset=0&limit=${a.count}&order=updated`, auth);
@@ -1338,7 +1480,38 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   return {
     // run executes one validated operation, calling emit with each
     // response frame (without the request id). It throws OpError.
-    async run(op, args, emit) {
+    clearInputs() { inputEpoch++; transfers.clear(); },
+    expireInputs() { transfers.busy(); },
+    async run(op, args, emit, input) {
+      if (INPUT_OPS.includes(op)) {
+        const [site, verb] = op.split('.');
+        if (!IMAGE_INPUT_SITES.includes(site)) throw new OpError('unsupported', 'image input awaits live acceptance; send text alone');
+        input = validate({ id: 0, op, args, input }).input;
+        const epoch = inputEpoch;
+        if (verb !== 'input_abort') await requireGrant(op);
+        if (epoch !== inputEpoch) throw bad('image transfer disconnected');
+        let result;
+        if (verb === 'input_begin') result = transfers.begin(input.connection, site, input.files);
+        else if (verb === 'input_chunk') result = transfers.chunk(input.connection, site, { token: input.token, seq: input.seq, data: input.data });
+        else if (verb === 'input_abort') result = transfers.abort(input.connection, site, input.token);
+        else {
+          let consumed = false;
+          try {
+            const files = await transfers.consume(input.connection, site, input.token);
+            consumed = true;
+            if (!sender) throw new OpError('unsupported', 'upgrade the extension for image input');
+            await chatgptAuth();
+            result = await sender.send(site, args, { images: files, active: () => transfers.active(input.token), confirmImages: async (id, submittedAt) => {
+              const raw = await handlers['chatgpt.detail']({ id });
+              return confirmedInputMessage(raw, args.message, files, submittedAt);
+            } });
+          } finally {
+            if (consumed) transfers.release(input.connection, site, input.token);
+          }
+        }
+        emit({ ok: true, result });
+        return;
+      }
       if (!Object.hasOwn(handlers, op)) throw bad('unknown operation');
       await requireGrant(op);
       try {
@@ -1351,4 +1524,26 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       }
     },
   };
+}
+
+// The existing ChatGPT reader supplies this shape. Require ordered names,
+// MIME types, real image pointers, fresh time and a unique human turn.
+export function confirmedInputMessage(raw, message, files, submittedAt) {
+  const matches = [];
+  const seen = new Set();
+  let id = raw?.current_node;
+  while (typeof id === 'string' && raw?.mapping?.[id] && !seen.has(id)) {
+    seen.add(id);
+    const node = raw.mapping[id];
+    const m = node.message;
+    const parts = m?.content?.parts;
+    const attachments = m?.metadata?.attachments;
+    if (m?.author?.role === 'user' && ID_RE.test(m.id || '') && Number.isFinite(m.create_time) && m.create_time * 1000 >= submittedAt - 1000 && Array.isArray(parts) && Array.isArray(attachments)) {
+      const text = parts.filter((p) => typeof p === 'string').join('\n');
+      const pointers = parts.filter((p) => p?.content_type === 'image_asset_pointer' && typeof p.asset_pointer === 'string');
+      if (text === message && pointers.length === files.length && attachments.length === files.length && files.every((f, i) => attachments[i].name === f.name && attachments[i].mime_type === f.mime && ID_RE.test(attachments[i].id || '') && [`sediment://${attachments[i].id}`, `file-service://${attachments[i].id}`].includes(pointers[i].asset_pointer))) matches.push(m.id);
+    }
+    id = node.parent;
+  }
+  return matches.length === 1 ? matches[0] : '';
 }

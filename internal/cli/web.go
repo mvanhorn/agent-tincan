@@ -26,6 +26,7 @@ func webCmd() *cobra.Command {
 			"site in a background tab the Tincan Chrome extension opens, and the reply comes back as the answer,\n" +
 			"with generated images attached from ChatGPT and Grok (Gemini's when they can be fetched), and Perplexity's and Copilot's answers ending with their source links.\n" +
 			"It acts as you there, and the chats show up in your history.\n" +
+			"Image input is disabled pending live acceptance; attachment asks fail explicitly. Send text alone.\n" +
 			"See docs/adapters/web-agents.md.",
 	}
 	cmd.AddCommand(webServeCmd(), webInstallCmd())

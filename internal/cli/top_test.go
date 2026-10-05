@@ -367,3 +367,10 @@ func TestTopUnansweredOrder(t *testing.T) {
 		t.Fatal(renderFrame(f, 120))
 	}
 }
+
+func TestSignedOutOnlineAttention(t *testing.T) {
+	score, flags := attention(client.AgentInfo{Online: true, Target: envelope.Target{SignedOutSite: "chatgpt.com"}}, "", time.Now())
+	if score != 6 || len(flags) != 1 || flags[0] != "SIGNED-OUT" {
+		t.Fatalf("attention = %d %v", score, flags)
+	}
+}

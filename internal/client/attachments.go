@@ -33,6 +33,7 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 // Capabilities is what a relay says it supports, from GET /v1/capabilities.
 // A relay that predates that endpoint supports none of it.
 type Capabilities struct {
+	WebStatus          bool  `json:"web_status,omitempty"`
 	Groups             bool  `json:"groups,omitempty"`
 	Progress           bool  `json:"progress,omitempty"`
 	Search             bool  `json:"search,omitempty"`
@@ -53,10 +54,12 @@ type UploadedAttachment struct {
 
 // DownloadedAttachment describes a fetched attachment.
 type DownloadedAttachment struct {
-	ID     string
-	MIME   string
-	Size   int64
-	SHA256 string
+	// Verified reports whether the relay supplied a matching checksum.
+	Verified bool
+	ID       string
+	MIME     string
+	Size     int64
+	SHA256   string
 }
 
 // AttachmentTimeout bounds one upload or download, well past the short API
@@ -165,7 +168,7 @@ func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) 
 	if want := resp.Header.Get(AttachmentSHA256Header); want != "" && !strings.EqualFold(want, got) {
 		return DownloadedAttachment{}, fmt.Errorf("attachment %s: sha256 %s does not match the relay's %s", id, got, want)
 	}
-	return DownloadedAttachment{ID: id, MIME: resp.Header.Get("Content-Type"), Size: n, SHA256: got}, nil
+	return DownloadedAttachment{ID: id, MIME: resp.Header.Get("Content-Type"), Size: n, SHA256: got, Verified: resp.Header.Get(AttachmentSHA256Header) != ""}, nil
 }
 
 // SendAttached is Send with attachments, named by the ids UploadAttachment

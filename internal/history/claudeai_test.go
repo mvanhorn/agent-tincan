@@ -125,7 +125,7 @@ func TestClaudeAIUnavailableMessages(t *testing.T) {
 		kind error
 		want string
 	}{
-		{frames(NativeResponse{Error: &NativeError{Code: "not_logged_in", Message: "no organization"}}), ErrNotLoggedIn, "source unavailable: claude-ai: not logged in to claude.ai in Chrome"},
+		{frames(NativeResponse{Error: &NativeError{Code: "not_logged_in", Message: "no organization"}}), ErrNotLoggedIn, "source unavailable: claude-ai: not logged in to claude.ai in Chrome; sign in there without restarting Chrome"},
 		{frames(NativeResponse{OK: true, Result: json.RawMessage(`{"not":"an array"}`)}), ErrEndpointChanged, "source unavailable: claude-ai: claude.ai changed its API (unexpected list shape)"},
 		{errChannel(ErrChromeNotRunning), ErrChromeNotRunning, "source unavailable: claude-ai: Chrome is not running"},
 	}

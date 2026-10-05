@@ -1229,17 +1229,20 @@ A Manifest V3 extension (in [extension/](extension/), named "Agent Tincan Histor
 
 What it can do:
 
-- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai, grok.com and gemini.google.com, `perplexity.detail` for one www.perplexity.ai thread, `copilot.list` and `copilot.detail` for copilot.com, `chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, `perplexity.send` and `copilot.send`, `chatgpt.close`, `claudeai.close`, `grok.close`, `gemini.close`, `perplexity.close` and `copilot.close`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
-- Open, fill and close its own background tabs for sends.
+- Run a fixed set of operations for its native host (`tincan history native-host`): list, detail and file reads for chatgpt.com, claude.ai, grok.com and gemini.google.com, `perplexity.detail` for one www.perplexity.ai thread, `copilot.list` and `copilot.detail` for copilot.com, `chatgpt.send`, `claudeai.send`, `grok.send`, `gemini.send`, `perplexity.send` and `copilot.send`, `chatgpt.close`, `claudeai.close`, `grok.close`, `gemini.close`, `perplexity.close` and `copilot.close`, `chatgpt.session`, `dots.session`, `claudeai.session`, `grok.session`, `gemini.session`, `perplexity.session` and `copilot.session`, `chatgpt.input_begin`, `chatgpt.input_chunk`, `chatgpt.input_abort`, `chatgpt.send_images`, and `extension.reload`. Images come back as base64 in chunks of at most 384 KiB.
+- Open, fill and close its own background tabs for sends. Run argument-free session checks, including an owned Copilot background tab that closes without typing. See the [session operation contract](extension/README.md#session-operations) for each check's inputs and reads.
+- The four image-input operations are registered but disabled by a compiled per-site gate, currently off for every site in both Go and the extension. If enabled, `chatgpt.input_begin` reserves a transfer from file metadata, `chatgpt.input_chunk` supplies ordered base64 chunks of at most 96 KiB decoded, `chatgpt.input_abort` cancels it, and `chatgpt.send_images` consumes its token once with the usual send arguments. Input is one to four nonempty PNG/JPEG files, at most 10 MiB each and 20 MiB total. Go checks that the bytes decode, match the declared MIME type and have at most 40 million pixels per image; animated PNG is rejected. The worker checks complete byte counts and SHA-256 checksums before sending. It permits at most four concurrent reservations and 40 MiB of reserved decoded bytes, including queued and active sends. Unconsumed transfers expire after two idle minutes or ten total minutes.
 
 What it cannot do:
 
 - It accepts nothing outside that operation set and never runs code from a message or a page. A message is passed as data to a fixed function in an isolated content script and inserted as text.
-- No cookie or token leaves the browser. The ChatGPT access token is read inside the extension's worker and stays there.
+- Image input accepts bytes only as chunked data, never URLs, file paths, page selectors or scripts. Names are nonempty UTF-8, at most 255 bytes, without control characters or path separators. The native host assigns connection identity and rejects service-supplied identities; transfer tokens are bound to that connection and site. Failure or disconnect aborts the connection's transfers. Abort releases local transfer state, not vendor uploads; cancelled active sends retain their reservation until cleanup finishes.
+- Session checks cannot accept arbitrary URLs, return credentials or account fields, or send messages. An indeterminate check cannot clear a known sign-out.
+- No browser cookie or authentication token leaves the browser. The ChatGPT access token is read inside the extension's worker and stays there.
 - It never scripts a tab the owner opened, and Chrome is never quit or restarted.
 - Its permissions are limited to `nativeMessaging`, `alarms` and `scripting`, on chatgpt.com, `*.oaiusercontent.com` and claude.ai, plus grok.com and assets.grok.com only after the owner grants Grok, gemini.google.com and `lh3.googleusercontent.com` only after the owner grants Gemini, www.perplexity.ai only after the owner grants Perplexity, and copilot.com and copilot.microsoft.com only after the owner grants Copilot, on the extension's options page (optional host permissions, so installing or updating asks nothing for any of them).
 
-Options page: `chrome://extensions` > Agent Tincan History > Details > Extension options lists each site, shows whether Chrome has granted it, and grants it with one click (Chrome asks you to confirm). ChatGPT and claude.ai are granted at install; Grok, Gemini, Perplexity and Copilot stay off until you grant them here. Every operation except close checks its site's grant first and fails with `permission_missing` otherwise, and a site that shows an anti-bot check fails as `blocked` instead of looking like a changed API. Version 0.4.0, in the v0.6.0 release, added the options page and the Grok and Gemini sites. Version 0.5.0, in the v0.7.0 release, adds the Perplexity and Copilot sites, and is pending Chrome Web Store review.
+Options page: `chrome://extensions` > Agent Tincan History > Details > Extension options lists each site, shows whether Chrome has granted it, and grants it with one click (Chrome asks you to confirm). ChatGPT and claude.ai are granted at install; Grok, Gemini, Perplexity and Copilot stay off until you grant them here. Every operation except close and image-transfer abort checks its site's grant first and fails with `permission_missing` otherwise, and a site that shows an anti-bot check fails as `blocked` instead of looking like a changed API. Version 0.4.0, in the v0.6.0 release, added the options page and the Grok and Gemini sites. Version 0.5.0, in the v0.7.0 release, adds the Perplexity and Copilot sites, and is pending Chrome Web Store review.
 
 Install: once the Chrome Web Store listing is published, installing is one click through Chrome's standard permission dialog. Until the store listing is live, load it unpacked once:
 
@@ -1326,3 +1329,20 @@ Always upload the `checksums.txt` written after signing; `make release` and `mak
 Quick start: [docs/quickstart.md](docs/quickstart.md). Protocol: [docs/protocol.md](docs/protocol.md).
 
 MIT licensed.
+
+### Web-agent image input
+
+All seven web-agent kinds currently reject attachment asks before download or
+submission, pending live acceptance. Send text alone. Generated-image output
+support is unchanged. The gated input candidate supports static PNG/JPEG only,
+four files, 10 MiB each, 20 MiB total and 40 million pixels per image.
+See [the web-agent input guide](docs/adapters/web-agents.md#image-input-acceptance-gate)
+for CLI `--attach` and local MCP `attach` examples, vendor exposure, failure
+behavior and the exact owner acceptance checks. Remote MCP cannot attach local
+paths. Upgrade both tincan and the Chrome extension when input becomes enabled.
+
+Web agents report browser sign-out separately from process presence. Look for
+`signed_out` in CLI/MCP rosters, `SIGNED-OUT` in `tincan top`, or browser-host
+recovery guidance in `tincan doctor`. Sign in on that host in Chrome without
+restarting Chrome. See [web-agent authentication status](docs/adapters/web-agents.md#browser-authentication-status)
+for idle probes, optional operator notices and upgrade limits.

@@ -20,6 +20,9 @@ const runner = createRunner({
   permissions: chrome.permissions,
 });
 let port = null;
+// Native connection keeps the worker alive; promptly expire idle buffers.
+const inputExpiry = setInterval(() => runner.expireInputs(), 5000);
+inputExpiry.unref?.(); // Node tests need not stay alive for the worker timer.
 // The files are hashed once, when this worker starts: every hello reports
 // the code Chrome loaded, not whatever is on disk at reconnect time, so
 // the host can tell when an update is waiting for a reload.
@@ -38,18 +41,19 @@ function requestId(msg) {
   return msg && Number.isSafeInteger(msg.id) && msg.id >= 0 ? msg.id : 0;
 }
 
-async function onHostMessage(msg) {
+async function onHostMessage(msg, p) {
+  const reply = (frame) => { if (port === p) post(frame); };
   let req;
   try {
     req = validate(msg);
   } catch (e) {
-    post({ id: requestId(msg), ok: false, error: { code: 'bad_request', message: e.message } });
+    reply({ id: requestId(msg), ok: false, error: { code: 'bad_request', message: e.message } });
     return;
   }
   try {
-    await runner.run(req.op, req.args, (frame) => post({ id: req.id, ...frame }));
+    await runner.run(req.op, req.args, (frame) => reply({ id: req.id, ...frame }), req.input);
   } catch (e) {
-    post({ id: req.id, ...errorFrame(e) });
+    reply({ id: req.id, ...errorFrame(e) });
   }
 }
 
@@ -63,12 +67,12 @@ function connect() {
   }
   port = p;
   p.onMessage.addListener((msg) => {
-    onHostMessage(msg);
+    if (port === p) onHostMessage(msg, p);
   });
   p.onDisconnect.addListener(() => {
     // Reading lastError marks it handled (host not installed, or exited).
     void chrome.runtime.lastError;
-    if (port === p) port = null;
+    if (port === p) { port = null; runner.clearInputs(); }
   });
   hello(p);
 }

@@ -155,6 +155,7 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	// 2b. Relay-woken agents that did not check in after a wake.
 	if joined {
 		add(unansweredCheck(ctx, r, time.Now()))
+		add(webStatusCheck(ctx, r))
 	}
 
 	// 3. Self-test of tincan mcp in both framings.
@@ -569,4 +570,23 @@ func printDoctor(w io.Writer, rep doctorReport) {
 	if rep.OK {
 		fmt.Fprintln(w, "\nNo failures.")
 	}
+}
+
+func webStatusCheck(ctx context.Context, r *client.Relay) check {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	roster, err := r.Roster(ctx)
+	if err != nil {
+		return check{"web authentication", "warn", "could not read roster: " + err.Error(), ""}
+	}
+	var notes []string
+	for _, a := range roster.Agents {
+		if a.SignedOutSite != "" {
+			notes = append(notes, client.SignedOutHint(a.Name, &a.Target))
+		}
+	}
+	if len(notes) == 0 {
+		return check{"web authentication", "ok", "no reported signed-out browser sessions; missing reports mean unknown", ""}
+	}
+	return check{"web authentication", "warn", strings.Join(notes, " "), "Sign in on each named browser host. Fresh authenticated traffic or a session probe clears the mark."}
 }

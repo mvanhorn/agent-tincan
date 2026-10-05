@@ -326,6 +326,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if backlog := a.Backlog(now); backlog != "" {
 			fmt.Fprintf(&b, " %s", backlog)
 		}
+		if signedOut := a.SignedOutField(now); signedOut != "" {
+			fmt.Fprintf(&b, " %s", signedOut)
+		}
 		if unanswered := a.UnansweredField(now); unanswered != "" {
 			fmt.Fprintf(&b, " %s", unanswered)
 		}
@@ -385,13 +388,15 @@ func askCmd() *cobra.Command {
 			}
 			ids := client.AttachmentIDs(ups)
 			if notify {
-				req, err := r.SendAttached(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
+				sent, err := r.SendAttachedResult(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
 				if err != nil {
 					return err
 				}
+				req := sent.Request
 				if asJSON {
-					return writeJSON(cmd.OutOrStdout(), sentJSON{Outcome: "sent", Request: req})
+					return writeJSON(cmd.OutOrStdout(), sentJSON{Outcome: "sent", Request: req, Target: sent.Target})
 				}
+				cmd.Print(client.SignedOutHint(req.To, sent.Target))
 				if req.Status == envelope.StatusHeld {
 					cmd.Printf("Request %s: held, waiting for the owner's approval.\n", req.ID)
 				} else {
@@ -502,6 +507,7 @@ type resultJSON struct {
 
 // sentJSON is what ask --notify --json prints: no reply is coming.
 type sentJSON struct {
+	Target  *envelope.Target `json:"target,omitempty"`
 	Outcome string           `json:"outcome"`
 	Request envelope.Request `json:"request"`
 }

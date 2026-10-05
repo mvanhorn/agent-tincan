@@ -219,3 +219,6 @@ func (p *Policy) rate(sender string, urgent bool) (time.Time, error) {
 }
 
 func reject(code int, err error) error { return &relay.StatusError{Code: code, Err: err} }
+
+// NotifyDestination exposes the configured operator destination.
+func (p *Policy) NotifyDestination() string { return p.cfg.Approval.NotifyDestination() }

@@ -254,7 +254,17 @@ func cleanVersion(v string) string {
 }
 
 // SetPreparer installs the chain and policy step.
-func (s *Server) SetPreparer(p Preparer) { s.prep = p }
+func (s *Server) SetPreparer(p Preparer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prep = p
+}
+
+func (s *Server) preparer() Preparer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prep
+}
 
 // Connector links virtual agents (ChatGPT through the gateway).
 type Connector interface {
@@ -296,6 +306,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/groups/{id}", s.handleGroup)
 	mux.HandleFunc("POST /v1/requests/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
+	mux.HandleFunc("PUT /v1/agents/self/web-status", s.handleWebStatus)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
@@ -332,6 +343,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
+	mux.HandleFunc("PUT /v1/agents/self/web-status", s.handleWebStatus)
 	s.adminRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), localAdminKey, true)))
@@ -379,6 +391,7 @@ func (s *Server) Run(ctx context.Context) {
 
 // Sweep runs one expiry and lease pass and wakes affected waiters.
 func (s *Server) Sweep(ctx context.Context) {
+	s.notifyWebStatus(ctx)
 	trs, err := s.store.Sweep(ctx)
 	if err != nil {
 		log.Printf("sweep: %v", err)
@@ -581,7 +594,8 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.prep.Prepare(r.Context(), &req); err != nil {
+	prep := s.preparer()
+	if err := prep.Prepare(r.Context(), &req); err != nil {
 		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
 		writeErr(w, statusFor(err), err)
 		return
@@ -589,7 +603,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	prepared := req
 	req, err = s.store.Enqueue(r.Context(), req, s.requestTTL(r.Context(), req.To))
 	if err != nil {
-		if rf, ok := s.prep.(Refunder); ok {
+		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
 		}
 		if errors.Is(err, store.ErrGroupFull) {
@@ -602,7 +616,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	if req.Status == envelope.StatusHeld {
 		s.record(r.Context(), "held", req.ID, req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
 		s.notifyApproval(r.Context(), req)
-		writeJSON(w, http.StatusCreated, req)
+		writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
 		return
 	}
 	s.hub.notify(inboxKey(req.To))
@@ -617,6 +631,22 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 // its last wake for an agent the relay wakes, and nil otherwise. A failed
 // join-time lookup measures from the relay's start.
 func (s *Server) recipientTarget(ctx context.Context, agent string) *envelope.Target {
+	t := s.recipientActivity(ctx, agent)
+	facts, err := s.store.WebStatuses(ctx)
+	if err == nil {
+		if a, ok, err := s.dir.Agent(ctx, agent); err == nil && ok {
+			if v, exists := facts[agent]; exists {
+				if t == nil {
+					t = &envelope.Target{}
+				}
+				v.Apply(a, t)
+			}
+		}
+	}
+	return t
+}
+
+func (s *Server) recipientActivity(ctx context.Context, agent string) *envelope.Target {
 	every := s.checkEvery(agent)
 	if every <= 0 {
 		return s.recipientWake(ctx, agent)
@@ -1179,6 +1209,10 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 			log.Printf("agents last poll: %v", err)
 		}
 	}
+	webFacts, err := s.store.WebStatuses(r.Context())
+	if err != nil {
+		log.Printf("agents web status: %v", err)
+	}
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -1206,6 +1240,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 				info.Target = s.wakeTarget(wk, polled, now)
 			}
 		}
+		webFacts[a.Name].Apply(a, &info.Target)
 		out = append(out, info)
 	}
 	s.mu.Unlock()

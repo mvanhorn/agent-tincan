@@ -23,11 +23,13 @@ type webJournal struct {
 }
 
 const (
+	webSendIntent   = "image_intent"
 	webSendSent     = "sent"
 	webSendAnswered = "answered"
 )
 
 type webSend struct {
+	Input          bool   `json:"input,omitempty"`
 	ConversationID string `json:"conversation_id"`
 	// UserMessageID is this request's user message, once seen.
 	UserMessageID string `json:"user_message_id,omitempty"`
@@ -70,6 +72,9 @@ func (w *WebAgent) loadJournal() webJournal {
 	}
 	cutoff := time.Now().Add(-w.journalRetention())
 	for id, e := range j.Requests {
+		if e.State == webSendIntent || (e.Input && e.State != webSendAnswered) {
+			continue
+		}
 		if e.Recorded.Before(cutoff) || !validNativeID(e.ConversationID) || (e.UserMessageID != "" && !validNativeID(e.UserMessageID)) {
 			delete(j.Requests, id)
 		}
@@ -81,6 +86,11 @@ func (w *WebAgent) loadJournal() webJournal {
 // hold w.mu.
 func (w *WebAgent) journal(reqID string, e webSend) {
 	if w.JournalPath == "" {
+		return
+	}
+	// Never let a later text send overwrite an unreadable image journal.
+	if _, err := w.loadInputJournal(); err != nil {
+		w.logf("journal could not be read; not overwriting it")
 		return
 	}
 	j := w.loadJournal()
@@ -95,4 +105,77 @@ func (w *WebAgent) journal(reqID string, e webSend) {
 	if err != nil {
 		w.logf("journal %s: %v", w.JournalPath, err)
 	}
+}
+
+// Image sends fail closed on journal read/write errors. Unresolved intents
+// have no retention deadline, including new chats without conversation ids.
+func (w *WebAgent) loadInputJournal() (webJournal, error) {
+	j := webJournal{Requests: map[string]webSend{}}
+	if w.JournalPath == "" {
+		return j, errors.New("image input requires a send journal")
+	}
+	b, err := os.ReadFile(w.JournalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return j, nil
+	}
+	if err != nil {
+		return j, err
+	}
+	if err := json.Unmarshal(b, &j); err != nil {
+		return j, err
+	}
+	if j.Requests == nil {
+		return j, errors.New("invalid image send journal")
+	}
+	for _, e := range j.Requests {
+		if e.State != webSendIntent && e.State != webSendSent && e.State != webSendAnswered {
+			return j, errors.New("unknown send journal state")
+		}
+		if e.State != webSendIntent && !validNativeID(e.ConversationID) {
+			return j, errors.New("invalid journal conversation")
+		}
+	}
+	return j, nil
+}
+
+func (w *WebAgent) journalStrict(reqID string, e webSend) error {
+	j, err := w.loadInputJournal()
+	if err != nil {
+		return err
+	}
+	j.Requests[reqID] = e
+	b, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(w.JournalPath), 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(w.JournalPath), ".image-journal-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err := f.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), w.JournalPath); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(w.JournalPath))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }

@@ -22,10 +22,11 @@ import (
 // op prefixes of the sites Chrome has granted it. Granted is nil from an
 // extension older than site grants (see grantedPrefixes).
 type Hello struct {
-	Version  string            `json:"version"`
-	Unpacked bool              `json:"unpacked"`
-	Files    map[string]string `json:"files"`
-	Granted  []string          `json:"granted"`
+	ImageInput ImageInputCapability `json:"image_input"`
+	Version    string               `json:"version"`
+	Unpacked   bool                 `json:"unpacked"`
+	Files      map[string]string    `json:"files"`
+	Granted    []string             `json:"granted"`
 }
 
 // ExtensionDirEnv names the unpacked extension directory for the native

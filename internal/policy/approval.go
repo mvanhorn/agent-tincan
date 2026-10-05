@@ -236,3 +236,17 @@ func approvalJSON(d *json.Decoder) error {
 	}
 	return nil
 }
+
+// NotifyDestination reloads the operator destination. Invalid configuration
+// never sends a notice using a stale destination.
+func (a *Approval) NotifyDestination() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.reload() != nil || a.missing || a.good == nil {
+		return ""
+	}
+	return a.good.Notify
+}

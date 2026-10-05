@@ -309,7 +309,7 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 // the request as sent, otherwise it waits up to wait for the reply. Either
 // way the send response's target facts are carried onto the result.
 func (r *Relay) asked(ctx context.Context, s sent, wait time.Duration) (Result, error) {
-	if wait <= 0 {
+	if wait <= 0 || (s.Target != nil && s.Target.SignedOutSite != "") {
 		return Result{Request: s.Request, Status: sentStatus(s.Request), Target: s.Target}, nil
 	}
 	res, err := r.Get(ctx, s.ID, wait)
@@ -810,23 +810,25 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 		return GroupResult{}, err
 	}
 	g := GroupResult{Group: newGroupID()}
-	for _, target := range targets {
-		req := envelope.Request{To: target, Body: body, Kind: kind, ParentID: parent, Group: g.Group, Urgent: urgent}
+	for _, targetName := range targets {
+		var target *envelope.Target
+		req := envelope.Request{To: targetName, Body: body, Kind: kind, ParentID: parent, Group: g.Group, Urgent: urgent}
 		ups, err := r.UploadFiles(ctx, attachPaths)
 		if err == nil {
 			for _, up := range ups {
 				req.Attachments = append(req.Attachments, envelope.Attachment{ID: up.ID})
 			}
-			var sent envelope.Request
+			var sent envelope.SendResponse
 			err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent)
 			if err == nil {
-				req = sent
+				req = sent.Request
+				target = sent.Target
 			}
 		}
-		res := Result{Request: req, Status: sentStatus(req)}
+		res := Result{Request: req, Status: sentStatus(req), Target: target}
 		if err != nil {
 			res.Status = envelope.StatusFailed
-			res.Reply = &envelope.Reply{From: target, Status: envelope.StatusFailed, Body: err.Error()}
+			res.Reply = &envelope.Reply{From: targetName, Status: envelope.StatusFailed, Body: err.Error()}
 		}
 		g.Results = append(g.Results, GroupEntry{Result: res})
 	}
@@ -889,7 +891,7 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 	g.Results = append([]GroupEntry(nil), g.Results...)
 	var wg sync.WaitGroup
 	for i, res := range g.Results {
-		if res.Request.ID == "" {
+		if res.Request.ID == "" || (res.Target != nil && res.Target.SignedOutSite != "") {
 			continue
 		}
 		wg.Go(func() {
@@ -898,6 +900,7 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 				g.Results[i].Error = err.Error()
 				return
 			}
+			next.Target = res.Target
 			g.Results[i] = GroupEntry{Result: next}
 		})
 	}

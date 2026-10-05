@@ -163,9 +163,11 @@ type WebAgent struct {
 	// request (send, reply wait and tab close) and for each watcher tick,
 	// so inbound and outbound never type into the site at once and an
 	// outbound reply is never typed while an inbound request waits.
-	mu sync.Mutex
+	mu             sync.Mutex
+	sendGeneration uint64
 	// watch is the outbound watcher's state; only the watcher uses it.
 	watch dotWatch
+	auth  webAuthState
 }
 
 func (w *WebAgent) logf(format string, args ...any) {
@@ -179,6 +181,10 @@ func (w *WebAgent) logf(format string, args ...any) {
 // Run polls and handles requests until ctx is cancelled; see Service.Run.
 // On a dot with OutPath set, the outbound watcher runs beside it.
 func (w *WebAgent) Run(ctx context.Context) error {
+	actx, stopAuth := context.WithCancel(ctx)
+	authDone := make(chan struct{})
+	go func() { defer close(authDone); w.runWebStatus(actx) }()
+	defer func() { stopAuth(); <-authDone }()
 	if w.watching() {
 		wctx, cancel := context.WithCancel(ctx)
 		done := make(chan struct{})
@@ -413,9 +419,44 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	// crash): it is not sent again, only its reply is read.
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if e, ok := w.loadJournal().Requests[req.ID]; ok {
+	w.sendGeneration++
+	images := len(req.Attachments) > 0
+	var j webJournal
+	if images {
+		var err error
+		j, err = w.loadInputJournal()
+		if err != nil {
+			w.reply(ctx, req, "Nothing was sent: the image send journal could not be read safely. Repair it before retrying.", envelope.StatusFailed, nil)
+			return
+		}
+	} else {
+		j = w.loadJournal()
+	}
+	if e, ok := j.Requests[req.ID]; ok {
+		if e.State == webSendIntent {
+			if images {
+				if confirmed, ok := w.reconcileInput(ctx, wr.message, req.Attachments, e); ok {
+					if w.journalStrict(req.ID, confirmed) == nil {
+						w.resume(ctx, req, wr, confirmed)
+						return
+					}
+				}
+			}
+			w.reply(ctx, req, "Image submission is uncertain. Files may already have reached the vendor. This request will not be sent again automatically; inspect the conversation before a new ask.", envelope.StatusFailed, nil)
+			return
+		}
 		w.resume(ctx, req, wr, e)
 		return
+	}
+	if images {
+		if err := w.Native.requireImageInput(ctx, w.Site); err != nil {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent for %q: %v. No attachments were downloaded or uploaded.", req.Attachments[0].Name, err), envelope.StatusFailed, nil)
+			return
+		}
+		if err := validateInputMetadata(req.Attachments); err != nil {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent: %v. Use PNG/JPEG images within the limits, or send text alone.", err), envelope.StatusFailed, nil)
+			return
+		}
 	}
 	// The site rate-limited the account (or showed an anti-bot check) a
 	// moment ago: it is not asked again until the cooldown ends.
@@ -458,17 +499,65 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		w.reply(ctx, req, w.rateLimitReply(), envelope.StatusFailed, nil)
 		return
 	}
-	res, err := w.Native.Send(ctx, w.Site, wr.message, convID, newChat)
-	if remembered && convID != "" && errors.Is(err, ErrNotFound) {
+	var res SendResult
+	intent := false
+	if images {
+		files, cleanup, inputErr := w.stageInputs(ctx, req.Attachments)
+		defer cleanup()
+		if inputErr != nil {
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent: %v.", inputErr), envelope.StatusFailed, nil)
+			return
+		}
+		send := func() (SendResult, error) {
+			return w.Native.sendImages(ctx, w.Site, OpArgs{Message: wr.message, ConversationID: convID, NewChat: newChat}, files, func() error {
+				e := webSend{ConversationID: convID, PrevUserID: anchor.prevUser, Recorded: time.Now().UTC(), SubmittedAt: time.Now().UTC(), State: webSendIntent, Input: true}
+				if err := w.journalStrict(req.ID, e); err != nil {
+					return errors.New("could not record image send intent; nothing was submitted")
+				}
+				intent = true
+				return nil
+			})
+		}
+		res, err = send()
+		w.observeAuth(err)
+		var ue *UnavailableError
+		if remembered && convID != "" && errors.Is(err, ErrNotFound) && errors.As(err, &ue) && !ue.Clicked && !ue.Uploaded {
+			note = fmt.Sprintf("Your previous %s conversation was not found, so this went to a new chat.", label)
+			convID, newChat = "", true
+			anchor = replyAnchor{message: wr.message}
+			res, err = send() // new connection, token and transfer; no uncertain replay
+			w.observeAuth(err)
+		}
+	} else {
+		res, err = w.authSend(ctx, w.Site, wr.message, convID, newChat)
+	}
+	if !images && remembered && convID != "" && errors.Is(err, ErrNotFound) {
 		note = fmt.Sprintf("Your previous %s conversation (id %s) was not found, so this went to a new chat.", label, convID)
 		delete(st.Conversations, req.From)
 		convID = ""
 		anchor = replyAnchor{message: wr.message}
-		res, err = w.Native.Send(ctx, w.Site, wr.message, "", true)
+		res, err = w.authSend(ctx, w.Site, wr.message, "", true)
 	}
 	if err != nil {
-		w.logf("request %s from %s: send: %v", req.ID, req.From, err)
-		w.reply(ctx, req, w.sendFailure(err, convID), envelope.StatusFailed, nil)
+		if !images {
+			w.logf("request %s from %s: send: %v", req.ID, req.From, err)
+		}
+		if images {
+			reason := fmt.Sprintf("Nothing was submitted for %s: image transfer failed before sending.", inputNames(req.Attachments))
+			if intent {
+				reason = "Image submission is uncertain. Files may already have reached the vendor. Do not retry automatically; inspect the conversation first."
+			}
+			var ue *UnavailableError
+			if errors.As(err, &ue) && !ue.Clicked {
+				reason = fmt.Sprintf("No message was submitted for %s: %s.", inputNames(req.Attachments), ue.Detail)
+				if ue.Uploaded {
+					reason += " Files may already have reached the vendor; their deletion cannot be guaranteed."
+				}
+			}
+			w.reply(ctx, req, reason, envelope.StatusFailed, nil)
+		} else {
+			w.reply(ctx, req, w.sendFailure(err, convID), envelope.StatusFailed, nil)
+		}
 		return
 	}
 	// The send left its tab open so the site can finish the reply; it is
@@ -481,8 +570,15 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	if id := res.MessageID; id != "" && len(id) <= 128 && !strings.ContainsFunc(id, unicode.IsControl) {
 		anchor.bound = id
 	}
-	entry := webSend{ConversationID: res.ConversationID, PrevUserID: anchor.prevUser, SubmittedAt: anchor.since, UserMessageID: anchor.bound, Recorded: time.Now().UTC(), State: webSendSent}
-	w.journal(req.ID, entry)
+	entry := webSend{ConversationID: res.ConversationID, PrevUserID: anchor.prevUser, SubmittedAt: anchor.since, UserMessageID: anchor.bound, Recorded: time.Now().UTC(), State: webSendSent, Input: images}
+	if images {
+		if err := w.journalStrict(req.ID, entry); err != nil {
+			w.reply(ctx, req, "The image message was submitted, but its confirmation could not be saved. Do not retry automatically; inspect the conversation.", envelope.StatusFailed, nil)
+			return
+		}
+	} else {
+		w.journal(req.ID, entry)
+	}
 	if site.oneThread {
 		// One fixed thread: no used list (not a history source) and no
 		// per-asker memory.
@@ -776,7 +872,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if convID == "" {
 		return a, nil
 	}
-	raw, err := w.Native.Request(ctx, w.live().detailOp, OpArgs{ID: convID})
+	raw, err := w.authRequest(ctx, w.live().detailOp, OpArgs{ID: convID})
 	if err == nil {
 		var nodes []webNode
 		if nodes, err = w.nodes(raw); err == nil {
@@ -792,7 +888,7 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if _, ok := rateLimited(err); ok || errors.Is(err, errThreadTooLong) {
 		return a, err
 	}
-	if !errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrNotLoggedIn) {
 		w.logf("conversation %s: reading it before the send: %v", convID, err)
 	}
 	return a, nil

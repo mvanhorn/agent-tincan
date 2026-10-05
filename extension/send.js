@@ -339,6 +339,37 @@ export function pageDismiss(sel) {
   return { clicked };
 }
 
+// Candidate ChatGPT file flow. These fixed selectors and readiness signals
+// require live acceptance before IMAGE_INPUT_SITES may include chatgpt.
+// The returned state never contains page URLs, tokens or user draft text.
+export function pageInputImages(files, attach = false) {
+  const composer = document.querySelector('#prompt-textarea');
+  const form = composer && composer.closest('form');
+  const input = form && form.querySelector('input[type="file"]');
+  if (!form || !input) return { ok: false, error: 'image file control not found' };
+  const previews = [...form.querySelectorAll('img')];
+  if (attach) {
+    if ((composer.innerText || composer.value || '').trim() || input.files?.length || previews.length) return { ok: false, error: 'existing text or image draft was left untouched' };
+    const transfer = new DataTransfer();
+    for (const f of files) {
+      const bytes = Uint8Array.from(atob(f.data), (c) => c.charCodeAt(0));
+      transfer.items.add(new File([bytes], f.name, { type: f.mime }));
+    }
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, ready: false };
+  }
+  if (form.querySelector('[role="alert"]')) return { ok: false, error: 'the composer reported an upload error' };
+  // FileList assignment alone is never readiness. Require a loaded preview
+  // for every filename, no upload progress and an enabled send button.
+  const button = form.querySelector('button[data-testid="send-button"]');
+  const ready = previews.length === files.length && files.every((f, i) => {
+    const img = previews[i];
+    return img.complete && img.naturalWidth > 0 && (img.alt === f.name || img.closest('[title]')?.getAttribute('title') === f.name);
+  }) && !form.querySelector('[role="progressbar"], [aria-busy="true"]') && button && !button.disabled;
+  return { ok: true, ready: !!ready };
+}
+
 // pageFill puts message into the composer and checks that it landed. It
 // tries typing (execCommand insertText), then a paste event, then setting
 // the text directly, clearing the composer between attempts.
@@ -419,7 +450,20 @@ export function pageFill(sel, message) {
 // no send button exists. A visible button is preferred over a hidden one
 // that matches first. A disabled button is reported so the caller can
 // retry.
-export function pageSubmit(sel) {
+export function pageSubmit(sel, inputNames = null, message = null) {
+  if (inputNames) {
+    const composer = document.querySelector('#prompt-textarea');
+    const form = composer?.closest('form');
+    const previews = form ? [...form.querySelectorAll('img')] : [];
+    const button = form?.querySelector('button[data-testid="send-button"]');
+    const ready = previews.length === inputNames.length && inputNames.every((name, i) => {
+      const img = previews[i];
+      return img.complete && img.naturalWidth > 0 && (img.alt === name || img.closest('[title]')?.getAttribute('title') === name);
+    });
+    if (!ready || !button || button.disabled || button.getAttribute('aria-disabled') === 'true' || form.querySelector('[role="alert"], [role="progressbar"], [aria-busy="true"]') || (composer.innerText || composer.value || '').trim() !== message.trim()) return { ok: false, code: 'disabled' };
+    button.click();
+    return { ok: true, how: 'button' };
+  }
   const q = (list) => {
     for (const s of list) {
       try {
@@ -767,7 +811,11 @@ export function createSender({
   // tab, so it cannot go out after the host has reported it failed.
   async function run(site, args, accepted, hooks) {
     const cfg = SITES[site];
-    const sel = SELECTORS[site];
+    const images = hooks?.images;
+    const inputActive = () => { if (images && hooks.active && !hooks.active()) throw new OpError('send_failed', 'image transfer disconnected'); };
+    inputActive();
+    const sel = images ? { ...SELECTORS[site], keepDraft: true } : SELECTORS[site];
+    if (images && (site !== 'chatgpt' || typeof hooks.confirmImages !== 'function')) throw new OpError('unsupported', 'image submission confirmation is unavailable');
     if (!cfg || !sel) throw new OpError('bad_request', 'unknown site');
     const start = now();
     const deadline = (accepted ?? start) + timeoutMs;
@@ -796,6 +844,7 @@ export function createSender({
     // is marked clicked: the message may have been sent, and sending it
     // again could post it twice.
     let clicked = false;
+    let uploaded = false;
     try {
       // 1. Page load, then a composer (or a login page).
       const blockedErr = () => new OpError('blocked', `anti-bot check on ${new URL(cfg.newURL).host}`);
@@ -834,6 +883,26 @@ export function createSender({
       // A feed-confirmed site's ready hook runs its last checks (a dot
       // paused while this send waited) before anything is typed.
       if (feed && typeof hooks.ready === 'function') await hooks.ready();
+      if (images) {
+        inputActive();
+        // Mark possible exposure before injection, since a lost injection
+        // response cannot establish that change was never dispatched.
+        uploaded = true;
+        const attached = await inject(tab.id, pageInputImages, [images, true]);
+        if (!attached?.ok) throw new OpError('send_failed', attached?.error || 'image upload failed');
+        for (;;) {
+          await onSite(tab.id, cfg);
+          const p = cleanProbe(await inject(tab.id, pageProbe, [sel]));
+          if (p.loggedOut) throw new OpError('not_logged_in', 'logged out during image upload');
+          if (p.blocked) throw blockedErr();
+          inputActive();
+          const state = await inject(tab.id, pageInputImages, [images, false]);
+          if (!state?.ok) throw new OpError('send_failed', state?.error || 'image upload failed');
+          if (state.ready) break;
+          if (late()) throw new OpError('timeout', 'image upload readiness was not confirmed');
+          await sleep(pollMs);
+        }
+      }
       const fill = await inject(tab.id, pageFill, [sel, args.message]);
       if (fill && fill.code === 'composer_busy') throw busy();
       if (!fill || fill.ok !== true) {
@@ -860,8 +929,20 @@ export function createSender({
         if (base.blocked) throw blockedErr();
         if (base.generating) throw answering();
         if (feed) await hooks.before();
+        if (images) {
+          inputActive();
+          const state = await inject(tab.id, pageInputImages, [images, false]);
+          if (!state?.ok || !state.ready) throw new OpError('send_failed', 'image readiness was lost before submission');
+        }
         submittedAt = now();
-        const r = await inject(tab.id, pageSubmit, [sel]);
+        // Image sends treat any lost click response as uncertain.
+        inputActive();
+        if (images) clicked = true;
+        const r = await inject(tab.id, pageSubmit, images ? [sel, images.map((f) => f.name), args.message] : [sel]);
+        if (images && r?.ok !== true) {
+          clicked = false;
+          throw new OpError('send_failed', 'image send button was not ready');
+        }
         if (r && r.ok === true) {
           clicked = true;
           break;
@@ -909,11 +990,24 @@ export function createSender({
         await sleep(pollMs);
         id = await urlId();
       }
+      let messageId;
+      if (images) {
+        for (;;) {
+          await onSite(tab.id, cfg);
+          inputActive();
+          messageId = await hooks.confirmImages(id, submittedAt);
+          if (messageId) break;
+          if (late()) throw new OpError('send_failed', 'submitted image evidence was not confirmed; do not retry automatically');
+          await sleep(pollMs);
+        }
+      }
       done = true;
       keep(tab.id, site, id);
-      return { conversation_id: id, url: cfg.convURL(id), submitted_at: submittedAt };
+      return { conversation_id: id, url: cfg.convURL(id), submitted_at: submittedAt, ...(images ? { message_id: messageId, input_count: images.length } : {}) };
     } catch (e) {
+      if (images && !(e instanceof OpError)) e = new OpError('send_failed', 'image send failed');
       if (clicked && e instanceof OpError) e.clicked = true;
+      if (uploaded && e instanceof OpError) e.uploaded = true;
       throw e;
     } finally {
       owned.delete(tab.id);
@@ -1021,6 +1115,13 @@ export function createSender({
     send(site, args, hooks) {
       const accepted = now();
       return enqueue(site, () => run(site, args, accepted, hooks));
+    },
+    // A probe uses the same signed-in gate and owned-tab cleanup as a read.
+    session(site) {
+      if (site !== 'copilot') return Promise.reject(new OpError('bad_request', 'unknown site'));
+      const accepted = now();
+      // Probes own a separate tab and must not queue an incoming send.
+      return readTab(site, SITES[site].newURL, async () => ({ result: {} }), accepted);
     },
     // readList reads Copilot's chat list from its rendered sidebar (see
     // above).

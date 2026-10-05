@@ -330,7 +330,7 @@ func (w *WebAgent) dotTick(ctx context.Context) time.Duration {
 	}
 	tctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	raw, err := w.Native.Request(tctx, w.live().detailOp, OpArgs{ID: thread})
+	raw, err := w.authRequest(tctx, w.live().detailOp, OpArgs{ID: thread})
 	if err != nil {
 		return w.watchBackoff(err)
 	}
@@ -362,7 +362,9 @@ func (w *WebAgent) watchBackoff(err error) time.Duration {
 	}
 	w.watch.failures++
 	d := min(interval<<min(w.watch.failures, 8), maxDotWatchBackoff)
-	w.logf("outbound: %v (next read in %s)", err, d)
+	if !errors.Is(err, ErrNotLoggedIn) {
+		w.logf("outbound: %v (next read in %s)", err, d)
+	}
 	return d
 }
 
@@ -944,7 +946,7 @@ func dotReplyText(target, line string, res client.Result) (string, bool) {
 // typeDM types text into the dot's DM through the one send path and
 // closes the tab the send opened. It returns the typed message's id.
 func (w *WebAgent) typeDM(ctx context.Context, thread, text string) (string, error) {
-	res, err := w.Native.Send(ctx, w.Site, text, thread, false)
+	res, err := w.authSend(ctx, w.Site, text, thread, false)
 	if err != nil {
 		return "", err
 	}

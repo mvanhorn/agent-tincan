@@ -175,7 +175,7 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 		if err := clock.Sleep(ctx, delay); err != nil {
 			return nil, a.bound, err
 		}
-		raw, err := w.Native.Request(ctx, op, OpArgs{ID: convID})
+		raw, err := w.authRequest(ctx, op, OpArgs{ID: convID})
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, a.bound, cerr
 		}

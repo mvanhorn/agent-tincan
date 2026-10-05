@@ -285,6 +285,15 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				return f.askAttached(ctx, in)
 			}
 			if in.Notify {
+				if sender, ok := b.(interface {
+					SendResult(context.Context, string, string, envelope.Kind, string, bool) (envelope.SendResponse, error)
+				}); ok {
+					sent, err := sender.SendResult(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, in.Urgent)
+					if err != nil {
+						return fail(err)
+					}
+					return text(client.SignedOutHint(in.To, sent.Target) + notifyText(sent.Request))
+				}
 				req, err := b.Send(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, in.Urgent)
 				if err != nil {
 					return fail(err)
@@ -440,6 +449,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				if backlog := a.Backlog(now); backlog != "" {
 					fmt.Fprintf(&out, ", %s", backlog)
 				}
+				if signedOut := a.SignedOutField(now); signedOut != "" {
+					fmt.Fprintf(&out, ", %s", signedOut)
+				}
 				if unanswered := a.UnansweredField(now); unanswered != "" {
 					fmt.Fprintf(&out, ", %s", unanswered)
 				}
@@ -549,6 +561,15 @@ func (f files) askAttached(ctx context.Context, in askIn) (*mcp.CallToolResult, 
 		return fail(err)
 	}
 	if in.Notify {
+		if sender, ok := f.att.(interface {
+			SendAttachedResult(context.Context, string, string, envelope.Kind, string, []string, bool) (envelope.SendResponse, error)
+		}); ok {
+			sent, err := sender.SendAttachedResult(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, ids, in.Urgent)
+			if err != nil {
+				return fail(err)
+			}
+			return text(client.SignedOutHint(in.To, sent.Target) + notifyText(sent.Request))
+		}
 		req, err := f.att.SendAttached(ctx, in.To, in.Message, envelope.KindNotify, in.ParentID, ids, in.Urgent)
 		if err != nil {
 			return fail(err)
@@ -678,4 +699,11 @@ func (f files) groupResult(ctx context.Context, g client.GroupResult) (*mcp.Call
 		atts = append(atts, replyAttachments(r.Result)...)
 	}
 	return f.result(ctx, client.FormatGroup(g), atts)
+}
+
+func notifyText(req envelope.Request) string {
+	if req.Status == envelope.StatusHeld {
+		return fmt.Sprintf("Request %s: held, waiting for the owner's approval.", req.ID)
+	}
+	return fmt.Sprintf("Sent to %s (request %s).", req.To, req.ID)
 }

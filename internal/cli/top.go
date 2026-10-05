@@ -161,6 +161,10 @@ func attention(a client.AgentInfo, relayVersion string, now time.Time) (score in
 		score += 8
 		flags = append(flags, "QUEUED-OFFLINE")
 	}
+	if a.SignedOutSite != "" {
+		score += 6
+		flags = append(flags, "SIGNED-OUT")
+	}
 	if a.Unanswered {
 		score += 6
 		flags = append(flags, "UNANSWERED")

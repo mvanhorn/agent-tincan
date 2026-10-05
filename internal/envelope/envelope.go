@@ -208,6 +208,10 @@ type SendResponse struct {
 // checks its inbox on its own interval, or its last wake when the relay
 // wakes it (webhook or email). Every field is optional.
 type Target struct {
+	SignedOutSite       string    `json:"signed_out_site,omitempty"`
+	SignedOutSince      time.Time `json:"signed_out_since,omitzero"`
+	WebStatusObservedAt time.Time `json:"web_status_observed_at,omitzero"`
+	WebHost             string    `json:"web_host,omitempty"`
 	// CheckEverySeconds is how often the recipient checks its inbox.
 	CheckEverySeconds int `json:"check_every_seconds,omitempty"`
 	// ExpectReplySeconds is how long a sender should expect to wait for a
@@ -391,4 +395,11 @@ type SearchResult struct {
 	// reply) that matched. It is an exchange on the request, never its reply.
 	QuestionSnippet string   `json:"question_snippet,omitempty"`
 	AttachmentNames []string `json:"attachment_names,omitempty"`
+}
+
+// WebStatus is a fresh, credential-free authentication observation.
+type WebStatus struct {
+	Site       string    `json:"site"`
+	State      string    `json:"state"`
+	ObservedAt time.Time `json:"observed_at"`
 }

@@ -215,3 +215,12 @@ func TestWebImageClaims(t *testing.T) {
 		}
 	}
 }
+
+func TestWebInputInstructionsMatchGate(t *testing.T) {
+	for _, kind := range []string{KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb} {
+		in := block(t, build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: kind, Wake: "wait"}}}), kind).Instructions
+		if !strings.Contains(in, "Image input is disabled pending live acceptance") || !strings.Contains(in, "send text alone") {
+			t.Errorf("%s missing input gate", kind)
+		}
+	}
+}

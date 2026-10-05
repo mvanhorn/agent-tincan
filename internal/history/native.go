@@ -32,6 +32,7 @@ package history
 // `tincan history install --extension-id`.
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -236,6 +237,11 @@ func ValidateOp(op Op, a OpArgs) error {
 		return fmt.Errorf("unknown operation %q", op)
 	}
 	switch kind {
+	case opSession:
+		if a != (OpArgs{}) {
+			return fmt.Errorf("%s: takes no arguments", op)
+		}
+		return nil
 	case opSend:
 		switch {
 		case a.Count != 0 || a.ID != "" || a.FileID != "":
@@ -310,9 +316,10 @@ func (op Op) send() bool { return op.is(opSend) }
 
 // NativeRequest is one request to the extension.
 type NativeRequest struct {
-	ID   int64  `json:"id"`
-	Op   Op     `json:"op"`
-	Args OpArgs `json:"args"`
+	ID    int64      `json:"id"`
+	Op    Op         `json:"op"`
+	Args  OpArgs     `json:"args"`
+	Input *InputArgs `json:"input,omitempty"`
 }
 
 // NativeError is an extension error: a fixed code and a short detail.
@@ -324,7 +331,8 @@ type NativeError struct {
 	RetryAfter int `json:"retry_after,omitempty"`
 	// Clicked is set on a send that failed after its send button was
 	// clicked: the message may have been sent.
-	Clicked bool `json:"clicked,omitempty"`
+	Clicked  bool `json:"clicked,omitempty"`
+	Uploaded bool `json:"uploaded,omitempty"`
 }
 
 // NativeChunk is one piece of a file's bytes, base64.
@@ -395,7 +403,8 @@ type UnavailableError struct {
 	RetryAfter time.Duration
 	// Clicked: a send failed after its send button was clicked, so the
 	// message may have been sent anyway.
-	Clicked bool
+	Clicked  bool
+	Uploaded bool
 }
 
 // siteOf is a site's host, for error text (the source name for a site
@@ -416,7 +425,7 @@ func (e *UnavailableError) Error() string {
 	case ErrExtensionNotConnected:
 		reason = "the Tincan Chrome extension is not connected (install it, then run tincan history install)"
 	case ErrNotLoggedIn:
-		reason = "not logged in to " + site + " in Chrome"
+		reason = "not logged in to " + site + " in Chrome; sign in there without restarting Chrome"
 		if s := siteFor(e.Source); s != nil && s.notLoggedIn != nil {
 			reason = s.notLoggedIn(e.Detail)
 		}
@@ -562,9 +571,9 @@ var sharedCooldown = &SiteCooldown{}
 // carries a send's clicked mark over.
 func fromNativeError(s Source, ne *NativeError) error {
 	err := nativeErrorKind(s, ne)
-	var ue *UnavailableError
-	if ne.Clicked && errors.As(err, &ue) {
-		ue.Clicked = true
+	if ue, ok := errors.AsType[*UnavailableError](err); ok {
+		ue.Clicked = ne.Clicked
+		ue.Uploaded = ne.Uploaded
 	}
 	return err
 }
@@ -671,7 +680,8 @@ type ExtensionStatus struct {
 	Version string `json:"version,omitempty"`
 	// Granted lists the op prefixes of the sites the extension has host
 	// access to (grantedPrefixes).
-	Granted []string `json:"granted"`
+	Granted    []string             `json:"granted"`
+	ImageInput ImageInputCapability `json:"image_input"`
 }
 
 // granted reports whether src's site is in s.Granted: the site whose
@@ -766,7 +776,7 @@ const TabReadClientTimeout = 100 * time.Second
 // opening a tab (a site with listInTab).
 func (op Op) readsInTab() bool {
 	site, kind, ok := op.resolve()
-	return ok && kind == opList && site.listInTab
+	return ok && (kind == opList || kind == opSession) && site.listInTab
 }
 
 func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(NativeResponse) (bool, error)) error {
@@ -867,7 +877,8 @@ type SendResult struct {
 	// MessageID is the id of the sent message in the conversation, when
 	// the extension confirmed it there (dots.send does); the reply wait
 	// binds to it.
-	MessageID string `json:"message_id,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	InputCount int    `json:"input_count,omitempty"`
 }
 
 // Submitted returns SubmittedAt as a time, zero when unknown.
@@ -1286,7 +1297,7 @@ func (h *NativeHost) status() ExtensionStatus {
 	if h.hello == nil {
 		return ExtensionStatus{Granted: []string{}}
 	}
-	return ExtensionStatus{Hello: true, Version: h.hello.Version, Granted: grantedPrefixes(*h.hello)}
+	return ExtensionStatus{Hello: true, Version: h.hello.Version, Granted: grantedPrefixes(*h.hello), ImageInput: h.hello.ImageInput}
 }
 
 func (h *NativeHost) forget(id int64) {
@@ -1304,8 +1315,15 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	var req NativeRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeNativeRequest(body, &req); err != nil {
 		_ = WriteMessage(conn, NativeResponse{Error: &NativeError{Code: "bad_request", Message: "malformed request"}}, MaxHostMessage)
+		return
+	}
+	if inputOp(req.Op) {
+		h.serveInput(ctx, conn, req)
+		return
+	}
+	if req.Input != nil {
 		return
 	}
 	if req.Op == OpHostStatus {
@@ -1406,4 +1424,16 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+func decodeNativeRequest(body []byte, req *NativeRequest) error {
+	d := json.NewDecoder(bytes.NewReader(body))
+	d.DisallowUnknownFields()
+	if err := d.Decode(req); err != nil {
+		return err
+	}
+	if d.Decode(new(any)) != io.EOF {
+		return errors.New("trailing request data")
+	}
+	return nil
 }

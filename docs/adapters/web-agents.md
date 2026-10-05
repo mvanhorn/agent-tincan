@@ -368,3 +368,167 @@ Both receive the same question, with answers labeled by teammate. A partial
 result includes a group id: pass it to `get_reply` as `request_id` or run
 `tincan get <group-id>` to gather later answers. Each web agent still applies
 its own allowlist. Attachments are uploaded once per target.
+
+## Image input acceptance gate
+
+Image input is disabled for all seven kinds in this build. Requests with
+attachments fail explicitly before downloads, page mutation or text submission.
+Generated-image output capabilities are unchanged. The following is code evidence,
+not live upload proof. No live sends were run for this change.
+
+| Kind | Input disposition and missing proof |
+| --- | --- |
+| chatgpt-web | Candidate implementation, disabled. The reader understands human image pointers and metadata. File control, upload readiness and submitted-image confirmation need live acceptance. |
+| claude-web | Disabled. Human Files/FilesV2 metadata exists, but file control and readiness have not been proved. |
+| grok-web | Disabled. generatedImageUrls describes output; input control, readiness and submitted-turn evidence are unproved. |
+| gemini-web | Disabled. Reply image capture and the Quill text composer do not prove upload readiness or submitted-image evidence. |
+| perplexity-web | Disabled. Image/attachment source flags do not establish an ask-input upload flow. |
+| copilot-web | Disabled. Personal-account text composer support does not establish file control, readiness or input confirmation. |
+| dot-web | Disabled. Attachment counts in the DM feed do not establish DM upload behavior or ordered input identity. |
+
+The gate is compiled into both Go's site table and the loaded extension's
+capability list. It has no runtime override. Passing mock tests is insufficient
+to enable a site. Record live evidence here and enable both gates together only
+after the checks below pass.
+
+### Input limits and failures
+
+The candidate accepts one to four static PNG/JPEG files, at most 10 MiB each,
+20 MiB total and 40 million pixels per image, subject to lower relay limits.
+A nonempty text prompt is required. PDF, SVG, animated images, other files,
+conversion and resizing are unsupported. Every attachment must validate; a
+missing, forbidden, corrupt, oversized or rejected file fails the entire ask.
+The failure reply names the file. Disabled sites fail before fetching files.
+
+The relay download runs as the recipient after claim and chain authorization.
+Held dot requests remain inaccessible before approval. Files are staged in a
+0700 request directory with generated names and 0600 files and removed on all
+normal exits, cancellation and recovered panics. Process termination can leave
+a staging directory, which the owner may remove after stopping the service.
+
+Once enabled, an upload exposes files to the vendor before message submission.
+An aborted ask cannot promise deletion of those vendor files. Failures distinguish
+no submission from possible upload and uncertain submission. Image asks require
+a readable, writable journal; an intent is synced before the click-capable
+operation. Unresolved intents are retained without an age limit. Known
+conversations can reconcile a unique human-image turn read-only. New-chat or
+ambiguous intents never auto-resend. Inspect the conversation before a new ask.
+Older hosts or extensions need both tincan and the extension upgraded; missing
+loaded-code capabilities fail before typing. Text-only requests remain available.
+
+### Attachment examples
+
+These are acceptance examples for a future enabled build. On this build they
+return the input gate error, without silently sending just the text:
+
+```sh
+tincan ask chatgpt-web --attach ./cropped-meme.png 'Describe the visible text and edit this meme'
+```
+
+Local MCP `ask` arguments:
+
+```json
+{"to":"chatgpt-web","body":"Describe the visible text and edit this meme","attach":["/absolute/path/cropped-meme.png"]}
+```
+
+Remote MCP cannot attach local paths. Relay attachment APIs are unchanged.
+Claude and Copilot output limitations remain as documented above.
+
+### Owner live acceptance checklist
+
+Use a development build with only the ChatGPT Go site flag and extension input
+list enabled for the test. Do not release or enable other sites from mock results.
+The candidate uses `#prompt-textarea`, its closest `form`, `input[type="file"]`,
+loaded form image previews matching filenames in order, no progress/busy mark,
+and `button[data-testid="send-button"]`. These are candidate signals, not retained
+live DOM fixtures. Capture actual DOM fixtures and replace any mismatching fixed
+selectors or signals before enabling the released capability.
+
+1. In signed-in ChatGPT, send a non-sensitive PNG cropped meme with text into a
+   new chat. Confirm the answer identifies visible fixture details, the upload
+   finishes before text entry and exactly one message is submitted.
+2. Repeat with JPEG, two distinguishable images in order, and a continued chat.
+   Confirm the current branch's human message has matching ordered names, MIME
+   types and image pointers. Verify actual account limits against the local caps.
+3. Reject the second file, interrupt an upload and let readiness time out.
+   Confirm no text submission and accurate possible-vendor-upload wording.
+4. Start with existing text and image drafts. Confirm neither is changed.
+   Revoke the grant, sign out and show an anti-bot challenge; each must stop the
+   upload/send. Confirm owned tabs close on failure and ordinary user tabs survive.
+5. Disconnect/reconnect the native host before upload, during upload and after
+   the send click. Restart the web agent and requeue the request. Confirm transfer
+   cleanup, retained uncertain intent and no second message. Check old host and
+   old extension combinations reject before typing while text-only sends work.
+6. For each other matrix row, independently prove its fixed upload controls,
+   readiness/errors, draft protection and submitted-image evidence with PNG,
+   JPEG, two images, new/continued conversations where supported. Keep it disabled
+   until that evidence and implementation exist. For dots additionally verify a
+   held request causes no fetch, approved requests still pass chain authorization,
+   a paused DM cannot upload, and submitted attachment order/identity is provable.
+
+Not built: arbitrary files, image conversion/resizing, URL substitutes, vendor
+upload APIs, debugger access, OS file pickers, generic plugins, dot outbound
+attachment forwarding, generated-image output changes, health reporting or
+council attachment fan-out changes.
+
+### Local implementation verification (2026-10-04)
+
+The implementation was checked in a restricted sandbox, with the Go and lint
+caches inside the worktree. These results do not replace live acceptance:
+
+| Check | Result |
+| --- | --- |
+| `go test ./...` | 4 packages passed, 10 failed, 5 had no tests. The run reports 14 failed top-level tests: localhost listeners are denied, a process-liveness assertion fails, and Python temp-directory probe warnings affect wake-script tests. Full suite acceptance remains outstanding outside the sandbox. |
+| `go test -race ./internal/history/ ./internal/relay/` | Both packages fail when httptest cannot bind localhost. No data-race report, but the suites do not finish. |
+| Focused image-input tests with `-race` | 12 top-level tests passed, including in-process HTTP boundaries, checksum staging, limits, PNG/JPEG decoding, native persistent frames, disconnect and journal reconciliation. |
+| Onboarding suite | 57 top-level tests passed, including all seven input-gate instructions and existing output wording. |
+| `go vet ./...` | Passed. |
+| `make lint` | Only the 6 supplied pre-existing modernize findings remain; no new findings. |
+| `GOOS=linux go build ./...` | Passed. |
+| `gofmt -l` on all changed Go files | No output. |
+| `make extension-test` | 136 tests passed. The existing delayed-hello timing test failed once during concurrent builds and passed on standalone reruns. |
+
+Git staging was denied because this worktree's index is under the read-only
+parent repository metadata. No commit, push or PR was created in this session.
+The plan file was left unchanged. Before release, rerun the full Go and race
+suites in an environment that permits their listeners and process probes, then
+complete the owner live acceptance checklist above.
+
+### Browser authentication status
+
+Process presence and site authentication are separate. A web agent can be online
+while its Chrome session is signed out. The CLI and MCP rosters then include
+`signed_out="chatgpt.com since 2h"`; `tincan top` flags `SIGNED-OUT`, and
+`tincan doctor` names the agent, site and registered browser host. Sign in to the
+named site in Chrome on that host without restarting Chrome. Copilot needs a
+personal Microsoft account with any sign-in or terms prompt completed.
+
+All seven web kinds, including custom agent names and dots, report typed sign-out
+failures from their traffic. A fresh authenticated read, confirmed send or session
+probe clears the mark. Polling the relay, closing a tab, downloading a public file
+and cached session data do not clear it. Repeated failures retain the episode's
+start time. Dots report only their own session, not every ChatGPT agent's session.
+
+An idle service probes at startup and every two minutes. Recent authenticated
+traffic replaces a probe. Active sends and site cooldowns defer probing; sleep,
+unavailable Chrome and a disconnected extension delay detection. HTTP probes are
+bounded to 30 seconds. Copilot uses the existing tab-read timeout and opens then
+closes a background tab for its signed-in gate. Probes never send a message or
+create a conversation.
+
+Known sign-out appears in ask and notify results, including groups and held asks.
+Asks return a pending request ID promptly. The warning does not cancel work,
+release a hold or prove nothing was sent. Check the request later as usual.
+
+The optional `notify` destination in `approval.json` also receives one metadata-only
+notice per sign-out episode. This queues a notification to an agent, not directly
+to a human. Queue failures are retried; recovery cancels an unqueued notice.
+Without a valid configured recipient, use roster, top and doctor. No push delivery
+or human acknowledgement is guaranteed.
+
+Upgrade the relay, service and extension for all surfaces and idle detection.
+An old relay does not store reports; the service logs the incompatibility once
+and keeps serving. An old extension disables session probes with one upgrade
+notice; traffic still detects sign-out, and confirmed sends or fresh ChatGPT/dot
+reads can clear it. Older clients ignore the optional fields. Missing reports mean
+unknown authentication, not a healthy session.

@@ -48,7 +48,13 @@ func FormatRequest(req envelope.Request) string {
 
 // FormatResult renders the state of a request this agent sent.
 func FormatResult(r Result) string {
+	return SignedOutHint(r.Request.To, r.Target) + formatResult(r)
+}
+
+func formatResult(r Result) string {
 	switch {
+	case r.Status == envelope.StatusHeld:
+		return fmt.Sprintf("Request %s: held, waiting for the owner's approval. Check later with get_reply or `tincan get %s`.\n", r.Request.ID, r.Request.ID)
 	case r.Status == envelope.StatusNeedsInput:
 		return FormatReply(r)
 	case r.Reply != nil:
@@ -381,4 +387,29 @@ func FormatGroup(g GroupResult) string {
 		}
 	}
 	return b.String()
+}
+
+// SignedOutField is the optional, quoted roster authentication fact.
+func (a AgentInfo) SignedOutField(now time.Time) string {
+	if a.SignedOutSite == "" {
+		return ""
+	}
+	age := max(time.Duration(0), now.Sub(a.SignedOutSince))
+	return "signed_out=" + strconv.Quote(a.SignedOutSite+" since "+strings.TrimSuffix(ageAgo(age), " ago"))
+}
+
+// SignedOutHint explains recovery without changing queue or hold semantics.
+func SignedOutHint(to string, t *envelope.Target) string {
+	if t == nil || t.SignedOutSite == "" {
+		return ""
+	}
+	host := t.WebHost
+	if host == "" {
+		host = "the agent's registered machine"
+	}
+	action := "Sign in to " + t.SignedOutSite + " in Chrome on " + host + " without restarting Chrome."
+	if t.SignedOutSite == "copilot.com" {
+		action += " Use a personal Microsoft account and finish any sign-in or terms prompt."
+	}
+	return fmt.Sprintf("%s is known to be signed out of %s. %s This warning does not cancel work or prove nothing was sent.\n", to, t.SignedOutSite, action)
 }

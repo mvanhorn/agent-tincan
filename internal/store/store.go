@@ -200,6 +200,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate approval: %w", err)
 	}
+	if err := s.migrateWebStatus(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate web status: %w", err)
+	}
 	if err := s.migrateWakes(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate wakes: %w", err)
