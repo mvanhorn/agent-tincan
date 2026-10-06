@@ -17,6 +17,7 @@ permissions:
 
 jobs:
   regression:
+    timeout-minutes: 3
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -26,4 +27,4 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python3 -m unittest discover -s examples/claude-code -p 'test_session_route.py'
+      - run: python3 -u -m unittest discover -v -s examples/claude-code -p 'test_session_route.py'
