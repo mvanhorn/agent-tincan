@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,6 +183,23 @@ func wakerOptions(f relayFlags, srv *relay.Server) wake.Options {
 		OpenAsks:        srv.OpenAsks,
 		RequestTag:      srv.RequestEmailTag,
 	}
+}
+
+// emailReplyInboxes lists the agents in wake.json with include_requests on
+// (always on an email primary path; LoadConfig refuses it elsewhere), by
+// name, with the AgentMail inbox their request emails are sent from and
+// the address whose replies count. The relay polls each one for replies
+// to its request emails (relay.Server.PollEmailReplies).
+func emailReplyInboxes(cfg wake.Config) []relay.EmailInbox {
+	var out []relay.EmailInbox
+	for _, name := range slices.Sorted(maps.Keys(cfg)) {
+		t := cfg[name]
+		if t.Method != wake.Email || !t.IncludeRequests {
+			continue
+		}
+		out = append(out, relay.EmailInbox{Agent: name, Address: t.EmailTo, Mail: wake.NewAgentMail("", t.AgentMailFrom, t.AgentMailKey, nil)})
+	}
+	return out
 }
 
 // loadOrCreateInvitePepper returns the relay's invite-code pepper, creating
@@ -431,6 +450,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		return err
 	}
 	waker := wake.New(wakeCfg, st, wakerOptions(f, srv))
+	if inboxes := emailReplyInboxes(wakeCfg); len(inboxes) > 0 {
+		srv.SetEmailInboxes(inboxes)
+		log.Printf("polling AgentMail for email replies from %d agents with include_requests on", len(inboxes))
+	}
 	srv.SetEvents(waker)
 	srv.SetWakeNamer(waker)
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {
@@ -509,7 +532,9 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		// drain below only waits for calls that are really working.
 		{"ending held polls", srv.Stop},
 		{"draining connections", func() { shutdown(servers) }},
-		{"stopping sweeps", func() { stopRun(); <-ran }},
+		// Run also polls AgentMail for email replies; ending it ends a
+		// poll in flight, Retry-After waits included.
+		{"stopping sweeps and email reply polls", func() { stopRun(); <-ran }},
 		{"stopping wakes", waker.Stop},
 		{"closing the gateway", closeGW},
 		{"closing the tailnet listener", closeNet},
