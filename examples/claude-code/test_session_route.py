@@ -235,9 +235,14 @@ class SessionRouteTests(unittest.TestCase):
         fake_claude = self.root / "fake-claude"
         capture = self.root / "opener.json"
         fake_claude.write_text(
-            "#!/bin/sh\n"
-            "printf '{\\\"cwd\\\":\\\"%s\\\",\\\"argc\\\":%s,\\\"a0\\\":\\\"%s\\\",\\\"a1\\\":\\\"%s\\\",\\\"a2\\\":\\\"%s\\\"}\\n' "
-            "\"$(pwd -P)\" \"$#\" \"$1\" \"$2\" \"$3\" > \"$ROUTE_TEST_CAPTURE\"\n"
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['ROUTE_TEST_CAPTURE']).write_text(json.dumps({\n"
+            "    'cwd': os.getcwd(), 'argc': len(sys.argv) - 1,\n"
+            "    'a0': sys.argv[1], 'a1': sys.argv[2], 'a2': sys.argv[3],\n"
+            "    'tty': all(os.isatty(fd) for fd in (0, 1, 2)),\n"
+            "}))\n"
         )
         fake_claude.chmod(0o700)
         result = session_route.open_desktop(
@@ -249,6 +254,7 @@ class SessionRouteTests(unittest.TestCase):
         self.assertEqual(value, {
             "cwd": str(self.project.resolve()), "argc": 3,
             "a0": "--desktop", "a1": "--resume", "a2": SESSION_A,
+            "tty": True,
         })
 
     def test_desktop_opener_timeout_is_bounded_and_reported_safely(self):
