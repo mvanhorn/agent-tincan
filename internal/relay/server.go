@@ -156,6 +156,9 @@ type Server struct {
 	blobs       string   // attachment directory, "" when attachments are off
 	key         string   // relay key, proves this relay's identity to its agents (hello)
 	urls        []string // addresses advertised to agents in whoami
+	// emailTagKey signs request-email reply tags (EmailTagKeyFile). It is
+	// never served; nil means no tags.
+	emailTagKey []byte
 
 	// upgrader installs the dist release over the relay binary; nil when off.
 	upgrader SelfUpgrader

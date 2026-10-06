@@ -178,67 +178,92 @@ func wakerOptions(f relayFlags, srv *relay.Server) wake.Options {
 		ReplyGrace:      f.replyGrace,
 		WakeGrace:       f.wakeGrace,
 		UrgentWakeGrace: f.urgentGrace,
+		OpenAsks:        srv.OpenAsks,
+		RequestTag:      srv.RequestEmailTag,
 	}
 }
 
 // loadOrCreateInvitePepper returns the relay's invite-code pepper, creating
-// and persisting a fresh 256-bit one on first run. A private temporary file
-// is fully written, synced and closed before an atomic, no-replace link
-// publishes it. Exactly one writer wins; others read its complete key.
-// Filesystems without hard-link support fail closed. An existing file is
-// validated before use — it must be a regular file (never a symlink),
-// exactly 32 bytes, and inaccessible to group/other — and anything else
-// fails closed. A missing key beside an existing database is never silently
-// replaced: it is either a first upgrade (expected) or an accidental loss
-// (outstanding invites are stranded), and the operator is told which.
+// and persisting a fresh 256-bit one on first run (see loadOrCreateKeyFile).
+// A missing key beside an existing database is never silently replaced: it
+// is either a first upgrade (expected) or an accidental loss (outstanding
+// invites are stranded), and the operator is told which.
 func loadOrCreateInvitePepper(stateDir string) ([]byte, error) {
-	path := filepath.Join(stateDir, "invite-pepper")
-	if b, err := readInvitePepperFile(path); err == nil {
-		return b, nil
-	} else if !os.IsNotExist(err) {
+	b, created, err := loadOrCreateKeyFile(stateDir, "invite-pepper", "invite pepper")
+	if err != nil {
 		return nil, err
+	}
+	if created {
+		if _, err := os.Stat(filepath.Join(stateDir, "relay.db")); err == nil {
+			log.Printf("warning: created a fresh invite pepper next to an existing relay.db: " +
+				"on a first upgrade from raw-code invites this is expected (legacy invites are invalidated); " +
+				"if the old invite-pepper file was lost, outstanding invites are stranded — restore it from backup")
+		}
+	}
+	return b, nil
+}
+
+// loadOrCreateEmailTagKey returns the relay's email-tag-key
+// (relay.EmailTagKeyFile), which signs the reply tags in request emails,
+// creating a fresh 256-bit one on first run exactly like invite-pepper. A
+// new key only revokes tags in emails already sent, so a missing one is
+// simply created.
+func loadOrCreateEmailTagKey(stateDir string) ([]byte, error) {
+	b, _, err := loadOrCreateKeyFile(stateDir, relay.EmailTagKeyFile, "email tag key")
+	return b, err
+}
+
+// loadOrCreateKeyFile returns the 32-byte relay-local key in stateDir/name,
+// creating and persisting a fresh 256-bit one on first run, and whether it
+// did. A private temporary file is fully written, synced and closed before
+// an atomic, no-replace link publishes it. Exactly one writer wins; others
+// read its complete key. Filesystems without hard-link support fail closed.
+// An existing file is validated before use — it must be a regular file
+// (never a symlink), exactly 32 bytes, and inaccessible to group/other — and
+// anything else fails closed. label names the key in errors.
+func loadOrCreateKeyFile(stateDir, name, label string) ([]byte, bool, error) {
+	path := filepath.Join(stateDir, name)
+	if b, err := readKeyFileWithOpen(path, label, openInvitePepperFile); err == nil {
+		return b, false, nil
+	} else if !os.IsNotExist(err) {
+		return nil, false, err
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generate invite pepper: %w", err)
+		return nil, false, fmt.Errorf("generate %s: %w", label, err)
 	}
 	// Never expose a partially written file at the final name. O_EXCL at
 	// that name elects one writer but still lets concurrent readers see an
 	// empty file before its first write. CreateTemp uses owner-only mode.
-	f, err := os.CreateTemp(stateDir, ".invite-pepper-*")
+	f, err := os.CreateTemp(stateDir, "."+name+"-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temporary invite pepper: %w", err)
+		return nil, false, fmt.Errorf("create temporary %s: %w", label, err)
 	}
 	defer os.Remove(f.Name())
 	if _, err := f.Write(b); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("write invite pepper: %w", err)
+		return nil, false, fmt.Errorf("write %s: %w", label, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("sync invite pepper: %w", err)
+		return nil, false, fmt.Errorf("sync %s: %w", label, err)
 	}
 	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("close invite pepper: %w", err)
+		return nil, false, fmt.Errorf("close %s: %w", label, err)
 	}
 	// Link is atomic and does not replace an existing destination. Rename
 	// would let a losing initializer overwrite the winner on Unix.
 	if err := os.Link(f.Name(), path); err != nil {
 		if os.IsExist(err) {
-			winner, readErr := readInvitePepperFile(path)
+			winner, readErr := readKeyFileWithOpen(path, label, openInvitePepperFile)
 			if readErr != nil {
-				return nil, fmt.Errorf("read the winning invite pepper: %w", readErr)
+				return nil, false, fmt.Errorf("read the winning %s: %w", label, readErr)
 			}
-			return winner, nil
+			return winner, false, nil
 		}
-		return nil, fmt.Errorf("publish invite pepper: %w", err)
+		return nil, false, fmt.Errorf("publish %s: %w", label, err)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "relay.db")); err == nil {
-		log.Printf("warning: created a fresh invite pepper next to an existing relay.db: " +
-			"on a first upgrade from raw-code invites this is expected (legacy invites are invalidated); " +
-			"if the old invite-pepper file was lost, outstanding invites are stranded — restore it from backup")
-	}
-	return b, nil
+	return b, true, nil
 }
 
 // readInvitePepperFile reads an existing pepper key, refusing symlinks,
@@ -251,6 +276,13 @@ func readInvitePepperFile(path string) ([]byte, error) {
 // The opener is passed explicitly so validation can be exercised against
 // the actual opened file without timing-dependent filesystem tests.
 func readInvitePepperFileWithOpen(path string, open func(string) (*os.File, error)) ([]byte, error) {
+	return readKeyFileWithOpen(path, "invite pepper", open)
+}
+
+// readKeyFileWithOpen reads an existing 32-byte key file through open (which
+// refuses symlinks), validating the opened handle: a regular file, private
+// to its owner, exactly 32 bytes. label names the key in errors.
+func readKeyFileWithOpen(path, label string, open func(string) (*os.File, error)) ([]byte, error) {
 	f, err := open(path)
 	if err != nil {
 		return nil, err
@@ -262,13 +294,13 @@ func readInvitePepperFileWithOpen(path string, open func(string) (*os.File, erro
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("invite pepper %s is not a regular file", path)
+		return nil, fmt.Errorf("%s %s is not a regular file", label, path)
 	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("invite pepper %s is accessible beyond its owner (mode %04o): refusing to use it", path, perm)
+		return nil, fmt.Errorf("%s %s is accessible beyond its owner (mode %04o): refusing to use it", label, path, perm)
 	}
 	if fi.Size() != 32 {
-		return nil, fmt.Errorf("invite pepper %s has %d bytes, want 32", path, fi.Size())
+		return nil, fmt.Errorf("%s %s has %d bytes, want 32", label, path, fi.Size())
 	}
 	// Bound reads even if another process changes the file after Stat.
 	b, err := io.ReadAll(io.LimitReader(f, 33))
@@ -276,7 +308,7 @@ func readInvitePepperFileWithOpen(path string, open func(string) (*os.File, erro
 		return nil, err
 	}
 	if len(b) != 32 {
-		return nil, fmt.Errorf("invite pepper %s has %d bytes, want 32", path, len(b))
+		return nil, fmt.Errorf("%s %s has %d bytes, want 32", label, path, len(b))
 	}
 	return b, nil
 }
@@ -344,6 +376,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
+	emailTagKey, err := loadOrCreateEmailTagKey(f.stateDir)
+	if err != nil {
+		return err
+	}
 	st, err := store.Open(filepath.Join(f.stateDir, "relay.db"))
 	if err != nil {
 		return err
@@ -373,6 +409,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	dirCfg.InvitePepper = pepper
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), dirCfg)
 	srv := relay.New(dir, st, f.relayConfig())
+	srv.SetEmailTagKey(emailTagKey)
 	urls := who.SelfURLs(ctx, advertisePort(listenAt, f.port))
 	srv.SetURLs(urls)
 	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))

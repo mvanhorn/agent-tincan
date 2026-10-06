@@ -798,6 +798,33 @@ func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error
 	return n, err
 }
 
+// OpenAsks returns agent's open asks with their bodies and clarification
+// exchanges, urgent first and then oldest, each with its current status in
+// Status. Open means queued, delivered or claimed and not expired. It is the
+// only query a request email reads, so it never returns a held request (or
+// one that was held and never approved), a ping, a notify, or a request
+// paused for input or already finished: none of those may reach an email.
+func (s *Store) OpenAsks(ctx context.Context, agent string) ([]envelope.Request, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
+		WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?) AND expires_at > ? AND NOT (was_held = 1 AND approved = 0)
+		ORDER BY urgent DESC, created_at, rowid`,
+		agent, string(envelope.KindAsk), string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), s.now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []envelope.Request
+	for rows.Next() {
+		r, status, err := scanRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		r.Status = status
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // QueueStat is one agent's backlog: requests waiting to be claimed, the
 // creation time of the oldest of them, and claims whose lease is still live.
 type QueueStat struct {
