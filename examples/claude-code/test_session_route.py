@@ -284,6 +284,25 @@ class SessionRouteTests(unittest.TestCase):
             faulthandler.cancel_dump_traceback_later()
         self.assertLess(time.monotonic() - started, 4)
 
+    def test_missing_process_group_still_signals_known_child(self):
+        with patch.object(session_route.os, "killpg", side_effect=ProcessLookupError), \
+                patch.object(session_route.os, "kill") as direct_signal, \
+                patch.object(session_route.os, "waitpid", return_value=(12345, 0)):
+            session_route._stop_child(12345)
+        direct_signal.assert_called_once_with(12345, session_route.signal.SIGTERM)
+
+    def test_cleanup_never_uses_blocking_wait_even_if_child_is_not_reaped(self):
+        with patch.object(session_route.os, "killpg"), \
+                patch.object(session_route.os, "kill") as direct_signal, \
+                patch.object(session_route.os, "waitpid", return_value=(0, 0)) as wait, \
+                patch.object(session_route.time, "sleep"), \
+                patch.object(session_route.time, "monotonic", side_effect=[0, 0, .6, .6, .6, 1.2]):
+            session_route._stop_child(12345)
+        self.assertEqual(direct_signal.call_count, 2)
+        self.assertEqual(wait.call_count, 2)
+        for call in wait.call_args_list:
+            self.assertEqual(call.args, (12345, os.WNOHANG))
+
     def test_desktop_opener_failure_never_returns_terminal_output(self):
         fake_claude = self.root / "fake-failing-claude"
         fake_claude.write_text("#!/bin/sh\nprintf 'PRIVATE_TRANSCRIPT_SHOULD_NOT_ESCAPE'\nexit 23\n")

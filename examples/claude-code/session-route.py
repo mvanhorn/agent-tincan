@@ -349,16 +349,21 @@ def _drain_pty(master_fd: int) -> None:
             return
 
 
-def _stop_child(child_pid: int) -> None:
+def _signal_child(child_pid: int, sig: int) -> None:
+    # A launcher can change process groups. Signal the known child as well as
+    # its original group; a missing group does not imply the child has exited.
     try:
-        os.killpg(child_pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+        os.killpg(child_pid, sig)
     except OSError:
-        try:
-            os.kill(child_pid, signal.SIGTERM)
-        except OSError:
-            pass
+        pass
+    try:
+        os.kill(child_pid, sig)
+    except OSError:
+        pass
+
+
+def _stop_child(child_pid: int) -> None:
+    _signal_child(child_pid, signal.SIGTERM)
     deadline = time.monotonic() + 0.5
     while time.monotonic() < deadline:
         try:
@@ -368,19 +373,18 @@ def _stop_child(child_pid: int) -> None:
         if waited:
             return
         time.sleep(0.02)
-    try:
-        os.killpg(child_pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except OSError:
+    _signal_child(child_pid, signal.SIGKILL)
+    # Never turn a bounded opener timeout into an unbounded waitpid. Normally
+    # SIGKILL is reaped immediately, but cleanup must also have a deadline.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
         try:
-            os.kill(child_pid, signal.SIGKILL)
-        except OSError:
-            pass
-    try:
-        os.waitpid(child_pid, 0)
-    except ChildProcessError:
-        pass
+            waited, _ = os.waitpid(child_pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited:
+            return
+        time.sleep(0.02)
 
 
 def open_desktop(project: Path, session_id: str, *, claude_bin: Path | None = None,
