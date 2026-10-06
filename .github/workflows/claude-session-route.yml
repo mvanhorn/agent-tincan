@@ -1,0 +1,29 @@
+name: Claude session route adapter
+
+on:
+  push:
+    paths:
+      - 'examples/claude-code/session-route.py'
+      - 'examples/claude-code/test_session_route.py'
+      - '.github/workflows/claude-session-route.yml'
+  pull_request:
+    paths:
+      - 'examples/claude-code/session-route.py'
+      - 'examples/claude-code/test_session_route.py'
+      - '.github/workflows/claude-session-route.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m unittest discover -s examples/claude-code -p 'test_session_route.py'

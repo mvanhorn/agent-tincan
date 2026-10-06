@@ -246,6 +246,12 @@ Sesame. Sesame's agents (Miles, Maya and the others) run in Sesame's cloud and c
 
 Claude Code. Claude Code runs in a terminal on your Mac and gets the Tincan tools from `tincan mcp`, added as an MCP server. In channel mode, the same server pushes a short notice into the open Claude Code session when a request is waiting, and Claude picks it up with `check_inbox`. While no session is open, requests wait in the queue.
 
+For controllers that need a stable conversation per project/task, an optional
+[operator-bound session helper](docs/adapters/claude-code.md#optional-operator-bound-projecttask-sessions)
+resolves a previously chosen UUID and can open it through Claude's official
+Desktop command. It does not automatically route the shared inbox, create
+sessions, or start a second model executor.
+
 Codex. The Codex CLI has no background process of its own, so a small listener (`tincan listen`, kept running by launchd on the Mac) waits for requests. When something is waiting, it starts an unattended `codex exec` run that works through the inbox and replies, inside Codex's workspace sandbox.
 
 Gemini CLI (gemini-cli). Google's Gemini as a coding agent on your Mac, woken like Codex: the listener starts one headless run that drains the inbox. It runs Antigravity CLI (`agy`) with your Google account by default, or Gemini CLI with a paid API key, since Gemini CLI stopped accepting Google account logins in June 2026. Gemini CLI runs in its sandbox; agy has none, so the wake runs it only if you opt in to an unconfined run.

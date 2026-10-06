@@ -47,3 +47,64 @@ tincan listen --exec ~/bin/cmux-wake.sh
 ```
 
 It uses the same cmux control-plane calls as agentmail-to-claude-code, so cmux's `automation.socketControlMode` must allow it (see that repo's `setup_cmux.py`). The listener does not take the requests; the new session picks them up with `check_inbox`. Set this agent's wake to `command` in the relay's `wake.json`.
+
+## Optional operator-bound project/task sessions
+
+When an operator wants to reuse a particular conversation rather than choose the
+latest conversation in a directory, the POSIX Python 3 helper
+[`examples/claude-code/session-route.py`](../../examples/claude-code/session-route.py)
+resolves **canonical project directory + explicit task key** to a bound Claude
+conversation UUID. This is a local controller building block, not an automatic
+Tincan inbox router. It changes no relay protocol, MCP registration or permissions.
+
+Create or choose the conversation with Claude's normal interface first. Obtain
+its actual conversation UUID (for example, from `/status`), not a Tincan request
+ID or the short address returned by cross-session discovery. Bind it once:
+
+The registry's parent directory must already exist, be owned by you, have no
+group/other permissions (normally `0700`), and have no symlinked path components.
+Registry and lock files must be private `0600` regular files. The helper rejects
+unsafe storage rather than changing existing permissions. Choose a dedicated
+private registry directory if your existing Tincan config directory is shared.
+
+```bash
+python3 examples/claude-code/session-route.py \
+  --registry "$HOME/.config/tincan/claude-session-routes.json" \
+  --project /path/to/project --task design \
+  --bind 00000000-0000-4000-8000-000000000001
+```
+
+Replace the example UUID with the real one. Running the same command without
+`--bind` returns the existing route as JSON. Other projects and task keys have
+independent routes. Missing routes and conflicting rebinds fail: the helper
+never silently creates a conversation, chooses the newest one, or substitutes
+a different conversation when the bound one is unavailable.
+
+On macOS, adding `--desktop` uses Claude's official
+`claude --desktop --resume <conversation UUID>` opener. It opens Desktop, not a
+second model executor. The helper supplies the terminal required by that opener;
+it does not click, type into a window, or inject into private session sockets.
+Claude Code v2.1.285 or newer, Claude Desktop, and an eligible subscription login
+are required; the official opener determines availability. An accepted open
+command is not proof of live CLI/Desktop synchronization or task execution.
+See [Claude's Desktop documentation](https://code.claude.com/docs/en/desktop#coming-from-the-cli).
+
+The operator must decide whether opening is needed. If the destination is
+already open, use the host's supported messaging/channel path instead of
+opening it again. Never run a headless `--resume` writer concurrently with a
+Desktop writer. This helper deliberately does not implement live-session
+discovery, message forwarding, automatic creation, or a semantic decision model.
+
+Registry paths, project paths, task keys and bind operations must come from a
+trusted local operator/controller, **not from peer request text**. A route is
+not new authority to access a project or approve an action. Keep the registry
+private; no prompts, credentials or chat histories belong in it. The existing
+native Tincan tools still fetch and reply to actual requests, and the receiving
+session's permissions and approval boundaries still apply. The shared-inbox
+first-claim behavior described above is unchanged.
+
+Regression tests require no Claude process, account, relay or LLM calls:
+
+```bash
+python3 -m unittest discover -s examples/claude-code -p 'test_session_route.py'
+```
