@@ -714,3 +714,36 @@ func TestEmailAnswerLeavesOtherAsksAndNoCheckIn(t *testing.T) {
 		}
 	}
 }
+
+// A response that still cannot be sent a day after its reply was decided
+// is given up: the agent's instructions already send it back to tincan, and
+// the relay stops calling AgentMail for it.
+func TestEmailResponseGivenUpAfterWindow(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); defer mu.Unlock(); now = now.Add(d) }
+	e := newEmailEnv(t, relay.Config{Now: clock})
+	e.m.Store.SetClock(clock)
+	req := e.ask("find the quote")
+	e.mail.fail = 1000
+	e.mail.add(instinctMail, e.subject(req), new("$4,200"), time.Now())
+	e.poll()
+	if owed, _ := e.m.Store.UnsentEmailResponses(t.Context(), "instinct"); len(owed) != 1 {
+		t.Fatalf("owed after a failed send = %+v, want one", owed)
+	}
+	advance(25 * time.Hour)
+	e.mail.mu.Lock()
+	tries := len(e.mail.failedKeys)
+	e.mail.mu.Unlock()
+	e.poll()
+	e.mail.mu.Lock()
+	after := len(e.mail.failedKeys)
+	e.mail.mu.Unlock()
+	if after != tries {
+		t.Fatalf("send attempts after the window = %d more, want none", after-tries)
+	}
+	if owed, _ := e.m.Store.UnsentEmailResponses(t.Context(), "instinct"); len(owed) != 0 {
+		t.Fatalf("still owed after the window: %+v", owed)
+	}
+}

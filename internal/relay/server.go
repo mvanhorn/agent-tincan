@@ -407,12 +407,13 @@ func (s *Server) Run(ctx context.Context) {
 	defer t.Stop()
 	at := time.NewTicker(s.cfg.Attachments.SweepEvery)
 	defer at.Stop()
-	var mail <-chan time.Time // nil: no inbox to poll
+	// The email reply poll talks to AgentMail and can wait out a 429 for
+	// minutes, so it runs on its own loop: expiry and lease sweeps never
+	// wait behind it. Run returns only after that loop has stopped.
 	if s.hasEmailInboxes() {
-		mt := time.NewTicker(s.cfg.EmailPollEvery)
-		defer mt.Stop()
-		mail = mt.C
-		s.PollEmailReplies(ctx)
+		var wg sync.WaitGroup
+		wg.Go(func() { s.pollEmailRepliesEvery(ctx) })
+		defer wg.Wait()
 	}
 	s.SweepAttachments(ctx)
 	for {
@@ -423,8 +424,21 @@ func (s *Server) Run(ctx context.Context) {
 			s.Sweep(ctx)
 		case <-at.C:
 			s.SweepAttachments(ctx)
-		case <-mail:
-			s.PollEmailReplies(ctx)
+		}
+	}
+}
+
+// pollEmailRepliesEvery polls for email replies at start and then every
+// EmailPollEvery until ctx ends.
+func (s *Server) pollEmailRepliesEvery(ctx context.Context) {
+	mt := time.NewTicker(s.cfg.EmailPollEvery)
+	defer mt.Stop()
+	for {
+		s.PollEmailReplies(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-mt.C:
 		}
 	}
 }

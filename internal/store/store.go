@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -989,27 +988,24 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	if rep, err = s.replyTx(ctx, tx, id, agent, rep, ""); err != nil {
+	if rep, err = s.replyTx(ctx, tx, id, agent, rep, false); err != nil {
 		return envelope.Reply{}, err
 	}
 	return rep, tx.Commit()
 }
 
 // replyTx closes open request id with agent's terminal reply rep inside tx:
-// the request takes rep's status and the reply row is written. guard, when
-// not empty, is one more SQL condition the request row must meet, with its
-// args after it; it reads the current time, Unix ms, as every ? in it. It
-// returns ErrWrongState when the request is no longer open or fails guard.
-func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep envelope.Reply, guard string) (envelope.Reply, error) {
+// the request takes rep's status and the reply row is written. byEmail adds
+// the email path's conditions (emailReplyGuard). It returns ErrWrongState
+// when the request is no longer open or fails those conditions.
+func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep envelope.Reply, byEmail bool) (envelope.Reply, error) {
 	now := s.now()
 	args := []any{string(rep.Status), now.UnixMilli(), now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed)}
 	where := ""
-	if guard != "" {
-		where = " AND " + guard
-		for range strings.Count(guard, "?") {
-			args = append(args, now.UnixMilli())
-		}
+	if byEmail {
+		where = " AND " + emailReplyGuard
+		args = append(args, now.UnixMilli())
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1
 		WHERE id = ? AND status IN (?, ?, ?)`+where, args...)

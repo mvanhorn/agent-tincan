@@ -40,6 +40,13 @@ type EmailReply struct {
 
 // migrateEmailReplies creates the table of decided email messages. It is a
 // no-op when the table exists.
+
+// emailReplyGuard is what an email reply additionally needs of its request
+// row, with the current time (Unix ms) as its one ?: not claimed under a
+// live lease (an agent is working it over tincan), and not held without
+// approval.
+const emailReplyGuard = `NOT (status = 'claimed' AND lease_until > ?) AND NOT (was_held = 1 AND approved = 0)`
+
 func (s *Store) migrateEmailReplies() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS email_replies (message_id TEXT PRIMARY KEY, agent TEXT NOT NULL, request_id TEXT NOT NULL,
 		outcome TEXT NOT NULL, response_sent INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -115,7 +122,7 @@ func (s *Store) ReplyByEmail(ctx context.Context, messageID, id, agent string, r
 	if n, _ := res.RowsAffected(); n == 0 {
 		return envelope.Reply{}, ErrEmailDecided
 	}
-	if rep, err = s.replyTx(ctx, tx, id, agent, rep, `NOT (status = 'claimed' AND lease_until > ?) AND NOT (was_held = 1 AND approved = 0)`); err != nil {
+	if rep, err = s.replyTx(ctx, tx, id, agent, rep, true); err != nil {
 		return envelope.Reply{}, err
 	}
 	return rep, tx.Commit()

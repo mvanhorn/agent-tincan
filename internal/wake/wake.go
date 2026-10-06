@@ -306,7 +306,7 @@ var DefaultReplyRetries = []time.Duration{5 * time.Minute, 20 * time.Minute, tim
 type Options struct {
 	Debounce     time.Duration // coalesce a burst into one nudge; default 3s
 	RetryDelay   time.Duration // wait before the single retry; default 5s
-	AgentMailAPI string        // default https://api.agentmail.to/v0
+	AgentMailAPI string        // default DefaultAgentMailAPI
 	HTTP         *http.Client
 	Online       func(agent string) bool // skip request wakes for agents already polling
 	// Queued counts agent's requests still waiting to be delivered. With
@@ -453,7 +453,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 		opts.UrgentWakeGrace = DefaultUrgentWakeGrace
 	}
 	if opts.AgentMailAPI == "" {
-		opts.AgentMailAPI = "https://api.agentmail.to/v0"
+		opts.AgentMailAPI = DefaultAgentMailAPI
 	}
 	if opts.HTTP == nil {
 		opts.HTTP = client.New(client.APIClient)

@@ -167,10 +167,9 @@ func (s *Server) emailWindowOpen(ctx context.Context, agent string) (bool, error
 // every later poll to an ever longer listing.
 func (s *Server) pollInbox(ctx context.Context, in EmailInbox) {
 	start := s.cfg.Now()
-	after, ok := s.emailCursor[in.Agent]
-	if !ok {
-		after = s.started.Add(-emailReplyWindow)
-	}
+	// Mail older than emailReplyWindow is never wanted, so a cursor left
+	// behind by a long idle gap is pulled forward instead of re-listing it.
+	after := later(s.emailCursor[in.Agent], start.Add(-emailReplyWindow))
 	msgs, err := in.Mail.Received(ctx, after)
 	truncated := errors.Is(err, wake.ErrListTruncated)
 	if err != nil && !truncated {
@@ -400,6 +399,15 @@ func (s *Server) sendOwedResponses(ctx context.Context, in EmailInbox) {
 		return
 	}
 	for _, e := range owed {
+		// A response still unsent after emailReplyWindow will not help the
+		// agent any more (its own instructions say to fall back to tincan),
+		// so stop retrying it rather than calling AgentMail forever.
+		if s.cfg.Now().Sub(e.CreatedAt) > emailReplyWindow {
+			if err := s.store.MarkEmailResponseSent(ctx, e.MessageID); err != nil {
+				log.Printf("email replies %s: %v", in.Agent, err)
+			}
+			continue
+		}
 		s.respond(ctx, in, e.MessageID, e.Outcome)
 	}
 }

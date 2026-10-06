@@ -69,12 +69,16 @@ type AgentMail struct {
 	Sleep func(ctx context.Context, d time.Duration) error
 }
 
+// DefaultAgentMailAPI is the AgentMail API base URL, used for wake emails
+// and for reading email replies unless a test points elsewhere.
+const DefaultAgentMailAPI = "https://api.agentmail.to/v0"
+
 // NewAgentMail returns a client for inbox at api (default
-// https://api.agentmail.to/v0) with key. A nil hc uses the relay's usual
+// DefaultAgentMailAPI) with key. A nil hc uses the relay's usual
 // outbound client.
 func NewAgentMail(api, inbox, key string, hc *http.Client) *AgentMail {
 	if api == "" {
-		api = "https://api.agentmail.to/v0"
+		api = DefaultAgentMailAPI
 	}
 	if hc == nil {
 		hc = client.New(client.APIClient)
