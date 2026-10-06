@@ -47,12 +47,12 @@ for a in "$@"; do case "$a" in --statedir=*) statedir=${a#--statedir=};; esac; d
 if [ -s "$statedir/tailscaled.state" ]; then echo Stopped; else echo NeedsLogin; fi > "$FAKE_DIR/ts.state"
 `
 
-// fakeTincanUp is tincan: doctor passes, and relay records its argv and its
+// fakeTincanUp is tincan: doctor records its TINCAN_CONFIG and passes, and relay records its argv and its
 // Tailscale keys (or <unset>), then stays up until it is killed. It records
 // nothing under FAKE_NO_RECORD, for a relay the test starts itself.
 const fakeTincanUp = `#!/bin/sh
 case "${1:-}" in
-doctor) exit 0;;
+doctor) printf '%s' "${TINCAN_CONFIG-<unset>}" > "$FAKE_DIR/doctor.config"; exit 0;;
 relay)
   if [ -z "${FAKE_NO_RECORD:-}" ]; then
     printf '%s\n%s\n' "${TS_AUTHKEY-<unset>}" "${RELAY_TS_AUTHKEY-<unset>}" > "$FAKE_DIR/relay.env.tmp"
@@ -362,4 +362,126 @@ func TestTincanUpRelayKeyOnlyForFirstLogin(t *testing.T) {
 			t.Fatalf("relay with saved identity got keys TS_AUTHKEY=%q RELAY_TS_AUTHKEY=%q, want none", ts, relayKey)
 		}
 	})
+}
+
+// workspaceLayout lays out a host where only /workspace survives (Hark): the
+// Tailscale binaries, node state, socket and tincan live under a workspace
+// folder outside HOME, and the lock and log stay in a local cache folder.
+type workspaceLayout struct {
+	lib, bin, stateDir, sock, cache string
+}
+
+func (h *tincanUpHarness) workspace() workspaceLayout {
+	h.t.Helper()
+	ws := filepath.Join(filepath.Dir(h.home), "workspace")
+	w := workspaceLayout{
+		lib:      filepath.Join(ws, "lib", "tailscale"),
+		bin:      filepath.Join(ws, "bin"),
+		stateDir: filepath.Join(ws, "tailscale", "state"),
+		sock:     filepath.Join(ws, "tailscale", "tailscaled.sock"),
+		cache:    filepath.Join(h.home, ".cache", "hark"),
+	}
+	h.write(filepath.Join(w.lib, "tailscale"), fakeTailscale, 0o755)
+	h.write(filepath.Join(w.lib, "tailscaled"), fakeTailscaled, 0o755)
+	raw, err := os.ReadFile(h.tincan)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.write(filepath.Join(w.bin, "tincan"), string(raw), 0o755)
+	return w
+}
+
+func (w workspaceLayout) env(extra ...string) []string {
+	return append([]string{
+		"START_RELAY=0",
+		"TAILSCALE_LIB=" + w.lib,
+		"TAILSCALE_BIN=" + w.bin,
+		"TAILSCALE_STATEDIR=" + w.stateDir,
+		"TAILSCALE_CACHE=" + w.cache,
+		"TS_SOCKET=" + w.sock,
+		"TS_HOSTNAME=hark-workspace",
+		"TS_TAGS=tag:hark",
+	}, extra...)
+}
+
+func TestTincanUpWorkspaceLayoutComesBackAsSameNode(t *testing.T) {
+	h := newTincanUpHarness(t)
+	w := h.workspace()
+	h.write(filepath.Join(w.stateDir, "tailscaled.state"), "{\"node\":\"hark-workspace\"}", 0o600)
+	config := filepath.Join(filepath.Dir(w.bin), "tincan", "client.json")
+	r := h.run(w.env("TINCAN_CONFIG=" + config)...)
+	if r.code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
+	}
+	daemon := h.argv("tailscaled.argv")
+	if !slices.Contains(daemon, "--statedir="+w.stateDir) || !slices.Contains(daemon, "--socket="+w.sock) {
+		t.Errorf("tailscaled argv %q does not use the workspace state dir and socket", daemon)
+	}
+	up := h.argv("up.argv")
+	if !slices.Contains(up, "--hostname=hark-workspace") || !slices.Contains(up, "--advertise-tags=tag:hark") {
+		t.Errorf("tailscale up argv %q does not keep the Hark name and tag", up)
+	}
+	for _, a := range up {
+		if strings.HasPrefix(a, "--auth-key") {
+			t.Errorf("tailscale up used a key on a node with saved identity: %q", up)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.home, ".config", "tailscale")); err == nil {
+		t.Error("the script created the home-folder state dir in the workspace layout")
+	}
+	if _, err := os.Stat(filepath.Join(w.bin, "tailscale")); err != nil {
+		t.Errorf("no tailscale wrapper in the workspace bin: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(h.fake, "doctor.config"))
+	if err != nil || string(raw) != config {
+		t.Errorf("tincan doctor ran with TINCAN_CONFIG %q (%v), want %q", raw, err, config)
+	}
+}
+
+// adoptedDaemon is a tailscaled the host started itself on the configured
+// socket, with no state flag, which would otherwise read as a system tailscaled.
+func adoptedDaemon(sock string) string {
+	return "/usr/local/bin/tailscaled --tun=userspace-networking --socket=" + sock + " --socks5-server=localhost:1055"
+}
+
+func TestTincanUpAdoptsDaemonOnItsSocket(t *testing.T) {
+	h := newTincanUpHarness(t)
+	w := h.workspace()
+	h.write(filepath.Join(h.fake, "ts.state"), "Running", 0o644)
+	h.setProcs("/bin/bash -l", adoptedDaemon(w.sock))
+	r := h.run(w.env()...)
+	if r.code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
+	}
+	if h.exists("tailscaled.argv") || h.exists("up.argv") {
+		t.Fatalf("started or reconfigured a daemon that was already running on the socket\n%s", r.out)
+	}
+}
+
+func TestTincanUpAdoptedDaemonLoggedOutNeedsKey(t *testing.T) {
+	h := newTincanUpHarness(t)
+	w := h.workspace()
+	h.write(filepath.Join(h.fake, "ts.state"), "NeedsLogin", 0o644)
+	h.setProcs(adoptedDaemon(w.sock))
+	r := h.run(w.env()...)
+	if r.code != 3 {
+		t.Fatalf("exit %d, want 3\n%s", r.code, r.out)
+	}
+	if h.exists("tailscaled.argv") || h.exists("up.argv") {
+		t.Fatalf("started a daemon or ran up with no key\n%s", r.out)
+	}
+}
+
+func TestTincanUpAdoptedDaemonStillRefusesListenRelay(t *testing.T) {
+	h := newTincanUpHarness(t)
+	w := h.workspace()
+	h.write(filepath.Join(h.fake, "ts.state"), "Running", 0o644)
+	h.setProcs(adoptedDaemon(w.sock), "/workspace/bin/tincan relay --listen 100.97.127.52")
+	r := h.run(w.env()...)
+	if r.code != 4 {
+		t.Fatalf("exit %d, want 4\n%s", r.code, r.out)
+	}
+	if !strings.Contains(r.out, "--listen") {
+		t.Errorf("output does not name the --listen relay:\n%s", r.out)
+	}
 }
