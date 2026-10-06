@@ -683,7 +683,7 @@ func text(s string) (*mcp.CallToolResult, any, error) {
 }
 
 func fail(err error) (*mcp.CallToolResult, any, error) {
-	err = client.RejoinHint(err, "")
+	err = client.TunnelHint(client.RejoinHint(err, ""))
 	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, nil, nil
 }
 

@@ -31,6 +31,20 @@ func IsNotJoined(err error) bool {
 	return errors.As(err, &e) && e.Code == http.StatusForbidden && strings.Contains(e.Message, notJoinedText)
 }
 
+// TunnelHint explains a call that failed because the SOCKS proxy could not
+// connect to the relay, after the client has already retried it for about
+// 15 seconds: the machine's tailnet tunnel is down, so the relay never saw
+// the call. An agent woken by email can still answer the request by
+// replying to that email. Other errors are returned unchanged.
+func TunnelHint(err error) error {
+	if err == nil || !socksConnectFailed(err) {
+		return err
+	}
+	hint := "The tailnet tunnel to the relay is not up, so the relay never got this call: nothing was sent or taken by it. " +
+		"If you are answering a request that arrived by email, you can answer it by replying to that email."
+	return fmt.Errorf("%w\n%s", err, hint)
+}
+
 // RejoinHint adds the self-heal step to a "not a joined agent" or "no relay
 // configured" error: a rebuilt machine re-admits itself with tincan rejoin,
 // and only a machine that was never joined needs a person. Other errors are

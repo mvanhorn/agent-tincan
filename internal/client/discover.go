@@ -396,6 +396,16 @@ func unreachable(err error) bool {
 	return errors.As(err, &ue) && ue.Timeout()
 }
 
+// socksConnectFailed reports whether err is the SOCKS proxy failing to open
+// a connection to the relay. In a sandbox that reaches the tailnet through a
+// local SOCKS tunnel, this is the tunnel being down (often for a moment,
+// right after the sandbox wakes), not the relay moving or refusing. No
+// request reached the relay, so the call is safe to make again.
+func socksConnectFailed(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "socks connect"
+}
+
 // netmapIPv4s lists IPv4 addresses on the local tailnet: LocalAPI first,
 // then the Tailscale CLI. source is "localapi", "cli", or "".
 func netmapIPv4s(ctx context.Context) (ips []string, source string) {
