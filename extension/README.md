@@ -67,8 +67,9 @@ ChatGPT and claude.ai are required `host_permissions`, as before, so an
 upgrade asks for nothing new; the owner can still withhold them in Chrome's
 site access settings. Sites added later go under `optional_host_permissions`
 (Grok: `https://grok.com/*` and `https://assets.grok.com/*`, granted together;
-Gemini: `https://gemini.google.com/*` and `https://lh3.googleusercontent.com/*`,
-its image host, granted together; Perplexity: `https://www.perplexity.ai/*`;
+Gemini: `https://gemini.google.com/*`, `https://lh3.googleusercontent.com/*`
+(its image host) and `https://lh3.google.com/*` (which its image links
+redirect through), granted together; Perplexity: `https://www.perplexity.ai/*`;
 Copilot: `https://copilot.com/*` and `https://copilot.microsoft.com/*`, where
 it starts, granted together) and are granted from the options page: `options.html` and `options.js`, opened from `chrome://extensions` >
 Agent Tincan History > Details > Extension options. It lists every site in

@@ -410,7 +410,7 @@ test('the manifest asks for exactly the origins in SITE_ACCESS', () => {
   // ChatGPT and claude.ai stay required, so an upgrade asks for nothing new;
   // Grok, Gemini, Perplexity and Copilot are optional, granted from the options page.
   assert.deepEqual(m.host_permissions, ['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*', 'https://claude.ai/*']);
-  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*', 'https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://www.perplexity.ai/*', 'https://copilot.com/*', 'https://copilot.microsoft.com/*']);
+  assert.deepEqual(m.optional_host_permissions, ['https://grok.com/*', 'https://assets.grok.com/*', 'https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://lh3.google.com/*', 'https://www.perplexity.ai/*', 'https://copilot.com/*', 'https://copilot.microsoft.com/*']);
   assert.equal(SITE_ACCESS.grok.required, false);
   assert.equal(SITE_ACCESS.gemini.required, false);
   assert.equal(SITE_ACCESS.perplexity.required, false);
@@ -733,7 +733,7 @@ test('grok ops need the grok.com grant; ChatGPT and claude.ai do not change', as
 const GEMINI_APP = 'https://gemini.google.com/app';
 const GEMINI_RPC = 'https://gemini.google.com/_/BardChatUi/data/batchexecute';
 const APP_HTML = '<html><script>window.WIZ_global_data = {"SNlM0e":"dummy-at-token","cfb2h":"boq_dummy_20260927.00_p0","FdrFJe":"-1234567890"};</script></html>';
-const GEMINI_GRANT = ['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*'];
+const GEMINI_GRANT = ['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://lh3.google.com/*'];
 
 // batchChunks renders rows as batchexecute's answer: the guard, then
 // length-prefixed chunks, the wrb.fr one first.
@@ -950,6 +950,16 @@ test('gemini.file captures the image in the send tab first, then fetches it in t
   t = mk(() => null, () => redirectedTo(bytesResponse(png), 'https://lh3.googleusercontent.com/gg/dummy-star-1=s0'));
   frames = await run(t.r, 'gemini.file', args);
   assert.deepEqual(Buffer.from(frames[0].chunk.data, 'base64'), Buffer.from(png));
+  // The live chain: /gg/ redirects through lh3.google.com/rd-gg/ and back
+  // to the image host, which is why lh3.google.com is in Gemini's grant.
+  // Ending back on the image host is accepted; a chain that stops on
+  // lh3.google.com is not.
+  assert.ok(SITE_ACCESS.gemini.origins.includes('https://lh3.google.com/*'), 'the redirect host is granted with Gemini');
+  t = mk(() => null, () => redirectedTo(bytesResponse(png), 'https://lh3.googleusercontent.com/rd-gg/dummy-star-1=s512'));
+  frames = await run(t.r, 'gemini.file', args);
+  assert.deepEqual(Buffer.from(frames[0].chunk.data, 'base64'), Buffer.from(png));
+  t = mk(() => null, () => redirectedTo(bytesResponse(png), 'https://lh3.google.com/rd-gg/dummy-star-1=s512'));
+  await assert.rejects(run(t.r, 'gemini.file', args), (e) => e.code === 'not_logged_in');
   // An image that is not in the conversation is not_found, with no capture.
   t = mk(() => null, () => bytesResponse(png));
   await assert.rejects(run(t.r, 'gemini.file', { ...args, file_id: 'rc_00000000000000b2-3' }), (e) => e.code === 'not_found');

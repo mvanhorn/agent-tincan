@@ -61,15 +61,24 @@ export function renderOptions({ document, permissions }) {
       } catch (e) {
         asked = Promise.reject(e);
       }
+      // Chrome refuses a request for an origin the loaded manifest does
+      // not list (a newer ops.js before the extension reloads); say so
+      // instead of leaving the click looking like it did nothing.
       asked
-        .catch(() => false)
+        .then(() => {
+          r.error = '';
+        })
+        .catch((e) => {
+          r.error = `Chrome refused: ${(e && e.message) || e}. Reload the extension in chrome://extensions and try again.`;
+        })
         .finally(() => {
           button.disabled = false;
           refresh();
         });
     });
     li.append(name, status, button);
-    return { li, status, button };
+    const r = { li, status, button, error: '' };
+    return r;
   }
 
   async function refresh() {
@@ -80,8 +89,8 @@ export function renderOptions({ document, permissions }) {
         rows.set(s.site, r);
       }
       const st = STATUS[s.granted ? 'granted' : s.partial ? 'partial' : 'none'];
-      r.status.textContent = st.text;
-      r.status.className = st.className;
+      r.status.textContent = r.error && !s.granted ? r.error : st.text;
+      r.status.className = r.error && !s.granted ? 'status error' : st.className;
       r.button.textContent = st.button;
       r.button.hidden = s.granted;
     }

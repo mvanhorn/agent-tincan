@@ -176,7 +176,7 @@ test('the options page lists sites, shows grants, and grants from the click', as
   perms.inGesture = true;
   r[3].button.click();
   perms.inGesture = false;
-  assert.deepEqual(perms.requests.at(-1), { origins: ['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*'], inGesture: true });
+  assert.deepEqual(perms.requests.at(-1), { origins: ['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://lh3.google.com/*'], inGesture: true });
   await settle();
   assert.equal(rows(doc)[3].status, 'Granted');
 
@@ -196,6 +196,30 @@ test('the options page lists sites, shows grants, and grants from the click', as
   assert.deepEqual(perms.requests.at(-1), { origins: ['https://copilot.com/*', 'https://copilot.microsoft.com/*'], inGesture: true });
   await settle();
   assert.equal(rows(doc)[5].status, 'Granted');
+});
+
+test('a grant Chrome refuses says so on the page, and a later grant clears it', async () => {
+  const doc = fakeDocument();
+  const perms = fakePermissions(['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*']);
+  const page = renderOptions({ document: doc, permissions: perms });
+  await page.ready;
+  assert.equal(rows(doc)[3].status, 'Granted (images and files need file access)');
+  // A loaded manifest older than ops.js does not list the new origin.
+  perms.request = ({ origins }) => {
+    perms.requests.push({ origins, inGesture: perms.inGesture });
+    return Promise.reject(new Error('Only permissions specified in the manifest may be requested.'));
+  };
+  rows(doc)[3].button.click();
+  await settle();
+  assert.match(rows(doc)[3].status, /^Chrome refused: Only permissions specified in the manifest may be requested\..*Reload the extension/);
+  assert.equal(rows(doc)[3].button.disabled, false);
+  perms.request = ({ origins }) => {
+    origins.forEach((o) => perms.granted.add(o));
+    return Promise.resolve(true);
+  };
+  rows(doc)[3].button.click();
+  await settle();
+  assert.equal(rows(doc)[3].status, 'Granted');
 });
 
 test('the options page is CSP-safe: no inline script, no main-world code', () => {
