@@ -24,7 +24,7 @@ and whether each of those paths is under /workspace.
 Check three things in the answer:
 
 - **The daemon runs as Hark's normal user** (the first column matches `id -un`). If it runs as root, the startup script cannot manage it. Ask Hark to stop it, `sudo chown -R` its state to its own user, and let the script start it in step 4.
-- **The state lives in a folder under /workspace.** The startup script uses `--statedir`, a folder holding `tailscaled.state`. If Hark's daemon uses `--state=<file>`, ask Hark to stop the daemon, move that file to `<a new folder under /workspace>/tailscaled.state`, and use that folder below. The node keeps its identity.
+- **The state lives in a folder under /workspace.** The startup script uses `--statedir`, a folder holding `tailscaled.state`, and adopts a running daemon only when its state is in that folder. If Hark's daemon uses `--state=<file>` with another file name or outside `/workspace`, ask Hark to stop the daemon, move that file to `<a new folder under /workspace>/tailscaled.state`, and use that folder below. The node keeps its identity.
 - **The socket is under /workspace or another fixed path**, and there is an HTTP proxy address (for example `localhost:1056`).
 
 ## 2. Tag the device (owner, in the Tailscale admin)
@@ -169,7 +169,7 @@ The agent keeps its name, kind and queued requests.
 | 1 | something unhealthy: tailscaled did not come up, `tincan` is missing, or `tincan doctor` failed | read the output; run `tincan doctor` after sourcing the env file |
 | 2 | the device waits for approval | approve it under Machines; next time make the key Pre-approved |
 | 3 | logged out and no key: the node identity is gone | [If the node identity is lost](#if-the-node-identity-is-lost) |
-| 4 | a `tincan relay --listen` or a system tailscaled with its state outside `/workspace` is running | a tailscaled serving `TS_SOCKET` is never refused; check that `TS_SOCKET` matches the daemon's `--socket`, or stop the other process |
+| 4 | a `tincan relay --listen` is running, or a tailscaled whose state is not in `TAILSCALE_STATEDIR` | a tailscaled serving `TS_SOCKET` is adopted only when its `--statedir` is `TAILSCALE_STATEDIR` (or its `--state` is `tailscaled.state` inside it); fix the env file to match, or move the state as in step 1. A daemon on another socket with no state flag or state in `/var/lib/tailscale` is a system tailscaled: stop it |
 | 124 | `timeout` stopped the script | Hark's network or a Tailscale download was slow; the next run tries again. Repeated 124s go to the owner |
 
 - **Roster shows `wake=none`:** the relay has no `schedule` entry for `hark`, or was not restarted after the edit.

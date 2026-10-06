@@ -38,15 +38,27 @@ if command -v flock >/dev/null && ! flock -n 9; then echo "already running"; exi
 # 0. Refuse to run next to the old layout: a relay bound to the system Tailscale with --listen, or
 #    a system tailscaled keeping its state in /var/lib/tailscale (its default). Starting a second
 #    tailscaled or relay beside them would fight over the node and the relay's database.
-#    A tailscaled serving this script's own socket is the daemon this host uses, so it is
-#    adopted as it is, whatever its state flags; the --listen relay is refused regardless.
-legacy=$(ps -eo args= 2>/dev/null | awk -v sock="$SOCK" '
+#    A tailscaled serving this script's own socket is the daemon this host uses: it is adopted
+#    when its identity is in STATEDIR, and refused otherwise, since that identity would not
+#    survive a wipe. The --listen relay is refused regardless.
+legacy=$(ps -eo args= 2>/dev/null | awk -v sock="$SOCK" -v statedir="$STATEDIR" '
+  function flag(name,   i, a) {
+    for (i = 2; i <= NF; i++) {
+      a = $i; sub(/^--?/, "", a)
+      if (a == name && i < NF) return $(i + 1)
+      if (index(a, name "=") == 1) return substr(a, length(name) + 2)
+    }
+    return ""
+  }
   { n = split($1, p, "/"); b = p[n] }
   b == "tincan" && $2 == "relay" {
     for (i = 3; i <= NF; i++) if ($i ~ /^--?listen(=|$)/) { print "a tincan relay started with --listen"; exit }
   }
+  b == "tailscaled" && flag("socket") == sock {
+    if (flag("statedir") == statedir || flag("state") == statedir "/tailscaled.state") next
+    print "a tailscaled on " sock " that keeps its state outside " statedir; exit
+  }
   b == "tailscaled" {
-    for (i = 2; i <= NF; i++) if ($i == "--socket=" sock || $i == "-socket=" sock || (($i == "--socket" || $i == "-socket") && $(i + 1) == sock)) next
     s = 0; for (i = 2; i <= NF; i++) if ($i ~ /^--?(state|statedir)(=|$)/) s = 1
     if (!s || index($0, "/var/lib/tailscale")) { print "a system tailscaled with its state in /var/lib/tailscale"; exit }
   }' || true)

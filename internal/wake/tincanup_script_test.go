@@ -439,16 +439,17 @@ func TestTincanUpWorkspaceLayoutComesBackAsSameNode(t *testing.T) {
 }
 
 // adoptedDaemon is a tailscaled the host started itself on the configured
-// socket, with no state flag, which would otherwise read as a system tailscaled.
-func adoptedDaemon(sock string) string {
-	return "/usr/local/bin/tailscaled --tun=userspace-networking --socket=" + sock + " --socks5-server=localhost:1055"
+// socket with its state in the configured state dir, from a path that would
+// otherwise read as a system tailscaled.
+func adoptedDaemon(w workspaceLayout) string {
+	return "/usr/local/bin/tailscaled --tun=userspace-networking --statedir " + w.stateDir + " --socket=" + w.sock + " --socks5-server=localhost:1055"
 }
 
 func TestTincanUpAdoptsDaemonOnItsSocket(t *testing.T) {
 	h := newTincanUpHarness(t)
 	w := h.workspace()
 	h.write(filepath.Join(h.fake, "ts.state"), "Running", 0o644)
-	h.setProcs("/bin/bash -l", adoptedDaemon(w.sock))
+	h.setProcs("/bin/bash -l", adoptedDaemon(w))
 	r := h.run(w.env()...)
 	if r.code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
@@ -462,7 +463,7 @@ func TestTincanUpAdoptedDaemonLoggedOutNeedsKey(t *testing.T) {
 	h := newTincanUpHarness(t)
 	w := h.workspace()
 	h.write(filepath.Join(h.fake, "ts.state"), "NeedsLogin", 0o644)
-	h.setProcs(adoptedDaemon(w.sock))
+	h.setProcs(adoptedDaemon(w))
 	r := h.run(w.env()...)
 	if r.code != 3 {
 		t.Fatalf("exit %d, want 3\n%s", r.code, r.out)
@@ -476,7 +477,7 @@ func TestTincanUpAdoptedDaemonStillRefusesListenRelay(t *testing.T) {
 	h := newTincanUpHarness(t)
 	w := h.workspace()
 	h.write(filepath.Join(h.fake, "ts.state"), "Running", 0o644)
-	h.setProcs(adoptedDaemon(w.sock), "/workspace/bin/tincan relay --listen 100.97.127.52")
+	h.setProcs(adoptedDaemon(w), "/workspace/bin/tincan relay --listen 100.97.127.52")
 	r := h.run(w.env()...)
 	if r.code != 4 {
 		t.Fatalf("exit %d, want 4\n%s", r.code, r.out)
@@ -484,4 +485,36 @@ func TestTincanUpAdoptedDaemonStillRefusesListenRelay(t *testing.T) {
 	if !strings.Contains(r.out, "--listen") {
 		t.Errorf("output does not name the --listen relay:\n%s", r.out)
 	}
+}
+
+// A daemon on the configured socket whose identity lives outside the state dir
+// would lose it on the next wipe, so it is refused, not adopted.
+func TestTincanUpRefusesSocketDaemonWithStateElsewhere(t *testing.T) {
+	for name, state := range map[string]string{
+		"no state flag":   "",
+		"state elsewhere": " --state=/var/lib/tailscale/tailscaled.state",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTincanUpHarness(t)
+			w := h.workspace()
+			h.write(filepath.Join(h.fake, "ts.state"), "Running", 0o644)
+			h.setProcs("/usr/local/bin/tailscaled --tun=userspace-networking --socket=" + w.sock + state)
+			r := h.run(w.env()...)
+			if r.code != 4 {
+				t.Fatalf("exit %d, want 4\n%s", r.code, r.out)
+			}
+			if !strings.Contains(r.out, w.stateDir) {
+				t.Errorf("output does not name the expected state dir:\n%s", r.out)
+			}
+		})
+	}
+	t.Run("state file in the state dir", func(t *testing.T) {
+		h := newTincanUpHarness(t)
+		w := h.workspace()
+		h.write(filepath.Join(h.fake, "ts.state"), "Running", 0o644)
+		h.setProcs("/usr/local/bin/tailscaled --state=" + filepath.Join(w.stateDir, "tailscaled.state") + " --socket " + w.sock)
+		if r := h.run(w.env()...); r.code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
+		}
+	})
 }
