@@ -414,9 +414,9 @@ type Waker struct {
 	// beside a pending follow-up (see armMail).
 	mailTimers map[string]*time.Timer
 	// mailed is when each open ask of a request-email agent was last
-	// emailed, by agent and request id. It lives in memory only: after a
-	// restart every open ask counts as never emailed, which costs at most
-	// one extra email per ask.
+	// emailed, by agent and mailKey (request id and clarification round).
+	// It lives in memory only: after a restart every open ask counts as
+	// never emailed, which costs at most one extra email per ask.
 	mailed map[string]map[string]time.Time
 	// rememberMu makes keeping a last wake, store write included, atomic
 	// with Forget, so a removal cannot slip between the check and the write.

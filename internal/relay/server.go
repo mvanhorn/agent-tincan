@@ -1047,7 +1047,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
 		return
 	}
-	rep, err = s.recordReply(r.Context(), r.PathValue("id"), name, rep, "")
+	rep, err = s.recordReply(r.Context(), r.PathValue("id"), name, rep, "", 0)
 	if err != nil {
 		writeErr(w, attachmentStatus(err, statusFor(err)), err)
 		return
@@ -1063,12 +1063,12 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 // An email reply is stored with its email_replies row in one transaction
 // (store.ReplyByEmail) and audited with via "email"; its tag, sender and
 // text never reach the audit log.
-func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope.Reply, emailMessageID string) (envelope.Reply, error) {
+func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope.Reply, emailMessageID string, round int) (envelope.Reply, error) {
 	var err error
 	if emailMessageID == "" {
 		rep, err = s.store.Reply(ctx, id, agent, rep)
 	} else {
-		rep, err = s.store.ReplyByEmail(ctx, emailMessageID, id, agent, rep)
+		rep, err = s.store.ReplyByEmail(ctx, emailMessageID, id, agent, round, rep)
 	}
 	if err != nil {
 		return envelope.Reply{}, err

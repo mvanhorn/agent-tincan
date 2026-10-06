@@ -230,7 +230,7 @@ func (s *Server) decideEmail(ctx context.Context, in EmailInbox, m wake.MailMess
 	if !sameAddress(m.From, in.Address) {
 		return s.decide(ctx, in, m.MessageID, id, emailWrongSender, false)
 	}
-	outcome, rep, err := s.judgeEmail(ctx, in, m, id, tag)
+	outcome, rep, round, err := s.judgeEmail(ctx, in, m, id, tag)
 	if err != nil {
 		log.Printf("email replies %s: %v", in.Agent, err)
 		return false
@@ -238,7 +238,7 @@ func (s *Server) decideEmail(ctx context.Context, in EmailInbox, m wake.MailMess
 	if outcome != store.EmailOutcomeRecorded {
 		return s.decide(ctx, in, m.MessageID, id, outcome, true)
 	}
-	_, err = s.recordReply(ctx, id, in.Agent, rep, m.MessageID)
+	_, err = s.recordReply(ctx, id, in.Agent, rep, m.MessageID, round)
 	switch {
 	case err == nil:
 		s.respond(ctx, in, m.MessageID, outcome)
@@ -250,7 +250,9 @@ func (s *Server) decideEmail(ctx context.Context, in EmailInbox, m wake.MailMess
 		return s.decide(ctx, in, m.MessageID, id, emailClaimed, true)
 	case errors.Is(err, store.ErrWrongState):
 		return s.decide(ctx, in, m.MessageID, id, emailClosed, true)
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrForbidden):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrForbidden), errors.Is(err, store.ErrStaleRound):
+		// ErrStaleRound: a clarification was asked and answered since
+		// judgeEmail checked the tag, so this email is for an earlier round.
 		return s.decide(ctx, in, m.MessageID, id, emailOutOfDate, true)
 	}
 	log.Printf("email replies %s: record reply to %s: %v", in.Agent, id, err)
@@ -259,50 +261,51 @@ func (s *Server) decideEmail(ctx context.Context, in EmailInbox, m wake.MailMess
 
 // judgeEmail runs the checks after the sender's: the tag, the request's
 // state and the reply's text. It returns the outcome, and for
-// EmailOutcomeRecorded the reply to store. An error means m could not be
+// EmailOutcomeRecorded the reply to store and the clarification round its
+// tag was verified for. An error means m could not be
 // judged now.
-func (s *Server) judgeEmail(ctx context.Context, in EmailInbox, m wake.MailMessage, id, tag string) (string, envelope.Reply, error) {
+func (s *Server) judgeEmail(ctx context.Context, in EmailInbox, m wake.MailMessage, id, tag string) (string, envelope.Reply, int, error) {
 	if id == "" {
-		return emailOutOfDate, envelope.Reply{}, nil
+		return emailOutOfDate, envelope.Reply{}, 0, nil
 	}
 	req, status, err := s.store.Request(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
-		return emailOutOfDate, envelope.Reply{}, nil
+		return emailOutOfDate, envelope.Reply{}, 0, nil
 	}
 	if err != nil {
-		return "", envelope.Reply{}, err
+		return "", envelope.Reply{}, 0, err
 	}
 	if req.To != in.Agent || req.Kind != envelope.KindAsk || !s.VerifyRequestEmailTag(tag, req) {
-		return emailOutOfDate, envelope.Reply{}, nil
+		return emailOutOfDate, envelope.Reply{}, 0, nil
 	}
 	switch status {
 	case envelope.StatusQueued, envelope.StatusDelivered, envelope.StatusClaimed:
 	case envelope.StatusNeedsInput:
 		// A clarification asked over tincan is waiting on the asker.
-		return emailClaimed, envelope.Reply{}, nil
+		return emailClaimed, envelope.Reply{}, 0, nil
 	default:
-		return emailClosed, envelope.Reply{}, nil
+		return emailClosed, envelope.Reply{}, 0, nil
 	}
 	if live, err := s.store.ClaimLive(ctx, id); err != nil {
-		return "", envelope.Reply{}, err
+		return "", envelope.Reply{}, 0, err
 	} else if live {
-		return emailClaimed, envelope.Reply{}, nil
+		return emailClaimed, envelope.Reply{}, 0, nil
 	}
 	full, err := in.Mail.Message(ctx, m.MessageID)
 	if err != nil {
-		return "", envelope.Reply{}, err
+		return "", envelope.Reply{}, 0, err
 	}
 	if full.ExtractedText == nil {
-		return emailUnsupported, envelope.Reply{}, nil
+		return emailUnsupported, envelope.Reply{}, 0, nil
 	}
 	rep, ok := emailReply(*full.ExtractedText)
 	if !ok {
-		return emailUnsupported, envelope.Reply{}, nil
+		return emailUnsupported, envelope.Reply{}, 0, nil
 	}
 	if len(rep.Body) > envelope.DefaultMaxBody {
-		return emailTooLong, envelope.Reply{}, nil
+		return emailTooLong, envelope.Reply{}, 0, nil
 	}
-	return store.EmailOutcomeRecorded, rep, nil
+	return store.EmailOutcomeRecorded, rep, EmailTagRound(req), nil
 }
 
 // emailReply turns an email's reply-stripped text into a reply: lines

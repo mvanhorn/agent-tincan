@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
 // asksFake stands in for the relay's open-asks query.
@@ -446,4 +447,116 @@ func TestRequestEmailFallbackStepStaysCountOnly(t *testing.T) {
 	if body["message"] != Message(1) || strings.Contains(hook.body(0), "SECRET") {
 		t.Fatalf("fallback webhook = %s", hook.body(0))
 	}
+}
+
+// An ask whose clarification was answered since its last email gets a new
+// request email on the next wake, even inside its wake grace: the old email's
+// tag no longer verifies, so the agent needs one with the current round.
+func TestClarifiedAskIsEmailedAgain(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	start := time.Unix(1_790_000_000, 0)
+	asks := &asksFake{asks: []envelope.Request{ask("ra", "muse", "find the quote", start)}}
+	w := New(Config{"instinct": optedIn()}, nil, Options{
+		Debounce: time.Millisecond, WakeGrace: time.Hour, AgentMailAPI: ts.URL + "/v0", OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued:   func(string) int { return 1 },
+		LastPoll: func(string) time.Time { return time.Time{} },
+		Now:      fixedClock(start),
+	})
+	defer w.Stop()
+	w.Queued(context.Background(), asks.asks[0])
+	waitCalls(t, &rc, 1)
+
+	asks.mu.Lock()
+	asks.asks[0].Exchanges = []envelope.Exchange{{Question: "which house?", Answer: "the Seattle one", At: start}}
+	clarified := asks.asks[0]
+	asks.mu.Unlock()
+	w.Requeued(context.Background(), clarified)
+	waitCalls(t, &rc, 2)
+	if m := rc.mail(t, 1); !strings.Contains(m.Text, "the Seattle one") {
+		t.Fatalf("second email = %+v, want the request with its answered clarification", m)
+	}
+}
+
+// A request email that fails twice (send and its retry) is recorded as a
+// failed wake, and the ask counts as never emailed, so the next wake sends
+// it again without waiting out a wake grace.
+func TestFailedRequestEmailIsSentAgain(t *testing.T) {
+	var rc recorder
+	rc.fail.Store(2)
+	ts := rc.server(t)
+	st := auditStore(t)
+	start := time.Unix(1_790_000_000, 0)
+	asks := &asksFake{asks: []envelope.Request{ask("ra", "muse", "find the quote", start)}}
+	w := New(Config{"instinct": optedIn()}, st, Options{
+		Debounce: time.Millisecond, RetryDelay: time.Millisecond, WakeGrace: time.Hour, AgentMailAPI: ts.URL + "/v0", OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued:   func(string) int { return 1 },
+		LastPoll: func(string) time.Time { return time.Time{} },
+		Now:      fixedClock(start),
+	})
+	defer w.Stop()
+	w.Queued(context.Background(), asks.asks[0])
+	waitCalls(t, &rc, 2)
+	waitEvents(t, st, "wake_failed")
+	w.Requeued(context.Background(), asks.asks[0])
+	waitCalls(t, &rc, 3)
+	if m := rc.mail(t, 2); m.Subject != subjectFor("muse", "ra") {
+		t.Fatalf("third send = %q, want the failed ask's request email again", m.Subject)
+	}
+}
+
+// With the hourly budget used up, a wake records wake_skipped and sends
+// nothing; the asks it would have emailed stay never emailed and go out on
+// the first wake the budget allows.
+func TestBudgetSkippedRequestEmailWaits(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	start := time.Unix(1_790_000_000, 0)
+	var now atomicTime
+	now.set(start)
+	asks := &asksFake{asks: []envelope.Request{ask("ra", "muse", "first", start)}}
+	cfg := optedIn()
+	cfg.MaxPerHour = 1
+	w := New(Config{"instinct": cfg}, st, Options{
+		Debounce: time.Millisecond, WakeGrace: time.Hour, AgentMailAPI: ts.URL + "/v0", OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued:   func(string) int { open, _ := asks.open(""); return len(open) },
+		LastPoll: func(string) time.Time { return time.Time{} },
+		Now:      now.get,
+	})
+	defer w.Stop()
+	w.Queued(context.Background(), asks.asks[0])
+	waitCalls(t, &rc, 1)
+	second := ask("rb", "claude-code", "second", start.Add(time.Second))
+	asks.add(second)
+	w.Queued(context.Background(), second)
+	waitEvents(t, st, "woke,wake_skipped")
+	if n := rc.count(); n != 1 {
+		t.Fatalf("sends with the budget spent = %d, want 1", n)
+	}
+	// After the window the skipped ask goes first, as never emailed, then
+	// the first ask's re-send, now a wake grace old.
+	now.set(start.Add(61 * time.Minute))
+	w.Queued(context.Background(), second)
+	waitCalls(t, &rc, 3)
+	if m := rc.mail(t, 1); m.Subject != subjectFor("claude-code", "rb") {
+		t.Fatalf("first send after the window = %q, want the skipped ask", m.Subject)
+	}
+	if m := rc.mail(t, 2); m.Subject != subjectFor("muse", "ra") {
+		t.Fatalf("second send after the window = %q, want the first ask's re-send", m.Subject)
+	}
+}
+
+// waitEvents waits up to 5s for the audit events to read want.
+func waitEvents(t *testing.T, st *store.Store, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	got := ""
+	for time.Now().Before(deadline) {
+		if got = strings.Join(events(t, st), ","); got == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("audit = %s, want %s", got, want)
 }

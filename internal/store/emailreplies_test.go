@@ -17,14 +17,14 @@ func TestReplyByEmailIsAtomic(t *testing.T) {
 	s, _ := open(t, ":memory:")
 	ctx := context.Background()
 	req := ask(t, s, "muse", "instinct", "find the quote")
-	rep, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", envelope.Reply{Status: envelope.StatusAnswered, Body: "$4,200"})
+	rep, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "$4,200"})
 	if err != nil || rep.From != "instinct" || rep.Body != "$4,200" {
 		t.Fatalf("ReplyByEmail = %+v, %v", rep, err)
 	}
-	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", envelope.Reply{Status: envelope.StatusAnswered, Body: "again"}); !errors.Is(err, ErrEmailDecided) {
+	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "again"}); !errors.Is(err, ErrEmailDecided) {
 		t.Fatalf("same message again: %v, want ErrEmailDecided", err)
 	}
-	if _, err := s.ReplyByEmail(ctx, "<m2>", req.ID, "instinct", envelope.Reply{Status: envelope.StatusAnswered, Body: "late"}); !errors.Is(err, ErrWrongState) {
+	if _, err := s.ReplyByEmail(ctx, "<m2>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "late"}); !errors.Is(err, ErrWrongState) {
 		t.Fatalf("closed request: %v, want ErrWrongState", err)
 	}
 	if ok, _ := s.EmailDecided(ctx, "<m2>"); ok {
@@ -61,14 +61,14 @@ func TestReplyByEmailRefusesLiveClaim(t *testing.T) {
 	if live, err := s.ClaimLive(ctx, req.ID); err != nil || !live {
 		t.Fatalf("ClaimLive = %v, %v", live, err)
 	}
-	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", envelope.Reply{Status: envelope.StatusAnswered, Body: "done"}); !errors.Is(err, ErrLiveClaim) {
+	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "done"}); !errors.Is(err, ErrLiveClaim) {
 		t.Fatalf("live claim: %v, want ErrLiveClaim", err)
 	}
-	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "grokbot", envelope.Reply{Status: envelope.StatusAnswered, Body: "done"}); !errors.Is(err, ErrForbidden) {
+	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "grokbot", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "done"}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("other agent: %v, want ErrForbidden", err)
 	}
 	c.advance(2 * time.Minute)
-	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", envelope.Reply{Status: envelope.StatusFailed, Body: "no plumber"}); err != nil {
+	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusFailed, Body: "no plumber"}); err != nil {
 		t.Fatalf("lapsed claim: %v", err)
 	}
 	if _, st, _ := s.Request(ctx, req.ID); st != envelope.StatusFailed {
@@ -102,5 +102,49 @@ func TestDecideEmailOncePerMessage(t *testing.T) {
 	}
 	if owed, _ := s.UnsentEmailResponses(ctx, "muse"); len(owed) != 0 {
 		t.Fatalf("another agent's owed = %+v", owed)
+	}
+}
+
+// An email reply is taken only for the clarification round its tag was
+// checked against: if the agent asked and the asker answered meanwhile, the
+// request has moved on and the reply is refused as out of date.
+func TestReplyByEmailRefusesStaleRound(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	req := ask(t, s, "muse", "instinct", "find the quote")
+	if _, err := s.Deliver(ctx, "instinct", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, req.ID, "instinct", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Reply(ctx, req.ID, "instinct", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which house?"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Answer(ctx, req.ID, "muse", "the Seattle one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "old answer"}); !errors.Is(err, ErrStaleRound) {
+		t.Fatalf("round-0 reply after round 1: %v, want ErrStaleRound", err)
+	}
+	if ok, _ := s.EmailDecided(ctx, "<m1>"); ok {
+		t.Fatal("a refused reply left an email_replies row")
+	}
+	if _, err := s.ReplyByEmail(ctx, "<m2>", req.ID, "instinct", 1, envelope.Reply{Status: envelope.StatusAnswered, Body: "$4,200"}); err != nil {
+		t.Fatalf("current round: %v", err)
+	}
+}
+
+// A request held for approval and never approved cannot be answered by
+// email, even though its target is the agent.
+func TestReplyByEmailRefusesHeldUnapproved(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	req := ask(t, s, "muse", "instinct", "wire the money")
+	if _, err := s.db.ExecContext(ctx, `UPDATE requests SET was_held = 1, approved = 0 WHERE id = ?`, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "instinct", 0, envelope.Reply{Status: envelope.StatusAnswered, Body: "sent"}); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("held, unapproved: %v, want ErrWrongState", err)
 	}
 }

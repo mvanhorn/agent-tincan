@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -26,6 +27,10 @@ var ErrEmailDecided = errors.New("email message already decided")
 // ErrLiveClaim means the request is claimed under a live lease.
 var ErrLiveClaim = errors.New("request is claimed under a live lease")
 
+// ErrStaleRound means the request's clarification round has moved on since
+// the email reply's tag was checked.
+var ErrStaleRound = errors.New("request is in a later clarification round")
+
 // EmailOutcomeRecorded is the outcome of a message whose reply was stored.
 const EmailOutcomeRecorded = "recorded"
 
@@ -38,15 +43,14 @@ type EmailReply struct {
 	CreatedAt time.Time
 }
 
-// migrateEmailReplies creates the table of decided email messages. It is a
-// no-op when the table exists.
-
 // emailReplyGuard is what an email reply additionally needs of its request
 // row, with the current time (Unix ms) as its one ?: not claimed under a
 // live lease (an agent is working it over tincan), and not held without
 // approval.
 const emailReplyGuard = `NOT (status = 'claimed' AND lease_until > ?) AND NOT (was_held = 1 AND approved = 0)`
 
+// migrateEmailReplies creates the table of decided email messages. It is a
+// no-op when the table exists.
 func (s *Store) migrateEmailReplies() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS email_replies (message_id TEXT PRIMARY KEY, agent TEXT NOT NULL, request_id TEXT NOT NULL,
 		outcome TEXT NOT NULL, response_sent INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -87,9 +91,11 @@ func (s *Store) DecideEmail(ctx context.Context, messageID, agent, requestID, ou
 // Unlike Reply it takes only a terminal reply, refuses a request claimed
 // under a live lease (ErrLiveClaim) and one held and never approved
 // (ErrWrongState), and needs no claim. It returns ErrEmailDecided when the
-// message already has a row, ErrForbidden when agent is not the target and
+// message already has a row, ErrForbidden when agent is not the target,
+// ErrStaleRound when the request's answered clarification rounds are no
+// longer round (the round the reply's tag was checked for), and
 // ErrWrongState when the request is no longer open.
-func (s *Store) ReplyByEmail(ctx context.Context, messageID, id, agent string, rep envelope.Reply) (envelope.Reply, error) {
+func (s *Store) ReplyByEmail(ctx context.Context, messageID, id, agent string, round int, rep envelope.Reply) (envelope.Reply, error) {
 	if !rep.Status.Terminal() || len(rep.Attachments) > 0 {
 		return envelope.Reply{}, ErrWrongState
 	}
@@ -98,10 +104,10 @@ func (s *Store) ReplyByEmail(ctx context.Context, messageID, id, agent string, r
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
-	var to string
+	var to, exchanges string
 	var claimLive bool
-	err = tx.QueryRowContext(ctx, `SELECT to_agent, status = ? AND lease_until > ? FROM requests WHERE id = ?`,
-		string(envelope.StatusClaimed), s.now().UnixMilli(), id).Scan(&to, &claimLive)
+	err = tx.QueryRowContext(ctx, `SELECT to_agent, status = ? AND lease_until > ?, exchanges FROM requests WHERE id = ?`,
+		string(envelope.StatusClaimed), s.now().UnixMilli(), id).Scan(&to, &claimLive, &exchanges)
 	if errors.Is(err, sql.ErrNoRows) {
 		return envelope.Reply{}, ErrNotFound
 	}
@@ -113,6 +119,13 @@ func (s *Store) ReplyByEmail(ctx context.Context, messageID, id, agent string, r
 	}
 	if claimLive {
 		return envelope.Reply{}, ErrLiveClaim
+	}
+	var cur envelope.Request
+	if err := json.Unmarshal([]byte(exchanges), &cur.Exchanges); err != nil {
+		return envelope.Reply{}, err
+	}
+	if cur.AnsweredExchanges() != round {
+		return envelope.Reply{}, ErrStaleRound
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO email_replies (message_id, agent, request_id, outcome, response_sent, created_at) VALUES (?, ?, ?, ?, 0, ?)
 		ON CONFLICT(message_id) DO NOTHING`, messageID, agent, id, EmailOutcomeRecorded, s.now().UnixMilli())

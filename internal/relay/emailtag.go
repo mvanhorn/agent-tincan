@@ -62,15 +62,7 @@ func emailTagMAC(key []byte, id, agent string, round int) []byte {
 // have been answered. An answered clarification starts a new round, so an
 // email sent before it stops verifying; a question still waiting for its
 // answer does not.
-func EmailTagRound(req envelope.Request) int {
-	n := 0
-	for _, ex := range req.Exchanges {
-		if ex.Answer != "" {
-			n++
-		}
-	}
-	return n
-}
+func EmailTagRound(req envelope.Request) int { return req.AnsweredExchanges() }
 
 // SetEmailTagKey installs the email-tag-key. Call it before the relay
 // serves or wakes anyone. Without it the relay mints and verifies no tags.

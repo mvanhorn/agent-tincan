@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -201,22 +202,30 @@ func (w *Waker) pickRequestMails(agent string, asks []envelope.Request, at time.
 		if a.Status == envelope.StatusQueued {
 			queuedAsks++
 		}
-		when, ok := last[a.ID]
+		when, ok := last[mailKey(a)]
 		switch {
 		case !ok:
 			picked = append(picked, a)
 		case w.resendDue(a, at.Sub(when)):
 			resend = append(resend, a)
-			prev[a.ID] = when
+			prev[mailKey(a)] = when
 		default:
-			kept[a.ID] = when
+			kept[mailKey(a)] = when
 			continue
 		}
-		kept[a.ID] = at
+		kept[mailKey(a)] = at
 	}
 	slices.SortStableFunc(resend, func(a, b envelope.Request) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	w.mailed[agent] = kept
 	return append(picked, resend...), prev, queuedAsks
+}
+
+// mailKey keys an ask in Waker.mailed by its id and clarification round.
+// Answering a clarification starts a new round whose tag the earlier email
+// does not carry, so the ask then counts as never emailed and its next
+// request email goes out on the debounce, not after a wake grace.
+func mailKey(a envelope.Request) string {
+	return a.ID + "#" + strconv.Itoa(a.AnsweredExchanges())
 }
 
 // unpick puts asks whose email was not sent back to their previous email
@@ -229,10 +238,10 @@ func (w *Waker) unpick(agent string, asks []envelope.Request, prev map[string]ti
 		return
 	}
 	for _, a := range asks {
-		if when, ok := prev[a.ID]; ok {
-			m[a.ID] = when
+		if when, ok := prev[mailKey(a)]; ok {
+			m[mailKey(a)] = when
 		} else {
-			delete(m, a.ID)
+			delete(m, mailKey(a))
 		}
 	}
 }

@@ -747,3 +747,28 @@ func TestEmailResponseGivenUpAfterWindow(t *testing.T) {
 		t.Fatalf("still owed after the window: %+v", owed)
 	}
 }
+
+// A message AgentMail labels unauthenticated, from the agent's own address
+// and carrying a valid tag, is a forged reply: it is never fetched, decided,
+// answered or recorded, whatever other labels it carries.
+func TestEmailUnauthenticatedReplyIgnored(t *testing.T) {
+	for _, labels := range [][]string{{"received", "unauthenticated"}, {"received", "spam", "unauthenticated"}} {
+		e := newEmailEnv(t, relay.Config{})
+		req := e.ask("find the quote")
+		id := e.mail.add(instinctMail, e.subject(req), new("forged answer"), time.Now())
+		e.mail.mu.Lock()
+		e.mail.msgs[len(e.mail.msgs)-1].Labels = labels
+		e.mail.mu.Unlock()
+		e.poll()
+		if got := e.mail.fetched(); len(got) != 0 {
+			t.Fatalf("labels %v: fetched %v, want nothing", labels, got)
+		}
+		e.wantResponses()
+		if e.decided(id) {
+			t.Fatalf("labels %v: forged message has an email_replies row", labels)
+		}
+		if res := e.get(req.ID); res.Status != envelope.StatusQueued {
+			t.Fatalf("labels %v: status = %s, want queued", labels, res.Status)
+		}
+	}
+}
