@@ -251,6 +251,18 @@ type Exchange struct {
 	At       time.Time `json:"at"`
 }
 
+// AnsweredExchanges counts r's clarification rounds that have an answer.
+// It is the round a request email's reply tag is bound to.
+func (r Request) AnsweredExchanges() int {
+	n := 0
+	for _, ex := range r.Exchanges {
+		if ex.Answer != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // ValidateInput checks a clarification body before it is stored.
 func ValidateInput(body string) error {
 	if strings.TrimSpace(body) == "" {

@@ -24,6 +24,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 // Config tunes the relay.
@@ -57,6 +58,10 @@ type Config struct {
 	// through the approval policy's notify destination; default
 	// DefaultOwnerNoticeAfter.
 	OwnerNoticeAfter int
+	// EmailPollEvery is how often the relay polls an opted-in agent's
+	// AgentMail inbox for replies to its request emails while the agent's
+	// window is open; default DefaultEmailPollEvery.
+	EmailPollEvery time.Duration
 }
 
 func (c *Config) defaults() {
@@ -95,6 +100,9 @@ func (c *Config) defaults() {
 	}
 	if c.OwnerNoticeAfter == 0 {
 		c.OwnerNoticeAfter = DefaultOwnerNoticeAfter
+	}
+	if c.EmailPollEvery == 0 {
+		c.EmailPollEvery = DefaultEmailPollEvery
 	}
 	c.Attachments.defaults()
 }
@@ -156,6 +164,9 @@ type Server struct {
 	blobs       string   // attachment directory, "" when attachments are off
 	key         string   // relay key, proves this relay's identity to its agents (hello)
 	urls        []string // addresses advertised to agents in whoami
+	// emailTagKey signs request-email reply tags (EmailTagKeyFile). It is
+	// never served; nil means no tags.
+	emailTagKey []byte
 
 	// upgrader installs the dist release over the relay binary; nil when off.
 	upgrader SelfUpgrader
@@ -190,6 +201,16 @@ type Server struct {
 	// current silent episode, for the owner's wake notice.
 	silent map[string]silentEpisode
 
+	// emailMu serializes email reply polls and guards inboxes,
+	// emailCursor and emailRetry: the agents opted in to request emails,
+	// how far back each one's next poll looks, and the listed messages
+	// that could not be decided yet, retried on their own (see
+	// emailreplies.go).
+	emailMu     sync.Mutex
+	inboxes     []EmailInbox
+	emailCursor map[string]time.Time
+	emailRetry  map[string]map[string]wake.MailMessage
+
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
 	stopOnce sync.Once
@@ -217,7 +238,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now()}
+		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
@@ -381,13 +402,23 @@ func limitBodies(h http.Handler) http.Handler {
 // so calls already in flight finish normally. Stop is idempotent.
 func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 
-// Run sweeps expired requests and leases, and applies attachment retention
-// at start and every Attachments.SweepEvery, until ctx ends.
+// Run sweeps expired requests and leases, applies attachment retention at
+// start and every Attachments.SweepEvery, and, when agents are opted in to
+// request emails (SetEmailInboxes), polls their inboxes for replies at
+// start and every EmailPollEvery, until ctx ends.
 func (s *Server) Run(ctx context.Context) {
 	t := time.NewTicker(s.cfg.SweepEvery)
 	defer t.Stop()
 	at := time.NewTicker(s.cfg.Attachments.SweepEvery)
 	defer at.Stop()
+	// The email reply poll talks to AgentMail and can wait out a 429 for
+	// minutes, so it runs on its own loop: expiry and lease sweeps never
+	// wait behind it. Run returns only after that loop has stopped.
+	if s.hasEmailInboxes() {
+		var wg sync.WaitGroup
+		wg.Go(func() { s.pollEmailRepliesEvery(ctx) })
+		defer wg.Wait()
+	}
 	s.SweepAttachments(ctx)
 	for {
 		select {
@@ -397,6 +428,21 @@ func (s *Server) Run(ctx context.Context) {
 			s.Sweep(ctx)
 		case <-at.C:
 			s.SweepAttachments(ctx)
+		}
+	}
+}
+
+// pollEmailRepliesEvery polls for email replies at start and then every
+// EmailPollEvery until ctx ends.
+func (s *Server) pollEmailRepliesEvery(ctx context.Context) {
+	mt := time.NewTicker(s.cfg.EmailPollEvery)
+	defer mt.Stop()
+	for {
+		s.PollEmailReplies(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-mt.C:
 		}
 	}
 }
@@ -1005,11 +1051,31 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
 		return
 	}
-	id := r.PathValue("id")
-	rep, err = s.store.Reply(r.Context(), id, name, rep)
+	rep, err = s.recordReply(r.Context(), r.PathValue("id"), name, rep, "", 0)
 	if err != nil {
 		writeErr(w, attachmentStatus(err, statusFor(err)), err)
 		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// recordReply stores agent's reply rep to request id and tells everyone who
+// waits on it: the request's own waiters, the audit log, the asker's held
+// poll and the asker's reply wake. It is the one path for every reply, so
+// a reply over tincan (handleReply, emailMessageID "") and a reply by email
+// (emailMessageID is the AgentMail message it came in) cannot drift apart.
+// An email reply is stored with its email_replies row in one transaction
+// (store.ReplyByEmail) and audited with via "email"; its tag, sender and
+// text never reach the audit log.
+func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope.Reply, emailMessageID string, round int) (envelope.Reply, error) {
+	var err error
+	if emailMessageID == "" {
+		rep, err = s.store.Reply(ctx, id, agent, rep)
+	} else {
+		rep, err = s.store.ReplyByEmail(ctx, emailMessageID, id, agent, round, rep)
+	}
+	if err != nil {
+		return envelope.Reply{}, err
 	}
 	s.hub.notify(requestKey(id))
 	event := "replied"
@@ -1018,18 +1084,21 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		event = "needs_input"
 		detail = map[string]any{"question_bytes": len(rep.Body)}
 	}
-	s.record(r.Context(), event, id, "", name, store.DetailJSON(detail))
+	if emailMessageID != "" {
+		detail["via"] = "email"
+	}
+	s.record(ctx, event, id, "", agent, store.DetailJSON(detail))
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
-	if req, _, err := s.store.Request(r.Context(), id); err == nil {
+	if req, _, err := s.store.Request(ctx, id); err == nil {
 		s.hub.notify(inboxKey(req.From))
 		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
-			rp.Replied(r.Context(), req)
+			rp.Replied(ctx, req)
 		}
 	} else {
 		log.Printf("reply %s: look up asker: %v", id, err)
 	}
-	writeJSON(w, http.StatusOK, rep)
+	return rep, nil
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {

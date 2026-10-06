@@ -3,6 +3,9 @@ package cli
 import (
 	"context"
 	"errors"
+	"net"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -33,6 +36,27 @@ func TestExitCodeSurvivesRejoinHints(t *testing.T) {
 				t.Fatalf("ExitStatus(%v) = %d, %v; want 2, %v", err, code, silent, want.Silent)
 			}
 		})
+	}
+}
+
+// A command that failed because the SOCKS proxy could not reach the relay
+// says the tunnel is down, that nothing was sent, and that an emailed
+// request can be answered by email.
+func TestSOCKSFailureGetsTunnelHint(t *testing.T) {
+	useConfig(t, client.Config{Relay: "http://tincan-relay"})
+	socks := &url.Error{Op: "Get", URL: "http://tincan-relay/v1/inbox", Err: &net.OpError{Op: "socks connect", Net: "tcp", Err: errors.New("unknown error general SOCKS server failure")}}
+	root := &cobra.Command{Use: "tincan", SilenceUsage: true, SilenceErrors: true}
+	root.AddCommand(&cobra.Command{Use: "inbox", RunE: func(*cobra.Command, []string) error { return socks }})
+	withRejoinHints(root)
+	root.SetArgs([]string{"inbox"})
+	err := root.ExecuteContext(context.Background())
+	if err == nil {
+		t.Fatal("want the SOCKS failure")
+	}
+	for _, want := range []string{"socks connect", "tailnet tunnel to the relay is not up", "nothing was sent", "replying to that email"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not say %q", err, want)
+		}
 	}
 }
 

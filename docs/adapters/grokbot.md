@@ -200,3 +200,5 @@ Give grokbot a second path so a dead routine does not strand its requests. A `fa
 ```
 
 A fallback cannot set `max_per_hour` or its own `fallback`, and a mistake is reported with the agent and the fallback's position, such as `wake grokbot: fallback 1: email needs email_to, agentmail_inbox, agentmail_key`. The roster and the asker's note name the path that sent the last wake, for example `woken 12m ago, no check-in (webhook ok (fallback 1: email))`. The URL, address and keys never reach agents.
+
+If this inbox is also the sending inbox for an agent with `include_requests` (such as Instinct), its replies and the relay's "recorded" emails land here too. Tell Grok Bot to ignore mail whose subject contains `[tincan `; the relay handles it. A dedicated sending inbox for that agent avoids the overlap.

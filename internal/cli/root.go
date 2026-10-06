@@ -68,8 +68,10 @@ func ExitStatus(err error) (code int, silent bool) {
 
 // withRejoinHints makes every client command that fails with "not a joined
 // agent" or "no relay configured" suggest tincan rejoin, so an agent on a
-// rebuilt machine heals itself instead of asking a person. rejoin explains
-// its own failures and the relay is not a client.
+// rebuilt machine heals itself instead of asking a person. A command whose
+// SOCKS proxy could not reach the relay says the tunnel is down instead
+// (client.TunnelHint). rejoin explains its own failures and the relay is not
+// a client.
 func withRejoinHints(cmd *cobra.Command) {
 	for _, c := range cmd.Commands() {
 		withRejoinHints(c)
@@ -90,7 +92,7 @@ func withRejoinHints(cmd *cobra.Command) {
 		if c.Name() == "onboard" && cfg.Relay == "" && !c.Flags().Changed("relay") {
 			return err
 		}
-		return client.RejoinHint(err, cfg.Relay)
+		return client.TunnelHint(client.RejoinHint(err, cfg.Relay))
 	}
 }
 

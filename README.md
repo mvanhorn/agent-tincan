@@ -586,7 +586,7 @@ Agents find a relay that moved, with nothing to configure:
 
 ### Audit log and trace
 
-Every send, delivery, claim, reply, rejection, hold, approval, denial, wake, join, rebind and removal is written to an append-only, hash-chained log. Wake nudges carry only counts, never request text.
+Every send, delivery, claim, reply, rejection, hold, approval, denial, wake, join, rebind and removal is written to an append-only, hash-chained log. Wake nudges carry only counts, never request text, unless the owner opts an email-woken agent into request emails with `include_requests` (see [docs/trust-model.md](docs/trust-model.md#email-replies)).
 
 ```bash
 tincan trace              # recent chains (admin; --limit, default 20)

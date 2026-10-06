@@ -141,3 +141,26 @@ func TestRelayOwnerNoticeAfterFlag(t *testing.T) {
 		t.Fatalf("zero --owner-notice-after: %v", err)
 	}
 }
+
+// The relay polls for email replies only from agents with include_requests
+// on, in name order, each with its own address and inbox.
+func TestEmailReplyInboxes(t *testing.T) {
+	cfg := wake.Config{
+		"instinct": {Method: wake.Email, EmailTo: "i@example.com", AgentMailFrom: "a@agentmail.to", AgentMailKey: "k1", IncludeRequests: true},
+		"alpha":    {Method: wake.Email, EmailTo: "alpha@example.com", AgentMailFrom: "b@agentmail.to", AgentMailKey: "k2", IncludeRequests: true},
+		"grokbot":  {Method: wake.Email, EmailTo: "g@example.com", AgentMailFrom: "a@agentmail.to", AgentMailKey: "k1"},
+		"hermes":   {Method: wake.Webhook, URL: "https://h.example"},
+	}
+	got := emailReplyInboxes(cfg)
+	if len(got) != 2 || got[0].Agent != "alpha" || got[0].Address != "alpha@example.com" || got[1].Agent != "instinct" || got[1].Address != "i@example.com" {
+		t.Fatalf("inboxes = %+v, want alpha and instinct", got)
+	}
+	for _, in := range got {
+		if in.Mail == nil {
+			t.Fatalf("%s has no mailbox", in.Agent)
+		}
+	}
+	if emailReplyInboxes(wake.Config{"grokbot": cfg["grokbot"]}) != nil {
+		t.Fatal("an agent without include_requests is polled")
+	}
+}

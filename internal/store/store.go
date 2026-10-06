@@ -220,6 +220,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate owner notices: %w", err)
 	}
+	if err := s.migrateEmailReplies(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate email replies: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -798,6 +802,33 @@ func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error
 	return n, err
 }
 
+// OpenAsks returns agent's open asks with their bodies and clarification
+// exchanges, urgent first and then oldest, each with its current status in
+// Status. Open means queued, delivered or claimed and not expired. It is the
+// only query a request email reads, so it never returns a held request (or
+// one that was held and never approved), a ping, a notify, or a request
+// paused for input or already finished: none of those may reach an email.
+func (s *Store) OpenAsks(ctx context.Context, agent string) ([]envelope.Request, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
+		WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?) AND expires_at > ? AND NOT (was_held = 1 AND approved = 0)
+		ORDER BY urgent DESC, created_at, rowid`,
+		agent, string(envelope.KindAsk), string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), s.now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []envelope.Request
+	for rows.Next() {
+		r, status, err := scanRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		r.Status = status
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // QueueStat is one agent's backlog: requests waiting to be claimed, the
 // creation time of the oldest of them, and claims whose lease is still live.
 type QueueStat struct {
@@ -952,16 +983,32 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 	if rep.Status == envelope.StatusNeedsInput {
 		return s.needsInput(ctx, id, agent, rep)
 	}
-	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Reply{}, err
 	}
 	defer tx.Rollback()
+	if rep, err = s.replyTx(ctx, tx, id, agent, rep, false); err != nil {
+		return envelope.Reply{}, err
+	}
+	return rep, tx.Commit()
+}
+
+// replyTx closes open request id with agent's terminal reply rep inside tx:
+// the request takes rep's status and the reply row is written. byEmail adds
+// the email path's conditions (emailReplyGuard). It returns ErrWrongState
+// when the request is no longer open or fails those conditions.
+func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep envelope.Reply, byEmail bool) (envelope.Reply, error) {
+	now := s.now()
+	args := []any{string(rep.Status), now.UnixMilli(), now.UnixMilli(), id,
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed)}
+	where := ""
+	if byEmail {
+		where = " AND " + emailReplyGuard
+		args = append(args, now.UnixMilli())
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1
-		WHERE id = ? AND status IN (?, ?, ?)`,
-		string(rep.Status), now.UnixMilli(), now.UnixMilli(), id,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed))
+		WHERE id = ? AND status IN (?, ?, ?)`+where, args...)
 	if err != nil {
 		return envelope.Reply{}, err
 	}
@@ -980,7 +1027,7 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 		id, agent, string(rep.Status), rep.Body, now.UnixMilli(), atts); err != nil {
 		return envelope.Reply{}, err
 	}
-	return rep, tx.Commit()
+	return rep, nil
 }
 
 // Result is a request with its current status and reply, if any.

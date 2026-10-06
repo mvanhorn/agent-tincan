@@ -612,8 +612,30 @@ func (r *Relay) Raw(ctx context.Context, method, path string, in, out any) error
 	return r.call(ctx, r.api, method, path, in, out)
 }
 
+// socksRetry spaces the retries of a call whose SOCKS proxy could not
+// connect to the relay, about 15 seconds in all: long enough for a sandbox's
+// tailnet tunnel to come back after the sandbox wakes. Tests shorten it.
+var socksRetry = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+
+// call makes one relay call. A call the SOCKS proxy could not connect is
+// made again on the socksRetry schedule while ctx allows; nothing reached
+// the relay, so this is safe for a POST too. Any other failure, and a SOCKS
+// failure that outlasts the schedule, goes on as before: a call that found
+// nothing at the relay's address looks for a moved relay and, if it finds
+// one, is made once more there.
 func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, in, out any) error {
 	err := r.callOnce(ctx, c, method, path, in, out)
+	for _, delay := range socksRetry {
+		if err == nil || !socksConnectFailed(err) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		err = r.callOnce(ctx, c, method, path, in, out)
+	}
 	if err != nil && r.relocate(ctx, err) {
 		return r.callOnce(ctx, c, method, path, in, out)
 	}

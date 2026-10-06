@@ -37,7 +37,11 @@
 // path shares the agent's MaxPerHour.
 //
 // Wake messages carry only counts and an instruction, never request or reply
-// text.
+// text. The one exception is an email agent with IncludeRequests: on its
+// primary path each open ask gets its own request email with that ask's text
+// and a reply tag (requestmail.go), and AgentMail (agentmail.go) lets the
+// relay read the agent's replies to those emails. Fallback paths, pings,
+// notifies and reply nudges stay count-only.
 // URLs, addresses, and keys live in the relay-local wake config and are never
 // served to agents.
 package wake
@@ -121,6 +125,12 @@ type Target struct {
 	EmailTo       string `json:"email_to,omitempty"`
 	AgentMailFrom string `json:"agentmail_inbox,omitempty"` // sending inbox, e.g. mvhgrokbot@agentmail.to
 	AgentMailKey  string `json:"agentmail_key,omitempty"`
+	// IncludeRequests turns on request emails for an agent whose primary
+	// path is email: each open ask gets its own email with its text and a
+	// reply tag (see requestmail.go). Off by default, since it sends request
+	// text off the tailnet to AgentMail and the agent's mail provider. Not
+	// allowed on any other method or on a fallback.
+	IncludeRequests bool `json:"include_requests,omitempty"`
 
 	// schedule: a Go duration such as "5m", the agent's own check interval.
 	Every string `json:"every,omitempty"`
@@ -206,6 +216,9 @@ func LoadConfig(path string) (Config, error) {
 
 // checkTarget validates one wake path's method and the fields it needs.
 func checkTarget(t Target) error {
+	if t.IncludeRequests && t.Method != Email {
+		return fmt.Errorf("include_requests needs method email, not %q", t.Method)
+	}
 	if t.Format != FormatGeneric && (t.Method != Webhook || t.Format != FormatOpenClaw) {
 		return fmt.Errorf("unknown format %q (webhook supports \"openclaw\")", t.Format)
 	}
@@ -243,6 +256,9 @@ func checkFallback(f Target) error {
 	}
 	if f.MaxPerHour != 0 {
 		return errors.New("max_per_hour belongs on the agent; all its paths share it")
+	}
+	if f.IncludeRequests {
+		return errors.New("include_requests belongs on the agent's primary email path; request emails never go to a fallback")
 	}
 	return checkTarget(f)
 }
@@ -290,7 +306,7 @@ var DefaultReplyRetries = []time.Duration{5 * time.Minute, 20 * time.Minute, tim
 type Options struct {
 	Debounce     time.Duration // coalesce a burst into one nudge; default 3s
 	RetryDelay   time.Duration // wait before the single retry; default 5s
-	AgentMailAPI string        // default https://api.agentmail.to/v0
+	AgentMailAPI string        // default DefaultAgentMailAPI
 	HTTP         *http.Client
 	Online       func(agent string) bool // skip request wakes for agents already polling
 	// Queued counts agent's requests still waiting to be delivered. With
@@ -333,7 +349,16 @@ type Options struct {
 	// or after the last recorded wake is proof of life and stops request
 	// follow-up. Nil is treated as never polled.
 	LastPoll func(agent string) time.Time
-	Now      func() time.Time
+	// OpenAsks lists agent's open asks for request emails: queued,
+	// delivered or claimed asks, urgent first then oldest, with bodies and
+	// exchanges, and never a held request, ping or notify. With RequestTag
+	// it turns on request emails for a target with IncludeRequests; without
+	// either, such a target gets count-only emails.
+	OpenAsks func(agent string) ([]envelope.Request, error)
+	// RequestTag is the reply tag for a request email to req's target; ""
+	// means no tag can be minted and the agent gets count-only emails.
+	RequestTag func(req envelope.Request) string
+	Now        func() time.Time
 }
 
 // nudge is one agent's pending wake.
@@ -347,6 +372,10 @@ type nudge struct {
 	followUp bool        // --wake-grace request follow-up; poll/queue stop checks apply
 	fresh    int         // requests that arrived while the follow-up was due
 	urgent   bool        // an urgent request was queued since the last nudge
+	// mailOnly marks a request-email nudge for asks that arrived while a
+	// follow-up was due (see armMail): it emails only those asks and leaves
+	// replies and the follow-up alone.
+	mailOnly bool
 }
 
 // Waker implements relay.Events, relay.Requeuer, relay.Replier,
@@ -381,6 +410,14 @@ type Waker struct {
 	// unbound is set by Forget until Joined or Unforget. followUpLater
 	// does not re-arm while the name is unbound.
 	unbound map[string]struct{}
+	// mailTimers holds each request-email agent's mail-only nudge, armed
+	// beside a pending follow-up (see armMail).
+	mailTimers map[string]*time.Timer
+	// mailed is when each open ask of a request-email agent was last
+	// emailed, by agent and mailKey (request id and clarification round).
+	// It lives in memory only: after a restart every open ask counts as
+	// never emailed, which costs at most one extra email per ask.
+	mailed map[string]map[string]time.Time
 	// rememberMu makes keeping a last wake, store write included, atomic
 	// with Forget, so a removal cannot slip between the check and the write.
 	rememberMu sync.Mutex
@@ -416,7 +453,7 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 		opts.UrgentWakeGrace = DefaultUrgentWakeGrace
 	}
 	if opts.AgentMailAPI == "" {
-		opts.AgentMailAPI = "https://api.agentmail.to/v0"
+		opts.AgentMailAPI = DefaultAgentMailAPI
 	}
 	if opts.HTTP == nil {
 		opts.HTTP = client.New(client.APIClient)
@@ -444,7 +481,8 @@ func New(cfg Config, audit *store.Store, opts Options) *Waker {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Waker{cfg: cfg, opts: opts, audit: audit, pending: map[string]*nudge{}, sent: map[string][]time.Time{}, replyGen: map[string]uint64{},
-		last: last, step: step, removed: map[string]time.Time{}, unbound: map[string]struct{}{}, ctx: ctx, cancel: cancel}
+		last: last, step: step, removed: map[string]time.Time{}, unbound: map[string]struct{}{},
+		mailTimers: map[string]*time.Timer{}, mailed: map[string]map[string]time.Time{}, ctx: ctx, cancel: cancel}
 }
 
 // LastWake implements relay.WakeReporter: the last wake the relay sent
@@ -475,6 +513,11 @@ func (w *Waker) Forget(agent string) {
 		}
 		delete(w.pending, agent)
 	}
+	if t := w.mailTimers[agent]; t != nil && t.Stop() {
+		w.wg.Done() // the stopped timer's callback will never run
+	}
+	delete(w.mailTimers, agent)
+	delete(w.mailed, agent)
 	w.replyGen[agent]++ // a follow-up of a nudge in flight is dropped too
 }
 
@@ -546,14 +589,14 @@ func (w *Waker) CheckEvery(agent string) time.Duration {
 // Queued implements relay.Events. Relay-side methods schedule a debounced
 // nudge; agent-side methods need nothing from the relay.
 func (w *Waker) Queued(_ context.Context, req envelope.Request) {
-	w.schedule(req.To, true, req.Urgent)
+	w.schedule(req.To, true, req.Urgent, req.Kind == envelope.KindAsk)
 }
 
 // Requeued implements relay.Requeuer. A requeue means the agent's own
 // delivery or claim lease ran out, so a recent poll does not prove a poller
 // holds the request; relay-side methods are nudged without the online check.
 func (w *Waker) Requeued(_ context.Context, req envelope.Request) {
-	w.schedule(req.To, false, req.Urgent)
+	w.schedule(req.To, false, req.Urgent, req.Kind == envelope.KindAsk)
 }
 
 // Replied implements relay.Replier: it schedules a nudge for the asker,
@@ -598,8 +641,9 @@ func (w *Waker) RequestsWaiting(agent string) {
 }
 
 // schedule debounces a relay-side nudge for agent. checkOnline skips agents
-// whose poller already has the request.
-func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
+// whose poller already has the request. ask says the request is an ask,
+// which a request-email agent gets its own email for.
+func (w *Waker) schedule(agent string, checkOnline, urgent, ask bool) {
 	if !w.relaySide(agent) {
 		return
 	}
@@ -620,6 +664,16 @@ func (w *Waker) schedule(agent string, checkOnline, urgent bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	p := w.nudgeFor(agent)
+	if p.followUp && !urgent && silent && ask && w.mailsRequests(agent) {
+		// A request-email agent gets a new ask's first email on the
+		// debounce, not when the follow-up for older asks comes due, and
+		// that follow-up keeps its time. The ask still rides the follow-up
+		// (p.fresh), so if its email fails or is skipped and the agent then
+		// checks in, the follow-up's fresh wake emails it.
+		w.armMail(agent)
+		p.fresh++
+		return
+	}
 	p.requests++
 	p.urgent = p.urgent || urgent
 	if p.followUp && !urgent && silent {
@@ -697,6 +751,11 @@ func (w *Waker) Stop() {
 			w.wg.Done() // the stopped timer's callback will never run
 		}
 	}
+	for _, t := range w.mailTimers {
+		if t.Stop() {
+			w.wg.Done()
+		}
+	}
 	w.mu.Unlock()
 	w.cancel()
 	w.wg.Wait()
@@ -711,6 +770,12 @@ func (w *Waker) fire(agent string) {
 	if p == nil {
 		return
 	}
+	w.deliver(agent, p, gen)
+}
+
+// deliver sends agent's nudge p, which fire or fireMail has taken out of
+// pending. gen is agent's reply generation when it fired.
+func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 	if p.followUp {
 		w.applyFollowUpStops(agent, p)
 		if p.followUp && p.requests > 0 && w.opts.Unanswered != nil {
@@ -726,7 +791,7 @@ func (w *Waker) fire(agent string) {
 		}
 	}
 	replies := p.replies
-	if w.opts.UnseenReplies != nil {
+	if w.opts.UnseenReplies != nil && !p.mailOnly {
 		replies = w.opts.UnseenReplies(agent)
 	}
 	if p.requests == 0 && replies == 0 {
@@ -740,6 +805,14 @@ func (w *Waker) fire(agent string) {
 	}
 	ctx, cancel := context.WithTimeout(w.ctx, 2*time.Minute)
 	defer cancel()
+	// A request-email agent gets its open asks as request emails on its
+	// primary path, except on a follow-up that moves to a fallback, which
+	// sends the count-only message there as before.
+	if p.requests > 0 && w.mailsRequests(agent) && (!p.followUp || w.peekStep(agent, true) == 0) {
+		if w.sendRequestMails(ctx, agent, p, replies) || p.mailOnly {
+			return
+		}
+	}
 	w.mu.Lock()
 	allowed := w.allow(agent)
 	w.mu.Unlock()
@@ -828,14 +901,29 @@ func (w *Waker) pathStep(agent string, followUp bool) int {
 	silent := w.silent(agent)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	step := w.step[agent]
+	step := nextStep(w.step[agent], n, silent, followUp)
+	w.step[agent] = step
+	return step
+}
+
+// peekStep is the path pathStep would pick, without moving the episode
+// there. Caller must not hold w.mu.
+func (w *Waker) peekStep(agent string, followUp bool) int {
+	n := len(w.cfg[agent].Fallback) + 1
+	silent := w.silent(agent)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return nextStep(w.step[agent], n, silent, followUp)
+}
+
+// nextStep is the path after step, of n, for the next nudge (see pathStep).
+func nextStep(step, n int, silent, followUp bool) int {
 	switch {
 	case !silent || step >= n:
-		step = 0
+		return 0
 	case followUp:
-		step = (step + 1) % n
+		return (step + 1) % n
 	}
-	w.step[agent] = step
 	return step
 }
 
@@ -849,6 +937,11 @@ func (w *Waker) applyFollowUpStops(agent string, p *nudge) {
 		// which starts the next episode on the primary.
 		p.requests = p.fresh
 		p.followUp = false
+		// Some of those requests may already be done (the agent just
+		// checked in): wake only for what is still queued.
+		if w.opts.Queued != nil {
+			p.requests = min(p.requests, w.opts.Queued(agent))
+		}
 		return
 	}
 	if w.opts.Queued == nil {
@@ -994,9 +1087,10 @@ func Message(n int) string {
 	return fmt.Sprintf("Agent Tincan: %d %s from your teammates waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.", n, plural(n, "request", "requests"))
 }
 
-// WaitingMessage is the only text a wake ever carries: counts of waiting
-// requests and of unseen replies to the agent's own requests, and what to
-// run. It never includes request or reply content.
+// WaitingMessage is the only text a count-only wake carries, which is every
+// wake but a request email (requestmail.go): counts of waiting requests and
+// of unseen replies to the agent's own requests, and what to run. It never
+// includes request or reply content.
 func WaitingMessage(requests, replies int) string {
 	switch {
 	case replies == 0:
@@ -1103,18 +1197,28 @@ func (w *Waker) send(ctx context.Context, t Target, msg, key string) (int, strin
 	case Email:
 		// The subject stays fixed for replies too: standing instructions
 		// match on it.
-		body, _ := json.Marshal(map[string]any{"to": t.EmailTo, "subject": "Agent Tincan: requests waiting", "text": msg})
-		u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
-		req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
-		if err != nil {
-			return 0, "", &sendError{reason: "invalid AgentMail URL", err: err}
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
-		code, _, err := w.do(req)
+		code, err := w.sendEmail(ctx, t, countOnlySubject, msg)
 		return code, "", err
 	}
 	return 0, "", nil
+}
+
+// countOnlySubject is the subject of every count-only wake email.
+const countOnlySubject = "Agent Tincan: requests waiting"
+
+// sendEmail sends one email through AgentMail on email path t and returns
+// the HTTP status.
+func (w *Waker) sendEmail(ctx context.Context, t Target, subject, text string) (int, error) {
+	body, _ := json.Marshal(map[string]any{"to": t.EmailTo, "subject": subject, "text": text})
+	u := fmt.Sprintf("%s/inboxes/%s/messages/send", w.opts.AgentMailAPI, url.PathEscape(t.AgentMailFrom))
+	req, err := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
+	if err != nil {
+		return 0, &sendError{reason: "invalid AgentMail URL", err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.AgentMailKey)
+	code, _, err := w.do(req)
+	return code, err
 }
 
 // do sends req and returns the status and up to the first 64 KiB of a 2xx

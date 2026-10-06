@@ -116,7 +116,7 @@ Client dial-out to {{.RelayURL}}: tincan agents from the affected agent returns 
 {{- if eq . "webhook"}}
 Webhook wakes: the relay log shows the POST status. A 401 or 403 means bearer_token or hmac_secret in wake.json does not match the receiver; fix it in the file, never in chat.
 {{- else if eq . "email"}}
-Email wakes: the agent stays paused until the email or its own scheduled check wakes it. Check that the sending inbox delivered the "Agent Tincan: requests waiting" email and that max_per_hour was not hit.
+Email wakes: the agent stays paused until the email or its own scheduled check wakes it. Check that the sending inbox delivered the "Agent Tincan: requests waiting" (or, with include_requests, "Agent Tincan: request from ...") email and that max_per_hour was not hit. tincan wakes <agent> shows each send.
 {{- else if eq . "wait"}}
 Wait-loop wakes: the agent must keep tincan wait running in the background. A proxy-only sandbox must reach the relay through the proxy that reaches the tailnet, set with --proxy at join.
 {{- else if eq . "channel"}}
