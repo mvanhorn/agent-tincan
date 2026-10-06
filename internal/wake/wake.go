@@ -37,7 +37,11 @@
 // path shares the agent's MaxPerHour.
 //
 // Wake messages carry only counts and an instruction, never request or reply
-// text.
+// text. The one exception is an email agent with IncludeRequests: on its
+// primary path each open ask gets its own request email with that ask's text
+// and a reply tag (requestmail.go), and AgentMail (agentmail.go) lets the
+// relay read the agent's replies to those emails. Fallback paths, pings,
+// notifies and reply nudges stay count-only.
 // URLs, addresses, and keys live in the relay-local wake config and are never
 // served to agents.
 package wake

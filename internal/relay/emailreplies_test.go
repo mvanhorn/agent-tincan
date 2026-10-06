@@ -679,3 +679,38 @@ func TestEmailReplyFetchFailureRetried(t *testing.T) {
 	}
 	e.wantResponses("Agent Tincan: recorded", "Agent Tincan: recorded")
 }
+
+// U4: an email answer closes only its own ask, so the asks the waker's
+// follow-ups email next are exactly the ones still open. It is not a
+// check-in: instinct's roster entry still shows no poll and no activity.
+func TestEmailAnswerLeavesOtherAsksAndNoCheckIn(t *testing.T) {
+	e := newEmailEnv(t, relay.Config{})
+	first := e.ask("find the generator quote")
+	second := e.ask("book the electrician")
+	e.mail.add(instinctMail, e.subject(first), new("Quote is $4,200."), time.Now())
+	e.poll()
+
+	open, err := e.m.Server.OpenAsks("instinct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 || open[0].ID != second.ID {
+		t.Fatalf("open asks after one email answer = %+v, want only %s", open, second.ID)
+	}
+
+	e.mail.add(instinctMail, e.subject(second), new("Booked for Friday."), time.Now())
+	e.poll()
+	if open, err = e.m.Server.OpenAsks("instinct"); err != nil || len(open) != 0 {
+		t.Fatalf("open asks after both answered = %+v (%v), want none, so follow-ups stop", open, err)
+	}
+
+	agents, err := e.m.Client(t, "muse").Agents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range agents {
+		if a.Name == "instinct" && (!a.LastPoll.IsZero() || !a.LastActive.IsZero()) {
+			t.Fatalf("instinct roster = %+v, want no poll or activity from email answers", a)
+		}
+	}
+}
