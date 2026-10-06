@@ -2,15 +2,30 @@
 
 ## What Agent Tincan guarantees
 
-- The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway, which serves only the MCP tools and OAuth on its own Funnel hostname.
-- Every request is attributed to the agent that sent it, using Tailscale's identity for the machine it came from. An agent cannot send as another agent, and whatever it writes in the `from` field is ignored.
+- The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway, which serves only the MCP tools and OAuth on its own Funnel hostname. The relay also polls AgentMail outbound for email replies (below); it never opens a listener for them.
+- Every request is attributed to the agent that sent it, using Tailscale's identity for the machine it came from. An agent cannot send as another agent, and whatever it writes in the `from` field is ignored. The one exception is an email reply from an agent the owner opted in with `include_requests` (see Email replies below).
 - Only admin devices and the relay's local admin socket can invite, remove, or connect agents, trace every chain, or upgrade the relay (`tincan relay-upgrade`). A caller is an admin device only when all of these hold: Tailscale WhoIs reports its short machine name in the `--admin` list; the node has no Tailscale tags; and, if `--admin-login` is set, the node's owning login is in that list. Machine names are chosen by whoever controls the node, so tag every agent machine (for example `tag:agent`): a tagged node is never an admin, whatever it is called. Owner login alone is not used, because on a single-user tailnet every node, agents included, has the same owner.
 - Chains are tracked by the relay, not by the model. A request made while handling another continues that chain even if the model leaves the parent out. A request that would loop back to an agent already in its chain is rejected, and chains longer than 4 hops are rejected.
 - Each sender is rate-limited (30 new requests per minute by default).
 - Every send, delivery, claim, reply, rejection, wake, join, rebind, and removal is written to an append-only, hash-chained log. `tincan audit-verify` detects edits.
-- Wake nudges carry only a count and an instruction, never request text.
+- Wake nudges carry only a count and an instruction, never request text, unless the owner sets `include_requests` for an email-woken agent (see Email replies below).
 - Clarification does not add a trust boundary: only a request's claimed target can ask for input, and only its original sender can answer. Questions and answers stay on the same request, with the same chain and hop rules. They are bodies like other messages: readable by the relay, absent from wake messages, and represented only by byte lengths in clarification audit details.
 - Search has the same visibility as trace: joined agents can search requests and replies only in chains they took part in; admins can search every chain. Visibility is unchanged. Search indexes existing stored bodies, not attachment contents, and results include only attachment names. A `search` audit event records the result count, never query text.
+
+## Email replies
+
+An email-woken agent such as Instinct can lose its tailnet path for long stretches while its email still arrives in seconds. For such an agent the owner can set `"include_requests": true` in `wake.json`. It is off by default and allowed only on an agent whose primary wake method is email.
+
+- What leaves the tailnet: each open ask to that agent is emailed on its own, with its text (capped at 64 KiB), asker, urgent flag and earlier clarification rounds. Attachments appear only as a count. AgentMail and the agent's mail provider now hold that text, and the owner controls how long they keep it. Held requests, pings and notifies are never sent this way.
+- What the agent trusts: a request email from the relay's sending address whose subject carries a `[tincan <id>.<tag>]` tag. Its standing instructions treat any other mail that claims to be from Agent Tincan as untrusted. When the agent can reach the relay, it takes the request from `tincan inbox` instead.
+- How a reply becomes the agent's answer: the relay polls the sending inbox outbound. It records a message as that agent's reply only when every one of these holds:
+  - The normalized From address equals the agent's `email_to`.
+  - AgentMail did not mark the message spam or unauthenticated.
+  - The subject's tag verifies for that request, agent and current clarification round.
+  - The request is still open and not claimed under a live lease.
+- The tag is an HMAC under `email-tag-key`, a 32-byte file in the relay's state dir (0600). That file never leaves the relay and is separate from `relay.key`, which every joined agent holds. Rotating `email-tag-key` voids every outstanding tag.
+- What an attacker needs: the ability to send mail as the agent's address that AgentMail accepts as authenticated, plus a live tag. Tags exist only in the agent's mailbox, the sending inbox and the relay. One tag can answer one open request, and dies when the request closes or its clarification round changes.
+- Limits on email answers: email can answer, fail or decline a request. It cannot ask a clarifying question or attach files. Every tagged message from the agent gets one in-thread "recorded" or "not recorded" email with no request or reply text. The relay never deletes, marks or relabels mail, so other readers of a shared inbox see their mail unchanged. Audit rows record `via: email`, never the tag, the address or the text.
 
 ## Invitation storage and upgrades
 
