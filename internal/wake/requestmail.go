@@ -119,9 +119,9 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 	if w.audit != nil {
 		w.audit.BeginWake(agent)
 	}
-	var code int
+	var code, failedSends int
 	var firstErr error
-	var failed []envelope.Request
+	var failed []envelope.Request // asks whose email failed, for unpick
 	send := func(subject, text string) error {
 		c, err := w.sendEmail(ctx, cfg, subject, text)
 		if err != nil {
@@ -131,8 +131,11 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 			case <-ctx.Done():
 			}
 		}
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err != nil {
+			failedSends++
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 		if err == nil {
 			code = c
@@ -153,8 +156,8 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 	}
 	if firstErr != nil {
 		reason := publicReason(firstErr)
-		if sent := total - len(failed); sent > 0 {
-			reason += fmt.Sprintf(" (%d of %d emails failed)", total-sent, total)
+		if failedSends < total {
+			reason += fmt.Sprintf(" (%d of %d emails failed)", failedSends, total)
 		}
 		log.Printf("wake %s: %s", agent, reason)
 		w.record(ctx, "wake_failed", agent, reason)

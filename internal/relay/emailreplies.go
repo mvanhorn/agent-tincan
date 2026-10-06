@@ -170,24 +170,27 @@ func (s *Server) pollInbox(ctx context.Context, in EmailInbox) {
 	// Mail older than emailReplyWindow is never wanted, so a cursor left
 	// behind by a long idle gap is pulled forward instead of re-listing it.
 	after := later(s.emailCursor[in.Agent], start.Add(-emailReplyWindow))
+	s.retryEmails(ctx, in, start)
 	msgs, err := in.Mail.Received(ctx, after)
 	truncated := errors.Is(err, wake.ErrListTruncated)
 	if err != nil && !truncated {
 		log.Printf("email replies %s: list: %v", in.Agent, err)
 		return
 	}
-	failed := false
 	for _, m := range msgs {
 		if ctx.Err() != nil {
 			return
 		}
 		if !s.decideEmail(ctx, in, m) {
-			failed = true
+			// Retried on its own each poll, so the cursor can move past it
+			// and one stuck message never hides later pages.
+			if s.emailRetry[in.Agent] == nil {
+				s.emailRetry[in.Agent] = map[string]wake.MailMessage{}
+			}
+			s.emailRetry[in.Agent][m.MessageID] = m
 		}
 	}
 	switch {
-	case failed:
-		s.emailCursor[in.Agent] = later(after, start.Add(-emailReplyWindow))
 	case truncated && len(msgs) > 0:
 		// Listed oldest first: carry on after the last one read.
 		s.emailCursor[in.Agent] = msgs[len(msgs)-1].Timestamp.Add(-time.Second)
@@ -202,6 +205,21 @@ func later(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// retryEmails decides again each message of in's agent that an earlier
+// poll listed but could not decide, dropping those decided now and those
+// older than emailReplyWindow. It lives in memory: after a restart the
+// cursor starts emailReplyWindow back, so such messages are listed again.
+func (s *Server) retryEmails(ctx context.Context, in EmailInbox, now time.Time) {
+	for id, m := range s.emailRetry[in.Agent] {
+		if ctx.Err() != nil {
+			return
+		}
+		if now.Sub(m.Timestamp) > emailReplyWindow || s.decideEmail(ctx, in, m) {
+			delete(s.emailRetry[in.Agent], id)
+		}
+	}
 }
 
 // emailTagRE finds a request email's tag in a subject: "[tincan <id>.<tag>]".

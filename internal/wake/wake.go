@@ -667,8 +667,11 @@ func (w *Waker) schedule(agent string, checkOnline, urgent, ask bool) {
 	if p.followUp && !urgent && silent && ask && w.mailsRequests(agent) {
 		// A request-email agent gets a new ask's first email on the
 		// debounce, not when the follow-up for older asks comes due, and
-		// that follow-up keeps its time.
+		// that follow-up keeps its time. The ask still rides the follow-up
+		// (p.fresh), so if its email fails or is skipped and the agent then
+		// checks in, the follow-up's fresh wake emails it.
 		w.armMail(agent)
+		p.fresh++
 		return
 	}
 	p.requests++

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -559,4 +561,80 @@ func waitEvents(t *testing.T, st *store.Store, want string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("audit = %s, want %s", got, want)
+}
+
+// A new ask whose first email fails while a follow-up is pending still rides
+// that follow-up: when the agent checks in before the follow-up fires, the
+// follow-up turns into a fresh wake and the ask gets its email then.
+func TestNewAskEmailFailureRidesFollowUp(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	start := time.Unix(1_790_000_000, 0)
+	var now atomicTime
+	now.set(start)
+	var polled atomicTime
+	asks := &asksFake{asks: []envelope.Request{ask("ra", "muse", "first", start)}}
+	w := New(Config{"instinct": optedIn()}, nil, Options{
+		Debounce: time.Millisecond, RetryDelay: time.Millisecond, WakeGrace: 50 * time.Millisecond, AgentMailAPI: ts.URL + "/v0", OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued:   func(string) int { open, _ := asks.open(""); return len(open) },
+		LastPoll: func(string) time.Time { return polled.get() },
+		Now:      now.get,
+	})
+	defer w.Stop()
+	w.Queued(context.Background(), asks.asks[0])
+	waitCalls(t, &rc, 1)
+	waitFollowUpDue(t, w, "instinct")
+	second := ask("rb", "claude-code", "second", start.Add(time.Second))
+	asks.add(second)
+	rc.fail.Store(2) // the second ask's email and its retry
+	w.Queued(context.Background(), second)
+	waitCalls(t, &rc, 3)
+	// The agent checks in after the failed email, still inside the first
+	// ask's wake grace, so only the second ask is due.
+	polled.set(start.Add(5 * time.Millisecond))
+	now.set(start.Add(10 * time.Millisecond))
+	waitCalls(t, &rc, 4)
+	if m := rc.mail(t, 3); m.Subject != subjectFor("claude-code", "rb") {
+		t.Fatalf("fourth send = %q, want the second ask's email after the check-in", m.Subject)
+	}
+}
+
+// When the request emails go out but the count-only email for the rest
+// fails, the wake is recorded failed and says one of its two emails failed,
+// never "0 of 2".
+func TestCountOnlyFailureIsCounted(t *testing.T) {
+	var sends atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m sentMail
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		sends.Add(1)
+		if m.Subject == countOnlySubject {
+			http.Error(w, "boom", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	st := auditStore(t)
+	start := time.Unix(1_790_000_000, 0)
+	asks := &asksFake{asks: []envelope.Request{ask("ra", "muse", "find the quote", start)}}
+	w := New(Config{"instinct": optedIn()}, st, Options{
+		Debounce: time.Millisecond, RetryDelay: time.Millisecond, WakeGrace: skipFollowUp, AgentMailAPI: ts.URL + "/v0", OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued: func(string) int { return 2 }, // the ask plus one ping
+	})
+	w.Queued(context.Background(), asks.asks[0])
+	w.Flush()
+	evs, err := st.AuditEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detail string
+	for _, ev := range evs {
+		if ev.Event == "wake_failed" {
+			detail = ev.Detail
+		}
+	}
+	if !strings.Contains(detail, "1 of 2 emails failed") {
+		t.Fatalf("wake_failed detail = %q, want it to say 1 of 2 emails failed", detail)
+	}
 }

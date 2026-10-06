@@ -24,6 +24,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 // Config tunes the relay.
@@ -200,12 +201,15 @@ type Server struct {
 	// current silent episode, for the owner's wake notice.
 	silent map[string]silentEpisode
 
-	// emailMu serializes email reply polls and guards inboxes and
-	// emailCursor: the agents opted in to request emails, and how far
-	// back each one's next poll looks (see emailreplies.go).
+	// emailMu serializes email reply polls and guards inboxes,
+	// emailCursor and emailRetry: the agents opted in to request emails,
+	// how far back each one's next poll looks, and the listed messages
+	// that could not be decided yet, retried on their own (see
+	// emailreplies.go).
 	emailMu     sync.Mutex
 	inboxes     []EmailInbox
 	emailCursor map[string]time.Time
+	emailRetry  map[string]map[string]wake.MailMessage
 
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
@@ -234,7 +238,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}}
+		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}

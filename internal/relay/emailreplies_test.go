@@ -772,3 +772,38 @@ func TestEmailUnauthenticatedReplyIgnored(t *testing.T) {
 		}
 	}
 }
+
+// One message whose fetch keeps failing does not pin the cursor of a list
+// longer than one poll reads: later pages are still reached, and the stuck
+// message is retried on its own until it can be decided.
+func TestStuckMessageDoesNotBlockLaterPages(t *testing.T) {
+	e := newEmailEnv(t, relay.Config{})
+	e.mail.mu.Lock()
+	e.mail.pageSize = 1
+	e.mail.mu.Unlock()
+	a, b := e.ask("one"), e.ask("two")
+	base := time.Now().Add(-time.Hour)
+	stuck := e.mail.add(instinctMail, e.subject(a), new("answer one"), base)
+	for i := range 20 {
+		e.mail.add("news@example.org", "Weekly digest", new("hi"), base.Add(time.Duration(i+1)*2*time.Second))
+	}
+	e.mail.add(instinctMail, e.subject(b), new("answer two"), base.Add(time.Minute))
+	e.mail.mu.Lock()
+	e.mail.broken = map[string]bool{stuck: true}
+	e.mail.mu.Unlock()
+	e.poll() // reads the stuck message and 19 digests, stops at the page cap
+	e.poll()
+	if res := e.get(b.ID); res.Status != envelope.StatusAnswered {
+		t.Fatalf("b = %s, want answered once the poll reaches past the stuck message", res.Status)
+	}
+	if res := e.get(a.ID); res.Status != envelope.StatusQueued {
+		t.Fatalf("a = %s, want queued while its message cannot be fetched", res.Status)
+	}
+	e.mail.mu.Lock()
+	e.mail.broken = nil
+	e.mail.mu.Unlock()
+	e.poll()
+	if res := e.get(a.ID); res.Status != envelope.StatusAnswered {
+		t.Fatalf("a = %s, want answered once its message can be fetched", res.Status)
+	}
+}
