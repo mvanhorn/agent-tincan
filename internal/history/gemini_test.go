@@ -432,6 +432,20 @@ func noFile(OpArgs) []NativeResponse {
 // A new chat: the answer appears, grows, then holds still; it comes back
 // with the image Gemini drew attached and the Gemini conversation footer,
 // and every store holds the canonical id.
+// Gemini's placeholder can carry a suffix after the image index
+// ("image_generation_content/1_733"); none of it may leak into the reply.
+func TestCleanGeminiTextPlaceholders(t *testing.T) {
+	for in, want := range map[string]string{
+		"Here is your fox.\nhttp://googleusercontent.com/image_generation_content/0": "Here is your fox.",
+		"\n\nhttp://googleusercontent.com/image_generation_content/1_733\n\n":        "",
+		"A dog: http://googleusercontent.com/image_generation_content/2_15 done":     "A dog: done",
+	} {
+		if got := cleanGeminiText(in); got != want {
+			t.Errorf("cleanGeminiText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestWebGeminiAnswerWithImage(t *testing.T) {
 	img := fakePNG(3000)
 	const url = "https://lh3.googleusercontent.com/gg/dummy-fox-1"

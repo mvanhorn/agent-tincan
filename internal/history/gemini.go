@@ -317,7 +317,7 @@ func geminiTurns(raw json.RawMessage) ([]gmTurn, error) {
 
 // geminiPlaceholder is the stand-in Gemini's text carries where a
 // generated image is shown.
-var geminiPlaceholder = regexp.MustCompile(`https?://googleusercontent\.com/[a-z_]+_content/\d+\s*`)
+var geminiPlaceholder = regexp.MustCompile(`https?://googleusercontent\.com/[a-z_]+_content/\d+(?:_\d+)*\s*`)
 
 func cleanGeminiText(s string) string {
 	return strings.TrimSpace(geminiPlaceholder.ReplaceAllString(s, ""))

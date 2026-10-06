@@ -91,7 +91,7 @@ export const SITE_ACCESS = Object.freeze({
   chatgpt: Object.freeze({ label: 'ChatGPT', origins: Object.freeze(['https://chatgpt.com/*', 'https://*.oaiusercontent.com/*']), pageOrigins: Object.freeze(['https://chatgpt.com/*']), required: true }),
   claudeai: Object.freeze({ label: 'claude.ai', origins: Object.freeze(['https://claude.ai/*']), pageOrigins: Object.freeze(['https://claude.ai/*']), required: true }),
   grok: Object.freeze({ label: 'Grok', origins: Object.freeze(['https://grok.com/*', 'https://assets.grok.com/*']), pageOrigins: Object.freeze(['https://grok.com/*']), required: false }),
-  gemini: Object.freeze({ label: 'Gemini', origins: Object.freeze(['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*']), pageOrigins: Object.freeze(['https://gemini.google.com/*']), required: false }),
+  gemini: Object.freeze({ label: 'Gemini', origins: Object.freeze(['https://gemini.google.com/*', 'https://lh3.googleusercontent.com/*', 'https://lh3.google.com/*']), pageOrigins: Object.freeze(['https://gemini.google.com/*']), required: false }),
   perplexity: Object.freeze({ label: 'Perplexity', origins: Object.freeze(['https://www.perplexity.ai/*']), pageOrigins: Object.freeze(['https://www.perplexity.ai/*']), required: false }),
   // copilot.microsoft.com is where Copilot starts; it sends the browser on
   // to copilot.com, where the extension's tabs open.
