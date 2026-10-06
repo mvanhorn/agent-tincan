@@ -2,7 +2,9 @@
 # examples/grokbot/tincan-up.sh: bring Tailscale (and optionally the Tincan relay) back after the host
 # was wiped or moved. Idempotent; safe to run every hour. Runs as the normal user, no sudo.
 #
-# See docs/adapters/grokbot.md.
+# See docs/adapters/grokbot.md. Hosts that keep only one folder other than the home folder
+# (Hark keeps /workspace) set TAILSCALE_LIB, TAILSCALE_BIN, TAILSCALE_STATEDIR, TAILSCALE_CACHE
+# and TS_SOCKET: see docs/adapters/hark.md. Unset, every path is the Grok Bot layout below.
 # Exit codes: 0 healthy | 1 unhealthy | 2 device needs approval in the Tailscale admin
 #             3 auth key missing, wrong type, expired, used or rejected
 #             4 legacy layout: a relay with --listen or a system tailscaled is running
@@ -16,15 +18,18 @@ START_RELAY="${START_RELAY:-0}"              # 1 if this host also runs `tincan 
 RELAY_ADMIN="${RELAY_ADMIN:-}"               # --admin list for that relay, e.g. my-laptop
 # RELAY_TS_AUTHKEY: the relay's own one-off auth key, used only while the relay has no saved identity
 
-LIB="$HOME/.local/lib/tailscale"             # real binaries
-BIN="$HOME/.local/bin"                       # wrapper `tailscale` (on PATH)
-STATEDIR="$HOME/.config/tailscale"           # node identity: must be in the home folder
-CACHE="$HOME/.cache/tailscale"
-SOCK="$CACHE/tailscaled.sock"
+# Where things live. The defaults are the Grok Bot layout, where the home folder survives a wipe.
+# A host that keeps only another folder (Hark keeps /workspace) points the binaries, the node
+# identity and the socket there, and keeps the cache (lock, log) on local disk.
+LIB="${TAILSCALE_LIB:-$HOME/.local/lib/tailscale}"       # real binaries
+BIN="${TAILSCALE_BIN:-$HOME/.local/bin}"                 # wrapper `tailscale` (on PATH)
+STATEDIR="${TAILSCALE_STATEDIR:-$HOME/.config/tailscale}" # node identity: must survive a wipe
+CACHE="${TAILSCALE_CACHE:-$HOME/.cache/tailscale}"       # lock and log: local disk
+SOCK="${TS_SOCKET:-$CACHE/tailscaled.sock}"              # the same TS_SOCKET tincan reads
 LOG="$CACHE/tailscaled.log"
 TINCAN="${TINCAN:-$BIN/tincan}"
 
-mkdir -p "$LIB" "$BIN" "$STATEDIR" "$CACHE"
+mkdir -p "$LIB" "$BIN" "$STATEDIR" "$CACHE" "$(dirname "$SOCK")"
 chmod 700 "$STATEDIR" "$CACHE"
 
 exec 9>"$CACHE/tincan-up.lock"
@@ -33,10 +38,25 @@ if command -v flock >/dev/null && ! flock -n 9; then echo "already running"; exi
 # 0. Refuse to run next to the old layout: a relay bound to the system Tailscale with --listen, or
 #    a system tailscaled keeping its state in /var/lib/tailscale (its default). Starting a second
 #    tailscaled or relay beside them would fight over the node and the relay's database.
-legacy=$(ps -eo args= 2>/dev/null | awk '
+#    A tailscaled serving this script's own socket is the daemon this host uses: it is adopted
+#    when its identity is in STATEDIR, and refused otherwise, since that identity would not
+#    survive a wipe. The --listen relay is refused regardless.
+legacy=$(ps -eo args= 2>/dev/null | awk -v sock="$SOCK" -v statedir="$STATEDIR" '
+  function flag(name,   i, a) {
+    for (i = 2; i <= NF; i++) {
+      a = $i; sub(/^--?/, "", a)
+      if (a == name && i < NF) return $(i + 1)
+      if (index(a, name "=") == 1) return substr(a, length(name) + 2)
+    }
+    return ""
+  }
   { n = split($1, p, "/"); b = p[n] }
   b == "tincan" && $2 == "relay" {
     for (i = 3; i <= NF; i++) if ($i ~ /^--?listen(=|$)/) { print "a tincan relay started with --listen"; exit }
+  }
+  b == "tailscaled" && flag("socket") == sock {
+    if (flag("statedir") == statedir || flag("state") == statedir "/tailscaled.state") next
+    print "a tailscaled on " sock " that keeps its state outside " statedir; exit
   }
   b == "tailscaled" {
     s = 0; for (i = 2; i <= NF; i++) if ($i ~ /^--?(state|statedir)(=|$)/) s = 1
@@ -94,7 +114,7 @@ printf '#!/bin/sh\nexec "%s/tailscale" --socket="%s" "$@"\n' "$LIB" "$SOCK" > "$
 chmod 755 "$BIN/tailscale.new" && mv -f "$BIN/tailscale.new" "$BIN/tailscale"
 
 # 2. Start tailscaled (userspace networking, no TUN, no root) if nothing answers,
-#    or restart it after an upgrade.
+#    or restart it after an upgrade. A daemon that already answers is left running.
 if [ "$restart_daemon" = 1 ] || ! tsc status --json >/dev/null 2>&1; then
   if pkill -u "$(id -u)" -f "tailscaled .*--socket=$SOCK" 2>/dev/null; then sleep 2; fi
   rm -f "$SOCK"
