@@ -37,21 +37,33 @@ Add a tag that an admin owns to the tailnet policy:
 "tagOwners": { "tag:hark": ["autogroup:admin"] }
 ```
 
-**Recommended: limit what the tag can reach.** A tag alone does not limit what a node can reach. Hark's workspace is a hosted machine with passwordless sudo, so on a tailnet that allows everything it can reach every one of your devices. If Hark is only a Tincan teammate, allow `tag:hark` to reach the relay and nothing else, with the relay's tag or tailnet IP in place of `<relay>`:
+**Recommended: limit what the tag can reach.** A tag alone does not limit what a node can reach. Hark's workspace is a hosted machine with passwordless sudo, so on a tailnet that allows everything it can reach every one of your devices. If Hark is only a Tincan teammate, let `tag:hark` reach the relay and nothing else.
+
+Tailscale access rules only add access, so a new rule cannot take any away. A new tailnet's policy starts with a rule that lets every device reach every other device, `{ "action": "accept", "src": ["*"], "dst": ["*:*"] }`, and while that rule is there `tag:hark` reaches everything whatever else you add. Narrow it to your own devices by changing its `src` from `"*"` to `"autogroup:member"`, which covers devices signed in as a person and not tagged ones. Then add a rule for Hark, with the relay's tag or tailnet IP in place of `<relay>`:
 
 ```json
-"acls": [{ "action": "accept", "src": ["tag:hark"], "dst": ["<relay>:80"] }]
+"acls": [
+  { "action": "accept", "src": ["autogroup:member"], "dst": ["*:*"] },
+  { "action": "accept", "src": ["tag:hark"], "dst": ["<relay>:80"] }
+]
 ```
 
-The trade-off: Hark can then no longer reach your other machines (it offers to when it joins). Leave the rule out only if you want Hark to reach them, and know that it can.
+Narrowing the broad rule also takes access away from your other tagged devices, such as other agent machines and the relay if it is tagged. Before saving, give each of those tags a rule for what it needs (an agent tag needs the relay, as here), and use the policy editor's preview to check what each device can still reach. If your policy has no `"src": ["*"]` rule, keep its other rules and only add the Hark rule.
+
+The trade-off: Hark can then no longer reach your other machines (it offers to when it joins). Skip this only if you want Hark to reach them, and know that it can.
 
 Then, under Machines, open `hark-workspace`, choose **Edit ACL tags**, and add `tag:hark`. Note the machine's ID and address before and after: they should not change. Tagging also turns off node key expiry, so the device does not need another login in six months.
 
-**If tagging the existing device is refused or replaces the node**, enroll Hark again with a one-off key. Hark's secrets vault adds keys to HTTP requests and cannot hold them as environment variables, so this is the one case where a key goes into a chat:
+**If tagging the existing device is refused**, enroll Hark again as a new, tagged device with a one-off key. Do this after step 4 (once the env file exists) and before joining in step 5. Hark's secrets vault adds keys to HTTP requests and cannot hold them as environment variables, so this is the one case where a key goes into a chat:
 
 1. Generate an auth key with Reusable off, Pre-approved on, Ephemeral off, tag `tag:hark`, and a one-day expiry. It must start with `tskey-auth-`.
-2. Paste it to Hark once. Hark passes it inline to the single re-enroll run of the startup script in step 4 (`TS_AUTHKEY=<key> timeout 110 /workspace/bin/tincan-up.sh`) and never writes it into the env file or any other file.
-3. Once `hark-workspace` shows as tagged and connected, revoke the key under Settings > Keys and delete the old device.
+2. Paste it to Hark once. The startup script uses a key only for a node that is logged out, so Hark first logs the old identity out, then runs the script once with the key inline, never writing it into the env file or any other file:
+
+   ```bash
+   . /workspace/tincan/env && tailscale logout && TS_AUTHKEY=<key> timeout 110 /workspace/bin/tincan-up.sh
+   ```
+
+3. Once `hark-workspace` shows as tagged and connected, revoke the key under Settings > Keys and delete the old, untagged device.
 
 ## 3. Install tincan and the startup script (Hark)
 
@@ -152,7 +164,7 @@ Then check that a restart is harmless. Ask Hark to stop tailscaled and delete ev
 
 ## If the node identity is lost
 
-If `/workspace/tailscale/state` is lost, the script exits 3. The node is tagged, so `tincan rejoin` cannot move the agent to a new device, and the self-heal advice in the standing instructions ("run tincan rejoin yourself") does not apply. Enroll again with a one-off key as in step 2, then re-link from an admin device:
+If `/workspace/tailscale/state` is lost, the script exits 3. The node is tagged, so `tincan rejoin` cannot move the agent to a new device, and the self-heal advice in the standing instructions ("run tincan rejoin yourself") does not apply. Enroll again with a one-off key as in step 2; the node is already logged out, so Hark skips `tailscale logout` and runs only `TS_AUTHKEY=<key> timeout 110 /workspace/bin/tincan-up.sh` after sourcing the env file. Then re-link from an admin device:
 
 ```bash
 tincan invite hark --kind scheduled                           # admin device
