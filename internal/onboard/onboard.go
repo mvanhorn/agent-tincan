@@ -65,7 +65,9 @@ var Sections = []string{"operator", "agents", "recipes", "all"}
 
 // runtimeNames maps runtime names to kinds when nothing else says. Only
 // product runtimes and product agents (history, notes, council) belong here, never anyone's
-// personal agent names.
+// personal agent names. A hosted product with no kind of its own maps to the
+// hosting-shape kind it fits: Hark has no push path and runs on its own
+// schedule, so it is scheduled.
 var runtimeNames = map[string]string{
 	"claude-code":    KindClaudeCode,
 	"chatgpt":        KindChatGPT,
@@ -84,6 +86,7 @@ var runtimeNames = map[string]string{
 	"perplexity-web": KindPerplexityWeb,
 	"copilot-web":    KindCopilotWeb,
 	"dot-web":        KindDotWeb,
+	"hark":           KindScheduled,
 }
 
 // defaultWake is the wake method a kind normally uses.

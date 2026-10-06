@@ -884,3 +884,25 @@ func TestGenericSetupExplainsSchedule(t *testing.T) {
 		}
 	}
 }
+
+// hark is a hosted product with no push path, so its runtime name maps to the
+// scheduled kind. A stored kind still wins, and it has no stock good-at line.
+func TestHarkRuntimeNameIsScheduled(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{
+		{Name: "hark"},
+	}})
+	a := block(t, k, "hark")
+	if a.Kind != KindScheduled || a.Wake != "schedule" {
+		t.Errorf("runtime name hark = %q/%q, want scheduled/schedule", a.Kind, a.Wake)
+	}
+	if !strings.Contains(a.Instructions, "inbox is empty") {
+		t.Errorf("hark block lacks the scheduled drain-the-inbox instructions:\n%s", a.Instructions)
+	}
+	k = build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "hark", Wake: "webhook", Kind: KindVMWebhook}}})
+	if got := block(t, k, "hark").Kind; got != KindVMWebhook {
+		t.Errorf("hark with stored kind vm-webhook = %q", got)
+	}
+	if got := StockGoodAt("hark", ""); got != "" {
+		t.Errorf("StockGoodAt(hark) = %q, want none", got)
+	}
+}
