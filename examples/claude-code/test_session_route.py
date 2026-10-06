@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import faulthandler
 import os
 from pathlib import Path
 import subprocess
@@ -272,9 +273,15 @@ class SessionRouteTests(unittest.TestCase):
         fake_claude.write_text("#!/bin/sh\nwhile :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done\n")
         fake_claude.chmod(0o700)
         started = time.monotonic()
-        with self.assertRaisesRegex(session_route.RouteError, "desktop_opener_timeout"):
-            session_route.open_desktop(self.project, SESSION_A, claude_bin=fake_claude, timeout=1,
-                                       env={"PATH": os.defpath, "HOME": str(self.root)})
+        # A watchdog makes platform-specific PTY stalls diagnosable and keeps
+        # a failing timeout test from hanging the entire CI job.
+        faulthandler.dump_traceback_later(10, exit=True)
+        try:
+            with self.assertRaisesRegex(session_route.RouteError, "desktop_opener_timeout"):
+                session_route.open_desktop(self.project, SESSION_A, claude_bin=fake_claude, timeout=1,
+                                           env={"PATH": os.defpath, "HOME": str(self.root)})
+        finally:
+            faulthandler.cancel_dump_traceback_later()
         self.assertLess(time.monotonic() - started, 4)
 
     def test_desktop_opener_failure_never_returns_terminal_output(self):
