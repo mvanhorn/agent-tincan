@@ -937,6 +937,11 @@ func (w *Waker) applyFollowUpStops(agent string, p *nudge) {
 		// which starts the next episode on the primary.
 		p.requests = p.fresh
 		p.followUp = false
+		// Some of those requests may already be done (the agent just
+		// checked in): wake only for what is still queued.
+		if w.opts.Queued != nil {
+			p.requests = min(p.requests, w.opts.Queued(agent))
+		}
 		return
 	}
 	if w.opts.Queued == nil {

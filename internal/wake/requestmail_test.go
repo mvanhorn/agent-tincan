@@ -638,3 +638,39 @@ func TestCountOnlyFailureIsCounted(t *testing.T) {
 		t.Fatalf("wake_failed detail = %q, want it to say 1 of 2 emails failed", detail)
 	}
 }
+
+// When the agent checks in and finishes every ask before a pending
+// follow-up fires, the follow-up sends nothing: no request is left to
+// announce, so a count-only email would only spend the hourly budget.
+func TestFollowUpAfterFinishedWorkSendsNothing(t *testing.T) {
+	var rc recorder
+	ts := rc.server(t)
+	start := time.Unix(1_790_000_000, 0)
+	var now, polled atomicTime
+	now.set(start)
+	asks := &asksFake{asks: []envelope.Request{ask("ra", "muse", "first", start)}}
+	w := New(Config{"instinct": optedIn()}, nil, Options{
+		Debounce: time.Millisecond, WakeGrace: 50 * time.Millisecond, AgentMailAPI: ts.URL + "/v0", OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued:   func(string) int { open, _ := asks.open(""); return len(open) },
+		LastPoll: func(string) time.Time { return polled.get() },
+		Now:      now.get,
+	})
+	w.Queued(context.Background(), asks.asks[0])
+	waitCalls(t, &rc, 1)
+	waitFollowUpDue(t, w, "instinct")
+	second := ask("rb", "claude-code", "second", start.Add(time.Second))
+	asks.add(second)
+	w.Queued(context.Background(), second)
+	waitCalls(t, &rc, 2)
+	// The agent checks in and finishes both asks before the follow-up.
+	asks.mu.Lock()
+	asks.asks = nil
+	asks.mu.Unlock()
+	polled.set(start.Add(5 * time.Millisecond))
+	now.set(start.Add(10 * time.Millisecond))
+	w.Flush()
+	w.Stop()
+	if n := rc.count(); n != 2 {
+		t.Fatalf("sends = %d, want 2: nothing after the agent finished its asks (last: %+v)", n, rc.mail(t, n-1))
+	}
+}
