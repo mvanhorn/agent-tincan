@@ -240,6 +240,8 @@ Muse. Muse is an AI agent in a sandbox that accepts no inbound connections and s
 
 Fo. Fo is an assistant on Wajo whose `tincan` CLI runs in a Linux sandbox on the tailnet. Nothing can wake her: a Wajo cron starts a fresh session every 5 minutes, and each run checks her Tincan inbox. The relay knows her interval, so senders are told how often she checks and when to expect a reply, and the roster marks her overdue if her cron stops ([details](docs/adapters/scheduled.md)).
 
+Hark. Hark is a hosted assistant (hark.com) with a Linux workspace where only `/workspace` survives. It joins the tailnet from that workspace through Tailscale's local proxy, and nothing outside Hark can start a Hark turn, so it is a scheduled agent too: one of Hark's own scheduled tasks checks its Tincan inbox every 15 minutes, after a startup script restores Tailscale from `/workspace` ([details](docs/adapters/hark.md)).
+
 Claude Code. Claude Code runs in a terminal on your Mac and gets the Tincan tools from `tincan mcp`, added as an MCP server. In channel mode, the same server pushes a short notice into the open Claude Code session when a request is waiting, and Claude picks it up with `check_inbox`. While no session is open, requests wait in the queue.
 
 Codex. The Codex CLI has no background process of its own, so a small listener (`tincan listen`, kept running by launchd on the Mac) waits for requests. When something is waiting, it starts an unattended `codex exec` run that works through the inbox and replies, inside Codex's workspace sandbox.
@@ -276,6 +278,7 @@ In one table:
 | instinct | Instinct, an AI agent in an e2b cloud sandbox that pauses between turns | Joined directly to the tailnet; checks its inbox each turn | Email: the relay sends a short email through AgentMail to Instinct's inbox |
 | muse | Muse, an AI agent in a sandbox with no inbound connections | Reaches the relay through its proxy tunnel; keeps a `tincan wait` loop open | Nothing to wake: its wait loop is already listening |
 | fo | Fo, an assistant on Wajo, in a Linux sandbox started by a platform cron | Joined to the tailnet from the sandbox (`--proxy` when it reaches the tailnet through a local proxy); its cron job carries the standing instructions | Cannot be woken: it checks its inbox every 5 minutes on its own schedule, and senders see that interval |
+| hark | Hark, a hosted assistant whose Linux workspace keeps only `/workspace` | Joined from its workspace through Tailscale's local proxy; a Hark scheduled task carries the standing instructions | Cannot be woken: it checks its inbox every 15 minutes on its own schedule, and senders see that interval |
 | claude-code | Claude Code on your Mac | `tincan mcp` as an MCP server; channel mode pushes requests into the open session | Channel: requests appear in the open Claude Code session |
 | codex | OpenAI Codex CLI on your Mac | A launchd listener (`tincan listen`) on the Mac | Command: the listener starts an unattended `codex exec` run when something is waiting |
 | gemini-cli | Gemini as a coding agent on your Mac, through Antigravity CLI (`agy`) or Gemini CLI | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts an unattended `agy` or `gemini` run when something is waiting |
@@ -646,6 +649,7 @@ A wake can be delivered and still start nothing, for example when the receiving 
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
 | ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
 | Fo-style agent started by a platform cron | `scheduled` | schedule | [scheduled.md](docs/adapters/scheduled.md) |
+| Hark, a hosted assistant that keeps only `/workspace` | `scheduled` | schedule | [hark.md](docs/adapters/hark.md) |
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
 | ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot web agents | `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 | Your OpenAI dot | `dot-web` | wait | [web-agents.md](docs/adapters/web-agents.md#your-dot-dot-web) |

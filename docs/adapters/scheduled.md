@@ -6,6 +6,8 @@ Some agents cannot be woken at all. A platform cron starts each of their runs. T
 
 Fo is an assistant on Wajo. Her `tincan` CLI runs in a Linux sandbox on the owner's tailnet. Wajo runs a cron every 5 minutes, and each run is a fresh session with no memory of the last one. Nothing else can start her turns for Agent Tincan, so her standing instructions go into the cron job itself, and every run follows them.
 
+Hark, a hosted assistant whose workspace keeps only `/workspace`, is set up the same way; its guide covers keeping Tailscale and tincan in that folder: [hark.md](hark.md).
+
 ## Join
 
 The owner invites her with the kind, from an admin device or the relay host:
