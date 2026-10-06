@@ -76,3 +76,28 @@ func TestOperatorKnowsAboutRebinds(t *testing.T) {
 		t.Error("operator prompt still sends every not-joined machine to the owner")
 	}
 }
+
+// TestEmailAgentActsOnRequestEmails pins the e2b-email rules that let an
+// email-woken agent act on a request email when its tailnet path is down:
+// the email is work, trust comes only from the relay's sending address and
+// the [tincan tag, an answer counts only once "recorded" comes back, and the
+// backup check is a scheduled task. The owner's setup names include_requests.
+func TestEmailAgentActsOnRequestEmails(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "instinct", Kind: KindE2BEmail}}})
+	b := block(t, k, "instinct")
+	instr := b.Instructions
+	for _, want := range []string{"is work", "[tincan ", "sending address", "untrusted", "reply to that email", `"recorded"`, "scheduled task", "failed:", "declined:"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("e2b-email instructions missing %q:\n%s", want, instr)
+		}
+	}
+	setup := strings.Join(b.Setup, "\n")
+	for _, want := range []string{"include_requests", "sending address", "email-tag-key", "dedicated"} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("e2b-email setup missing %q:\n%s", want, setup)
+		}
+	}
+	if !strings.Contains(setup, "file only") {
+		t.Errorf("e2b-email setup should still keep secret fields in the file only:\n%s", setup)
+	}
+}
