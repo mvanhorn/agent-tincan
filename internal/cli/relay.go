@@ -449,7 +449,13 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
-	waker := wake.New(wakeCfg, st, wakerOptions(f, srv))
+	wopts := wakerOptions(f, srv)
+	if d, ok := who.(tailnetDialer); ok {
+		// Wake webhooks at tailnet addresses go out through the relay's own
+		// node: the host may have no route to the tailnet at all.
+		wopts.HTTP = wakeHTTPClient(d.DialTailnet)
+	}
+	waker := wake.New(wakeCfg, st, wopts)
 	if inboxes := emailReplyInboxes(wakeCfg); len(inboxes) > 0 {
 		srv.SetEmailInboxes(inboxes)
 		log.Printf("polling AgentMail for email replies from %d agents with include_requests on", len(inboxes))
@@ -616,7 +622,26 @@ var openRelayNet = func(ctx context.Context, f relayFlags, listenAt string) (net
 	if err != nil {
 		return fail(err)
 	}
-	return ln, identity.NewLocalResolver(lc), func() { ts.Close() }, nil
+	return ln, tailnetResolver{identity.NewLocalResolver(lc), ts.Dial}, func() { ts.Close() }, nil
+}
+
+// tailnetDialer is a relay resolver that can also open connections to
+// tailnet machines from the relay's own node.
+type tailnetDialer interface {
+	DialTailnet(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// tailnetResolver is the tsnet relay's resolver together with its node's
+// dialer, so the waker can reach tailnet webhooks even when the host's
+// tailscaled has no TUN device (wakeHTTPClient).
+type tailnetResolver struct {
+	relayResolver
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// DialTailnet dials addr from the relay's tsnet node.
+func (r tailnetResolver) DialTailnet(ctx context.Context, network, addr string) (net.Conn, error) {
+	return r.dial(ctx, network, addr)
 }
 
 // gatewayListener returns the public listener and base URL for the ChatGPT
