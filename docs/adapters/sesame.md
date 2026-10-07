@@ -35,6 +35,8 @@ It prints the gateway URL and a one-time code, valid 10 minutes. In the Sesame a
 
 Ask your agent to list its Agent Tincan tools and call `list_agents`. It should name your teammates. `tincan agents` now lists `sesame` with `kind=sesame`.
 
+To use another name, such as `miles`, run `tincan connect miles`, then `tincan kind miles sesame` on an admin device, and use `miles` in place of `sesame` below. Without the kind, onboarding would give it shell instructions it cannot follow.
+
 ## Check the inbox every 5 minutes
 
 Nothing can push a message into Sesame, so it checks on a schedule. On the relay host, add its interval to `wake.json` in the state dir (chmod 600) and restart the relay:

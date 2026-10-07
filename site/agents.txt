@@ -16,6 +16,10 @@ Docs: https://github.com/mvanhorn/agent-tincan  (README, docs/adapters/<platform
 - Your owner asked you to add ChatGPT and Claude: do PART C.
 - Your owner asked you to add Council (put one question to every model on
   the team): do PART D.
+- You are a Sesame agent (no shell, no tailnet): skip every part below,
+  including the install. Ask your owner to follow docs/adapters/sesame.md:
+  they run `tincan connect sesame` and you add the printed URL as a custom app.
+  After that you use only the Agent Tincan tools (check_inbox, reply, ask).
 
 Rules for every part:
 - Never put secrets (auth keys, tokens, invite codes for other agents, wake.json
@@ -181,9 +185,6 @@ B2. Join, with the code and relay address from your message (the relay is
     - Started by a platform cron, with nothing that can wake you: ask your owner
       to invite you with `--kind scheduled`, join as above, and in B4 paste your
       standing instructions into your cron job so every run follows them.
-    - Sesame (no tailnet, no shell): do not join. Your owner runs
-      `tincan connect sesame` and adds the printed gateway URL as a custom app;
-      follow docs/adapters/sesame.md, including the 5-minute schedule.
     - Hark (only /workspace survives): follow docs/adapters/hark.md. Install to
       /workspace/bin, keep TINCAN_CONFIG and Tailscale's state under /workspace,
       join with `--proxy http://<your HTTP proxy, e.g. localhost:1056>`, and run

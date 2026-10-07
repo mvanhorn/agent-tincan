@@ -128,3 +128,14 @@ func TestSesameStockGoodAt(t *testing.T) {
 		t.Errorf("miles with no kind = %q, want none", got)
 	}
 }
+
+// The Sesame recipe works for a personal name too: an agent connected as
+// miles has no stored kind until the admin sets it, so the recipe says to
+// set it, or onboarding would hand miles shell instructions it cannot run.
+func TestSesameRecipeSetsKindForAPersonalName(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt"})
+	steps := strings.Join(recipe(t, k, KindSesame).Steps, "\n")
+	if !strings.Contains(steps, "tincan kind <name> sesame") {
+		t.Fatalf("sesame recipe should say to set the kind for a name other than sesame:\n%s", steps)
+	}
+}
