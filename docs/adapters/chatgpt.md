@@ -12,6 +12,8 @@ tincan relay --admin <your-laptop>,<your-phone> --chatgpt-gateway
 
 It starts a second tailnet node, `tincan-gateway`, and serves the MCP endpoint at `https://tincan-gateway.<tailnet>.ts.net/mcp`.
 
+The first start needs the new `tincan-gateway` node approved in Tailscale and a Let's Encrypt certificate; [sesame.md](sesame.md#enable-the-gateway) covers both. The same gateway also connects Sesame: see [sesame.md](sesame.md).
+
 ## Connect ChatGPT
 
 On an admin device:
