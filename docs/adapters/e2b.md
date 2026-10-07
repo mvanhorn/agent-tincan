@@ -37,7 +37,7 @@ Each open ask then arrives as its own email, `Agent Tincan: request from <asker>
 
 ## Flaky paths
 
-After a resume, `tincan` retries a failed SOCKS connect for about 15 seconds. If the tunnel is still down it says so, and that nothing reached the relay. With `include_requests` on, Instinct can answer the request email instead.
+After a resume, `tincan` retries a failed SOCKS connect for about 15 seconds, then searches the tailnet for a relay that moved, since through the tunnel a moved relay looks the same as a tunnel that is down. If it still cannot reach the relay, it says the tunnel is not up and that nothing reached the relay. With `include_requests` on, Instinct can answer the request email instead.
 
 In testing, Instinct sometimes reached the relay only through Tailscale's DERP relays, and some connections failed. Requests are queued at the relay, so nothing is lost; the agent's next `tincan inbox` picks them up.
 

@@ -95,7 +95,7 @@ Client and onboarding
 - Not built: labeling or marking processed mail. `email_replies` already makes ingestion exactly-once, and R11 keeps a shared inbox untouched. Would change if AgentMail's `after` filter proves too coarse to keep polls cheap.
 - Not built: retry on connection-refused dials. The live failure is the SOCKS connect; a refused dial usually means a moved or restarting relay, which goes straight to relocate (#134) as today. Would change if live logs show refused dials from a down tunnel.
 - Not built: polling dedupe across agents that share one inbox and key. Only Instinct opts in today. Would change when a second agent opts in on the same inbox.
-- Not built: relocate on SOCKS connect failure. A SOCKS failure means the local tunnel is down, not that the relay moved, and #134 already handles moves. Would change if live logs show a moved relay surfacing as a SOCKS failure.
+- Relocate on SOCKS connect failure: first left out (a SOCKS failure usually means the local tunnel is down), then added in v0.14.1 after the relay moved on 2026-10-06 and Instinct, which reaches it only through SOCKS, never searched for it.
 
 ### Sources
 
