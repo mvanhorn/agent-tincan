@@ -1,8 +1,10 @@
-// Package gateway lets ChatGPT, which runs in OpenAI's cloud and cannot reach
-// the tailnet, join as an agent. It serves the Agent Tincan MCP tools over
-// Streamable HTTP on a public Funnel hostname, behind the smallest OAuth 2.1
-// authorization server ChatGPT's connectors accept: one owner, PKCE, and a
-// login page that takes a one-time code Matt mints with `tincan connect`.
+// Package gateway lets cloud agents that cannot reach the tailnet, such as
+// ChatGPT in OpenAI's cloud or a Sesame agent in Sesame's, join as agents. It
+// serves the Agent Tincan MCP tools over Streamable HTTP on a public Funnel
+// hostname, behind the smallest OAuth 2.1 authorization server their remote
+// MCP clients accept: one owner, dynamic client registration, PKCE, and a
+// login page that takes a one-time code Matt mints with `tincan connect
+// <name>`, bound to that agent name.
 //
 // Only the MCP endpoint and the OAuth endpoints are served. The relay's agent
 // API is never reachable from the public side.

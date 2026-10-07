@@ -1786,7 +1786,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.conn == nil {
-		writeErr(w, http.StatusNotFound, errors.New("the ChatGPT gateway is not enabled on this relay (start it with --chatgpt-gateway)"))
+		writeErr(w, http.StatusNotFound, errors.New("the MCP gateway is not enabled on this relay (start the relay with --chatgpt-gateway)"))
 		return
 	}
 	var in struct {
@@ -1800,6 +1800,20 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	// The roster shows only stored kinds, and a gateway agent has no shell to
+	// run tincan kind from, so connecting a product name (sesame, chatgpt)
+	// stores the kind that name implies when the agent has none yet. A kind
+	// the owner already set is kept. The kind is only a roster label, so a
+	// failure to store it is logged and the connect still succeeds.
+	if kind := onboard.RuntimeKind(in.Name); kind != "" {
+		if a, ok, err := s.dir.Agent(r.Context(), in.Name); err != nil {
+			log.Printf("connect %s: read kind: %v", in.Name, err)
+		} else if ok && a.Kind == "" {
+			if err := s.dir.SetKind(r.Context(), s.remote(r), in.Name, kind); err != nil {
+				log.Printf("connect %s: store kind %s: %v", in.Name, kind, err)
+			}
+		}
 	}
 	s.record(r.Context(), "connected", "", "", in.Name, "")
 	writeJSON(w, http.StatusOK, map[string]string{"name": in.Name, "code": code, "url": url, "expires_in": "10m0s"})
