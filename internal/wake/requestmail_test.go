@@ -529,6 +529,9 @@ func TestBudgetSkippedRequestEmailWaits(t *testing.T) {
 	defer w.Stop()
 	w.Queued(context.Background(), asks.asks[0])
 	waitCalls(t, &rc, 1)
+	// The first wake's audit row lands after its send; wait for it so the
+	// second wake's skip is recorded after it.
+	waitEvents(t, st, "woke")
 	second := ask("rb", "claude-code", "second", start.Add(time.Second))
 	asks.add(second)
 	w.Queued(context.Background(), second)

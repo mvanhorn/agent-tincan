@@ -70,3 +70,41 @@ func TestTailnetHost(t *testing.T) {
 		}
 	}
 }
+
+// rtFunc is an http.RoundTripper made from a function.
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The route is chosen by the request's destination, never by whatever
+// address the transport ends up dialing: a public wake or an AgentMail call
+// keeps the relay's original transport (with its proxy, even a proxy at a
+// tailnet address), and only a request whose own host is on the tailnet
+// goes through the tsnet transport.
+func TestWakeRouteFollowsDestination(t *testing.T) {
+	var public, tailnet []string
+	ok := func(r *http.Request) *http.Response {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}
+	}
+	rt := wakeRoute{
+		public: rtFunc(func(r *http.Request) (*http.Response, error) { public = append(public, r.URL.Host); return ok(r), nil }),
+		tailnet: rtFunc(func(r *http.Request) (*http.Response, error) {
+			tailnet = append(tailnet, r.URL.Host)
+			return ok(r), nil
+		}),
+	}
+	c := &http.Client{Transport: rt}
+	for _, u := range []string{"https://api.agentmail.to/v0/inboxes", "https://hooks.example.com/wake", "http://100.80.229.80:8644/", "http://hermes.tail2b6977.ts.net/"} {
+		resp, err := c.Get(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if strings.Join(public, ",") != "api.agentmail.to,hooks.example.com" {
+		t.Fatalf("public transport got %v, want the two public hosts", public)
+	}
+	if strings.Join(tailnet, ",") != "100.80.229.80:8644,hermes.tail2b6977.ts.net" {
+		t.Fatalf("tailnet transport got %v, want the two tailnet hosts", tailnet)
+	}
+}
