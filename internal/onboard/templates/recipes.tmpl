@@ -20,6 +20,9 @@ On the Agent Notes Mac: TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <c
 {{- define "recipe.invite.chatgpt" -}}
 No tincan invite: ChatGPT cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
 {{- end -}}
+{{- define "recipe.invite.sesame" -}}
+No tincan invite: a Sesame agent runs in Sesame's cloud and cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
+{{- end -}}
 
 {{- define "recipe.tail" -}}
 Once <name> has joined, re-run tincan onboard: its agent block holds the standing instructions to paste, and the operator prompt then lists it.
