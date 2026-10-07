@@ -202,7 +202,7 @@ func TestEmptyRosterAndOffline(t *testing.T) {
 
 func TestRecipes(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL})
-	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "scheduled", "generic", "second-agent", "relay-host"} {
+	for _, kind := range []string{"vm-webhook", "e2b-email", "proxy-sandbox", "claude-code", "chatgpt", "sesame", "hermes", "openclaw", "codex", "gemini-cli", "grok-cli", "history", "scheduled", "generic", "second-agent", "relay-host"} {
 		r := recipe(t, k, kind)
 		if r.Title == "" || len(r.Steps) < 2 {
 			t.Errorf("recipe %s too thin: %+v", kind, r)
@@ -608,14 +608,19 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 		"needs_input is for a missing detail, never for permission",
 		"Never ignore a request: every request you receive ends with a reply",
 		"Claimed work comes before anything else in a turn, including Matt's chat.",
-		"If the relay seems unreachable, do not pause your inbox checks",
 	}
+	// The unreachable-relay line sends the agent to tincan doctor, which a
+	// gateway agent (no shell) cannot run.
+	const unreachable = "If the relay seems unreachable, do not pause your inbox checks"
 	var sawScheduled bool
 	for _, a := range k.Agents {
 		for _, w := range want {
 			if got := strings.Contains(a.Instructions, w); got == isService(a.Kind) {
 				t.Errorf("%s (%s): contains %q = %v", a.Name, a.Kind, w, got)
 			}
+		}
+		if got := strings.Contains(a.Instructions, unreachable); got == (isService(a.Kind) || isGatewayKind(a.Kind)) {
+			t.Errorf("%s (%s): contains %q = %v", a.Name, a.Kind, unreachable, got)
 		}
 		sawScheduled = sawScheduled || a.Kind == KindScheduled
 	}

@@ -2,7 +2,7 @@
 
 ## What Agent Tincan guarantees
 
-- The relay only listens on your tailnet. The one exception is the optional ChatGPT gateway, which serves only the MCP tools and OAuth on its own Funnel hostname. The relay also polls AgentMail outbound for email replies (below); it never opens a listener for them.
+- The relay only listens on your tailnet. The one exception is the optional MCP gateway (`--chatgpt-gateway`), which serves only the MCP tools and OAuth on its own Funnel hostname. It serves any cloud agent an admin connects with `tincan connect <name>` (ChatGPT, Sesame), each with its own tokens; each such agent's vendor receives the requests sent to it and every teammate answer it gets, including `history` and web-agent answers unless their allow files leave it out. The relay also polls AgentMail outbound for email replies (below); it never opens a listener for them.
 - Every request is attributed to the agent that sent it, using Tailscale's identity for the machine it came from. An agent cannot send as another agent, and whatever it writes in the `from` field is ignored. The one exception is an email reply from an agent the owner opted in with `include_requests` (see Email replies below).
 - Only admin devices and the relay's local admin socket can invite, remove, or connect agents, trace every chain, or upgrade the relay (`tincan relay-upgrade`). A caller is an admin device only when all of these hold: Tailscale WhoIs reports its short machine name in the `--admin` list; the node has no Tailscale tags; and, if `--admin-login` is set, the node's owning login is in that list. Machine names are chosen by whoever controls the node, so tag every agent machine (for example `tag:agent`): a tagged node is never an admin, whatever it is called. Owner login alone is not used, because on a single-user tailnet every node, agents included, has the same owner.
 - Chains are tracked by the relay, not by the model. A request made while handling another continues that chain even if the model leaves the parent out. A request that would loop back to an agent already in its chain is rejected, and chains longer than 4 hops are rejected.
@@ -155,7 +155,7 @@ If one agent reads untrusted content (a web page, an email, a document) and gets
 - Agents treat a teammate's request as authorized and do not stop to ask, except before spending money or contacting someone in a way they would normally confirm with you. Give high-power agents instructions about which other kinds of requests they should confirm with you first, or hold them with the [owner approval gate](#owner-approval-gate).
 - Keep `tincan trace` handy so you can see who asked for what.
 - For an OpenAI dot (`dot-web`), which reads your connected apps, list the teammates it may ask in `~/.config/tincan/dot-web-send.txt`; with no file it may ask any joined agent, like every other teammate.
-- Use `tincan remove <agent>` to cut an agent off immediately. Its queued requests are cancelled and, for ChatGPT, its tokens are revoked.
+- Use `tincan remove <agent>` to cut an agent off immediately. Its queued requests are cancelled and, for an agent connected through the gateway (ChatGPT, Sesame), its tokens are revoked.
 
 ## Owner approval gate
 

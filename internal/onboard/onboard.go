@@ -29,6 +29,7 @@ const (
 	KindProxySandbox  = "proxy-sandbox"
 	KindClaudeCode    = "claude-code"
 	KindChatGPT       = "chatgpt"
+	KindSesame        = "sesame"
 	KindHermes        = "hermes"
 	KindOpenClaw      = "openclaw"
 	KindCodex         = "codex"
@@ -49,7 +50,7 @@ const (
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindCouncil, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindCouncil, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -71,6 +72,7 @@ var Sections = []string{"operator", "agents", "recipes", "all"}
 var runtimeNames = map[string]string{
 	"claude-code":    KindClaudeCode,
 	"chatgpt":        KindChatGPT,
+	"sesame":         KindSesame,
 	"hermes":         KindHermes,
 	"openclaw":       KindOpenClaw,
 	"codex":          KindCodex,
@@ -96,6 +98,7 @@ var defaultWake = map[string]string{
 	KindProxySandbox:  "wait",
 	KindClaudeCode:    "channel",
 	KindChatGPT:       "none",
+	KindSesame:        "schedule",
 	KindHermes:        "webhook",
 	KindOpenClaw:      "webhook",
 	KindCodex:         "command",
@@ -134,7 +137,14 @@ var stockGoodAt = map[string]string{
 	KindGeminiCLI:     "a Gemini coding agent run unattended on the owner's machine: reads, edits and runs code",
 	KindGrokCLI:       "xAI's Grok Build CLI run unattended on the owner's machine: reads code, edits and runs it in its own work folder",
 	KindChatGPT:       "ChatGPT in the owner's ChatGPT app; acts only while the owner is chatting with it, so it cannot pick up asks later",
+	KindSesame:        "the owner's Sesame agent in Sesame's cloud; picks up asks when its Sesame schedule checks the inbox, not at once",
 }
+
+// RuntimeKind returns the kind a roster name implies when nothing else says,
+// "" for a name that is not a product runtime. The relay stores it on an agent
+// that tincan connect binds with no kind, and tincan connect picks the
+// connector steps it prints by it.
+func RuntimeKind(name string) string { return runtimeNames[name] }
 
 // StockGoodAt returns the stock good-at line for an agent: its stored kind's
 // line, or with no stored kind the line of the product its name is, "" for
@@ -219,12 +229,21 @@ type agentData struct {
 	OwnConfig bool
 	// Service: a Go service whose config file is named after its kind.
 	Service bool
+	// Gateway: the agent reaches the relay only through the OAuth MCP
+	// gateway, so it has the Agent Tincan tools but no shell, no tincan CLI
+	// and no local tincan mcp to reload, and only tincan connect rejoins it.
+	Gateway bool
 }
 
 func newAgentData(name, kind, wake, relay, owner string, team []string) agentData {
 	return agentData{Name: name, Kind: kind, Wake: wake, RelayURL: relay, Owner: owner, OwnerPoss: possessive(owner), Team: team,
-		OwnConfig: freshSession[kind] || isService(kind), Service: isService(kind)}
+		OwnConfig: freshSession[kind] || isService(kind), Service: isService(kind), Gateway: isGatewayKind(kind)}
 }
+
+// isGatewayKind reports whether kind is a cloud agent that connects through
+// the relay's OAuth MCP gateway (tincan connect) instead of joining the
+// tailnet: ChatGPT and Sesame.
+func isGatewayKind(kind string) bool { return kind == KindChatGPT || kind == KindSesame }
 
 type teamLine struct {
 	Name, Kind, Wake string

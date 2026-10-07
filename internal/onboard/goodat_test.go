@@ -14,7 +14,7 @@ import (
 // and hosting shapes and owner-configured frameworks have none. A new service
 // kind without a line fails here.
 func TestStockGoodAtCoversServiceAndProductKinds(t *testing.T) {
-	products := []string{KindClaudeCode, KindCodex, KindGeminiCLI, KindGrokCLI, KindChatGPT}
+	products := []string{KindClaudeCode, KindCodex, KindGeminiCLI, KindGrokCLI, KindChatGPT, KindSesame}
 	none := []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindScheduled, KindGeneric, KindHermes, KindOpenClaw}
 	want := slices.Clone(products)
 	for _, k := range Kinds {

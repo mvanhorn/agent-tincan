@@ -16,6 +16,10 @@ Docs: https://github.com/mvanhorn/agent-tincan  (README, docs/adapters/<platform
 - Your owner asked you to add ChatGPT and Claude: do PART C.
 - Your owner asked you to add Council (put one question to every model on
   the team): do PART D.
+- You are a Sesame agent (no shell, no tailnet): skip every part below,
+  including the install. Ask your owner to follow docs/adapters/sesame.md:
+  they run `tincan connect sesame` and you add the printed URL as a custom app.
+  After that you use only the Agent Tincan tools (check_inbox, reply, ask).
 
 Rules for every part:
 - Never put secrets (auth keys, tokens, invite codes for other agents, wake.json

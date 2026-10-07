@@ -182,7 +182,7 @@ var loginPage = template.Must(template.New("login").Parse(`<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Tincan</title>
 <style>body{font:16px system-ui;max-width:28rem;margin:4rem auto;padding:0 1rem}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}button{font:inherit;padding:.5rem 1rem;margin-top:1rem}</style></head>
 <body><h1>Connect to Agent Tincan</h1>
-<p>Enter the one-time code from <code>tincan connect chatgpt</code>.</p>
+<p>Enter the one-time code from <code>tincan connect &lt;name&gt;</code>.</p>
 {{if .Error}}<p style="color:#b00">{{.Error}}</p>{{end}}
 <form method="post" action="/authorize">
 <input name="login_code" placeholder="XXXX-XXXX" autocomplete="one-time-code" autofocus>

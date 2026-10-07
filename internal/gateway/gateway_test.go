@@ -78,7 +78,7 @@ func (e *env) loginSession(t *testing.T, code string) (session, *http.Response) 
 		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {"xyz"}}.Encode())
 	body, _ := io.ReadAll(page.Body)
 	page.Body.Close()
-	if page.StatusCode != 200 || !strings.Contains(string(body), "tincan connect chatgpt") {
+	if page.StatusCode != 200 || !strings.Contains(string(body), "tincan connect") {
 		t.Fatalf("login page %d: %s", page.StatusCode, body)
 	}
 	resp, err := noRedirect.PostForm(e.gw.URL+"/authorize", url.Values{"login_code": {code}, "client_id": {client.ClientID},
@@ -394,5 +394,83 @@ func TestRegisterCapsClientCount(t *testing.T) {
 	}
 	if got := countRows(t, e, `SELECT count(*) FROM gw_clients`); got != 1000 {
 		t.Fatalf("clients = %d, want 1000", got)
+	}
+}
+
+// The login page serves any agent tincan connect names, so it names the
+// command without naming a product.
+func TestLoginPageNamesNoProduct(t *testing.T) {
+	e := setup(t)
+	_, reg := register(t, e, `{"redirect_uris":["https://app.example/cb"],"client_name":"Sesame"}`)
+	clientID, _ := reg["client_id"].(string)
+	page, err := http.Get(e.gw.URL + "/authorize?" + url.Values{"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {"https://app.example/cb"},
+		"code_challenge": {"abc"}, "code_challenge_method": {"S256"}, "state": {"xyz"}}.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	if page.StatusCode != 200 || !strings.Contains(string(body), "tincan connect &lt;name&gt;") {
+		t.Fatalf("login page %d: %s", page.StatusCode, body)
+	}
+	for _, bad := range []string{"chatgpt", "ChatGPT", "Sesame", "sesame"} {
+		if strings.Contains(string(body), bad) {
+			t.Errorf("login page names %q:\n%s", bad, body)
+		}
+	}
+}
+
+// AE3: chatgpt and sesame connected at once each hold their own tokens.
+// Either refreshing leaves the other's session working, each call is
+// attributed to its own agent, and removing one revokes only its tokens.
+func TestTwoGatewayAgentsKeepSeparateTokens(t *testing.T) {
+	e := setup(t)
+	gptCode, _, err := e.conn.Connect(context.Background(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sesCode, _, err := e.conn.Connect(context.Background(), "sesame")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gpt, _ := e.loginSession(t, gptCode)
+	ses, _ := e.loginSession(t, sesCode)
+
+	sesFresh, status := e.refresh(t, ses.RefreshToken, ses.ClientID)
+	if status != http.StatusOK || sesFresh.AccessToken == "" {
+		t.Fatalf("sesame refresh: status %d", status)
+	}
+	// chatgpt's first access token still works after sesame refreshed.
+	if res, err := e.mcpSession(t, gpt.AccessToken).CallTool(t.Context(), &mcp.CallToolParams{Name: "list_agents", Arguments: map[string]any{}}); err != nil || res.IsError {
+		t.Fatalf("chatgpt after sesame's refresh: %v %+v", err, res)
+	}
+	gptFresh, status := e.refresh(t, gpt.RefreshToken, gpt.ClientID)
+	if status != http.StatusOK || gptFresh.AccessToken == "" {
+		t.Fatalf("chatgpt refresh after sesame's: status %d", status)
+	}
+	if _, status := e.refresh(t, sesFresh.RefreshToken, gpt.ClientID); status != http.StatusBadRequest {
+		t.Fatalf("sesame's refresh token accepted for chatgpt's client: status %d", status)
+	}
+
+	for _, agent := range []string{"chatgpt", "sesame"} {
+		tok := map[string]string{"chatgpt": gptFresh.AccessToken, "sesame": sesFresh.AccessToken}[agent]
+		res, err := e.mcpSession(t, tok).CallTool(t.Context(), &mcp.CallToolParams{Name: "ask", Arguments: map[string]any{"to": "instinct", "message": "from " + agent, "wait_seconds": 1}})
+		if err != nil || res.IsError {
+			t.Fatalf("%s ask: %v %+v", agent, err, res)
+		}
+		in, err := e.m.Client(t, "instinct").Poll(context.Background(), 0)
+		if err != nil || len(in.Requests) != 1 || in.Requests[0].From != agent || in.Requests[0].Body != "from "+agent {
+			t.Fatalf("instinct got %+v, %v, want one request from %s", in.Requests, err, agent)
+		}
+	}
+
+	if err := e.m.Client(t, "admin").Remove(context.Background(), "sesame"); err != nil {
+		t.Fatal(err)
+	}
+	if _, status := e.refresh(t, sesFresh.RefreshToken, ses.ClientID); status != http.StatusBadRequest {
+		t.Fatalf("sesame refresh after remove: status %d", status)
+	}
+	if res, err := e.mcpSession(t, gptFresh.AccessToken).CallTool(t.Context(), &mcp.CallToolParams{Name: "list_agents", Arguments: map[string]any{}}); err != nil || res.IsError {
+		t.Fatalf("chatgpt after removing sesame: %v %+v", err, res)
 	}
 }

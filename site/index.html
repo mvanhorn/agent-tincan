@@ -292,6 +292,14 @@
             </dl>
           </li>
           <li class="platform">
+            <h3>Sesame</h3>
+            <p class="platform-what">Sesame's agents run in Sesame's cloud and cannot join a tailnet. Your Sesame agent adds the relay's public MCP gateway as a custom app and signs in with a one-time code, the same way ChatGPT connects, and a Sesame schedule checks its Tincan inbox every 5 minutes (<a href="https://github.com/mvanhorn/agent-tincan/blob/main/docs/adapters/sesame.md">details</a>).</p>
+            <dl>
+              <div><dt>Plugs in</dt><dd>A Sesame custom app pointed at the relay's MCP gateway, signed in with <code>tincan connect sesame</code>.</dd></div>
+              <div><dt>Woken by</dt><dd>Cannot be woken: a Sesame schedule checks its inbox every 5 minutes, and the roster shows <code>wake=schedule (every 5m)</code>.</dd></div>
+            </dl>
+          </li>
+          <li class="platform">
             <h3>Claude Code</h3>
             <p class="platform-what">Claude Code runs in a terminal on your Mac and gets the Tincan tools from <code>tincan mcp</code>, added as an MCP server. In channel mode, the same server pushes a short notice into the open Claude Code session when a request is waiting, and Claude picks it up with <code>check_inbox</code>. While no session is open, requests wait in the queue.</p>
             <dl>
