@@ -378,9 +378,15 @@ func (r *Relay) proves(ctx context.Context, base, key string) bool {
 }
 
 // unreachable reports whether err means nothing answered at the relay's
-// address (refused, timed out, no route, unknown host), as opposed to the
-// relay answering with an error.
+// address (refused, timed out, no route, unknown host, or a SOCKS tunnel
+// that could not connect to it), as opposed to the relay answering with an
+// error. Through a SOCKS tunnel a relay that moved looks exactly like a
+// tunnel that is down, so Relay.call retries a SOCKS failure first and then,
+// like any other unreachable relay, searches for it.
 func unreachable(err error) bool {
+	if socksConnectFailed(err) {
+		return true
+	}
 	var api *APIError
 	if errors.As(err, &api) {
 		// Through a proxy (Muse), a relay that no longer answers comes
@@ -398,9 +404,10 @@ func unreachable(err error) bool {
 
 // socksConnectFailed reports whether err is the SOCKS proxy failing to open
 // a connection to the relay. In a sandbox that reaches the tailnet through a
-// local SOCKS tunnel, this is the tunnel being down (often for a moment,
-// right after the sandbox wakes), not the relay moving or refusing. No
-// request reached the relay, so the call is safe to make again.
+// local SOCKS tunnel, this is usually the tunnel being down (often for a
+// moment, right after the sandbox wakes), but it is also how a relay that
+// moved shows up. No request reached the relay, so the call is safe to make
+// again.
 func socksConnectFailed(err error) bool {
 	var op *net.OpError
 	return errors.As(err, &op) && op.Op == "socks connect"
