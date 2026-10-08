@@ -75,6 +75,7 @@ func (f *servicesFixture) refresher(revert bool) *serviceRefresher {
 		exe:     f.exe,
 		revert:  revert,
 		ensure:  func() (string, error) { return f.launcher, nil },
+		verify:  func(string) error { return nil },
 		launchd: f.ld,
 		sleep:   func() {},
 		out:     &f.out,
@@ -550,6 +551,106 @@ func TestLoginItemsCheckUnreadablePlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c := loginItemsCheck(f.loginItems()); c.Status != "fail" || !strings.Contains(c.Detail, "com.agenttincan.broken") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+// An unsigned tincan (a self-built binary that embeds the signed app) must
+// not wrap its services: the launcher would refuse it and they would stop.
+func TestRefreshLeavesServicesAloneForUnsignedBinary(t *testing.T) {
+	f := newServicesFixture(t)
+	p := f.writePlist(t, "com.agenttincan.council", map[string]any{"ProgramArguments": []string{f.exe, "council", "serve"}})
+	orig, _ := os.ReadFile(p)
+	f.ld.loaded["com.agenttincan.council"] = true
+	r := f.refresher(false)
+	r.verify = func(string) error { return errors.New("not signed by Agent Tincan") }
+	if err := r.run(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(p); string(got) != string(orig) || len(f.ld.calls) != 0 {
+		t.Fatalf("services changed for an unsigned binary; calls %q", f.ld.calls)
+	}
+	if !strings.Contains(f.out.String(), "not signed") {
+		t.Fatalf("output: %s", f.out.String())
+	}
+}
+
+// Revert restores a hand-written plist byte for byte when nothing changed
+// since refresh, including a Program key, its argv[0], and the user's own
+// com.agenttincan.app entry.
+func TestRefreshRevertRestoresHandWrittenPlistExactly(t *testing.T) {
+	f := newServicesFixture(t)
+	p := f.writePlist(t, "com.agenttincan.codex-listen", map[string]any{
+		"Program":                     f.exe,
+		"ProgramArguments":            []string{"my-listener", "listen"},
+		"AssociatedBundleIdentifiers": []string{macapp.BundleID, "com.example.mine"},
+	})
+	orig, _ := os.ReadFile(p)
+	if err := f.refresher(false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(p); string(got) == string(orig) {
+		t.Fatal("refresh did not wrap the plist")
+	}
+	if err := f.refresher(true).run(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(p); string(got) != string(orig) {
+		t.Fatalf("revert did not restore the original:\n%s\nwant\n%s", got, orig)
+	}
+}
+
+// Revert leaves a plist refresh never touched exactly as it is.
+func TestRefreshRevertLeavesUntouchedPlistAlone(t *testing.T) {
+	f := newServicesFixture(t)
+	p := f.writePlist(t, "com.agenttincan.codex-listen", map[string]any{"Program": f.exe, "ProgramArguments": []string{"tincan", "listen"}})
+	orig, _ := os.ReadFile(p)
+	if err := f.refresher(true).run(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(p); string(got) != string(orig) {
+		t.Fatal("revert changed a plist refresh never wrapped")
+	}
+}
+
+// When a wrapped plist was edited after refresh, revert keeps the edit and
+// only unwraps it.
+func TestRefreshRevertKeepsLaterEdits(t *testing.T) {
+	f := newServicesFixture(t)
+	p := f.writePlist(t, "com.agenttincan.council", map[string]any{"ProgramArguments": []string{f.exe, "council", "serve"}})
+	if err := f.refresher(false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("/usr/bin/plutil", "-insert", "ProgramArguments.4", "-string", "--verbose", p).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	if err := f.refresher(true).run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strs(readPlist(t, p)["ProgramArguments"]); !slices.Equal(got, []string{f.exe, "council", "serve", "--verbose"}) {
+		t.Fatalf("ProgramArguments = %q", got)
+	}
+}
+
+// Doctor checks the launcher each plist names, not only the default app.
+func TestLoginItemsCheckMissingNamedLauncher(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	old := filepath.Join(f.home, "Old", "Agent Tincan.app", "Contents", "MacOS", "agent-tincan")
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{old, f.exe, "history", "serve"}})
+	c := loginItemsCheck(f.loginItems())
+	if c.Status != "fail" || !strings.Contains(c.Detail, "com.agenttincan.history") || !strings.Contains(c.Fix, "tincan services refresh") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckPendingRestartAdvice(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	env := f.loginItems()
+	env.liveProgram = func(string) string { return f.exe }
+	if c := loginItemsCheck(env); !strings.Contains(c.Fix, "tincan services refresh --restart") {
 		t.Fatalf("check = %+v", c)
 	}
 }

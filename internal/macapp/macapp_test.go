@@ -241,3 +241,22 @@ func TestRequirementsPinAppleDeveloperID(t *testing.T) {
 		t.Error("AppRequirement does not pin the app's bundle identifier")
 	}
 }
+
+// A failed LaunchServices registration is retried on the next Ensure, even
+// though the installed app is already current.
+func TestEnsureRetriesRegistration(t *testing.T) {
+	home := t.TempDir()
+	z := testZip(t, "v1", BundleID)
+	var r recorder
+	o := r.opts(home, z)
+	o.Register = func(string) error { return errors.New("lsregister failed") }
+	if _, err := Ensure(o); err == nil {
+		t.Fatal("registration failure not reported")
+	}
+	if _, err := Ensure(r.opts(home, z)); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.registered) != 1 {
+		t.Fatalf("registration not retried for a current app: %v", r.registered)
+	}
+}

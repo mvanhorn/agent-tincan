@@ -113,6 +113,10 @@ func Ensure(o Options) (string, error) {
 	}
 	dst := Path(o.Home)
 	if current(zr, dst) && o.Validate(dst) == nil {
+		// Register again: an earlier install may have failed at this step.
+		if err := o.Register(dst); err != nil {
+			return "", fmt.Errorf("register %s: %w", dst, err)
+		}
 		return Launcher(o.Home), nil
 	}
 	dir := filepath.Dir(dst)
