@@ -354,7 +354,7 @@ func writePlistEdit(path string, mode os.FileMode, args []string, dropProgram bo
 	}
 	for _, e := range edits {
 		out, err := exec.Command(plutilBin, append(e, tmp.Name())...).CombinedOutput()
-		if err != nil && !(e[0] == "-remove" && strings.Contains(string(out), "No value to remove")) {
+		if err != nil && (e[0] != "-remove" || !strings.Contains(string(out), "No value to remove")) {
 			return fmt.Errorf("plutil %s: %v: %s", strings.Join(e[:2], " "), err, strings.TrimSpace(string(out)))
 		}
 	}

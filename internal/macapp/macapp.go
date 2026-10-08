@@ -49,7 +49,7 @@ const (
 
 // ErrUnavailable means this tincan cannot install the app: it is not running
 // on macOS, or it is a build without the embedded app.
-var ErrUnavailable = errors.New("Agent Tincan.app is not available in this build")
+var ErrUnavailable = errors.New("this build does not include Agent Tincan.app")
 
 // Embedded reports whether this build carries the app.
 func Embedded() bool { return len(embeddedZip) > 0 }
