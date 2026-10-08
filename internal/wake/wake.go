@@ -845,16 +845,18 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 	if step > 0 {
 		marker = " (" + pathLabel(cfg, step) + ")"
 	}
-	if w.audit != nil {
-		w.audit.BeginWake(agent)
-	}
 	// What the wake covers, read as it goes out: a poll the wake sets off
-	// could take a request before the send returns.
+	// could take a request before the send returns. It is read before the
+	// wake is marked in flight, so a poll during the lookup still counts as
+	// the first poll after the previous wake.
 	waiting, unseen := p.requests, replies
 	var ids []string
 	if q, r, ok := w.coveredIDs(agent); ok {
 		waiting, unseen = len(q), len(r)
 		ids = append(q, r...)
+	}
+	if w.audit != nil {
+		w.audit.BeginWake(agent)
 	}
 	at := w.opts.Now()
 	code, answer, err := w.send(ctx, t, msg, key)

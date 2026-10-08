@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
@@ -20,9 +21,13 @@ type idsFake struct {
 	queued  []string
 	replies []string
 	err     error
+	lookup  func() // runs during the queued-id lookup
 }
 
 func (f *idsFake) queuedIDs(string) ([]string, error) {
+	if f.lookup != nil {
+		f.lookup()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.queued...), f.err
@@ -222,5 +227,39 @@ func TestRequestEmailWokeRowNamesEmailedAsks(t *testing.T) {
 				t.Fatalf("woke row = request_id %q, detail %q", row.RequestID, row.Detail)
 			}
 		})
+	}
+}
+
+// A poll that lands while the next wake reads its ids is still the first
+// poll after the previous wake, so that wake keeps its polled row: the id
+// lookup happens before the wake is marked in flight.
+func TestPollDuringIDLookupKeepsPreviousWakesPoll(t *testing.T) {
+	st := auditStore(t)
+	if err := st.PutAgent(context.Background(), identity.Agent{Name: "grokbot", NodeID: "nG", NodeName: "grok", JoinedAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	ids := &idsFake{queued: []string{"ra"}}
+	w := idWaker(t, st, ids, 0)
+	queued(w, "grokbot", 1)
+	w.Flush()
+	ids.lookup = func() {
+		if err := st.TouchAgentPoll(context.Background(), "grokbot", time.Now()); err != nil {
+			t.Error(err)
+		}
+	}
+	queued(w, "grokbot", 1)
+	w.Flush()
+	evs, err := st.AuditEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first int
+	for _, e := range evs {
+		if e.Event == store.EventPolled && strings.HasPrefix(e.Detail, "first poll since the wake") {
+			first++
+		}
+	}
+	if first != 1 {
+		t.Fatalf("first-poll rows = %d, want 1 for the first wake: %+v", first, evs)
 	}
 }

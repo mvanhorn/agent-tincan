@@ -116,10 +116,11 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 	// on the primary path.
 	w.pathStep(agent, p.followUp)
 	cfg := w.cfg[agent]
+	// Read before the wake is marked in flight, as in deliver.
+	detailOthers, detailReplies, ids := w.mailedIDs(agent, p, asks, picked, others, replies)
 	if w.audit != nil {
 		w.audit.BeginWake(agent)
 	}
-	detailOthers, detailReplies, ids := w.mailedIDs(agent, p, asks, picked, others, replies)
 	var code, failedSends int
 	var firstErr error
 	var failed []envelope.Request // asks whose email failed, for unpick
