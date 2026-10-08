@@ -59,13 +59,15 @@ Tincan inbox router. It changes no relay protocol, MCP registration or permissio
 
 Create or choose the conversation with Claude's normal interface first. Obtain
 its actual conversation UUID (for example, from `/status`), not a Tincan request
-ID or the short address returned by cross-session discovery. Bind it once:
+ID or the short address returned by cross-session discovery.
 
 The registry's parent directory must already exist, be owned by you, have no
 group/other permissions (normally `0700`), and have no symlinked path components.
 Registry and lock files must be private `0600` regular files. The helper rejects
 unsafe storage rather than changing existing permissions. Choose a dedicated
 private registry directory if your existing Tincan config directory is shared.
+
+Bind it once:
 
 ```bash
 python3 examples/claude-code/session-route.py \
@@ -84,8 +86,8 @@ On macOS, adding `--desktop` uses Claude's official
 `claude --desktop --resume <conversation UUID>` opener. It opens Desktop, not a
 second model executor. The helper supplies the terminal required by that opener;
 it does not click, type into a window, or inject into private session sockets.
-Claude Code v2.1.285 or newer, Claude Desktop, and an eligible subscription login
-are required; the official opener determines availability. An accepted open
+Claude Desktop and an eligible subscription login are required; the official
+opener determines availability and the minimum Claude Code version. An accepted open
 command is not proof of live CLI/Desktop synchronization or task execution.
 See [Claude's Desktop documentation](https://code.claude.com/docs/en/desktop#coming-from-the-cli).
 
