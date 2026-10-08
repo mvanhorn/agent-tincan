@@ -24,7 +24,7 @@ Muse mints a new egress-proxy password for every shell, and the old one stops wo
 
 Credentials written into the config still win, and so does `TINCAN_PROXY`, which overrides the saved proxy for one process.
 
-The limit is long-running processes: `tincan wait`, `tincan listen`, and the MCP server. Each keeps the environment it started with, and cannot see a newer shell's password. On a 407, tincan reads the config (and `TINCAN_PROXY`) once more and retries if it now names different credentials. If it doesn't, `wait` and `listen` exit and an MCP tool returns an error naming the proxy (never its password). Start them again from a shell with current credentials. The 407 is never retried in a loop.
+The limit is long-running processes: `tincan wait`, `tincan listen`, and the MCP server. Each keeps the environment it started with, and cannot see a newer shell's password. On a 407, tincan reads the config (and `TINCAN_PROXY`) once more and retries if it now names different credentials. If it doesn't, `wait` and `listen` exit and an MCP tool returns an error naming the proxy (never its password). Start them again from a shell with current credentials. Background service loops, such as the MCP server's channel that watches for new requests, log the 407 and keep retrying with backoff, so they recover only once the config names working credentials or they are restarted.
 
 ### Wrapper pattern
 
