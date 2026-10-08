@@ -100,6 +100,19 @@ class SessionRouteTests(unittest.TestCase):
             session_route.bind_route(self.registry, self.project, "design", SESSION_B)
         self.assertEqual(session_route.resolve_route(self.registry, self.project, "design"), route)
 
+    def test_case_variant_project_path_is_the_same_route(self):
+        variant = self.root / self.project.name.upper()
+        if not variant.exists():
+            self.skipTest("filesystem is case-sensitive")
+        route, _ = session_route.bind_route(self.registry, self.project, "design", SESSION_A)
+        with self.assertRaisesRegex(session_route.RouteError, "route_conflict_immutable"):
+            session_route.bind_route(self.registry, variant, "design", SESSION_B)
+        same, created = session_route.bind_route(self.registry, variant, "design", SESSION_A)
+        self.assertFalse(created)
+        self.assertEqual(same, route)
+        self.assertEqual(session_route.resolve_route(self.registry, variant, "design"), route)
+        self.assertEqual(len(json.loads(self.registry.read_text())["routes"]), 1)
+
     def test_one_session_uuid_cannot_be_bound_to_another_route(self):
         session_route.bind_route(self.registry, self.project, "design", SESSION_A)
         with self.assertRaisesRegex(session_route.RouteError, "session_already_bound"):

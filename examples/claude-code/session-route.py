@@ -269,6 +269,17 @@ def _atomic_write(directory_fd: int, name: str, state: dict[str, object]) -> Non
         raise RouteError("registry_write_unavailable") from None
 
 
+def _same_project(stored: str, canonical: str) -> bool:
+    """Match one directory even when its path differs, e.g. by letter case on macOS."""
+    if stored == canonical:
+        return True
+    try:
+        return os.path.samefile(stored, canonical)
+    except OSError:
+        # The stored directory no longer exists; only an exact path matches.
+        return False
+
+
 def bind_route(registry: Path, project: Path, task: str, session_id: str) -> tuple[dict[str, str], bool]:
     """Bind an existing UUID once; return (route, created)."""
     canonical_project = str(_project_directory(project))
@@ -282,7 +293,7 @@ def bind_route(registry: Path, project: Path, task: str, session_id: str) -> tup
                 state = {"version": REGISTRY_VERSION, "routes": []}
             routes = state["routes"]
             for existing in routes:
-                if existing["project"] == canonical_project and existing["task"] == task:
+                if existing["task"] == task and _same_project(existing["project"], canonical_project):
                     if existing["session_id"] == session_id:
                         return existing, False
                     raise RouteError("route_conflict_immutable")
@@ -304,7 +315,7 @@ def resolve_route(registry: Path, project: Path, task: str) -> dict[str, str]:
     if state is None:
         raise RouteError("route_not_found")
     for route in state["routes"]:
-        if route["project"] == canonical_project and route["task"] == task:
+        if route["task"] == task and _same_project(route["project"], canonical_project):
             return route
     raise RouteError("route_not_found")
 
