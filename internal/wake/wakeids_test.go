@@ -263,3 +263,30 @@ func TestPollDuringIDLookupKeepsPreviousWakesPoll(t *testing.T) {
 		t.Fatalf("first-poll rows = %d, want 1 for the first wake: %+v", first, evs)
 	}
 }
+
+// A reply that turns up after the wake counted its work, but before the ids
+// are read, is not named: no count-only email went out to tell of it, so the
+// row lists only the emailed asks.
+func TestRequestEmailWokeRowSkipsUnmentionedReply(t *testing.T) {
+	at := time.Unix(1_790_000_000, 0)
+	var rc recorder
+	ts := rc.server(t)
+	st := auditStore(t)
+	a := ask("ra", "muse", "book the boat", at)
+	asks := &asksFake{asks: []envelope.Request{a}}
+	ids := &idsFake{queued: []string{"ra"}, replies: []string{"rr"}}
+	w := New(Config{"instinct": optedIn()}, st, Options{
+		Debounce: time.Millisecond, WakeGrace: skipFollowUp, AgentMailAPI: ts.URL + "/v0",
+		OpenAsks: asks.open, RequestTag: fakeTag,
+		Queued:        func(string) int { return 1 },
+		UnseenReplies: func(string) int { return 0 },
+		QueuedIDs:     ids.queuedIDs, UnseenReplyIDs: ids.replyIDs,
+	})
+	t.Cleanup(w.Stop)
+	w.Queued(context.Background(), a)
+	w.Flush()
+	row := oneWoke(t, st)
+	if row.RequestID != "ra" || row.Detail != "email, HTTP 200, 1 open asks, 1 request emails" {
+		t.Fatalf("woke row = request_id %q, detail %q", row.RequestID, row.Detail)
+	}
+}

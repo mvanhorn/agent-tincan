@@ -190,14 +190,16 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 // unseen that its count-only email tells of, with the counts of those two
 // for the detail. Without the id hooks (coveredIDs), the row keeps the
 // counts given and lists the emailed asks only when nothing else rides the
-// wake, so a lone id is never named as its only cause. A mail-only nudge
-// covers just its asks.
+// wake, so a lone id is never named as its only cause. A mail-only nudge,
+// and a wake that sent no count-only email, cover just their asks.
 func (w *Waker) mailedIDs(agent string, p *nudge, asks, picked []envelope.Request, others, replies int) (int, int, []string) {
 	ids := make([]string, 0, len(picked))
 	for _, a := range picked {
 		ids = append(ids, a.ID)
 	}
-	if p.mailOnly {
+	if p.mailOnly || (others == 0 && replies == 0) {
+		// Nothing but the asks was emailed, so nothing else is named, even
+		// if work turned up after the wake counted it.
 		return others, replies, ids
 	}
 	queued, unseen, ok := w.coveredIDs(agent)
