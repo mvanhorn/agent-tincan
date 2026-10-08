@@ -531,3 +531,32 @@ func TestJoinProxyCredentialsFromEnvSavesNoPassword(t *testing.T) {
 		})
 	}
 }
+
+// join --proxy-credentials-from-env with no --proxy, over a config whose
+// saved proxy password has expired, dials with the current shell's password
+// from HTTPS_PROXY and saves the proxy with no password.
+func TestJoinProxyCredentialsFromEnvReplacesExpiredSavedPassword(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	proxy := forwardProxy(t, "fresh-secret")
+	host := strings.TrimPrefix(proxy.URL, "http://")
+	hostname, _, _ := strings.Cut(host, ":")
+	useConfig(t, client.Config{Relay: m.URL("stranger"), Proxy: "http://u:expired-secret@" + host})
+	t.Setenv("HTTPS_PROXY", "http://u:fresh-secret@"+hostname+":3128")
+	out, err := run(t, joinCmd(), m.Invite(t, "hermes"), "--proxy-credentials-from-env")
+	if err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	cfg, err := client.LoadConfig()
+	if err != nil || cfg.Agent != "hermes" || cfg.Proxy != "http://"+host || !cfg.ProxyCredentialsFromEnv {
+		t.Fatalf("saved config = %+v, %v", cfg, err)
+	}
+	raw, err := os.ReadFile(client.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"expired-secret", "fresh-secret"} {
+		if strings.Contains(string(raw)+out, secret) {
+			t.Fatalf("a proxy password was saved or printed: %s\n%s", raw, out)
+		}
+	}
+}

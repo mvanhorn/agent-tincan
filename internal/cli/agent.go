@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -77,6 +78,21 @@ func savedProxyConfig(cfg client.Config) client.Config {
 	return cfg
 }
 
+// applyProxyCredsFlag applies --proxy-credentials-from-env to cfg. Turning it
+// on without a proxy from --proxy or TINCAN_PROXY also drops the password
+// saved in the config: that is the migration a 407 asks for, and the saved
+// password is the one that expired, so DialProxy must borrow the current
+// one from the environment instead.
+func applyProxyCredsFlag(cmd *cobra.Command, cfg *client.Config, on bool) {
+	if !cmd.Flags().Changed(proxyCredsFlag) {
+		return
+	}
+	cfg.ProxyCredentialsFromEnv = on
+	if on && !cmd.Flags().Changed("proxy") && os.Getenv("TINCAN_PROXY") == "" {
+		cfg.Proxy = client.WithoutProxyPassword(cfg.Proxy)
+	}
+}
+
 // printProxyCredsNote says, after join or rejoin, that the proxy password
 // was left out of the config and where commands find it instead.
 func printProxyCredsNote(cmd *cobra.Command, cfg client.Config) {
@@ -119,9 +135,7 @@ func joinCmd() *cobra.Command {
 			if cmd.Flags().Changed("proxy") {
 				cfg.Proxy = proxy
 			}
-			if cmd.Flags().Changed(proxyCredsFlag) {
-				cfg.ProxyCredentialsFromEnv = credsFromEnv
-			}
+			applyProxyCredsFlag(cmd, &cfg, credsFromEnv)
 			if cfg.Relay == "" {
 				return errors.New("--relay is required the first time (for example http://tincan-relay)")
 			}

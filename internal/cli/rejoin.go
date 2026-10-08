@@ -36,9 +36,7 @@ Only a machine that was never joined needs a first-time invite from an admin.`,
 			if cmd.Flags().Changed("proxy") {
 				cfg.Proxy = proxy
 			}
-			if cmd.Flags().Changed(proxyCredsFlag) {
-				cfg.ProxyCredentialsFromEnv = credsFromEnv
-			}
+			applyProxyCredsFlag(cmd, &cfg, credsFromEnv)
 			if cmd.Flags().Changed("name") {
 				cfg.Agent = name
 			}
