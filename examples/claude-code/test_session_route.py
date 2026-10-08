@@ -329,6 +329,41 @@ class SessionRouteTests(unittest.TestCase):
             faulthandler.cancel_dump_traceback_later()
         self.assertLess(time.monotonic() - started, 4)
 
+    def test_interrupted_desktop_open_stops_and_reaps_child(self):
+        fake_claude = self.root / "fake-interrupted-claude"
+        fake_claude.write_text("#!/bin/sh\nsleep 10\n")
+        fake_claude.chmod(0o700)
+        real_fork = session_route.pty.fork
+        forked: list[int] = []
+
+        def recording_fork():
+            child_pid, master_fd = real_fork()
+            if child_pid:
+                forked.append(child_pid)
+            return child_pid, master_fd
+
+        def cleanup_leaked_child():
+            for pid in forked:
+                try:
+                    os.kill(pid, 9)
+                    os.waitpid(pid, 0)
+                except (OSError, ChildProcessError):
+                    pass
+
+        self.addCleanup(cleanup_leaked_child)
+        started = time.monotonic()
+        with patch.object(session_route.pty, "fork", side_effect=recording_fork), \
+                patch.object(session_route.select, "select", side_effect=KeyboardInterrupt), \
+                patch.object(session_route, "_signal_child", wraps=session_route._signal_child) as signalled:
+            with self.assertRaises(KeyboardInterrupt):
+                session_route.open_desktop(self.project, SESSION_A, claude_bin=fake_claude, timeout=5,
+                                           env={"PATH": os.defpath, "HOME": str(self.root)})
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(len(forked), 1)
+        signalled.assert_any_call(forked[0], session_route.signal.SIGTERM)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(forked[0], os.WNOHANG)
+
     def test_missing_process_group_still_signals_known_child(self):
         with patch.object(session_route.os, "killpg", side_effect=ProcessLookupError), \
                 patch.object(session_route.os, "kill") as direct_signal, \

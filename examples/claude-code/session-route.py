@@ -426,13 +426,16 @@ def open_desktop(project: Path, session_id: str, *, claude_bin: Path | None = No
     os.set_blocking(master_fd, False)
     deadline = time.monotonic() + timeout
     status: int | None = None
+    child_unfinished = True
     try:
         while time.monotonic() < deadline:
             try:
                 waited, child_status = os.waitpid(child_pid, os.WNOHANG)
             except ChildProcessError:
+                child_unfinished = False
                 raise RouteError("desktop_opener_failed") from None
             if waited:
+                child_unfinished = False
                 status = child_status
                 _drain_pty(master_fd)
                 break
@@ -445,10 +448,15 @@ def open_desktop(project: Path, session_id: str, *, claude_bin: Path | None = No
             if ready:
                 _drain_pty(master_fd)
         if status is None:
-            _stop_child(child_pid)
             raise RouteError("desktop_opener_timeout")
     finally:
-        os.close(master_fd)
+        # Any exit before the child is reaped (timeout, KeyboardInterrupt, or
+        # another exception) must stop it with the same bounded cleanup.
+        try:
+            if child_unfinished:
+                _stop_child(child_pid)
+        finally:
+            os.close(master_fd)
     if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
         raise RouteError("desktop_opener_failed")
     return os.WEXITSTATUS(status)
