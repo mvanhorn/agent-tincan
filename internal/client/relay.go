@@ -583,12 +583,9 @@ const DistDownloadTimeout = 10 * time.Minute
 
 // DownloadDist streams the named release file from the relay into w.
 func (r *Relay) DownloadDist(ctx context.Context, name string, w io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", r.Base()+"/v1/dist/"+url.PathEscape(name), nil)
-	if err != nil {
-		return err
-	}
-	r.headers(req)
-	resp, err := r.withTimeout(DistDownloadTimeout).Do(req)
+	resp, err := r.do(r.withTimeout(DistDownloadTimeout), func(int) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "GET", r.Base()+"/v1/dist/"+url.PathEscape(name), nil)
+	})
 	if err != nil {
 		return err
 	}
