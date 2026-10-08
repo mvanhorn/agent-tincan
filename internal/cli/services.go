@@ -231,7 +231,7 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 		return r.restartUnchanged(label, path, "skipped (the notes service keeps running tincan directly so its Files and Folders grant stays its own)")
 	}
 	if r.revert && j.launcher == "" {
-		return "already current", nil // refresh never wrapped it
+		return r.restartUnchanged(label, path, "already current") // refresh never wrapped it
 	}
 	orig, err := os.ReadFile(path)
 	if err != nil {

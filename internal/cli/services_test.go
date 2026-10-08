@@ -654,3 +654,19 @@ func TestLoginItemsCheckPendingRestartAdvice(t *testing.T) {
 		t.Fatalf("check = %+v", c)
 	}
 }
+
+// --revert --restart restarts a loaded job even when its plist already runs
+// tincan directly.
+func TestRefreshRevertRestartRestartsUnwrappedJob(t *testing.T) {
+	f := newServicesFixture(t)
+	f.writePlist(t, "com.agenttincan.council", map[string]any{"ProgramArguments": []string{f.exe, "council", "serve"}})
+	f.ld.loaded["com.agenttincan.council"] = true
+	r := f.refresher(true)
+	r.restartCurrent = true
+	if err := r.run(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"bootout com.agenttincan.council", "bootstrap com.agenttincan.council"}; !slices.Equal(f.ld.calls, want) {
+		t.Fatalf("launchctl calls = %q, want %q", f.ld.calls, want)
+	}
+}
