@@ -587,3 +587,77 @@ func TestProxy407WithNothingNewFailsClearly(t *testing.T) {
 		t.Fatalf("proxy saw %d calls (%q), want 1 with no retry", len(got), got)
 	}
 }
+
+// Two calls on one client both fail on the expired password before either
+// reads the config again. The first to read it switches to the fresh
+// credentials; the second then finds the client already on them. It must
+// still retry, since the attempt that failed used the old proxy, rather
+// than give up with a proxy error while working credentials are in use.
+func TestProxy407ConcurrentCallsBothRetry(t *testing.T) {
+	clearProxyEnv(t)
+	var stale sync.WaitGroup
+	stale.Add(2)
+	var mu sync.Mutex
+	seen := map[string]int{}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := ""
+		if raw, ok := strings.CutPrefix(r.Header.Get("Proxy-Authorization"), "Basic "); ok {
+			if dec, err := base64.StdEncoding.DecodeString(raw); err == nil {
+				_, got, _ = strings.Cut(string(dec), ":")
+			}
+		}
+		mu.Lock()
+		seen[got]++
+		mu.Unlock()
+		if got != "fresh" {
+			// Hold each stale call until both have arrived, so both fail
+			// before either reads the config again.
+			stale.Done()
+			stale.Wait()
+			w.Header().Set("Proxy-Authenticate", `Basic realm="egress"`)
+			http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"agents":[{"name":"muse","online":true,"wake":"wait"}]}`))
+	}))
+	t.Cleanup(proxy.Close)
+	pu, _ := url.Parse(proxy.URL)
+	path := filepath.Join(t.TempDir(), "client.json")
+	cfg := client.Config{Relay: "http://tincan-relay", Proxy: "http://u:stale@" + pu.Host, Agent: "muse"}
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r, err := client.NewRelayForFile(cfg, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Proxy = "http://u:fresh@" + pu.Host
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Go(func() {
+			agents, err := r.Agents(ctx)
+			if err == nil && len(agents) != 1 {
+				err = fmt.Errorf("got %d agents", len(agents))
+			}
+			errs[i] = err
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("call %d: %v", i, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["stale"] != 2 || seen["fresh"] != 2 {
+		t.Fatalf("proxy saw %v, want 2 stale then 2 fresh", seen)
+	}
+}

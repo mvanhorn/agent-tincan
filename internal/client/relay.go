@@ -647,18 +647,13 @@ var socksRetry = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 
 // nothing at the relay's address looks for a moved relay and, if it finds
 // one, is made once more there.
 //
-// A call the proxy refused with 407 is made once more if the config file
-// now names fresher proxy credentials (reloadProxy); otherwise, or if that
-// fails too, it ends with a ProxyAuthError.
+// A call the proxy refused with 407 is made once more if the client now
+// uses a different proxy than the refused attempt did (see proxyAuthRetry);
+// otherwise, or if that fails too, it ends with a ProxyAuthError.
 func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, in, out any) error {
-	err := r.callOnce(ctx, c, method, path, in, out)
-	if proxyAuthFailed(err) {
-		if r.reloadProxy() {
-			err = r.callOnce(ctx, c, method, path, in, out)
-		}
-		if proxyAuthFailed(err) {
-			return &ProxyAuthError{Proxy: r.proxyHost(), err: err}
-		}
+	err := r.proxyAuthRetry(func() error { return r.callOnce(ctx, c, method, path, in, out) })
+	if IsProxyAuth(err) {
+		return err
 	}
 	for _, delay := range socksRetry {
 		if err == nil || !socksConnectFailed(err) {
@@ -774,30 +769,60 @@ func proxyAuthFailed(err error) bool {
 		(err != nil && strings.Contains(err.Error(), http.StatusText(http.StatusProxyAuthRequired)))
 }
 
+// proxyAuthRetry makes attempt and, if the proxy refused it with 407, reads
+// the config again (reloadProxy) and makes it once more when the client now
+// uses a different proxy than the refused attempt did. That is so whether
+// this reload switched or a concurrent call's reload already had: either way
+// the credentials that failed are no longer the ones in use. A 407 that
+// stands ends as a ProxyAuthError. attempt must be safe to make twice.
+func (r *Relay) proxyAuthRetry(attempt func() error) error {
+	used := r.currentProxy()
+	err := attempt()
+	if !proxyAuthFailed(err) {
+		return err
+	}
+	r.reloadProxy()
+	if r.currentProxy() != used {
+		err = attempt()
+	}
+	if proxyAuthFailed(err) {
+		return &ProxyAuthError{Proxy: r.proxyHost(), err: err}
+	}
+	return err
+}
+
+// currentProxy is the proxy relay traffic now goes through, nil for the
+// environment's. reloadProxy replaces it rather than changing it in place,
+// so two reads are the same proxy exactly when they are the same pointer.
+func (r *Relay) currentProxy() *url.URL {
+	r.proxyMu.Lock()
+	defer r.proxyMu.Unlock()
+	return r.proxy
+}
+
 // reloadProxy reads the config file again after a 407 and switches to the
 // proxy it names, if that differs from the one in use: a wrapper may have
 // written fresh credentials there. A running process's own environment
 // cannot have changed, so only the file (and TINCAN_PROXY) can offer
-// anything new. It reports whether it switched.
-func (r *Relay) reloadProxy() bool {
+// anything new.
+func (r *Relay) reloadProxy() {
 	if r.proxyFile == "" {
-		return false
+		return
 	}
 	c, err := LoadConfigFrom(r.proxyFile)
 	if err != nil || c.DialProxy() == "" {
-		return false
+		return
 	}
 	pu, err := url.Parse(c.DialProxy())
 	if err != nil {
-		return false
+		return
 	}
 	r.proxyMu.Lock()
 	defer r.proxyMu.Unlock()
 	if r.proxy != nil && r.proxy.String() == pu.String() {
-		return false
+		return
 	}
 	r.proxy = pu
-	return true
 }
 
 // proxyHost is the host:port of the proxy in use, "" for the environment's.
