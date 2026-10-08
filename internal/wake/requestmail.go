@@ -108,7 +108,7 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 	w.mu.Unlock()
 	if !allowed {
 		w.unpick(agent, picked, prev)
-		w.record(ctx, "wake_skipped", agent, "hourly wake budget used up; requests and replies stay queued")
+		w.record(ctx, "wake_skipped", agent, "", "hourly wake budget used up; requests and replies stay queued")
 		later()
 		return true
 	}
@@ -119,6 +119,7 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 	if w.audit != nil {
 		w.audit.BeginWake(agent)
 	}
+	detailOthers, detailReplies, ids := w.mailedIDs(agent, p, asks, picked, others, replies)
 	var code, failedSends int
 	var firstErr error
 	var failed []envelope.Request // asks whose email failed, for unpick
@@ -160,7 +161,7 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 			reason += fmt.Sprintf(" (%d of %d emails failed)", failedSends, total)
 		}
 		log.Printf("wake %s: %s", agent, reason)
-		w.record(ctx, "wake_failed", agent, reason)
+		w.record(ctx, "wake_failed", agent, "", reason)
 		w.rememberSend(ctx, agent, store.Wake{At: at, Result: reason}, false)
 		w.endWake(ctx, agent, at)
 		later()
@@ -168,17 +169,55 @@ func (w *Waker) sendRequestMails(ctx context.Context, agent string, p *nudge, re
 	}
 	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK}, true)
 	detail := fmt.Sprintf("%s, HTTP %d, %d open asks, %d request emails", pathLabel(cfg, 0), code, len(asks), len(picked))
-	if others > 0 {
-		detail += fmt.Sprintf(", %d other requests waiting", others)
+	if detailOthers > 0 {
+		detail += fmt.Sprintf(", %d other requests waiting", detailOthers)
 	}
-	if replies > 0 {
-		detail += fmt.Sprintf(", %d unseen replies", replies)
+	if detailReplies > 0 {
+		detail += fmt.Sprintf(", %d unseen replies", detailReplies)
 	}
+	requestID, idsSegment := wokeIDs(ids)
+	detail += idsSegment
 	log.Printf("wake %s: ok, %s", agent, detail)
-	w.record(ctx, "woke", agent, detail)
+	w.record(ctx, "woke", agent, requestID, detail)
 	w.endWake(ctx, agent, at)
 	later()
 	return true
+}
+
+// mailedIDs is what a request-email wake covers, for its woke row: the asks
+// it emails, then the other requests still queued and the replies still
+// unseen that its count-only email tells of, with the counts of those two
+// for the detail. Without the id hooks (coveredIDs), the row keeps the
+// counts given and lists the emailed asks only when nothing else rides the
+// wake, so a lone id is never named as its only cause. A mail-only nudge
+// covers just its asks.
+func (w *Waker) mailedIDs(agent string, p *nudge, asks, picked []envelope.Request, others, replies int) (int, int, []string) {
+	ids := make([]string, 0, len(picked))
+	for _, a := range picked {
+		ids = append(ids, a.ID)
+	}
+	if p.mailOnly {
+		return others, replies, ids
+	}
+	queued, unseen, ok := w.coveredIDs(agent)
+	if !ok {
+		if others > 0 || replies > 0 {
+			return others, replies, nil
+		}
+		return others, replies, ids
+	}
+	open := make(map[string]bool, len(asks))
+	for _, a := range asks {
+		open[a.ID] = true
+	}
+	var otherIDs []string
+	for _, id := range queued {
+		if !open[id] {
+			otherIDs = append(otherIDs, id)
+		}
+	}
+	ids = append(ids, otherIDs...)
+	return len(otherIDs), len(unseen), append(ids, unseen...)
 }
 
 // hasPending reports whether agent has a nudge waiting for its timer.
