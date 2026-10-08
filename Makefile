@@ -78,13 +78,20 @@ extension-test:
 # checksums.txt covers the binaries.
 RELEASE_TARGETS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
+# MACAPP=1 builds the darwin binaries with the Agent Tincan.app zip that
+# `make mac-app` wrote (build tag macapp); release sets it when signing.
 dist: extension
+	@if [ "$(MACAPP)" = 1 ]; then $(MAKE) -s macapp-zip-check; fi
 	mkdir -p dist
 	rm -f dist/tincan_* dist/checksums.txt
 	for t in $(RELEASE_TARGETS); do \
-		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} go build -ldflags "-s -w $(LDFLAGS)" -o dist/tincan_$${t%/*}_$${t#*/} ./cmd/tincan || exit 1; \
+		tags=; if [ "$(MACAPP)" = 1 ] && [ "$${t%/*}" = darwin ]; then tags="-tags macapp"; fi; \
+		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} go build $$tags -ldflags "-s -w $(LDFLAGS)" -o dist/tincan_$${t%/*}_$${t#*/} ./cmd/tincan || exit 1; \
 	done
 	$(MAKE) checksums
+
+macapp-zip-check:
+	@[ -f "$(MACAPP_ZIP)" ] || { echo "make dist: MACAPP=1 needs $(MACAPP_ZIP); run make mac-app first" >&2; exit 1; }
 
 checksums:
 	cd dist && shasum -a 256 tincan_* > checksums.txt
@@ -224,7 +231,7 @@ release:
 	cleanup() { if [ -z "$$dry" ] && [ -z "$$pushed" ] && git rev-parse -q --verify "refs/tags/$$tag" >/dev/null; then echo "make release: stopped before the tag was pushed; deleting the local tag $$tag" >&2; git tag -d "$$tag" >/dev/null; fi; }; \
 	trap cleanup EXIT; \
 	run git tag -a "$$tag" -m "$$tag"; \
-	run $(MAKE) dist VERSION=$$v; \
+	if [ "$(SIGN)" != 0 ]; then run $(MAKE) mac-app VERSION=$$v; run $(MAKE) dist VERSION=$$v MACAPP=1; else run $(MAKE) dist VERSION=$$v; fi; \
 	if [ "$(SIGN)" != 0 ]; then run $(MAKE) sign-mac notarize-mac VERSION=$$v; fi; \
 	run $(MAKE) checksums; \
 	run sh -c 'cd dist && shasum -a 256 -c checksums.txt'; \

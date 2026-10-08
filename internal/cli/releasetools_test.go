@@ -560,6 +560,7 @@ func releaseRepo(t *testing.T, storeRecipe string) (repo, remote, logFile string
 	os.MkdirAll(bin, 0o755)
 	fakes := "\n# test fakes\n" +
 		"extension:\n\tmkdir -p dist\n" +
+		"mac-app:\n\ttrue\n" +
 		"dist:\n\tmkdir -p dist && for f in tincan_darwin_amd64 tincan_darwin_arm64 tincan_linux_amd64 tincan_linux_arm64 tincan-history-extension.zip; do echo $$f > dist/$$f; done\n" +
 		"checksums:\n\tcd dist && shasum -a 256 tincan_* > checksums.txt\n" +
 		"store:\n\t" + storeRecipe + "\n"
@@ -628,7 +629,8 @@ func TestMakeReleaseDryRun(t *testing.T) {
 	}
 	want := []string{
 		"git tag -a v0.0.0 -m v0.0.0",
-		"make dist VERSION=0.0.0",
+		"make mac-app VERSION=0.0.0",
+		"make dist VERSION=0.0.0 MACAPP=1",
 		"make sign-mac notarize-mac VERSION=0.0.0",
 		"make checksums",
 		"sh -c cd dist && shasum -a 256 -c checksums.txt",
@@ -754,5 +756,55 @@ func TestMakeReleaseChecks(t *testing.T) {
 		if tagExists(t, env, repo, "refs/tags/v1.0.0") {
 			t.Fatalf("%s: a failed check left a tag", tc.name)
 		}
+	}
+}
+
+// SIGN=0 builds no Agent Tincan.app and plain darwin binaries.
+func TestMakeReleaseDryRunUnsigned(t *testing.T) {
+	repo, remote, _, env := releaseRepo(t, "false")
+	notes := filepath.Join(t.TempDir(), "NOTES.md")
+	os.WriteFile(notes, []byte("notes\n"), 0o644)
+	out, err := runRelease(t, repo, env, "VERSION=0.0.0", "DRY_RUN=1", "SIGN=0", "CWS=0", "NOTES="+notes, "RELEASE_REMOTE="+remote)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	plain := false
+	for line := range strings.SplitSeq(out, "\n") {
+		if !strings.HasPrefix(line, "+ ") {
+			continue
+		}
+		if strings.Contains(line, "mac-app") || strings.Contains(line, "MACAPP=1") {
+			t.Fatalf("unsigned release builds the app: %s", line)
+		}
+		plain = plain || strings.HasSuffix(line, "make dist VERSION=0.0.0")
+	}
+	if !plain {
+		t.Fatalf("no plain dist step:\n%s", out)
+	}
+}
+
+// A macapp build without the app zip stops and says how to make it.
+func TestMakeMacAppZipCheck(t *testing.T) {
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not on PATH")
+	}
+	mk, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "Makefile"), mk, 0o644)
+	cmd := exec.Command("make", "-s", "macapp-zip-check")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "make mac-app") {
+		t.Fatalf("err %v, output %s", err, out)
+	}
+	os.MkdirAll(filepath.Join(dir, "internal", "macapp", "embedded"), 0o755)
+	os.WriteFile(filepath.Join(dir, "internal", "macapp", "embedded", "AgentTincan.zip"), []byte("zip"), 0o644)
+	cmd = exec.Command("make", "-s", "macapp-zip-check")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("with the zip: %v %s", err, out)
 	}
 }
