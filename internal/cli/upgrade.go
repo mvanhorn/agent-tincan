@@ -151,11 +151,10 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 	}
 	done = true
 	fmt.Fprintf(out, "Upgraded %s from tincan %s to %s.\n", exe, current, available)
-	if msg, err := postUpgradeRefresh(exe); msg != "" || err != nil {
-		fmt.Fprint(out, msg)
-		if err != nil {
-			fmt.Fprintf(out, "tincan services refresh did not finish (%v); run it again to update the macOS services.\n", err)
-		}
+	msg, err := postUpgradeRefresh(exe)
+	fmt.Fprint(out, msg)
+	if err != nil {
+		fmt.Fprintf(out, "tincan services refresh did not finish (%v); run it again to update the macOS services.\n", err)
 	}
 	fmt.Fprint(out, reloadAdvice(mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath())), available, mcpserver.LaunchRunning))
 	return nil

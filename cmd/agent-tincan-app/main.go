@@ -18,16 +18,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/mvanhorn/agent-tincan/internal/macapp"
 )
-
-// Requirement is the code-signing requirement a target must satisfy.
-const Requirement = macapp.TincanRequirement
 
 func main() {
 	os.Exit(run(os.Args, codesignVerify, syscall.Exec, os.Stderr))
@@ -68,15 +63,10 @@ func run(args []string, verify func(string) error, execve func(string, []string,
 	return 0
 }
 
-// codesignVerify checks path against Requirement with the system codesign.
+// codesignVerify checks path against macapp.TincanRequirement.
 func codesignVerify(path string) error {
-	out, err := exec.Command("/usr/bin/codesign", "--verify", "--strict", "-R="+Requirement, path).CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("not signed by Agent Tincan (%s)", msg)
+	if err := macapp.VerifyTincan(path); err != nil {
+		return fmt.Errorf("not signed by Agent Tincan (%v)", err)
 	}
 	return nil
 }

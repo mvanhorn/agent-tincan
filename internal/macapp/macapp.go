@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"os/exec"
@@ -144,7 +145,8 @@ func Ensure(o Options) (string, error) {
 }
 
 // current reports whether every file in the zip is already at dst with the
-// same content and executable bit.
+// same size, checksum and executable bit. The signature check that follows
+// is what proves the bundle intact.
 func current(zr *zip.Reader, dst string) bool {
 	for _, f := range zr.File {
 		rel, ok := entryPath(f.Name)
@@ -154,17 +156,13 @@ func current(zr *zip.Reader, dst string) bool {
 		if f.FileInfo().IsDir() {
 			continue
 		}
-		fi, err := os.Lstat(filepath.Join(dst, rel))
+		p := filepath.Join(dst, rel)
+		fi, err := os.Lstat(p)
 		if err != nil || !fi.Mode().IsRegular() || fi.Size() != int64(f.UncompressedSize64) ||
 			fi.Mode().Perm()&0o111 != f.Mode().Perm()&0o111 {
 			return false
 		}
-		want, err := readEntry(f)
-		if err != nil {
-			return false
-		}
-		have, err := os.ReadFile(filepath.Join(dst, rel))
-		if err != nil || !bytes.Equal(have, want) {
+		if sum, err := fileCRC32(p); err != nil || sum != f.CRC32 {
 			return false
 		}
 	}
@@ -207,6 +205,19 @@ func extract(zr *zip.Reader, dir string) error {
 	return nil
 }
 
+func fileCRC32(path string) (uint32, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	h := crc32.NewIEEE()
+	if _, err := io.Copy(h, f); err != nil {
+		return 0, err
+	}
+	return h.Sum32(), nil
+}
+
 func readEntry(f *zip.File) ([]byte, error) {
 	rc, err := f.Open()
 	if err != nil {
@@ -218,9 +229,25 @@ func readEntry(f *zip.File) ([]byte, error) {
 
 // Validate checks app's code signature against AppRequirement.
 func Validate(app string) error {
-	out, err := exec.Command("/usr/bin/codesign", "--verify", "--strict", "--deep", "-R="+AppRequirement, app).CombinedOutput()
+	if err := codesignVerify("--deep", "-R="+AppRequirement, app); err != nil {
+		return fmt.Errorf("signature check failed: %w", err)
+	}
+	return nil
+}
+
+// VerifyTincan checks that exe is a tincan binary signed by Agent Tincan
+// (TincanRequirement), the check the launcher makes before running it.
+func VerifyTincan(exe string) error {
+	return codesignVerify("-R="+TincanRequirement, exe)
+}
+
+func codesignVerify(args ...string) error {
+	out, err := exec.Command("/usr/bin/codesign", append([]string{"--verify", "--strict"}, args...)...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("signature check failed: %s", strings.TrimSpace(string(out)))
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return errors.New(msg)
+		}
+		return err
 	}
 	return nil
 }

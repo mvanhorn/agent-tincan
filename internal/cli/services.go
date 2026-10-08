@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/macapp"
+	"github.com/mvanhorn/agent-tincan/internal/notes"
 )
 
 const plutilBin = "/usr/bin/plutil"
@@ -65,7 +66,6 @@ Login Items approvals of every app, not just tincan.`,
 			}
 			r := &serviceRefresher{
 				home:    home,
-				uid:     os.Getuid(),
 				exe:     exe,
 				revert:  revert,
 				ensure:  func() (string, error) { return macapp.Ensure(macapp.Options{Home: home}) },
@@ -97,6 +97,20 @@ func (l launchctl) Loaded(label string) bool {
 	return exec.Command("/bin/launchctl", "print", l.target(label)).Run() == nil
 }
 
+// Program is the program launchd runs for a loaded job, "" if not loaded.
+func (l launchctl) Program(label string) string {
+	out, err := exec.Command("/bin/launchctl", "print", l.target(label)).Output()
+	if err != nil {
+		return ""
+	}
+	for line := range strings.Lines(string(out)) {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "program = "); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
 func (l launchctl) Bootout(label string) error {
 	if out, err := exec.Command("/bin/launchctl", "bootout", l.target(label)).CombinedOutput(); err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
@@ -115,7 +129,6 @@ func (l launchctl) Bootstrap(path string) error {
 // the Agent Tincan.app launcher.
 type serviceRefresher struct {
 	home    string
-	uid     int
 	exe     string // the running tincan binary, symlinks resolved
 	revert  bool
 	ensure  func() (string, error)
@@ -138,13 +151,9 @@ func (r *serviceRefresher) run() error {
 		}
 		launcher = l
 	}
-	paths, err := filepath.Glob(filepath.Join(r.home, "Library", "LaunchAgents", "com.agenttincan.*.plist"))
-	if err != nil {
-		return err
-	}
 	var failed []string
-	for _, p := range paths {
-		label := strings.TrimSuffix(filepath.Base(p), ".plist")
+	for _, p := range launchAgentPlists(r.home) {
+		label := plistLabel(p)
 		msg, err := r.refreshOne(p, label, launcher)
 		if err != nil {
 			failed = append(failed, label)
@@ -182,29 +191,28 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 	if !ok {
 		return "skipped (no program)", nil
 	}
-	target, targs, hasProgram := j.target, j.args, j.hasProgram
 	if !j.runs(r.exe) {
-		return fmt.Sprintf("skipped (runs %s, not this tincan %s)", target, r.exe), nil
+		return fmt.Sprintf("skipped (runs %s, not this tincan %s)", j.target, r.exe), nil
 	}
-	if label == "com.agenttincan.notes" && !r.revert {
+	if label == notes.ServiceLabel && !r.revert {
 		return "skipped (the notes service keeps running tincan directly so its Files and Folders grant stays its own)", nil
 	}
 	ids, _ := stringList(m["AssociatedBundleIdentifiers"])
-	wantArgs := append([]string{target}, targs...)
+	wantArgs := append([]string{j.target}, j.args...)
 	wantIDs := slices.DeleteFunc(slices.Clone(ids), func(s string) bool { return s == macapp.BundleID })
 	if !r.revert {
 		wantArgs = append([]string{launcher}, wantArgs...)
 		wantIDs = append(wantIDs, macapp.BundleID)
 	}
 	curArgs, _ := stringList(m["ProgramArguments"])
-	if !hasProgram && slices.Equal(curArgs, wantArgs) && slices.Equal(ids, wantIDs) {
+	if !j.hasProgram && slices.Equal(curArgs, wantArgs) && slices.Equal(ids, wantIDs) {
 		return "already current", nil
 	}
 	orig, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	if err := writePlistEdit(path, fi.Mode().Perm(), wantArgs, hasProgram, wantIDs); err != nil {
+	if err := writePlistEdit(path, orig, fi.Mode().Perm(), wantArgs, j.hasProgram, wantIDs); err != nil {
 		return "", fmt.Errorf("update failed: %w", err)
 	}
 	if !r.launchd.Loaded(label) {
@@ -324,23 +332,12 @@ func stringList(v any) ([]string, bool) {
 
 // writePlistEdit edits a copy of path next to it with plutil, checks it, and
 // renames it over path, so launchd never reads a half-written plist.
-func writePlistEdit(path string, mode os.FileMode, args []string, dropProgram bool, ids []string) error {
-	orig, err := os.ReadFile(path)
+func writePlistEdit(path string, orig []byte, mode os.FileMode, args []string, dropProgram bool, ids []string) error {
+	tmp, err := stageTemp(path, orig, mode)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tincan-refresh-*.plist")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(orig); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
+	defer os.Remove(tmp)
 	argsJSON, _ := json.Marshal(args)
 	edits := [][]string{{"-replace", "ProgramArguments", "-json", string(argsJSON)}}
 	if dropProgram {
@@ -353,39 +350,50 @@ func writePlistEdit(path string, mode os.FileMode, args []string, dropProgram bo
 		edits = append(edits, []string{"-replace", "AssociatedBundleIdentifiers", "-json", string(idsJSON)})
 	}
 	for _, e := range edits {
-		out, err := exec.Command(plutilBin, append(e, tmp.Name())...).CombinedOutput()
+		out, err := exec.Command(plutilBin, append(e, tmp)...).CombinedOutput()
 		if err != nil && (e[0] != "-remove" || !strings.Contains(string(out), "No value to remove")) {
 			return fmt.Errorf("plutil %s: %v: %s", strings.Join(e[:2], " "), err, strings.TrimSpace(string(out)))
 		}
 	}
-	if out, err := exec.Command(plutilBin, "-lint", tmp.Name()).CombinedOutput(); err != nil {
+	if out, err := exec.Command(plutilBin, "-lint", tmp).CombinedOutput(); err != nil {
 		return fmt.Errorf("edited plist is invalid: %s", strings.TrimSpace(string(out)))
 	}
-	if err := os.Chmod(tmp.Name(), mode); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return os.Rename(tmp, path)
 }
 
 // writeFileReplacing writes data to path through a temp file and rename.
 func writeFileReplacing(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tincan-refresh-*.plist")
+	tmp, err := stageTemp(path, data, mode)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), mode); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	defer os.Remove(tmp)
+	return os.Rename(tmp, path)
 }
+
+// stageTemp writes data with mode to a new temp file next to path and
+// returns its name.
+func stageTemp(path string, data []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tincan-refresh-*.plist")
+	if err != nil {
+		return "", err
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if err := errors.Join(werr, cerr, os.Chmod(f.Name(), mode)); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// launchAgentPlists lists tincan's LaunchAgent plists under home.
+func launchAgentPlists(home string) []string {
+	paths, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.*.plist"))
+	return paths
+}
+
+func plistLabel(path string) string { return strings.TrimSuffix(filepath.Base(path), ".plist") }
 
 // loginItemsEnv is what the doctor's login items check reads.
 type loginItemsEnv struct {
@@ -404,30 +412,13 @@ func defaultLoginItemsEnv(exe string) (loginItemsEnv, error) {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	uid := os.Getuid()
 	return loginItemsEnv{
 		home:        home,
 		exe:         exe,
 		embedded:    macapp.Embedded(),
 		validateApp: macapp.Validate,
-		signed: func(exe string) error {
-			if out, err := exec.Command("/usr/bin/codesign", "--verify", "--strict", "-R="+macapp.TincanRequirement, exe).CombinedOutput(); err != nil {
-				return errors.New(strings.TrimSpace(string(out)))
-			}
-			return nil
-		},
-		liveProgram: func(label string) string {
-			out, err := exec.Command("/bin/launchctl", "print", fmt.Sprintf("gui/%d/%s", uid, label)).Output()
-			if err != nil {
-				return ""
-			}
-			for line := range strings.Lines(string(out)) {
-				if v, ok := strings.CutPrefix(strings.TrimSpace(line), "program = "); ok {
-					return strings.TrimSpace(v)
-				}
-			}
-			return ""
-		},
+		signed:      macapp.VerifyTincan,
+		liveProgram: launchctl{uid: os.Getuid()}.Program,
 	}, nil
 }
 
@@ -435,10 +426,9 @@ func defaultLoginItemsEnv(exe string) (loginItemsEnv, error) {
 // Tincan in Login Items, and anything that would stop them from starting.
 func loginItemsCheck(e loginItemsEnv) check {
 	const name = "login items"
-	paths, _ := filepath.Glob(filepath.Join(e.home, "Library", "LaunchAgents", "com.agenttincan.*.plist"))
 	var wrapped, plain, pending []string
-	for _, p := range paths {
-		label := strings.TrimSuffix(filepath.Base(p), ".plist")
+	for _, p := range launchAgentPlists(e.home) {
+		label := plistLabel(p)
 		m, err := readPlistJSON(p)
 		if err != nil {
 			continue
@@ -453,7 +443,7 @@ func loginItemsCheck(e loginItemsEnv) check {
 			if live := e.liveProgram(label); live != "" && live != j.launcher {
 				pending = append(pending, label)
 			}
-		case label != "com.agenttincan.notes":
+		case label != notes.ServiceLabel:
 			plain = append(plain, label)
 		}
 	}

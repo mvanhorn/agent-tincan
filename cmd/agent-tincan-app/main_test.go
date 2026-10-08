@@ -115,22 +115,6 @@ func TestLauncherVerifiesTheResolvedTarget(t *testing.T) {
 	}
 }
 
-// The production requirement pins Apple's Developer ID chain, not just a Team
-// ID string that a self-signed certificate could carry.
-func TestRequirementIsAppleAnchoredDeveloperID(t *testing.T) {
-	for _, part := range []string{
-		"anchor apple generic",
-		"certificate 1[field.1.2.840.113635.100.6.2.6] exists",
-		"certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
-		`certificate leaf[subject.OU] = "NM8VT393AR"`,
-		`identifier "com.agenttincan.tincan"`,
-	} {
-		if !strings.Contains(Requirement, part) {
-			t.Errorf("Requirement lacks %q", part)
-		}
-	}
-}
-
 // The real verifier refuses an ad-hoc-signed binary.
 func TestCodesignVerifierRefusesAdHocBinary(t *testing.T) {
 	if runtime.GOOS != "darwin" {

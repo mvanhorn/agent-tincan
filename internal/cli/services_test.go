@@ -72,7 +72,6 @@ func newServicesFixture(t *testing.T) *servicesFixture {
 func (f *servicesFixture) refresher(revert bool) *serviceRefresher {
 	return &serviceRefresher{
 		home:    f.home,
-		uid:     501,
 		exe:     f.exe,
 		revert:  revert,
 		ensure:  func() (string, error) { return f.launcher, nil },
