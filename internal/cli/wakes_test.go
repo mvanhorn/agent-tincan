@@ -156,3 +156,61 @@ func TestFormatWakesTruncated(t *testing.T) {
 		t.Fatalf("untruncated table has the truncation line:\n%s", got)
 	}
 }
+
+// With the waker wired as `tincan relay` wires it, a wake for one request
+// shows that request's id in `tincan wakes`, as request_ids in JSON and in
+// the table; a row written before ids were recorded has none.
+func TestWakesCLIRequestIDs(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(hook.Close)
+	opts := wakerOptions(relayFlags{wakeGrace: -1}, m.Server)
+	opts.HTTP, opts.Debounce, opts.RetryDelay, opts.ReplyRetries = hook.Client(), time.Millisecond, time.Millisecond, []time.Duration{}
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, m.Store, opts)
+	t.Cleanup(w.Stop)
+	m.Server.SetWakeNamer(w)
+	m.Server.SetEvents(w)
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	if err := m.Store.Audit(t.Context(), store.AuditEvent{Event: "woke", Actor: "grokbot", Detail: "webhook, HTTP 200, 1 waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	req, err := m.Client(t, "muse").Send(t.Context(), "grokbot", "check the garage", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Flush()
+
+	out, err := run(t, Root(), "wakes", "grokbot", "--since", "1h", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got relay.WakeExport
+	if err := json.Unmarshal([]byte(out), &got); err != nil || len(got.Wakes) != 2 {
+		t.Fatalf("JSON = %s, %v", out, err)
+	}
+	if got.Wakes[0].RequestIDs != nil || strings.Count(out, `"request_ids"`) != 1 {
+		t.Errorf("old row carries request_ids: %s", out)
+	}
+	if ids := got.Wakes[1].RequestIDs; len(ids) != 1 || ids[0] != req.ID {
+		t.Errorf("request_ids = %v, want [%s]", ids, req.ID)
+	}
+
+	table, err := run(t, Root(), "wakes", "grokbot", "--since", "1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(table), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], "REQUEST IDS") || strings.Contains(lines[1], req.ID) || !strings.HasSuffix(lines[2], req.ID) {
+		t.Fatalf("table = %q", table)
+	}
+}
+
+// The table lists every id of a wake that covered several, comma-separated.
+func TestFormatWakesRequestIDs(t *testing.T) {
+	at := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	out := relay.WakeExport{Agent: "grokbot", Since: at, Until: at.Add(time.Hour),
+		Wakes: []relay.WakeEntry{{At: at, Event: "woke", Path: "webhook", Status: "200", Reply: relay.ReplyNotRecorded, RequestIDs: []string{"ra", "rb", "q7"}}}}
+	if got := formatWakes(out); !strings.Contains(got, "ra,rb,q7") {
+		t.Fatalf("table lacks the ids:\n%s", got)
+	}
+}
