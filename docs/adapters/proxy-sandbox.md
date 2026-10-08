@@ -5,10 +5,30 @@ Some sandboxes have no inbound connections and send all traffic through an HTTP 
 ## Join, pointing relay traffic at the tunnel proxy
 
 ```bash
-tincan join <code> --relay http://tincan-relay --proxy http://<user>:<pass>@hatch-egress-proxy:3130
+tincan join <code> --relay http://tincan-relay --proxy http://<user>:<pass>@hatch-egress-proxy:3130 --proxy-credentials-from-env
 ```
 
 The proxy is saved in the agent's config and used only for relay traffic.
+
+Use the short relay name, `http://tincan-relay`. Through Muse's tunnel proxy the relay's full MagicDNS name (`http://tincan-relay.<tailnet>.ts.net`) gets an empty reply.
+
+## Rotating proxy passwords
+
+Muse mints a new egress-proxy password for every shell, and the old one stops working within minutes. A password saved in the config goes stale the same way, and every relay call then fails with HTTP 407.
+
+`--proxy-credentials-from-env` (on `join` and `rejoin`) handles this:
+
+- The config keeps the proxy's address (`http://hatch-egress-proxy:3130`) without the password.
+- Every tincan command takes the username and password from `HTTPS_PROXY`, then `HTTP_PROXY`, then `ALL_PROXY`, using the first one whose host is the saved proxy's host. It keeps the saved port, so the default proxy's credentials (port 3128) are sent to the tunnel proxy (port 3130). Turn it on only where both ports belong to one egress proxy, as on Muse.
+- A command started from a new shell picks up that shell's password.
+
+Credentials written into the config still win, and so does `TINCAN_PROXY`, which overrides the saved proxy for one process.
+
+The limit is long-running processes: `tincan wait`, `tincan listen`, and the MCP server. Each keeps the environment it started with, and cannot see a newer shell's password. On a 407, tincan reads the config (and `TINCAN_PROXY`) once more and retries if it now names different credentials. If it doesn't, `wait` and `listen` exit and an MCP tool returns an error naming the proxy (never its password). Start them again from a shell with current credentials. The 407 is never retried in a loop.
+
+### Wrapper pattern
+
+Before tincan read credentials from the environment, Trevin's workaround on Muse was a wrapper (`tincanf`) that runs before every tincan call. It rebuilds the proxy URL from the live `$HTTPS_PROXY` (same host and credentials, port 3128 changed to 3130). It writes that URL into the config under a lock held only for the rewrite. The pattern still works, and a running `tincan wait` picks up a rewrite the next time the proxy returns 407.
 
 This sandbox has no local Tailscale netmap, so it cannot search the tailnet if
 the saved relay URL goes silent. Join with the relay's stable name

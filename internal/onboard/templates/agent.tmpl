@@ -252,7 +252,7 @@ Ask {{.Name}} to keep its own scheduled tincan inbox check as a backup, then pas
 {{- end -}}
 
 {{- define "setup.proxy-sandbox" -}}
-Join through the proxy that reaches the tailnet (--proxy), not the sandbox's default egress proxy. The proxy credentials are saved in the agent's own config; never paste them in chat.
+Join through the proxy that reaches the tailnet (--proxy), not the sandbox's default egress proxy. The proxy credentials are saved in the agent's own config; never paste them in chat. If the sandbox mints a new proxy password for every shell, add --proxy-credentials-from-env: the password is then left out of the config and each command takes the current one from HTTPS_PROXY on the same host.
 If the sandbox's app asks before each new site (for example "Allow ... to access <host>?"), choose "Always allow this site" for the relay's address when it first asks, and for its name too: after joining, run tincan doctor, which touches both. Otherwise the background wait loop stalls on the prompt, and after a relay move the agent cannot reach the relay until someone approves it.
 On the relay host, in wake.json: set {{.Name}} to method "wait" so teammates see how it wakes. No secret fields.
 Paste the standing instructions; {{.Name}} starts tincan wait & and keeps it running.
