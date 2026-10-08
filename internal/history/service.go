@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/mvanhorn/agent-tincan/internal/macapp"
 )
 
 // ServiceLabel is the launchd label of the history service.
@@ -110,6 +112,11 @@ type ServiceOptions struct {
 	// agent serves one (dots); InstallWebService requires it there and
 	// refuses it elsewhere.
 	Thread string
+	// Launcher is the Agent Tincan.app launcher a macOS service starts
+	// through, so Login Items shows "Agent Tincan" rather than the signer's
+	// name. Default: install the app this build embeds and use it; builds
+	// without it write the plain plist.
+	Launcher string
 }
 
 // ServiceResult says what InstallService wrote and the command that
@@ -197,6 +204,10 @@ type ServiceDef struct {
 	Launchd, Systemd string
 	Vars             []string
 	Unsupported      string
+	// NoLauncher keeps the plist running the tincan binary directly. The
+	// notes service sets it: macOS may attribute a privacy grant to the
+	// app, which would let every wrapped service share notes' folder access.
+	NoLauncher bool
 }
 
 // InstallServiceDef writes d the way InstallService writes the history
@@ -208,7 +219,21 @@ func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
 	}
 	o.findTools()
 	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
+	launcher := ""
+	if o.GOOS == "darwin" && !d.NoLauncher {
+		launcher = o.Launcher
+		if launcher == "" {
+			l, err := macapp.Ensure(macapp.Options{Home: o.Home, GOOS: o.GOOS})
+			switch {
+			case err == nil:
+				launcher = l
+			case !errors.Is(err, macapp.ErrUnavailable):
+				return ServiceResult{}, fmt.Errorf("install Agent Tincan.app: %w", err)
+			}
+		}
+	}
 	return installServiceDef(o, serviceDef{
+		launcher:    launcher,
 		label:       d.Label,
 		unit:        d.Unit,
 		launchd:     d.Launchd,
@@ -222,6 +247,7 @@ func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
 // template, its systemd unit name and template, and the placeholder/value
 // pairs both templates are filled with (XML-escaped for the plist).
 type serviceDef struct {
+	launcher         string
 	label, unit      string
 	launchd, systemd string
 	vars             []string
@@ -243,6 +269,12 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 			esc[i] = v
 		}
 		body := strings.NewReplacer(esc...).Replace(d.launchd)
+		if d.launcher != "" {
+			var err error
+			if body, err = wrapLaunchd(body, d.launcher); err != nil {
+				return ServiceResult{}, fmt.Errorf("%s: %w", d.label, err)
+			}
+		}
 		if err := os.MkdirAll(filepath.Join(o.Home, "Library", "Logs"), 0o755); err != nil {
 			return ServiceResult{}, err
 		}
@@ -296,6 +328,21 @@ func servicePath(goos, home string, toolDirs ...string) string {
 		parts = append(parts, d)
 	}
 	return strings.Join(parts, ":")
+}
+
+// wrapLaunchd makes a rendered plist start through launcher: the launcher
+// becomes the first program argument, ahead of the tincan binary, and the
+// app's bundle id is named in AssociatedBundleIdentifiers.
+func wrapLaunchd(body, launcher string) (string, error) {
+	const args, end = "<key>ProgramArguments</key>\n  <array>\n", "</dict>\n</plist>\n"
+	i := strings.Index(body, args)
+	if i < 0 || !strings.HasSuffix(body, end) {
+		return "", errors.New("launchd template has no ProgramArguments array to wrap")
+	}
+	i += len(args)
+	body = body[:i] + "    <string>" + xmlEscape(launcher) + "</string>\n" + body[i:]
+	assoc := "  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>" + macapp.BundleID + "</string>\n  </array>\n"
+	return strings.TrimSuffix(body, end) + assoc + end, nil
 }
 
 func writeService(dst, body string) error {
