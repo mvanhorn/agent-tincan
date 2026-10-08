@@ -124,6 +124,49 @@ notarize-mac:
 			echo "make notarize-mac: warning: spctl does not report $$f as notarized yet (the ticket can take a few minutes to propagate)" >&2; \
 	done
 
+# mac-app builds Agent Tincan.app, the bundle every tincan LaunchAgent starts
+# through so macOS lists it in Login Items as "Agent Tincan" instead of the
+# signer's name. It holds only cmd/agent-tincan-app (universal), Info.plist
+# and the icon; it is signed, notarized and stapled, then zipped to
+# internal/macapp/embedded/AgentTincan.zip, which `-tags macapp` builds of
+# tincan embed. MACAPP_NOTARIZE=0 skips notarization for local testing.
+MACAPP_DIR := dist/macapp
+MACAPP_ICON ?= site/icon-192.png
+MACAPP_NOTARIZE ?= 1
+MACAPP_ZIP := internal/macapp/embedded/AgentTincan.zip
+
+mac-app:
+	@set -e; \
+	app="$(MACAPP_DIR)/Agent Tincan.app"; \
+	rm -rf "$(MACAPP_DIR)"; mkdir -p "$$app/Contents/MacOS" "$$app/Contents/Resources"; \
+	for a in arm64 amd64; do \
+		CGO_ENABLED=0 GOOS=darwin GOARCH=$$a go build -trimpath -ldflags "-s -w" -o "$(MACAPP_DIR)/agent-tincan_$$a" ./cmd/agent-tincan-app; \
+	done; \
+	lipo -create -output "$$app/Contents/MacOS/agent-tincan" "$(MACAPP_DIR)/agent-tincan_arm64" "$(MACAPP_DIR)/agent-tincan_amd64"; \
+	sed 's/__VERSION__/$(VERSION)/' internal/macapp/Info.plist.tmpl > "$$app/Contents/Info.plist"; \
+	plutil -lint "$$app/Contents/Info.plist" >/dev/null; \
+	iconset="$(MACAPP_DIR)/AppIcon.iconset"; mkdir -p "$$iconset"; \
+	for s in 16 32 128 256 512; do \
+		sips -z $$s $$s "$(MACAPP_ICON)" --out "$$iconset/icon_$${s}x$${s}.png" >/dev/null; \
+		d=$$((s * 2)); sips -z $$d $$d "$(MACAPP_ICON)" --out "$$iconset/icon_$${s}x$${s}@2x.png" >/dev/null; \
+	done; \
+	iconutil -c icns -o "$$app/Contents/Resources/AppIcon.icns" "$$iconset"; \
+	security find-identity -v -p codesigning | grep -qF "$(TINCAN_SIGN_IDENTITY)" || { echo "make mac-app: codesign identity not found: $(TINCAN_SIGN_IDENTITY) (set TINCAN_SIGN_IDENTITY)" >&2; exit 1; }; \
+	codesign --force --options runtime --timestamp --sign "$(TINCAN_SIGN_IDENTITY)" "$$app/Contents/MacOS/agent-tincan"; \
+	codesign --force --options runtime --timestamp --sign "$(TINCAN_SIGN_IDENTITY)" "$$app"; \
+	codesign --verify --strict --verbose=2 "$$app"; \
+	if [ "$(MACAPP_NOTARIZE)" != 0 ]; then \
+		zip="$(MACAPP_DIR)/notarize.zip"; ditto -c -k --keepParent "$$app" "$$zip"; \
+		echo "notarizing $$app (waiting for Apple)"; \
+		xcrun notarytool submit "$$zip" --keychain-profile "$(TINCAN_NOTARY_PROFILE)" --wait --output-format json > "$(MACAPP_DIR)/result.json" || { cat "$(MACAPP_DIR)/result.json" >&2; exit 1; }; \
+		grep -q '"status": *"Accepted"' "$(MACAPP_DIR)/result.json" || { cat "$(MACAPP_DIR)/result.json" >&2; echo "make mac-app: the app was not accepted" >&2; exit 1; }; \
+		xcrun stapler staple "$$app"; \
+		xcrun stapler validate "$$app"; \
+	fi; \
+	mkdir -p "$$(dirname $(MACAPP_ZIP))"; rm -f "$(MACAPP_ZIP)"; \
+	ditto -c -k --keepParent "$$app" "$(MACAPP_ZIP)"; \
+	echo "make mac-app: wrote $(MACAPP_ZIP)"
+
 release-mac: dist sign-mac notarize-mac
 	$(MAKE) checksums
 	cd dist && shasum -a 256 -c checksums.txt
