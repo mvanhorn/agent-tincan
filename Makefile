@@ -171,7 +171,8 @@ mac-app:
 		xcrun stapler validate "$$app"; \
 	fi; \
 	mkdir -p "$$(dirname $(MACAPP_ZIP))"; rm -f "$(MACAPP_ZIP)"; \
-	ditto -c -k --keepParent "$$app" "$(MACAPP_ZIP)"; \
+	ditto -c -k --norsrc --noextattr --keepParent "$$app" "$(MACAPP_ZIP)"; \
+	if unzip -Z1 "$(MACAPP_ZIP)" | grep -qE '(^|/)(\._|__MACOSX)'; then echo "make mac-app: $(MACAPP_ZIP) holds AppleDouble entries, which would break the app's seal when unpacked" >&2; exit 1; fi; \
 	echo "make mac-app: wrote $(MACAPP_ZIP)"
 
 release-mac: dist sign-mac notarize-mac
