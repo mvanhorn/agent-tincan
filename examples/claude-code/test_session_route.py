@@ -21,6 +21,8 @@ exec(compile(SCRIPT.read_text(encoding="utf-8"), str(SCRIPT), "exec"), session_r
 
 SESSION_A = "00000000-0000-4000-8000-000000000001"
 SESSION_B = "00000000-0000-4000-8000-000000000002"
+# Contains hex letters, so its uppercase form differs and exercises normalization.
+SESSION_HEX = "0a1b2c3d-4e5f-4a6b-8c7d-9e0fabcdef12"
 
 
 class SessionRouteTests(unittest.TestCase):
@@ -89,13 +91,17 @@ class SessionRouteTests(unittest.TestCase):
         )
 
     def test_uuid_input_is_normalized_but_route_remains_immutable(self):
-        uppercase = SESSION_A.upper()
+        uppercase = SESSION_HEX.upper()
+        self.assertNotEqual(uppercase, SESSION_HEX)
         route, created = session_route.bind_route(self.registry, self.project, "design", uppercase)
-        same, created_again = session_route.bind_route(self.registry, self.project, "design", SESSION_A)
+        same, created_again = session_route.bind_route(self.registry, self.project, "design", SESSION_HEX)
         self.assertTrue(created)
         self.assertFalse(created_again)
         self.assertEqual(route, same)
-        self.assertEqual(SESSION_A, route["session_id"])
+        self.assertEqual(SESSION_HEX, route["session_id"])
+        stored = json.loads(self.registry.read_text())["routes"][0]["session_id"]
+        self.assertEqual(stored, SESSION_HEX)
+        self.assertEqual(stored, stored.lower())
         with self.assertRaisesRegex(session_route.RouteError, "route_conflict_immutable"):
             session_route.bind_route(self.registry, self.project, "design", SESSION_B)
         self.assertEqual(session_route.resolve_route(self.registry, self.project, "design"), route)
