@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,61 @@ type Config struct {
 	RelayURLs []string `json:"relay_urls,omitempty"`
 	// RelayInfoAt is when RelayKey and RelayURLs were last refreshed.
 	RelayInfoAt time.Time `json:"relay_info_at,omitzero"`
+	// ProxyCredentialsFromEnv says Proxy is saved without a password, and
+	// each command takes the username and password from the environment's
+	// proxy on the same host (see DialProxy). For sandboxes like Muse that
+	// mint a new proxy password for every shell.
+	ProxyCredentialsFromEnv bool `json:"proxy_credentials_from_env,omitempty"`
+}
+
+// proxyEnv lists the variables DialProxy borrows credentials from, in
+// order, each with the lower-case spelling tools also accept.
+var proxyEnv = [][2]string{{"HTTPS_PROXY", "https_proxy"}, {"HTTP_PROXY", "http_proxy"}, {"ALL_PROXY", "all_proxy"}}
+
+// DialProxy is the proxy URL relay traffic goes through. It is Proxy as
+// saved, except that with ProxyCredentialsFromEnv on and no credentials in
+// Proxy, it takes them from the first of HTTPS_PROXY, HTTP_PROXY and
+// ALL_PROXY whose host is Proxy's host, keeping Proxy's own port. Credentials
+// written into the config (by a wrapper, or TINCAN_PROXY) win: they can be
+// newer than this process's environment.
+func (c Config) DialProxy() string {
+	if !c.ProxyCredentialsFromEnv || c.Proxy == "" {
+		return c.Proxy
+	}
+	saved, err := url.Parse(c.Proxy)
+	if err != nil || saved.User != nil {
+		return c.Proxy
+	}
+	for _, names := range proxyEnv {
+		v := os.Getenv(names[0])
+		if v == "" {
+			v = os.Getenv(names[1])
+		}
+		if v == "" {
+			continue
+		}
+		if !strings.Contains(v, "://") {
+			v = "http://" + v // a bare host:port, as Go's proxy settings accept
+		}
+		env, err := url.Parse(v)
+		if err != nil || env.User == nil || !strings.EqualFold(env.Hostname(), saved.Hostname()) {
+			continue
+		}
+		saved.User = env.User
+		return saved.String()
+	}
+	return c.Proxy
+}
+
+// WithoutProxyPassword returns proxy with its username and password removed,
+// for saving a config whose credentials come from the environment.
+func WithoutProxyPassword(proxy string) string {
+	u, err := url.Parse(proxy)
+	if err != nil || u.User == nil {
+		return proxy
+	}
+	u.User = nil
+	return u.String()
 }
 
 // ConfigPath is where the agent config lives. A second agent on the same

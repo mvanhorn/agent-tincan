@@ -213,6 +213,13 @@ type Relay struct {
 	searched   bool                                            // a FindRelay has listed candidates
 	lastSource string                                          // "localapi", "cli", "netmap", or ""
 	findRelays func(ctx context.Context, base string) []string // tests replace it
+
+	// proxy is the proxy relay traffic goes through, nil for the
+	// environment's. proxyFile is the config a 407 reads again for fresher
+	// credentials (see reloadProxy); "" reads nothing.
+	proxyMu   sync.Mutex
+	proxy     *url.URL
+	proxyFile string
 }
 
 // NewRelay returns a client for the relay at base (for example
@@ -224,19 +231,32 @@ func NewRelay(base, proxy string) (*Relay, error) {
 	if _, err := url.Parse(base); err != nil || base == "" {
 		return nil, fmt.Errorf("bad relay URL %q", base)
 	}
-	api, polls := New(APIClient), New(PollClient)
+	r := &Relay{base: base, api: New(APIClient), polls: New(PollClient), version: Version}
 	if proxy != "" {
 		pu, err := url.Parse(proxy)
 		if err != nil {
 			return nil, fmt.Errorf("bad proxy URL: %w", err)
 		}
-		for _, c := range []*http.Client{api, polls} {
-			if tr, ok := c.Transport.(*http.Transport); ok {
-				tr.Proxy = http.ProxyURL(pu)
-			}
+		r.proxy = pu
+	}
+	for _, c := range []*http.Client{r.api, r.polls} {
+		if tr, ok := c.Transport.(*http.Transport); ok {
+			tr.Proxy = r.proxyFor
 		}
 	}
-	return &Relay{base: base, api: api, polls: polls, version: Version}, nil
+	return r, nil
+}
+
+// proxyFor is the relay transports' Proxy: the proxy this client was given
+// or last reloaded, else the environment's.
+func (r *Relay) proxyFor(req *http.Request) (*url.URL, error) {
+	r.proxyMu.Lock()
+	pu := r.proxy
+	r.proxyMu.Unlock()
+	if pu != nil {
+		return pu, nil
+	}
+	return http.ProxyFromEnvironment(req)
 }
 
 // NewRelayFor returns a client for the saved config at ConfigPath(). It
@@ -251,12 +271,15 @@ func NewRelayFor(c Config) (*Relay, error) {
 // NewRelayForFile is NewRelayFor for a config loaded from path (a service's
 // --config), which is then the file relay info and a found address are
 // written back to. With TINCAN_RELAY set nothing is written to any file:
-// the environment overrides the saved relay for this process only.
+// the environment overrides the saved relay for this process only. Relay
+// traffic goes through c.DialProxy(), and a 407 reads path again for
+// fresher proxy credentials.
 func NewRelayForFile(c Config, path string) (*Relay, error) {
-	r, err := NewRelay(c.Relay, c.Proxy)
+	r, err := NewRelay(c.Relay, c.DialProxy())
 	if err != nil {
 		return nil, err
 	}
+	r.proxyFile = path
 	r.agent = c.Agent
 	r.key = c.RelayKey
 	r.known = c.RelayURLs
@@ -623,8 +646,20 @@ var socksRetry = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 
 // failure that outlasts the schedule, goes on as before: a call that found
 // nothing at the relay's address looks for a moved relay and, if it finds
 // one, is made once more there.
+//
+// A call the proxy refused with 407 is made once more if the config file
+// now names fresher proxy credentials (reloadProxy); otherwise, or if that
+// fails too, it ends with a ProxyAuthError.
 func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, in, out any) error {
 	err := r.callOnce(ctx, c, method, path, in, out)
+	if proxyAuthFailed(err) {
+		if r.reloadProxy() {
+			err = r.callOnce(ctx, c, method, path, in, out)
+		}
+		if proxyAuthFailed(err) {
+			return &ProxyAuthError{Proxy: r.proxyHost(), err: err}
+		}
+	}
 	for _, delay := range socksRetry {
 		if err == nil || !socksConnectFailed(err) {
 			break
@@ -700,6 +735,77 @@ func (r *Relay) headers(req *http.Request) {
 		req.Header.Set(VersionHeader, r.version)
 	}
 	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
+}
+
+// ProxyAuthError is a relay call the proxy refused with HTTP 407: the proxy
+// credentials have expired or are wrong, and the config offered nothing
+// fresher. Its message names the proxy's host but never its credentials.
+type ProxyAuthError struct {
+	Proxy string // host:port, "" when the proxy came from the environment
+	err   error
+}
+
+func (e *ProxyAuthError) Error() string {
+	proxy := "the proxy"
+	if e.Proxy != "" {
+		proxy = "proxy " + e.Proxy
+	}
+	return proxy + " refused the relay call with HTTP 407 (Proxy Authentication Required): its credentials have expired or are wrong. " +
+		"If this sandbox mints a new proxy password for every shell, run tincan rejoin with --proxy-credentials-from-env so each command takes the current password from HTTPS_PROXY, " +
+		"or set TINCAN_PROXY to the proxy URL with current credentials (see docs/adapters/proxy-sandbox.md). " +
+		"A running tincan wait, listen or MCP server keeps the password it started with: start it again from a shell with current credentials"
+}
+
+func (e *ProxyAuthError) Unwrap() error { return e.err }
+
+// IsProxyAuth reports whether err is a ProxyAuthError.
+func IsProxyAuth(err error) bool {
+	_, ok := errors.AsType[*ProxyAuthError](err)
+	return ok
+}
+
+// proxyAuthFailed reports whether the proxy refused a call with 407: as the
+// response to a plain http:// relay call, or as the failed CONNECT of an
+// https:// one.
+func proxyAuthFailed(err error) bool {
+	return IsStatus(err, http.StatusProxyAuthRequired) ||
+		(err != nil && strings.Contains(err.Error(), "407 Proxy Authentication Required"))
+}
+
+// reloadProxy reads the config file again after a 407 and switches to the
+// proxy it names, if that differs from the one in use: a wrapper may have
+// written fresh credentials there. A running process's own environment
+// cannot have changed, so only the file (and TINCAN_PROXY) can offer
+// anything new. It reports whether it switched.
+func (r *Relay) reloadProxy() bool {
+	if r.proxyFile == "" {
+		return false
+	}
+	c, err := LoadConfigFrom(r.proxyFile)
+	if err != nil || c.DialProxy() == "" {
+		return false
+	}
+	pu, err := url.Parse(c.DialProxy())
+	if err != nil {
+		return false
+	}
+	r.proxyMu.Lock()
+	defer r.proxyMu.Unlock()
+	if r.proxy != nil && r.proxy.String() == pu.String() {
+		return false
+	}
+	r.proxy = pu
+	return true
+}
+
+// proxyHost is the host:port of the proxy in use, "" for the environment's.
+func (r *Relay) proxyHost() string {
+	r.proxyMu.Lock()
+	defer r.proxyMu.Unlock()
+	if r.proxy == nil {
+		return ""
+	}
+	return r.proxy.Host
 }
 
 // IsStatus reports whether err is a relay error with the given HTTP code.
