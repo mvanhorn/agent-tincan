@@ -312,6 +312,10 @@ def resolve_route(registry: Path, project: Path, task: str) -> dict[str, str]:
 def _desktop_environment() -> dict[str, str]:
     allowed = {
         "HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+        # Claude Code reads its config and login from these; dropping them would
+        # resume against a different account or fail to find the session.
+        "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     }
     env = {key: value for key, value in os.environ.items() if key in allowed}
     env.setdefault("HOME", str(Path.home()))

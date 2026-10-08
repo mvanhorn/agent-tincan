@@ -258,6 +258,32 @@ class SessionRouteTests(unittest.TestCase):
             "tty": True,
         })
 
+    def test_desktop_environment_keeps_claude_config_dir(self):
+        fake_claude = self.root / "fake-env-claude"
+        capture = self.root / "opener-env.json"
+        config_dir = self.root / "claude-config"
+        fake_claude.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os\n"
+            f"open({str(capture)!r}, 'w').write(json.dumps(dict(os.environ)))\n"
+        )
+        fake_claude.chmod(0o700)
+        inherited = {
+            "CLAUDE_CONFIG_DIR": str(config_dir),
+            "XDG_CONFIG_HOME": str(self.root / "xdg"),
+            "HTTPS_PROXY": "http://proxy.invalid:3128",
+            "no_proxy": "localhost",
+            "ROUTE_TEST_UNRELATED_SECRET": "must-not-pass",
+        }
+        with patch.dict(session_route.os.environ, inherited):
+            session_route.open_desktop(self.project, SESSION_A, claude_bin=fake_claude, timeout=5)
+        child_env = json.loads(capture.read_text())
+        self.assertEqual(child_env.get("CLAUDE_CONFIG_DIR"), str(config_dir))
+        self.assertEqual(child_env.get("XDG_CONFIG_HOME"), str(self.root / "xdg"))
+        self.assertEqual(child_env.get("HTTPS_PROXY"), "http://proxy.invalid:3128")
+        self.assertEqual(child_env.get("no_proxy"), "localhost")
+        self.assertNotIn("ROUTE_TEST_UNRELATED_SECRET", child_env)
+
     def test_desktop_opener_timeout_is_bounded_and_reported_safely(self):
         fake_claude = self.root / "fake-slow-claude"
         fake_claude.write_text("#!/bin/sh\nsleep 10\n")
