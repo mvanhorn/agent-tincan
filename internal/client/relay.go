@@ -766,10 +766,12 @@ func IsProxyAuth(err error) bool {
 
 // proxyAuthFailed reports whether the proxy refused a call with 407: as the
 // response to a plain http:// relay call, or as the failed CONNECT of an
-// https:// one.
+// https:// one. Go's transport reports a refused CONNECT as an error holding
+// only the status text after the code, "Proxy Authentication Required", so
+// that text is what is matched.
 func proxyAuthFailed(err error) bool {
 	return IsStatus(err, http.StatusProxyAuthRequired) ||
-		(err != nil && strings.Contains(err.Error(), "407 Proxy Authentication Required"))
+		(err != nil && strings.Contains(err.Error(), http.StatusText(http.StatusProxyAuthRequired)))
 }
 
 // reloadProxy reads the config file again after a 407 and switches to the
