@@ -179,3 +179,19 @@ func TestRejoinAtNewRelayDropsOldKey(t *testing.T) {
 		t.Fatalf("the new relay's config kept the old relay's info: %+v", cfg)
 	}
 }
+
+// rejoin with --proxy-credentials-from-env saves the proxy without its
+// password, as join does.
+func TestRejoinProxyCredentialsFromEnvSavesNoPassword(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{})
+	proxy := forwardProxy(t, "rejoin-secret")
+	host := strings.TrimPrefix(proxy.URL, "http://")
+	if _, err := run(t, Root(), "rejoin", "--relay", m.URL("muse"), "--proxy", "http://u:rejoin-secret@"+host, "--proxy-credentials-from-env"); err != nil {
+		t.Fatalf("rejoin: %v", err)
+	}
+	cfg, err := client.LoadConfig()
+	if err != nil || cfg.Agent != "muse" || cfg.Proxy != "http://"+host || !cfg.ProxyCredentialsFromEnv {
+		t.Fatalf("saved config = %+v, %v", cfg, err)
+	}
+}

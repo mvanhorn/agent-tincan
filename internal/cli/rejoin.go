@@ -12,6 +12,7 @@ import (
 
 func rejoinCmd() *cobra.Command {
 	var relayURL, proxy, name string
+	var credsFromEnv bool
 	cmd := &cobra.Command{
 		Use:   "rejoin",
 		Short: "Reconnect this machine to the relay after a rebuild or a lost config (no invite needed)",
@@ -35,6 +36,9 @@ Only a machine that was never joined needs a first-time invite from an admin.`,
 			if cmd.Flags().Changed("proxy") {
 				cfg.Proxy = proxy
 			}
+			if cmd.Flags().Changed(proxyCredsFlag) {
+				cfg.ProxyCredentialsFromEnv = credsFromEnv
+			}
 			if cmd.Flags().Changed("name") {
 				cfg.Agent = name
 			}
@@ -50,7 +54,7 @@ Only a machine that was never joined needs a first-time invite from an admin.`,
 				return rejoinError(err, cfg)
 			}
 			cfg.Agent = me.Name
-			if err := client.SaveConfig(cfg); err != nil {
+			if err := client.SaveConfig(savedProxyConfig(cfg)); err != nil {
 				return err
 			}
 			learnRelayInfo(cmd.Context(), cfg)
@@ -59,11 +63,13 @@ Only a machine that was never joined needs a first-time invite from an admin.`,
 				kind = " (kind " + me.Kind + ")"
 			}
 			cmd.Printf("Rejoined as %q%s. Config saved to %s\n", me.Name, kind, client.ConfigPath())
+			printProxyCredsNote(cmd, cfg)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL, e.g. http://tincan-relay (default: saved config)")
 	cmd.Flags().StringVar(&proxy, "proxy", "", "proxy for relay traffic (for sandboxes whose default proxy cannot reach the tailnet)")
+	cmd.Flags().BoolVar(&credsFromEnv, proxyCredsFlag, false, proxyCredsUsage)
 	cmd.Flags().StringVar(&name, "name", "", "the agent to rejoin as, when this machine ran several")
 	return cmd
 }

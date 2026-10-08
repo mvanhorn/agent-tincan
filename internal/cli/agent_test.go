@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -448,5 +451,83 @@ func TestOlderRelayGoodAt(t *testing.T) {
 	useConfig(t, client.Config{})
 	if _, err := run(t, goodAtCmd(), "muse", "phone calls", "--relay", srv.URL); err == nil || !strings.Contains(err.Error(), "upgrade the relay") {
 		t.Fatalf("good-at against an older relay: %v", err)
+	}
+}
+
+// forwardProxy is a forward proxy in front of the test relay. It forwards a
+// call whose Proxy-Authorization carries pass and answers 407 otherwise.
+func forwardProxy(t *testing.T, pass string) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := ""
+		if raw, ok := strings.CutPrefix(r.Header.Get("Proxy-Authorization"), "Basic "); ok {
+			if dec, err := base64.StdEncoding.DecodeString(raw); err == nil {
+				_, got, _ = strings.Cut(string(dec), ":")
+			}
+		}
+		if got != pass {
+			http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
+			return
+		}
+		out := r.Clone(r.Context())
+		out.RequestURI = ""
+		out.Header.Del("Proxy-Authorization")
+		resp, err := http.DefaultTransport.RoundTrip(out)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		maps.Copy(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// With --proxy-credentials-from-env, join dials with the password it was
+// given but saves the proxy without it, along with the flag. Without the
+// flag the full URL is saved as before.
+func TestJoinProxyCredentialsFromEnvSavesNoPassword(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		flag      bool
+		wantProxy func(host string) string
+	}{
+		{"flag on", true, func(host string) string { return "http://" + host }},
+		{"flag off", false, func(host string) string { return "http://u:join-secret@" + host }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testrelay.New(t, relay.Config{})
+			useConfig(t, client.Config{})
+			proxy := forwardProxy(t, "join-secret")
+			host := strings.TrimPrefix(proxy.URL, "http://")
+			args := []string{m.Invite(t, "hermes"), "--relay", m.URL("stranger"), "--proxy", "http://u:join-secret@" + host}
+			if tc.flag {
+				args = append(args, "--proxy-credentials-from-env")
+			}
+			out, err := run(t, joinCmd(), args...)
+			if err != nil {
+				t.Fatalf("join: %v", err)
+			}
+			cfg, err := client.LoadConfig()
+			if err != nil || cfg.Agent != "hermes" {
+				t.Fatalf("config = %+v, %v", cfg, err)
+			}
+			if cfg.Proxy != tc.wantProxy(host) || cfg.ProxyCredentialsFromEnv != tc.flag {
+				t.Fatalf("saved proxy %q, credentials from env %v; want %q, %v", cfg.Proxy, cfg.ProxyCredentialsFromEnv, tc.wantProxy(host), tc.flag)
+			}
+			raw, err := os.ReadFile(client.ConfigPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.flag && strings.Contains(string(raw)+out, "join-secret") {
+				t.Fatalf("the proxy password was saved or printed: %s\n%s", raw, out)
+			}
+			if tc.flag != strings.Contains(out, "not saved") {
+				t.Fatalf("join output = %q", out)
+			}
+		})
 	}
 }

@@ -294,3 +294,39 @@ func TestWaitTimeoutBoundsPongRetries(t *testing.T) {
 		t.Fatalf("wait ran %v past a 500ms timeout", d)
 	}
 }
+
+// A background wait whose proxy password has expired, with nothing fresher
+// in its config, exits with the proxy error instead of retrying 407s
+// forever, so the agent reruns it from a shell with current credentials.
+func TestWaitExitsOnExpiredProxyPassword(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	proxy := forwardProxy(t, "fresh")
+	host := strings.TrimPrefix(proxy.URL, "http://")
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse", Proxy: "http://u:expired-secret@" + host})
+	start := time.Now()
+	_, err := run(t, Root(), "wait", "--timeout", "20s")
+	if err == nil || !strings.Contains(err.Error(), host) || !strings.Contains(err.Error(), "407") {
+		t.Fatalf("wait = %v, want the proxy authentication error", err)
+	}
+	if strings.Contains(err.Error(), "expired-secret") {
+		t.Fatalf("error leaks the proxy password: %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatalf("wait took %s to give up; it retried the 407", time.Since(start))
+	}
+}
+
+// listen stops on an expired proxy password as wait does.
+func TestListenExitsOnExpiredProxyPassword(t *testing.T) {
+	proxy := forwardProxy(t, "fresh")
+	host := strings.TrimPrefix(proxy.URL, "http://")
+	r, err := client.NewRelay("http://tincan-relay", "http://u:expired@"+host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	if err := listen(ctx, r, "", false); !client.IsProxyAuth(err) {
+		t.Fatalf("listen = %v, want the proxy authentication error", err)
+	}
+}
