@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -317,5 +318,32 @@ func TestUpgradeOlderClientInstalls(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "up to date") {
 		t.Fatalf("same release output = %q", out.String())
+	}
+}
+
+// After the swap, upgrade runs the new binary's services refresh so the
+// macOS services move onto the new build's Agent Tincan.app. A refresh
+// failure is reported but does not fail the upgrade: the binary is replaced.
+func TestUpgradeRunsServicesRefresh(t *testing.T) {
+	m := meshWithDist(t, map[string]string{platformFile: "new binary", "VERSION": "0.4.0"})
+	exe, _ := fakeExe(t)
+	var ran string
+	orig := postUpgradeRefresh
+	t.Cleanup(func() { postUpgradeRefresh = orig })
+	postUpgradeRefresh = func(newExe string) (string, error) {
+		ran = newExe
+		return "com.agenttincan.council: updated, restarted\n", errors.New("exit status 1")
+	}
+	var out bytes.Buffer
+	if err := upgrade(t.Context(), m.Client(t, "muse"), exe, false, false, &out); err != nil {
+		t.Fatalf("upgrade failed because refresh failed: %v", err)
+	}
+	if ran != exe {
+		t.Fatalf("refresh ran %q, want the new binary %q", ran, exe)
+	}
+	for _, want := range []string{"com.agenttincan.council: updated, restarted", "tincan services refresh"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
 	}
 }

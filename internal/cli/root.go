@@ -30,7 +30,7 @@ func Root() *cobra.Command {
 	root.SetOut(os.Stdout)
 	root.AddCommand(relayCmd(), versionCmd())
 	root.AddCommand(agentCmds()...)
-	root.AddCommand(topCmd(), pingCmd(), mcpCmd(), doctorCmd(), traceCmd(), searchCmd(), auditCmd(), listenCmd(), connectCmd(), onboardCmd(), rejoinCmd(), upgradeCmd(), relayUpgradeCmd(), historyCmd(), notesCmd(), wakesCmd(), councilCmd(), webCmd(), attachmentCmd(), releaseToolsCmd(), relayWatchCmd())
+	root.AddCommand(topCmd(), pingCmd(), mcpCmd(), doctorCmd(), traceCmd(), searchCmd(), auditCmd(), listenCmd(), connectCmd(), onboardCmd(), rejoinCmd(), upgradeCmd(), relayUpgradeCmd(), historyCmd(), notesCmd(), wakesCmd(), councilCmd(), webCmd(), attachmentCmd(), releaseToolsCmd(), relayWatchCmd(), servicesCmd())
 	withRejoinHints(root)
 	return root
 }
