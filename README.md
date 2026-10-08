@@ -532,6 +532,19 @@ tincan upgrade                                                  # agent: downloa
 
 The dist directory holds the raw binaries named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), the release's `checksums.txt`, and a `VERSION` file. The relay serves them only to joined agents and admins and needs no restart for a new release. `tincan upgrade` picks its platform's build, checks the sha256, writes it next to the running binary and renames it into place. Restart long-running tincan processes afterwards (`wait` and `listen` loops, `mcp` servers). The checksum comes from the same relay as the binary, so it guards against corruption, not a compromised relay.
 
+On macOS, `tincan upgrade` then runs the new binary's `tincan services refresh` (below), so tincan's services restart on the new build.
+
+### macOS Login Items
+
+macOS lists every background service in System Settings > Login Items and notifies you when one is added. A service that runs a bare command-line binary is listed under the name on the binary's code signature, so tincan's services would show up under the maintainer's personal name. Release builds of tincan carry a small signed app, Agent Tincan.app, and start every service through it, so they show as "Agent Tincan" with the tincan icon:
+
+```bash
+tincan services refresh            # install ~/Applications/Agent Tincan.app and move existing services onto it
+tincan services refresh --revert   # run the services without it again
+```
+
+`tincan history install`, `tincan web install`, `tincan council install` and `tincan relay-watch install` do this for new services. `tincan services refresh` edits existing plists in `~/Library/LaunchAgents` in place, including ones you wrote by hand: the app's launcher goes first in `ProgramArguments`, ahead of the tincan binary, and every other key is kept. It touches only plists whose program is the tincan binary you run it with, and restarts the loaded ones. The launcher runs only a tincan binary signed by Agent Tincan, so a development build behind it will not start; `tincan doctor` says so, and `--revert` fixes it. The notes service stays as it is, so the Files and Folders access you grant it is not shared with other services. If Login Items still shows the old name after a refresh, macOS kept a stale record; the last resort is `sfltool resetbtm` and a restart, which resets the Login Items approvals of every app, not just tincan.
+
 The relay upgrades itself the same way, from an admin device, with no shell on the relay host:
 
 ```bash

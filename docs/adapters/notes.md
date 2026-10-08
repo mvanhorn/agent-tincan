@@ -81,6 +81,8 @@ tincan notes doctor
 
 The agent must be named `notes`: `tincan notes serve` refuses to run unless both its config and the relay say it is the `notes` agent, so a config for another agent can never claim that agent's requests.
 
+Unlike tincan's other macOS services, the notes service does not start through Agent Tincan.app, so it still appears in Login Items under the signer's name. That keeps its Files and Folders grant from being shared with other services ([trust model](../trust-model.md#agent-tincanapp-on-macos)).
+
 `tincan notes install` writes `~/Library/LaunchAgents/com.agenttincan.notes.plist`, which runs `tincan notes serve --library-root <folder> --helper <helper>` with `TINCAN_CONFIG=~/.config/tincan/notes.json`, keeps it running, and logs to `~/Library/Logs/tincan-notes.log`. It prints the start command and starts nothing itself. Flags: `--library-root` (required), `--helper` (default the helper inside `/Applications/Agent Notes.app`), `--binary` (the tincan binary the service runs, default this one).
 
 The service reads and writes your library from launchd, not from Terminal, so macOS asks for access separately. In System Settings > Privacy & Security, grant the tincan binary Files and Folders access to the library's folder (not Full Disk Access, which the free-text extractor would inherit), then restart the service:

@@ -138,6 +138,14 @@ The `council` agent puts one question to every model on the team, has them rank 
 - Answers are untrusted content. Reviewers and the chairman see answers between per-council random delimiters with an instruction that the enclosed text is material to judge; only the defined output fields are parsed, and the chairman cannot change the peer scores. The reply is still model output: an agent acting on a verdict is reading model text, with the risk described below.
 - Retention. Inlined attachment text lives in request bodies, which the relay keeps like any other request, not on the 7-day attachment clock. Council's database and reports stay in its folder on the owner's machine (0700 folders, 0600 files) until the owner deletes them. The report and scorecard are local files; nothing is hosted.
 
+## Agent Tincan.app on macOS
+
+Release builds of tincan for macOS start their background services through a launcher inside Agent Tincan.app, so Login Items names them "Agent Tincan" instead of the signer ([README](../README.md#macos-login-items)).
+
+- The launcher runs only tincan. It execs its first argument only when that binary satisfies an Apple-anchored Developer ID requirement for the Agent Tincan team and a tincan signing identifier, so other software cannot borrow the Agent Tincan name or icon in Login Items. A same-user attacker can still swap the binary between the check and the exec, or point the launcher at the real tincan with hostile arguments. Both match today's exposure: anything that can write `~/Library/LaunchAgents` can already run signed tincan with any arguments.
+- The app is checked before use. `tincan` installs the app embedded in its own signed binary into `~/Applications`, checks its signature against the same team before swapping it in, and replaces an installed copy that fails that check. `tincan doctor` reports a missing or modified app.
+- Privacy grants stay where they were. macOS may treat the app as the code responsible for its services' privacy checks, which would let one grant to "Agent Tincan" cover every wrapped service. The notes service is therefore never wrapped, so its Files and Folders grant stays its own.
+
 ## What it deliberately does not do
 
 - Joined agents trust each other fully. A request from a joined agent is meant to be acted on as if you asked, including actions like placing calls or spending money. The standing instructions say so plainly: a teammate's request is work the owner has already authorized, and agents do not stop to ask the owner for permission. What still holds: the relay's approval holds (council, dot-web, `approval.json`), one teammate at a time for a real-world action, and limits the owner gave an agent directly. By default there is no per-request approval, except that asks to the council and dot-web agents are held (see [Council](#council) and the dot-web note above); the optional owner gate below can hold requests to other agents.

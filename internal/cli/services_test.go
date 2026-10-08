@@ -403,3 +403,101 @@ func TestRefreshWithoutEmbeddedAppChangesNothing(t *testing.T) {
 		t.Fatalf("output: %s", f.out.String())
 	}
 }
+
+func (f *servicesFixture) loginItems() loginItemsEnv {
+	return loginItemsEnv{
+		home:        f.home,
+		exe:         f.exe,
+		embedded:    true,
+		validateApp: func(string) error { return nil },
+		signed:      func(string) error { return nil },
+		liveProgram: func(string) string { return "" },
+	}
+}
+
+func (f *servicesFixture) installLauncher(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(f.launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.launcher, []byte("l"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoginItemsCheckDevelopmentBuild(t *testing.T) {
+	f := newServicesFixture(t)
+	f.writePlist(t, "com.agenttincan.council", map[string]any{"ProgramArguments": []string{f.exe, "council", "serve"}})
+	env := f.loginItems()
+	env.embedded = false
+	c := loginItemsCheck(env)
+	if c.Status != "warn" || !strings.Contains(c.Detail, "development build") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckNamesUnrefreshedPlist(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.agenttincan.council", map[string]any{"ProgramArguments": []string{f.exe, "council", "serve"}})
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	c := loginItemsCheck(f.loginItems())
+	if c.Status != "warn" || !strings.Contains(c.Detail, "com.agenttincan.council") || strings.Contains(c.Detail, "com.agenttincan.history") || !strings.Contains(c.Fix, "tincan services refresh") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckPassesWhenCurrent(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	f.writePlist(t, "com.agenttincan.notes", map[string]any{"ProgramArguments": []string{f.exe, "notes", "serve"}})
+	if c := loginItemsCheck(f.loginItems()); c.Status != "ok" {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckMissingAppBreaksWrappedServices(t *testing.T) {
+	f := newServicesFixture(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	c := loginItemsCheck(f.loginItems())
+	if c.Status != "fail" || !strings.Contains(c.Detail, "missing") || !strings.Contains(c.Fix, "tincan services refresh") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckModifiedApp(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	env := f.loginItems()
+	env.validateApp = func(string) error { return errors.New("a sealed resource is missing or invalid") }
+	c := loginItemsCheck(env)
+	if c.Status != "fail" || !strings.Contains(c.Detail, "signature") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckUnsignedBuildBehindLauncher(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	env := f.loginItems()
+	env.signed = func(string) error { return errors.New("not signed by Agent Tincan") }
+	c := loginItemsCheck(env)
+	if c.Status != "fail" || !strings.Contains(c.Fix, "tincan services refresh --revert") {
+		t.Fatalf("check = %+v", c)
+	}
+}
+
+func TestLoginItemsCheckRestartPending(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	env := f.loginItems()
+	env.liveProgram = func(label string) string { return f.exe }
+	c := loginItemsCheck(env)
+	if c.Status != "warn" || !strings.Contains(c.Detail, "com.agenttincan.history") || !strings.Contains(c.Detail, "restart") {
+		t.Fatalf("check = %+v", c)
+	}
+}

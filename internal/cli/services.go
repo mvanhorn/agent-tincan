@@ -178,21 +178,12 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 	if _, ok := m["BundleProgram"]; ok {
 		return "skipped (uses BundleProgram)", nil
 	}
-	args, ok := stringList(m["ProgramArguments"])
-	prog, hasProgram := m["Program"].(string)
-	if !hasProgram {
-		if !ok || len(args) == 0 {
-			return "skipped (no program)", nil
-		}
-		prog, args = args[0], args[1:]
-	} else if len(args) > 0 {
-		args = args[1:] // with Program, ProgramArguments[0] is only argv[0]
+	j, ok := parseJob(m)
+	if !ok {
+		return "skipped (no program)", nil
 	}
-	target, targs := prog, args
-	if isLauncher(prog) && len(args) > 0 {
-		target, targs = args[0], args[1:]
-	}
-	if resolved, err := filepath.EvalSymlinks(target); err != nil || resolved != r.exe {
+	target, targs, hasProgram := j.target, j.args, j.hasProgram
+	if !j.runs(r.exe) {
 		return fmt.Sprintf("skipped (runs %s, not this tincan %s)", target, r.exe), nil
 	}
 	if label == "com.agenttincan.notes" && !r.revert {
@@ -262,6 +253,39 @@ func (r *serviceRefresher) restart(label, path string) error {
 		r.sleep()
 	}
 	return err
+}
+
+// launchJob is what a LaunchAgent plist runs: its program, and when that
+// program is the Agent Tincan.app launcher, the binary the launcher runs.
+type launchJob struct {
+	target     string   // the binary that ends up running
+	args       []string // its arguments
+	launcher   string   // the launcher in front of it, if any
+	hasProgram bool     // the plist names its program with the Program key
+}
+
+func parseJob(m map[string]any) (launchJob, bool) {
+	args, ok := stringList(m["ProgramArguments"])
+	prog, hasProgram := m["Program"].(string)
+	if !hasProgram {
+		if !ok || len(args) == 0 {
+			return launchJob{}, false
+		}
+		prog, args = args[0], args[1:]
+	} else if len(args) > 0 {
+		args = args[1:] // with Program, ProgramArguments[0] is only argv[0]
+	}
+	j := launchJob{target: prog, args: args, hasProgram: hasProgram}
+	if isLauncher(prog) && len(args) > 0 {
+		j.launcher, j.target, j.args = prog, args[0], args[1:]
+	}
+	return j, true
+}
+
+// runs reports whether the job's binary is exe (symlinks resolved).
+func (j launchJob) runs(exe string) bool {
+	resolved, err := filepath.EvalSymlinks(j.target)
+	return err == nil && resolved == exe
 }
 
 // isLauncher reports whether p is an Agent Tincan.app launcher.
@@ -361,4 +385,104 @@ func writeFileReplacing(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// loginItemsEnv is what the doctor's login items check reads.
+type loginItemsEnv struct {
+	home, exe   string
+	embedded    bool                      // this build carries Agent Tincan.app
+	validateApp func(app string) error    // the installed app's signature
+	signed      func(exe string) error    // exe satisfies the launcher's requirement
+	liveProgram func(label string) string // the program a loaded job runs, "" if not loaded
+}
+
+func defaultLoginItemsEnv(exe string) (loginItemsEnv, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return loginItemsEnv{}, err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	uid := os.Getuid()
+	return loginItemsEnv{
+		home:        home,
+		exe:         exe,
+		embedded:    macapp.Embedded(),
+		validateApp: macapp.Validate,
+		signed: func(exe string) error {
+			if out, err := exec.Command("/usr/bin/codesign", "--verify", "--strict", "-R="+macapp.TincanRequirement, exe).CombinedOutput(); err != nil {
+				return errors.New(strings.TrimSpace(string(out)))
+			}
+			return nil
+		},
+		liveProgram: func(label string) string {
+			out, err := exec.Command("/bin/launchctl", "print", fmt.Sprintf("gui/%d/%s", uid, label)).Output()
+			if err != nil {
+				return ""
+			}
+			for line := range strings.Lines(string(out)) {
+				if v, ok := strings.CutPrefix(strings.TrimSpace(line), "program = "); ok {
+					return strings.TrimSpace(v)
+				}
+			}
+			return ""
+		},
+	}, nil
+}
+
+// loginItemsCheck reports whether this tincan's LaunchAgents show as Agent
+// Tincan in Login Items, and anything that would stop them from starting.
+func loginItemsCheck(e loginItemsEnv) check {
+	const name = "login items"
+	paths, _ := filepath.Glob(filepath.Join(e.home, "Library", "LaunchAgents", "com.agenttincan.*.plist"))
+	var wrapped, plain, pending []string
+	for _, p := range paths {
+		label := strings.TrimSuffix(filepath.Base(p), ".plist")
+		m, err := readPlistJSON(p)
+		if err != nil {
+			continue
+		}
+		j, ok := parseJob(m)
+		if !ok || !j.runs(e.exe) {
+			continue
+		}
+		switch {
+		case j.launcher != "":
+			wrapped = append(wrapped, label)
+			if live := e.liveProgram(label); live != "" && live != j.launcher {
+				pending = append(pending, label)
+			}
+		case label != "com.agenttincan.notes":
+			plain = append(plain, label)
+		}
+	}
+	app := macapp.Path(e.home)
+	if len(wrapped) > 0 {
+		if _, err := os.Stat(macapp.Launcher(e.home)); err != nil {
+			return check{name, "fail", fmt.Sprintf("%s is missing, so %s cannot start", app, strings.Join(wrapped, ", ")),
+				"Run tincan services refresh to reinstall it, or tincan services refresh --revert to run the services without it."}
+		}
+		if err := e.validateApp(app); err != nil {
+			return check{name, "fail", fmt.Sprintf("%s fails its signature check: %v", app, err), "Run tincan services refresh to reinstall it."}
+		}
+		if err := e.signed(e.exe); err != nil {
+			return check{name, "fail", fmt.Sprintf("the Agent Tincan launcher refuses %s (%v), so %s cannot start", e.exe, err, strings.Join(wrapped, ", ")),
+				"Run tincan services refresh --revert, or install a release build of tincan."}
+		}
+	}
+	if len(plain) > 0 && !e.embedded {
+		return check{name, "warn", fmt.Sprintf("development build: %s show the signer's name in Login Items instead of Agent Tincan", strings.Join(plain, ", ")),
+			"Install a release build of tincan, then run tincan services refresh."}
+	}
+	if len(plain) > 0 {
+		return check{name, "warn", fmt.Sprintf("%s still show the signer's name in Login Items", strings.Join(plain, ", ")), "Run tincan services refresh."}
+	}
+	if len(pending) > 0 {
+		return check{name, "warn", fmt.Sprintf("%s still run without the launcher until they restart", strings.Join(pending, ", ")), "Run tincan services refresh, or restart them."}
+	}
+	if len(wrapped) == 0 {
+		return check{name, "ok", "no tincan LaunchAgents for this binary", ""}
+	}
+	return check{name, "ok", fmt.Sprintf("%s show as Agent Tincan in Login Items", strings.Join(wrapped, ", ")), ""}
 }
