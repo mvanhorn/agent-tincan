@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -343,5 +344,83 @@ func TestWakeExportBoundCountsWakesOnly(t *testing.T) {
 		if e.NextPoll == nil || e.NextVia != "poll" {
 			t.Errorf("wake %d = %+v, want its poll", i, e)
 		}
+	}
+}
+
+// wakeIDsHarness is wakeExportHarness with the waker's id hooks wired to the
+// relay, as `tincan relay` wires them, and a short reply grace.
+func wakeIDsHarness(t *testing.T) (*harness, *wake.Waker) {
+	t.Helper()
+	h := newHarness(t, Config{})
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP: hook.Client(), Debounce: time.Millisecond, RetryDelay: time.Millisecond, ReplyGrace: time.Millisecond,
+		WakeGrace: -1, ReplyRetries: []time.Duration{}, Queued: h.srv.QueuedCount, LastPoll: h.srv.LastPoll,
+		UnseenReplies: h.srv.UnseenReplies, QueuedIDs: h.srv.QueuedIDs, UnseenReplyIDs: h.srv.UnseenReplyIDs,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+	return h, w
+}
+
+// A wake for one queued request and one for one unseen reply each export
+// that request's id; a row written before ids were recorded has none.
+func TestWakeExportRequestIDs(t *testing.T) {
+	h, w := wakeIDsHarness(t)
+	since := time.Now().Add(-time.Second)
+	if err := h.st.Audit(t.Context(), store.AuditEvent{Event: "woke", Actor: "grokbot", Detail: "webhook, HTTP 200, 1 waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	queuedReq := h.send(museAddr, "grokbot", "check the garage")
+	w.Flush()
+	h.do(grokAddr, "GET", "/v1/poll", "", http.StatusOK, nil) // takes it, so the reply wake covers the reply alone
+	ask := h.send(grokAddr, "muse", "call the yard")
+	h.answer(museAddr, ask, "done")
+	w.Flush()
+	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
+	if len(out.Wakes) != 3 {
+		t.Fatalf("export = %+v", out)
+	}
+	if got := out.Wakes[0].RequestIDs; got != nil {
+		t.Errorf("old row request_ids = %v, want none", got)
+	}
+	if got := out.Wakes[1].RequestIDs; !slices.Equal(got, []string{queuedReq.ID}) {
+		t.Errorf("request wake request_ids = %v, want [%s]", got, queuedReq.ID)
+	}
+	if got := out.Wakes[2].RequestIDs; !slices.Equal(got, []string{ask.ID}) {
+		t.Errorf("reply wake request_ids = %v, want [%s]", got, ask.ID)
+	}
+	if n, err := h.st.VerifyAudit(t.Context()); err != nil || n == 0 {
+		t.Fatalf("verify = %d, %v", n, err)
+	}
+}
+
+// wakeEntry reads the same path, status and reply from an old row, a row
+// with one id in request_id and a row with an ids segment and a response,
+// and the ids from the last two.
+func TestWakeEntryRequestIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		e    store.AuditEvent
+		ids  []string
+	}{
+		{"old", store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 202, 1 waiting, response: queued, run 42"}, nil},
+		{"one id", store.AuditEvent{Event: "woke", RequestID: "ra", Detail: "webhook, HTTP 202, 1 waiting, response: queued, run 42"}, []string{"ra"}},
+		{"several ids", store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 202, 2 waiting, 1 unseen replies, ids: ra,rb,q7, response: queued, run 42"}, []string{"ra", "rb", "q7"}},
+	} {
+		got := wakeEntry(tc.e, "webhook")
+		if got.Path != "webhook" || got.Status != "202" || got.Reply != "queued, run 42" || !slices.Equal(got.RequestIDs, tc.ids) {
+			t.Errorf("%s: entry = %+v", tc.name, got)
+		}
+	}
+	// An ids-like segment inside the webhook's own response is not read as ids.
+	if got := wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 200, 1 waiting, response: ok, ids: x,y"}, "webhook"); got.RequestIDs != nil || got.Reply != "ok, ids: x,y" {
+		t.Errorf("response with ids text = %+v", got)
+	}
+	// An old row without the status code still reads as before.
+	if got := wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, 1 waiting"}, "webhook"); got.Status != "2xx" || got.RequestIDs != nil {
+		t.Errorf("oldest row = %+v", got)
 	}
 }

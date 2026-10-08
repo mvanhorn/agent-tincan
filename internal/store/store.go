@@ -774,6 +774,31 @@ func (s *Store) CountQueued(ctx context.Context, agent string) (int, error) {
 	return n, err
 }
 
+// QueuedIDs lists the ids of agent's live requests still waiting to be
+// delivered, oldest first: the requests CountQueued counts.
+func (s *Store) QueuedIDs(ctx context.Context, agent string) ([]string, error) {
+	return s.ids(ctx, `SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? ORDER BY created_at, rowid`,
+		agent, string(envelope.StatusQueued), s.now().UnixMilli())
+}
+
+// ids runs a query whose rows are single ids.
+func (s *Store) ids(ctx context.Context, query string, args ...any) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // AgentsWithQueuedRequests returns every agent that has a live request
 // still waiting to be delivered.
 func (s *Store) AgentsWithQueuedRequests(ctx context.Context) ([]string, error) {
