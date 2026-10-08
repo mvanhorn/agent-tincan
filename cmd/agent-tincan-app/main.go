@@ -22,13 +22,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/mvanhorn/agent-tincan/internal/macapp"
 )
 
-// Requirement is the code-signing requirement a target must satisfy: Apple's
-// Developer ID chain, the Agent Tincan team, and a tincan signing identifier.
-// Matching the Team ID alone is not enough, since a self-signed certificate
-// can carry any OU.
-const Requirement = `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "NM8VT393AR" and (identifier "tincan_darwin_arm64" or identifier "tincan_darwin_amd64" or identifier "com.agenttincan.tincan")`
+// Requirement is the code-signing requirement a target must satisfy.
+const Requirement = macapp.TincanRequirement
 
 func main() {
 	os.Exit(run(os.Args, codesignVerify, syscall.Exec, os.Stderr))
