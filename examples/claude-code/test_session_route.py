@@ -338,6 +338,74 @@ class SessionRouteTests(unittest.TestCase):
                                        env={"PATH": os.defpath, "HOME": str(self.root)})
         self.assertNotIn("PRIVATE_TRANSCRIPT", str(error.exception))
 
+        cli = self.run_cli("--bind", SESSION_A, "--desktop", "--claude-bin", str(fake_claude))
+        self.assertEqual(cli.returncode, 2, (cli.stdout, cli.stderr))
+        self.assertEqual(cli.stderr.strip(), "desktop_opener_failed")
+        self.assertNotIn("PRIVATE_TRANSCRIPT", cli.stdout)
+        self.assertNotIn("PRIVATE_TRANSCRIPT", cli.stderr)
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--registry", str(self.registry),
+             "--project", str(self.project), "--task", "design", *args],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+
+    def test_cli_desktop_opens_bound_session(self):
+        fake_claude = self.root / "fake-cli-claude"
+        capture = self.root / "cli-opener.json"
+        fake_claude.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            f"open({str(capture)!r}, 'w').write(json.dumps({{'cwd': os.getcwd(), 'argv': sys.argv[1:]}}))\n"
+        )
+        fake_claude.chmod(0o700)
+        result = self.run_cli("--bind", SESSION_A, "--desktop", "--claude-bin", str(fake_claude),
+                              "--opener-timeout", "5")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "action": "desktop_open_requested", "project": str(self.project.resolve()),
+            "task": "design", "session_id": SESSION_A,
+        })
+        self.assertEqual(json.loads(capture.read_text()), {
+            "cwd": str(self.project.resolve()), "argv": ["--desktop", "--resume", SESSION_A],
+        })
+
+    def test_desktop_opener_rejects_invalid_timeout_and_claude_bin(self):
+        good_claude = self.root / "fake-ok-claude"
+        good_claude.write_text("#!/bin/sh\nexit 0\n")
+        good_claude.chmod(0o700)
+        not_executable = self.root / "fake-noexec-claude"
+        not_executable.write_text("#!/bin/sh\nexit 0\n")
+        not_executable.chmod(0o600)
+        cases = (
+            ("timeout zero", {"claude_bin": good_claude, "timeout": 0}, "invalid_opener_timeout"),
+            ("timeout above max", {"claude_bin": good_claude, "timeout": 61}, "invalid_opener_timeout"),
+            ("timeout bool", {"claude_bin": good_claude, "timeout": True}, "invalid_opener_timeout"),
+            ("missing claude", {"claude_bin": self.root / "no-such-claude"}, "claude_cli_unavailable"),
+            ("non-executable claude", {"claude_bin": not_executable}, "claude_cli_unavailable"),
+            ("directory claude", {"claude_bin": self.root}, "claude_cli_unavailable"),
+        )
+        env = {"PATH": os.defpath, "HOME": str(self.root)}
+        for name, kwargs, code in cases:
+            with self.subTest(name), self.assertRaises(session_route.RouteError) as error:
+                session_route.open_desktop(self.project, SESSION_A, env=env, **kwargs)
+            self.assertEqual(str(error.exception), code)
+
+        session_route.bind_route(self.registry, self.project, "design", SESSION_A)
+        cli_cases = (
+            (("--opener-timeout", "0", "--claude-bin", str(good_claude)), "invalid_opener_timeout"),
+            (("--opener-timeout", "61", "--claude-bin", str(good_claude)), "invalid_opener_timeout"),
+            (("--claude-bin", str(self.root / "no-such-claude")), "claude_cli_unavailable"),
+            (("--claude-bin", str(not_executable)), "claude_cli_unavailable"),
+        )
+        for args, code in cli_cases:
+            with self.subTest(args=args):
+                result = self.run_cli("--desktop", *args)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertEqual(result.stderr.strip(), code)
+                self.assertEqual(result.stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()
