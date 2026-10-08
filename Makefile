@@ -16,7 +16,7 @@
 #                       checksums.txt
 #   make notarize-mac - submit each signed dist/tincan_darwin_* to Apple's
 #                       notary service and wait for the verdict
-#   make release-mac  - dist + sign-mac + notarize-mac, checksums regenerated
+#   make release-mac  - mac-app + dist MACAPP=1 + sign-mac + notarize-mac, checksums regenerated
 #                       after signing
 #   make release VERSION=x.y.z NOTES=<file> - the whole release: checks, local
 #                       tag, dist, sign, notarize, verified checksums, store
@@ -26,7 +26,7 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS := -X main.Version=$(VERSION)
 
-.PHONY: build test vet lint spike extension extension-test store dist checksums sign-mac notarize-mac release-mac release
+.PHONY: build test vet lint spike extension extension-test store dist checksums sign-mac notarize-mac release-mac release mac-app macapp-zip-check
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o tincan ./cmd/tincan
@@ -175,7 +175,10 @@ mac-app:
 	if unzip -Z1 "$(MACAPP_ZIP)" | grep -qE '(^|/)(\._|__MACOSX)'; then echo "make mac-app: $(MACAPP_ZIP) holds AppleDouble entries, which would break the app's seal when unpacked" >&2; exit 1; fi; \
 	echo "make mac-app: wrote $(MACAPP_ZIP)"
 
-release-mac: dist sign-mac notarize-mac
+release-mac:
+	$(MAKE) mac-app
+	$(MAKE) dist MACAPP=1
+	$(MAKE) sign-mac notarize-mac
 	$(MAKE) checksums
 	cd dist && shasum -a 256 -c checksums.txt
 

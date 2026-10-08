@@ -26,7 +26,7 @@ func servicesCmd() *cobra.Command {
 		Use:   "services",
 		Short: "Manage tincan's macOS background services",
 	}
-	var revert bool
+	var revert, restart bool
 	refresh := &cobra.Command{
 		Use:   "refresh",
 		Short: "Make tincan's LaunchAgents show as Agent Tincan in Login Items",
@@ -40,7 +40,8 @@ ahead of this tincan binary, and AssociatedBundleIdentifiers names the app.
 Every other key, argument and log path is kept. Plists whose program is not
 this tincan binary are skipped, and so is the notes service, whose Files and
 Folders grant must not be shared with other services. Loaded services are
-restarted to pick up the change, except the one this command runs under.
+restarted to pick up the change, except the one this command runs under;
+--restart restarts the others too, so they run this binary.
 
 --revert undoes it: services run the tincan binary directly again.
 
@@ -65,19 +66,21 @@ Login Items approvals of every app, not just tincan.`,
 				return err
 			}
 			r := &serviceRefresher{
-				home:    home,
-				exe:     exe,
-				revert:  revert,
-				ensure:  func() (string, error) { return macapp.Ensure(macapp.Options{Home: home}) },
-				launchd: launchctl{uid: os.Getuid()},
-				self:    os.Getenv("XPC_SERVICE_NAME"),
-				sleep:   func() { time.Sleep(time.Second) },
-				out:     cmd.OutOrStdout(),
+				home:           home,
+				exe:            exe,
+				revert:         revert,
+				restartCurrent: restart,
+				ensure:         func() (string, error) { return macapp.Ensure(macapp.Options{Home: home}) },
+				launchd:        launchctl{uid: os.Getuid()},
+				self:           os.Getenv("XPC_SERVICE_NAME"),
+				sleep:          func() { time.Sleep(time.Second) },
+				out:            cmd.OutOrStdout(),
 			}
 			return r.run()
 		},
 	}
 	refresh.Flags().BoolVar(&revert, "revert", false, "make services run the tincan binary directly again")
+	refresh.Flags().BoolVar(&restart, "restart", false, "also restart loaded services whose plist is already current, so they run this binary (tincan upgrade passes it)")
 	cmd.AddCommand(refresh)
 	return cmd
 }
@@ -128,14 +131,17 @@ func (l launchctl) Bootstrap(path string) error {
 // serviceRefresher moves tincan's LaunchAgents onto (or, with revert, off)
 // the Agent Tincan.app launcher.
 type serviceRefresher struct {
-	home    string
-	exe     string // the running tincan binary, symlinks resolved
-	revert  bool
-	ensure  func() (string, error)
-	launchd launchdOps
-	self    string // the launchd job this process runs under, if any
-	sleep   func()
-	out     io.Writer
+	home   string
+	exe    string // the running tincan binary, symlinks resolved
+	revert bool
+	// restartCurrent also restarts loaded jobs whose plist is already
+	// current; tincan upgrade sets it so services move to the new build.
+	restartCurrent bool
+	ensure         func() (string, error)
+	launchd        launchdOps
+	self           string // the launchd job this process runs under, if any
+	sleep          func()
+	out            io.Writer
 }
 
 func (r *serviceRefresher) run() error {
@@ -143,7 +149,10 @@ func (r *serviceRefresher) run() error {
 	if !r.revert {
 		l, err := r.ensure()
 		if errors.Is(err, macapp.ErrUnavailable) {
-			fmt.Fprintln(r.out, "This tincan build does not include Agent Tincan.app (a development build), so its services keep showing the signer's name in Login Items. To undo an earlier refresh, run tincan services refresh --revert.")
+			fmt.Fprintln(r.out, "This tincan build does not include Agent Tincan.app (a development build), so its services keep showing the signer's name in Login Items.")
+			if wrapped := r.wrappedPlists(); len(wrapped) > 0 {
+				fmt.Fprintf(r.out, "%s start through Agent Tincan.app, whose launcher only runs a release-signed tincan; run tincan services refresh --revert so they run this build.\n", strings.Join(wrapped, ", "))
+			}
 			return nil
 		}
 		if err != nil {
@@ -165,6 +174,19 @@ func (r *serviceRefresher) run() error {
 		return fmt.Errorf("could not refresh %s", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// wrappedPlists names the plists that start this tincan through the launcher.
+func (r *serviceRefresher) wrappedPlists() []string {
+	var out []string
+	for _, p := range launchAgentPlists(r.home) {
+		if m, err := readPlistJSON(p); err == nil {
+			if j, ok := parseJob(m); ok && j.launcher != "" && j.runs(r.exe) {
+				out = append(out, plistLabel(p))
+			}
+		}
+	}
+	return out
 }
 
 // refreshOne brings one plist to the wanted form and returns a short status.
@@ -195,7 +217,7 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 		return fmt.Sprintf("skipped (runs %s, not this tincan %s)", j.target, r.exe), nil
 	}
 	if label == notes.ServiceLabel && !r.revert {
-		return "skipped (the notes service keeps running tincan directly so its Files and Folders grant stays its own)", nil
+		return r.restartUnchanged(label, path, "skipped (the notes service keeps running tincan directly so its Files and Folders grant stays its own)")
 	}
 	ids, _ := stringList(m["AssociatedBundleIdentifiers"])
 	wantArgs := append([]string{j.target}, j.args...)
@@ -206,7 +228,7 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 	}
 	curArgs, _ := stringList(m["ProgramArguments"])
 	if !j.hasProgram && slices.Equal(curArgs, wantArgs) && slices.Equal(ids, wantIDs) {
-		return "already current", nil
+		return r.restartUnchanged(label, path, "already current")
 	}
 	orig, err := os.ReadFile(path)
 	if err != nil {
@@ -231,6 +253,19 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 		return "", fmt.Errorf("restart failed (%v); restored the original plist%s", err, restoreNote(werr, berr))
 	}
 	return "updated, restarted", nil
+}
+
+// restartUnchanged restarts a loaded job whose plist needs no change when
+// restartCurrent asks for it (after an upgrade the job still runs the old
+// build), except the job refresh runs under.
+func (r *serviceRefresher) restartUnchanged(label, path, status string) (string, error) {
+	if !r.restartCurrent || label == r.self || !r.launchd.Loaded(label) {
+		return status, nil
+	}
+	if err := r.restart(label, path); err != nil {
+		return "", fmt.Errorf("%s, but the restart failed: %v", status, err)
+	}
+	return status + ", restarted", nil
 }
 
 func restoreNote(werr, berr error) string {
@@ -426,11 +461,12 @@ func defaultLoginItemsEnv(exe string) (loginItemsEnv, error) {
 // Tincan in Login Items, and anything that would stop them from starting.
 func loginItemsCheck(e loginItemsEnv) check {
 	const name = "login items"
-	var wrapped, plain, pending []string
+	var wrapped, plain, pending, unreadable []string
 	for _, p := range launchAgentPlists(e.home) {
 		label := plistLabel(p)
 		m, err := readPlistJSON(p)
 		if err != nil {
+			unreadable = append(unreadable, label)
 			continue
 		}
 		j, ok := parseJob(m)
@@ -448,6 +484,10 @@ func loginItemsCheck(e loginItemsEnv) check {
 		}
 	}
 	app := macapp.Path(e.home)
+	if len(unreadable) > 0 {
+		return check{name, "fail", fmt.Sprintf("cannot read %s in ~/Library/LaunchAgents, so launchd cannot start them", strings.Join(unreadable, ", ")),
+			"Fix or reinstall those services (tincan <service> install), then run tincan services refresh."}
+	}
 	if len(wrapped) > 0 {
 		if _, err := os.Stat(macapp.Launcher(e.home)); err != nil {
 			return check{name, "fail", fmt.Sprintf("%s is missing, so %s cannot start", app, strings.Join(wrapped, ", ")),

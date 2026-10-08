@@ -223,12 +223,11 @@ func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
 	if o.GOOS == "darwin" && !d.NoLauncher {
 		launcher = o.Launcher
 		if launcher == "" {
-			l, err := macapp.Ensure(macapp.Options{Home: o.Home, GOOS: o.GOOS})
-			switch {
-			case err == nil:
+			// Without the app (a development build, or an install that
+			// failed) the plain plist still works; tincan doctor reports it
+			// and tincan services refresh moves it later.
+			if l, err := ensureApp(macapp.Options{Home: o.Home, GOOS: o.GOOS}); err == nil && launcherAccepts(o.Binary) {
 				launcher = l
-			case !errors.Is(err, macapp.ErrUnavailable):
-				return ServiceResult{}, fmt.Errorf("install Agent Tincan.app: %w", err)
 			}
 		}
 	}
@@ -328,6 +327,22 @@ func servicePath(goos, home string, toolDirs ...string) string {
 		parts = append(parts, d)
 	}
 	return strings.Join(parts, ":")
+}
+
+// ensureApp and verifyTincan are macapp's, replaced in tests.
+var (
+	ensureApp    = macapp.Ensure
+	verifyTincan = macapp.VerifyTincan
+)
+
+// launcherAccepts reports whether the Agent Tincan launcher would run
+// binary. A service for a binary it refuses (a self-built tincan named with
+// --binary) is written without the launcher so it still starts.
+func launcherAccepts(binary string) bool {
+	if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+		binary = resolved
+	}
+	return verifyTincan(binary) == nil
 }
 
 // wrapLaunchd makes a rendered plist start through launcher: the launcher

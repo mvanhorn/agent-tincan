@@ -2,10 +2,13 @@ package history
 
 import (
 	"encoding/xml"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mvanhorn/agent-tincan/internal/macapp"
 )
 
 // The example plist in the repo is the template install writes.
@@ -308,5 +311,48 @@ func TestInstallWebServiceDotsUsesLauncher(t *testing.T) {
 	b, _ := os.ReadFile(res.Path)
 	if !strings.Contains(string(b), "<string>/A/agent-tincan</string>\n    <string>/opt/tincan</string>") || !strings.Contains(string(b), "<string>--thread</string>") {
 		t.Fatalf("dots plist not wrapped in order:\n%s", b)
+	}
+}
+
+// A release build installing a service for a --binary the launcher would
+// refuse (an unsigned or self-built tincan) writes the plain plist, so the
+// service still starts.
+func TestInstallServiceUnsignedBinarySkipsLauncher(t *testing.T) {
+	home := t.TempDir()
+	origEnsure, origVerify := ensureApp, verifyTincan
+	t.Cleanup(func() { ensureApp, verifyTincan = origEnsure, origVerify })
+	ensureApp = func(macapp.Options) (string, error) { return "/A/agent-tincan", nil }
+	verifyTincan = func(string) error { return errors.New("not signed") }
+	res, err := InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/dev/tincan", UID: 501})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if strings.Contains(string(b), "/A/agent-tincan") {
+		t.Fatalf("unsigned binary was wrapped:\n%s", b)
+	}
+	verifyTincan = func(string) error { return nil }
+	res, err = InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/rel/tincan", UID: 501})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(res.Path); !strings.Contains(string(b), "/A/agent-tincan") {
+		t.Fatalf("signed binary was not wrapped:\n%s", b)
+	}
+}
+
+// A failed app install does not block the service: the plain plist is
+// written.
+func TestInstallServiceAppInstallFailureWritesPlainPlist(t *testing.T) {
+	home := t.TempDir()
+	orig := ensureApp
+	t.Cleanup(func() { ensureApp = orig })
+	ensureApp = func(macapp.Options) (string, error) { return "", errors.New("lsregister failed") }
+	res, err := InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501})
+	if err != nil {
+		t.Fatalf("install failed because the app did: %v", err)
+	}
+	if b, _ := os.ReadFile(res.Path); strings.Contains(string(b), "AssociatedBundleIdentifiers") {
+		t.Fatalf("wrapped without an app:\n%s", b)
 	}
 }

@@ -164,7 +164,6 @@ func TestEnsureReplacesTamperedAppWithSameContentName(t *testing.T) {
 	// Same bytes on disk, but the installed copy no longer validates (its
 	// signature was broken by a modified file elsewhere in the bundle).
 	installed := appPath(home)
-	r.reject = func(p string) bool { return p == installed }
 	if err := os.WriteFile(filepath.Join(installed, "Contents/Resources/extra"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}

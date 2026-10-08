@@ -167,7 +167,7 @@ var postUpgradeRefresh = func(exe string) (string, error) {
 	if runtime.GOOS != "darwin" {
 		return "", nil
 	}
-	out, err := exec.Command(exe, "services", "refresh").CombinedOutput()
+	out, err := exec.Command(exe, "services", "refresh", "--restart").CombinedOutput()
 	return string(out), err
 }
 

@@ -96,7 +96,9 @@ func Launcher(home string) string { return filepath.Join(Path(home), LauncherPat
 
 // Ensure makes sure ~/Applications/Agent Tincan.app is the embedded app and
 // returns its launcher path. It returns ErrUnavailable off macOS or without
-// an embedded app, and leaves any installed app untouched on error.
+// an embedded app. A failed unpack or signature check leaves any installed
+// app untouched; a failed LaunchServices registration leaves the new app
+// installed and returns the error.
 func Ensure(o Options) (string, error) {
 	o, err := o.withDefaults()
 	if err != nil {

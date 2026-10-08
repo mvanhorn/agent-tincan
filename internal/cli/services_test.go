@@ -500,3 +500,56 @@ func TestLoginItemsCheckRestartPending(t *testing.T) {
 		t.Fatalf("check = %+v", c)
 	}
 }
+
+// After an upgrade, services keep running the old build until restarted, so
+// --restart restarts loaded tincan jobs even when their plist is current,
+// notes included, but never the job refresh runs under.
+func TestRefreshRestartRestartsCurrentLoadedJobs(t *testing.T) {
+	f := newServicesFixture(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}, "AssociatedBundleIdentifiers": []string{macapp.BundleID}})
+	f.writePlist(t, "com.agenttincan.notes", map[string]any{"ProgramArguments": []string{f.exe, "notes", "serve"}})
+	f.writePlist(t, "com.agenttincan.codex-listen", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "listen"}, "AssociatedBundleIdentifiers": []string{macapp.BundleID}})
+	f.writePlist(t, "com.agenttincan.council", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "council", "serve"}, "AssociatedBundleIdentifiers": []string{macapp.BundleID}})
+	for _, l := range []string{"com.agenttincan.history", "com.agenttincan.notes", "com.agenttincan.codex-listen"} {
+		f.ld.loaded[l] = true
+	}
+	r := f.refresher(false)
+	r.restartCurrent = true
+	r.self = "com.agenttincan.codex-listen"
+	if err := r.run(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"bootout com.agenttincan.history", "bootstrap com.agenttincan.history", "bootout com.agenttincan.notes", "bootstrap com.agenttincan.notes"}
+	if !slices.Equal(f.ld.calls, want) {
+		t.Fatalf("launchctl calls = %q, want %q", f.ld.calls, want)
+	}
+	out := f.out.String()
+	for _, w := range []string{"com.agenttincan.history: already current, restarted", "com.agenttincan.notes: skipped", "restarted", "com.agenttincan.council: already current"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("output missing %q:\n%s", w, out)
+		}
+	}
+}
+
+func TestRefreshDevBuildNamesWrappedServices(t *testing.T) {
+	f := newServicesFixture(t)
+	f.writePlist(t, "com.agenttincan.history", map[string]any{"ProgramArguments": []string{f.launcher, f.exe, "history", "serve"}})
+	r := f.refresher(false)
+	r.ensure = func() (string, error) { return "", macapp.ErrUnavailable }
+	if err := r.run(); err != nil {
+		t.Fatal(err)
+	}
+	if out := f.out.String(); !strings.Contains(out, "com.agenttincan.history start through Agent Tincan.app") || !strings.Contains(out, "--revert") {
+		t.Fatalf("output: %s", out)
+	}
+}
+
+func TestLoginItemsCheckUnreadablePlist(t *testing.T) {
+	f := newServicesFixture(t)
+	if err := os.WriteFile(filepath.Join(f.agents, "com.agenttincan.broken.plist"), []byte("not a plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := loginItemsCheck(f.loginItems()); c.Status != "fail" || !strings.Contains(c.Detail, "com.agenttincan.broken") {
+		t.Fatalf("check = %+v", c)
+	}
+}

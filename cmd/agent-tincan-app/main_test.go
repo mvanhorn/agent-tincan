@@ -131,7 +131,12 @@ func TestCodesignVerifierRefusesAdHocBinary(t *testing.T) {
 	if out, err := exec.Command("/usr/bin/codesign", "-f", "-s", "-", p).CombinedOutput(); err != nil {
 		t.Skipf("cannot ad-hoc sign: %v %s", err, out)
 	}
-	if err := codesignVerify(p); err == nil {
+	err = codesignVerify(p)
+	if err == nil {
 		t.Fatal("an ad-hoc-signed binary satisfied the requirement")
+	}
+	// A malformed requirement also errors; make sure this is a rejection.
+	if !strings.Contains(err.Error(), "failed to satisfy") {
+		t.Fatalf("err = %v, want a requirement rejection", err)
 	}
 }
