@@ -117,7 +117,7 @@ Want to manage the team from your laptop too? Start the relay with `--admin <lap
 
 Before you upgrade:
 
-- Upgrade the relay first: `tincan relay-upgrade --from-github v0.15.0`. It is network-facing, so it should get the Go security fixes.
+- Upgrade the relay first, from an admin device or the relay host: `tincan relay-upgrade --from-github v0.15.0` (self-upgrade needs the relay started with `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). It is network-facing, so it should get the Go security fixes.
 - Then `tincan upgrade` on each agent, and on each Mac run `tincan services refresh` once.
 - Proxy-only sandboxes with rotating passwords: run `tincan rejoin --proxy-credentials-from-env` once.
 
