@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
@@ -422,5 +425,98 @@ func TestWakeEntryRequestIDs(t *testing.T) {
 	// An old row without the status code still reads as before.
 	if got := wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, 1 waiting"}, "webhook"); got.Status != "2xx" || got.RequestIDs != nil {
 		t.Errorf("oldest row = %+v", got)
+	}
+}
+
+// auditWokeWithIDs writes n woke rows for agent, each naming perWake ids of
+// idLen characters, and returns the ids of each row.
+func auditWokeWithIDs(t *testing.T, st *store.Store, agent string, n, perWake, idLen int) [][]string {
+	t.Helper()
+	all := make([][]string, n)
+	for i := range n {
+		ids := make([]string, perWake)
+		for j := range ids {
+			id := fmt.Sprintf("r%d-%d-", i, j)
+			ids[j] = id + strings.Repeat("x", max(idLen-len(id), 0))
+		}
+		all[i] = ids
+		detail := fmt.Sprintf("webhook, HTTP 200, %d waiting, ids: %s", perWake, strings.Join(ids, ","))
+		if err := st.Audit(t.Context(), store.AuditEvent{Event: "woke", Actor: agent, Detail: detail}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return all
+}
+
+// exportWakesClient fetches an export through the client, as `tincan wakes`
+// does, so the client's response limit applies.
+func exportWakesClient(t *testing.T, h *harness, agent string, since time.Time) (WakeExport, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = macAddr
+		h.h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	var out WakeExport
+	q := url.Values{"since": {since.Format(time.RFC3339Nano)}}
+	err := client.NewRelayHTTP(srv.URL, srv.Client()).Raw(t.Context(), "GET", "/v1/admin/wakes/"+agent+"?"+q.Encode(), nil, &out)
+	return out, err
+}
+
+// An export whose wakes carry many ids stops at the size budget, says it is
+// truncated, lists the oldest wakes whole, and still decodes in the client.
+func TestWakeExportBoundedBySize(t *testing.T) {
+	h := newHarness(t, Config{})
+	since := time.Now().Add(-time.Second)
+	want := auditWokeWithIDs(t, h.st, "grokbot", 6, 40, 20)
+	one, err := json.Marshal(wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 200, 40 waiting, ids: " + strings.Join(want[0], ",")}, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := maxWakeExportBytes
+	t.Cleanup(func() { maxWakeExportBytes = old })
+	maxWakeExportBytes = len(one)*5/2 + 200
+	out, err := exportWakesClient(t, h, "grokbot", since)
+	if err != nil {
+		t.Fatalf("client export: %v", err)
+	}
+	if !out.Truncated || len(out.Wakes) < 1 || len(out.Wakes) >= len(want) {
+		t.Fatalf("export = %d wakes, truncated %v; want fewer than %d, true", len(out.Wakes), out.Truncated, len(want))
+	}
+	for i, e := range out.Wakes {
+		if !slices.Equal(e.RequestIDs, want[i]) {
+			t.Errorf("wake %d request_ids = %d ids, want all %d of row %d", i, len(e.RequestIDs), len(want[i]), i)
+		}
+	}
+	// A budget no wake fits still lists the oldest wake, whole.
+	maxWakeExportBytes = 1
+	out, err = exportWakesClient(t, h, "grokbot", since)
+	if err != nil || !out.Truncated || len(out.Wakes) != 1 || !slices.Equal(out.Wakes[0].RequestIDs, want[0]) {
+		t.Fatalf("tiny budget: %d wakes, truncated %v, err %v; want the first wake whole, truncated", len(out.Wakes), out.Truncated, err)
+	}
+	// With room for all, nothing is truncated.
+	maxWakeExportBytes = old
+	if out, err = exportWakesClient(t, h, "grokbot", since); err != nil || out.Truncated || len(out.Wakes) != len(want) {
+		t.Fatalf("full budget: %d wakes, truncated %v, err %v", len(out.Wakes), out.Truncated, err)
+	}
+}
+
+// With the default bounds, a backlog whose ids pass the client's 4 MiB read
+// limit still exports something the client can decode.
+func TestWakeExportDefaultFitsClient(t *testing.T) {
+	h := newHarness(t, Config{})
+	since := time.Now().Add(-time.Second)
+	want := auditWokeWithIDs(t, h.st, "grokbot", 300, 400, 40) // about 16 KB of ids a wake
+	out, err := exportWakesClient(t, h, "grokbot", since)
+	if err != nil {
+		t.Fatalf("client export: %v", err)
+	}
+	if !out.Truncated || len(out.Wakes) == 0 || len(out.Wakes) >= len(want) {
+		t.Fatalf("export = %d wakes, truncated %v", len(out.Wakes), out.Truncated)
+	}
+	for i, e := range out.Wakes {
+		if len(e.RequestIDs) != len(want[i]) {
+			t.Fatalf("wake %d has %d ids, want %d", i, len(e.RequestIDs), len(want[i]))
+		}
 	}
 }

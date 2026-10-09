@@ -2034,14 +2034,21 @@ type WakeExport struct {
 	Until time.Time   `json:"until"`
 	Wakes []WakeEntry `json:"wakes"`
 	// Truncated is set when the window held more wakes than one export
-	// lists (maxWakeExportWakes): the wakes listed are the oldest, and a
-	// later since shows the rest.
+	// lists, by count (maxWakeExportWakes) or by encoded size
+	// (maxWakeExportBytes, since each wake carries all its request ids):
+	// the wakes listed are the oldest, each whole, and a later since shows
+	// the rest.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
 // maxWakeExportWakes bounds the wakes one export lists, and so its memory,
 // its lookups and its response size. Tests lower it.
 var maxWakeExportWakes = 1000
+
+// maxWakeExportBytes bounds an export's encoded size, comfortably below the
+// 4 MiB a client reads of a response. An export stops before the wake that
+// would pass it, but always lists at least one wake. Tests lower it.
+var maxWakeExportBytes = 3 << 20
 
 // pollTime is when the poll an audit row records happened: the time in a
 // polled row written after its wake call ended ("polled at <time>, ..."),
@@ -2118,6 +2125,12 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}, Truncated: len(rows) == maxWakeExportWakes}
+	head, err := json.Marshal(out)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	size := len(head) + len(`,"truncated":true`)
 	for i, e := range rows {
 		entry := wakeEntry(e, path)
 		// The next activity must come before the relay's next sent wake,
@@ -2157,6 +2170,16 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 			if n.Event == store.EventPolled {
 				entry.NextVia = "poll"
 			}
+		}
+		b, err := json.Marshal(entry)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		size += len(b) + 1 // and its comma
+		if len(out.Wakes) > 0 && size > maxWakeExportBytes {
+			out.Truncated = true
+			break
 		}
 		out.Wakes = append(out.Wakes, entry)
 	}
