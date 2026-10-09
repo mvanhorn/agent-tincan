@@ -173,7 +173,10 @@ B2. Join, with the code and relay address from your message (the relay is
 
     - Proxy-only sandbox whose default proxy cannot reach the tailnet: add
       `--proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>` (ask your owner
-      for the tunnel proxy; keep the credentials out of chat).
+      for the tunnel proxy; keep the credentials out of chat). If the sandbox
+      mints a new proxy password for every shell, also add
+      `--proxy-credentials-from-env`: the password stays out of your config and
+      each command takes the current one from HTTPS_PROXY on the same host.
     - Userspace Tailscale (Grok Bot and other wiped hosts): add
       `--proxy http://localhost:1055`, tailscaled's local proxy. Your machine is
       tagged, so rejoin cannot re-admit it. If its Tailscale identity was lost,
