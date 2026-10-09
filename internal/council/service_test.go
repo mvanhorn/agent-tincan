@@ -88,3 +88,23 @@ func TestInstallServiceLinux(t *testing.T) {
 		t.Fatalf("next = %q", res.Next)
 	}
 }
+
+// Through Agent Tincan.app, the launcher comes first and the original
+// arguments keep their order.
+func TestInstallServiceDarwinUsesLauncher(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallService(history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin & can/tincan", UID: 501, Launcher: "/A/Agent Tincan.app/Contents/MacOS/agent-tincan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	joined := plistStrings(string(b))
+	for _, want := range []string{
+		"ProgramArguments|/A/Agent Tincan.app/Contents/MacOS/agent-tincan|/opt/tin & can/tincan|council|serve|EnvironmentVariables",
+		"AssociatedBundleIdentifiers|com.agenttincan.app",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("plist missing %q:\n%s", want, joined)
+		}
+	}
+}
