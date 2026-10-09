@@ -1,14 +1,18 @@
 package relay
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
@@ -342,6 +346,177 @@ func TestWakeExportBoundCountsWakesOnly(t *testing.T) {
 	for i, e := range out.Wakes {
 		if e.NextPoll == nil || e.NextVia != "poll" {
 			t.Errorf("wake %d = %+v, want its poll", i, e)
+		}
+	}
+}
+
+// wakeIDsHarness is wakeExportHarness with the waker's id hooks wired to the
+// relay, as `tincan relay` wires them, and a short reply grace.
+func wakeIDsHarness(t *testing.T) (*harness, *wake.Waker) {
+	t.Helper()
+	h := newHarness(t, Config{})
+	hook := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(hook.Close)
+	w := wake.New(wake.Config{"grokbot": {Method: wake.Webhook, URL: hook.URL}}, h.st, wake.Options{
+		HTTP: hook.Client(), Debounce: time.Millisecond, RetryDelay: time.Millisecond, ReplyGrace: time.Millisecond,
+		WakeGrace: -1, ReplyRetries: []time.Duration{}, Queued: h.srv.QueuedCount, LastPoll: h.srv.LastPoll,
+		UnseenReplies: h.srv.UnseenReplies, QueuedIDs: h.srv.QueuedIDs, UnseenReplyIDs: h.srv.UnseenReplyIDs,
+	})
+	t.Cleanup(w.Stop)
+	h.srv.SetWakeNamer(w)
+	h.srv.SetEvents(w)
+	return h, w
+}
+
+// A wake for one queued request and one for one unseen reply each export
+// that request's id; a row written before ids were recorded has none.
+func TestWakeExportRequestIDs(t *testing.T) {
+	h, w := wakeIDsHarness(t)
+	since := time.Now().Add(-time.Second)
+	if err := h.st.Audit(t.Context(), store.AuditEvent{Event: "woke", Actor: "grokbot", Detail: "webhook, HTTP 200, 1 waiting"}); err != nil {
+		t.Fatal(err)
+	}
+	queuedReq := h.send(museAddr, "grokbot", "check the garage")
+	w.Flush()
+	h.do(grokAddr, "GET", "/v1/poll", "", http.StatusOK, nil) // takes it, so the reply wake covers the reply alone
+	ask := h.send(grokAddr, "muse", "call the yard")
+	h.answer(museAddr, ask, "done")
+	w.Flush()
+	out := exportWakes(t, h, macAddr, "grokbot", since, http.StatusOK)
+	if len(out.Wakes) != 3 {
+		t.Fatalf("export = %+v", out)
+	}
+	if got := out.Wakes[0].RequestIDs; got != nil {
+		t.Errorf("old row request_ids = %v, want none", got)
+	}
+	if got := out.Wakes[1].RequestIDs; !slices.Equal(got, []string{queuedReq.ID}) {
+		t.Errorf("request wake request_ids = %v, want [%s]", got, queuedReq.ID)
+	}
+	if got := out.Wakes[2].RequestIDs; !slices.Equal(got, []string{ask.ID}) {
+		t.Errorf("reply wake request_ids = %v, want [%s]", got, ask.ID)
+	}
+	if n, err := h.st.VerifyAudit(t.Context()); err != nil || n == 0 {
+		t.Fatalf("verify = %d, %v", n, err)
+	}
+}
+
+// wakeEntry reads the same path, status and reply from an old row, a row
+// with one id in request_id and a row with an ids segment and a response,
+// and the ids from the last two.
+func TestWakeEntryRequestIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		e    store.AuditEvent
+		ids  []string
+	}{
+		{"old", store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 202, 1 waiting, response: queued, run 42"}, nil},
+		{"one id", store.AuditEvent{Event: "woke", RequestID: "ra", Detail: "webhook, HTTP 202, 1 waiting, response: queued, run 42"}, []string{"ra"}},
+		{"several ids", store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 202, 2 waiting, 1 unseen replies, ids: ra,rb,q7, response: queued, run 42"}, []string{"ra", "rb", "q7"}},
+	} {
+		got := wakeEntry(tc.e, "webhook")
+		if got.Path != "webhook" || got.Status != "202" || got.Reply != "queued, run 42" || !slices.Equal(got.RequestIDs, tc.ids) {
+			t.Errorf("%s: entry = %+v", tc.name, got)
+		}
+	}
+	// An ids-like segment inside the webhook's own response is not read as ids.
+	if got := wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 200, 1 waiting, response: ok, ids: x,y"}, "webhook"); got.RequestIDs != nil || got.Reply != "ok, ids: x,y" {
+		t.Errorf("response with ids text = %+v", got)
+	}
+	// An old row without the status code still reads as before.
+	if got := wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, 1 waiting"}, "webhook"); got.Status != "2xx" || got.RequestIDs != nil {
+		t.Errorf("oldest row = %+v", got)
+	}
+}
+
+// auditWokeWithIDs writes n woke rows for agent, each naming perWake ids of
+// idLen characters, and returns the ids of each row.
+func auditWokeWithIDs(t *testing.T, st *store.Store, agent string, n, perWake, idLen int) [][]string {
+	t.Helper()
+	all := make([][]string, n)
+	for i := range n {
+		ids := make([]string, perWake)
+		for j := range ids {
+			id := fmt.Sprintf("r%d-%d-", i, j)
+			ids[j] = id + strings.Repeat("x", max(idLen-len(id), 0))
+		}
+		all[i] = ids
+		detail := fmt.Sprintf("webhook, HTTP 200, %d waiting, ids: %s", perWake, strings.Join(ids, ","))
+		if err := st.Audit(t.Context(), store.AuditEvent{Event: "woke", Actor: agent, Detail: detail}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return all
+}
+
+// exportWakesClient fetches an export through the client, as `tincan wakes`
+// does, so the client's response limit applies.
+func exportWakesClient(t *testing.T, h *harness, agent string, since time.Time) (WakeExport, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = macAddr
+		h.h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	var out WakeExport
+	q := url.Values{"since": {since.Format(time.RFC3339Nano)}}
+	err := client.NewRelayHTTP(srv.URL, srv.Client()).Raw(t.Context(), "GET", "/v1/admin/wakes/"+agent+"?"+q.Encode(), nil, &out)
+	return out, err
+}
+
+// An export whose wakes carry many ids stops at the size budget, says it is
+// truncated, lists the oldest wakes whole, and still decodes in the client.
+func TestWakeExportBoundedBySize(t *testing.T) {
+	h := newHarness(t, Config{})
+	since := time.Now().Add(-time.Second)
+	want := auditWokeWithIDs(t, h.st, "grokbot", 6, 40, 20)
+	one, err := json.Marshal(wakeEntry(store.AuditEvent{Event: "woke", Detail: "webhook, HTTP 200, 40 waiting, ids: " + strings.Join(want[0], ",")}, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := maxWakeExportBytes
+	t.Cleanup(func() { maxWakeExportBytes = old })
+	maxWakeExportBytes = len(one)*5/2 + 200
+	out, err := exportWakesClient(t, h, "grokbot", since)
+	if err != nil {
+		t.Fatalf("client export: %v", err)
+	}
+	if !out.Truncated || len(out.Wakes) < 1 || len(out.Wakes) >= len(want) {
+		t.Fatalf("export = %d wakes, truncated %v; want fewer than %d, true", len(out.Wakes), out.Truncated, len(want))
+	}
+	for i, e := range out.Wakes {
+		if !slices.Equal(e.RequestIDs, want[i]) {
+			t.Errorf("wake %d request_ids = %d ids, want all %d of row %d", i, len(e.RequestIDs), len(want[i]), i)
+		}
+	}
+	// A budget no wake fits still lists the oldest wake, whole.
+	maxWakeExportBytes = 1
+	out, err = exportWakesClient(t, h, "grokbot", since)
+	if err != nil || !out.Truncated || len(out.Wakes) != 1 || !slices.Equal(out.Wakes[0].RequestIDs, want[0]) {
+		t.Fatalf("tiny budget: %d wakes, truncated %v, err %v; want the first wake whole, truncated", len(out.Wakes), out.Truncated, err)
+	}
+	// With room for all, nothing is truncated.
+	maxWakeExportBytes = old
+	if out, err = exportWakesClient(t, h, "grokbot", since); err != nil || out.Truncated || len(out.Wakes) != len(want) {
+		t.Fatalf("full budget: %d wakes, truncated %v, err %v", len(out.Wakes), out.Truncated, err)
+	}
+}
+
+// With the default bounds, a backlog whose ids pass the client's 4 MiB read
+// limit still exports something the client can decode.
+func TestWakeExportDefaultFitsClient(t *testing.T) {
+	h := newHarness(t, Config{})
+	since := time.Now().Add(-time.Second)
+	want := auditWokeWithIDs(t, h.st, "grokbot", 300, 400, 40) // about 16 KB of ids a wake
+	out, err := exportWakesClient(t, h, "grokbot", since)
+	if err != nil {
+		t.Fatalf("client export: %v", err)
+	}
+	if !out.Truncated || len(out.Wakes) == 0 || len(out.Wakes) >= len(want) {
+		t.Fatalf("export = %d wakes, truncated %v", len(out.Wakes), out.Truncated)
+	}
+	for i, e := range out.Wakes {
+		if len(e.RequestIDs) != len(want[i]) {
+			t.Fatalf("wake %d has %d ids, want %d", i, len(e.RequestIDs), len(want[i]))
 		}
 	}
 }

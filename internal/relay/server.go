@@ -1586,6 +1586,24 @@ func (s *Server) UnseenReplies(agent string) int {
 	return n
 }
 
+// QueuedIDs lists the ids of agent's requests still waiting to be
+// delivered, oldest first: the requests QueuedCount counts. The waker names
+// them in a woke audit row.
+func (s *Server) QueuedIDs(agent string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.store.QueuedIDs(ctx, agent)
+}
+
+// UnseenReplyIDs lists the ids of agent's own requests whose replies it has
+// not read yet: the replies UnseenReplies counts. The waker names them in a
+// woke audit row.
+func (s *Server) UnseenReplyIDs(agent string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.store.UnseenReplyIDs(ctx, agent)
+}
+
 // LastPoll is agent's last inbox poll, including peek: the later of this
 // process's memory and the poll persisted for a restart. The waker uses it
 // as proof of life for request follow-up. The store is read only when this
@@ -2016,14 +2034,21 @@ type WakeExport struct {
 	Until time.Time   `json:"until"`
 	Wakes []WakeEntry `json:"wakes"`
 	// Truncated is set when the window held more wakes than one export
-	// lists (maxWakeExportWakes): the wakes listed are the oldest, and a
-	// later since shows the rest.
+	// lists, by count (maxWakeExportWakes) or by encoded size
+	// (maxWakeExportBytes, since each wake carries all its request ids):
+	// the wakes listed are the oldest, each whole, and a later since shows
+	// the rest.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
 // maxWakeExportWakes bounds the wakes one export lists, and so its memory,
 // its lookups and its response size. Tests lower it.
 var maxWakeExportWakes = 1000
+
+// maxWakeExportBytes bounds an export's encoded size, comfortably below the
+// 4 MiB a client reads of a response. An export stops before the wake that
+// would pass it, but always lists at least one wake. Tests lower it.
+var maxWakeExportBytes = 3 << 20
 
 // pollTime is when the poll an audit row records happened: the time in a
 // polled row written after its wake call ended ("polled at <time>, ..."),
@@ -2056,6 +2081,10 @@ type WakeEntry struct {
 	// agent's next delivery or claim, and NextVia names which.
 	NextPoll *time.Time `json:"next_poll,omitempty"`
 	NextVia  string     `json:"next_via,omitempty"` // poll, delivered or claimed
+	// RequestIDs are the requests a woke row says the wake covered: its
+	// request_id when it names one, else the ids in its ", ids: " detail
+	// segment. Rows written before ids were recorded have none.
+	RequestIDs []string `json:"request_ids,omitempty"`
 }
 
 // ReplyNotRecorded is a woke row's reply when the relay kept no summary.
@@ -2096,6 +2125,12 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := WakeExport{Agent: agent, Since: since.UTC(), Until: until.UTC(), Wakes: []WakeEntry{}, Truncated: len(rows) == maxWakeExportWakes}
+	head, err := json.Marshal(out)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	size := len(head) + len(`,"truncated":true`)
 	for i, e := range rows {
 		entry := wakeEntry(e, path)
 		// The next activity must come before the relay's next sent wake,
@@ -2136,6 +2171,16 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 				entry.NextVia = "poll"
 			}
 		}
+		b, err := json.Marshal(entry)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		size += len(b) + 1 // and its comma
+		if len(out.Wakes) > 0 && size > maxWakeExportBytes {
+			out.Truncated = true
+			break
+		}
 		out.Wakes = append(out.Wakes, entry)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -2146,13 +2191,20 @@ func (s *Server) handleWakes(w http.ResponseWriter, r *http.Request) {
 var failedStatus = regexp.MustCompile(`returned (\d{3})\b`)
 
 // wakeEntry reads one wake audit row. A woke detail is "<path>, HTTP
-// <code>, <n> waiting[, <n> unseen replies][, response: <summary>]", the
+// <code>, <n> waiting[, <n> unseen replies][, ids: <id>,<id>...][, response:
+// <summary>]" (a request-email wake has its own counts in place of the
+// waiting ones), the
 // path being the method or "fallback <n>: <method>", and a wake_failed
 // reason sent on a fallback ends in "(fallback <n>: <method>)"; rows
 // written before the status code was recorded lack the HTTP part. path is
-// the agent's current wake method, for rows that do not name one.
+// the agent's current wake method, for rows that do not name one. A wake
+// that covered one request carries its id in request_id instead of an ids
+// segment.
 func wakeEntry(e store.AuditEvent, path string) WakeEntry {
 	entry := WakeEntry{At: e.At, Event: e.Event, Path: path}
+	if e.RequestID != "" {
+		entry.RequestIDs = []string{e.RequestID}
+	}
 	switch e.Event {
 	case "woke":
 		head := e.Detail
@@ -2170,6 +2222,9 @@ func wakeEntry(e store.AuditEvent, path string) WakeEntry {
 			}
 			if code, ok := strings.CutPrefix(part, "HTTP "); ok {
 				entry.Status = code
+			}
+			if ids, ok := strings.CutPrefix(part, "ids: "); ok && ids != "" {
+				entry.RequestIDs = strings.Split(ids, ",")
 			}
 		}
 	case "wake_failed":

@@ -86,7 +86,13 @@ func TestAskUnansweredTarget(t *testing.T) {
 	m.Server.SetWakeNamer(w)
 	useConfig(t, client.Config{Relay: m.URL("instinct"), Agent: "instinct"})
 	out, _, err := runSplit(t, askCmd(), "grokbot", "status")
-	want := "grokbot's wake at " + woke.Format("15:04") + " failed (hooks.example returned 502 Bad Gateway) and it has not checked in yet; the request is queued.\nNo reply yet from grokbot."
+	// The wake shows as a clock time today, with its date once midnight has
+	// passed since (local clock), as the ask output prints it.
+	at := woke.Local().Format("15:04")
+	if now := time.Now().Local(); woke.Local().YearDay() != now.YearDay() || woke.Local().Year() != now.Year() {
+		at = woke.Local().Format("Jan 2 15:04")
+	}
+	want := "grokbot's wake at " + at + " failed (hooks.example returned 502 Bad Gateway) and it has not checked in yet; the request is queued.\nNo reply yet from grokbot."
 	if err != nil || !strings.HasPrefix(out, want) {
 		t.Fatalf("ask grokbot = %q, %v", out, err)
 	}

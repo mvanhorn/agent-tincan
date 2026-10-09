@@ -322,6 +322,15 @@ type Options struct {
 	// that finds none for a reply-only wake is dropped, since the asker
 	// already read it inline.
 	UnseenReplies func(agent string) int
+	// QueuedIDs and UnseenReplyIDs list the ids of agent's requests still
+	// waiting to be delivered (oldest first) and of its own requests whose
+	// replies it has not read. With both set, a woke audit row names what the
+	// wake covered when it was sent: one id in its request_id, two or more
+	// as an ", ids: <id>,<id>" detail segment, and its "N waiting" and
+	// "N unseen replies" are the lengths of those lists. With either unset or
+	// failing, the row keeps the nudge's counts and names no ids.
+	QueuedIDs      func(agent string) ([]string, error)
+	UnseenReplyIDs func(agent string) ([]string, error)
 	// ReplyRetries is the follow-up schedule after a nudge that finds
 	// replies still unseen: each step waits its delay, re-checks
 	// UnseenReplies, and nudges again only if some remain. The schedule
@@ -817,7 +826,7 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 	allowed := w.allow(agent)
 	w.mu.Unlock()
 	if !allowed {
-		w.record(ctx, "wake_skipped", agent, "hourly wake budget used up; requests and replies stay queued")
+		w.record(ctx, "wake_skipped", agent, "", "hourly wake budget used up; requests and replies stay queued")
 		w.followUpLater(agent, p.requests)
 		return
 	}
@@ -835,6 +844,16 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 	marker := "" // names a fallback in the stored result, never its URL
 	if step > 0 {
 		marker = " (" + pathLabel(cfg, step) + ")"
+	}
+	// What the wake covers, read as it goes out: a poll the wake sets off
+	// could take a request before the send returns. It is read before the
+	// wake is marked in flight, so a poll during the lookup still counts as
+	// the first poll after the previous wake.
+	waiting, unseen := p.requests, replies
+	var ids []string
+	if q, r, ok := w.coveredIDs(agent); ok {
+		waiting, unseen = len(q), len(r)
+		ids = append(q, r...)
 	}
 	if w.audit != nil {
 		w.audit.BeginWake(agent)
@@ -854,7 +873,7 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 		// read) all get the safe reason: the raw error can carry the URL.
 		reason := publicReason(err) + marker
 		log.Printf("wake %s: %s", agent, reason)
-		w.record(ctx, "wake_failed", agent, reason)
+		w.record(ctx, "wake_failed", agent, "", reason)
 		w.rememberSend(ctx, agent, store.Wake{At: at, Result: reason}, false)
 		w.endWake(ctx, agent, at)
 		w.followUpLater(agent, p.requests)
@@ -862,10 +881,12 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 	}
 	w.rememberSend(ctx, agent, store.Wake{At: at, Result: envelope.WakeOK + marker}, true)
 	// The exact status lets a wake export show what the webhook answered.
-	detail := fmt.Sprintf("%s, HTTP %d, %d waiting", pathLabel(cfg, step), code, p.requests)
-	if replies > 0 {
-		detail += fmt.Sprintf(", %d unseen replies", replies)
+	detail := fmt.Sprintf("%s, HTTP %d, %d waiting", pathLabel(cfg, step), code, waiting)
+	if unseen > 0 {
+		detail += fmt.Sprintf(", %d unseen replies", unseen)
 	}
+	requestID, idsSegment := wokeIDs(ids)
+	detail += idsSegment
 	if answer != "" {
 		// What the platform said with its 2xx, for the operator: a queued
 		// run and an error answered 2xx look the same otherwise. It stays
@@ -873,9 +894,43 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 		detail += ", response: " + answer
 	}
 	log.Printf("wake %s: ok, %s", agent, detail)
-	w.record(ctx, "woke", agent, detail)
+	w.record(ctx, "woke", agent, requestID, detail)
 	w.endWake(ctx, agent, at)
 	w.followUpLater(agent, p.requests)
+}
+
+// coveredIDs is what a wake about to be sent covers, for its woke row: the
+// ids of agent's requests still queued and of its replies still unseen
+// (Options.QueuedIDs and UnseenReplyIDs). ok is false when either hook is
+// unset or fails; the row then keeps the nudge's counts and names no ids.
+func (w *Waker) coveredIDs(agent string) (queued, replies []string, ok bool) {
+	if w.opts.QueuedIDs == nil || w.opts.UnseenReplyIDs == nil {
+		return nil, nil, false
+	}
+	queued, err := w.opts.QueuedIDs(agent)
+	if err != nil {
+		log.Printf("wake %s: queued request ids: %v", agent, err)
+		return nil, nil, false
+	}
+	replies, err = w.opts.UnseenReplyIDs(agent)
+	if err != nil {
+		log.Printf("wake %s: unseen reply ids: %v", agent, err)
+		return nil, nil, false
+	}
+	return queued, replies, true
+}
+
+// wokeIDs places a woke row's ids: one goes in the row's request_id, two or
+// more in an ", ids: <id>,<id>" segment for the detail, every id listed.
+// The segment goes before any ", response: " so the response stays last.
+func wokeIDs(ids []string) (requestID, segment string) {
+	switch len(ids) {
+	case 0:
+		return "", ""
+	case 1:
+		return ids[0], ""
+	}
+	return "", ", ids: " + strings.Join(ids, ",")
 }
 
 // endWake ends the wake call to agent in the store, which writes the polled
@@ -1465,7 +1520,9 @@ func (w *Waker) remember(ctx context.Context, agent string, wk store.Wake) {
 	}
 }
 
-func (w *Waker) record(ctx context.Context, event, agent, detail string) {
+// record writes an audit row for agent. requestID is the one request the
+// event is about, or "".
+func (w *Waker) record(ctx context.Context, event, agent, requestID, detail string) {
 	if w.audit == nil {
 		return
 	}
@@ -1473,7 +1530,7 @@ func (w *Waker) record(ctx context.Context, event, agent, detail string) {
 	// bound so it cannot hold Stop up.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 	defer cancel()
-	if err := w.audit.Audit(ctx, store.AuditEvent{Event: event, Actor: agent, Detail: detail}); err != nil {
+	if err := w.audit.Audit(ctx, store.AuditEvent{Event: event, RequestID: requestID, Actor: agent, Detail: detail}); err != nil {
 		log.Printf("audit %s: %v", event, err)
 	}
 }

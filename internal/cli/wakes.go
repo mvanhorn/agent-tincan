@@ -19,8 +19,8 @@ func wakesCmd() *cobra.Command {
 		Use:   "wakes <agent> --since <time>",
 		Short: "Show each wake the relay sent an agent, what it answered, and when the agent next polled (admin)",
 		Long: `Show each wake the relay sent an agent in a time window: when, the wake
-path, the HTTP status, the endpoint's reply summary, and when the agent next
-polled before the following wake. Times are RFC 3339, "2006-01-02 15:04"
+path, the HTTP status, the endpoint's reply summary, when the agent next
+polled before the following wake, and the requests the wake covered. Times are RFC 3339, "2006-01-02 15:04"
 or "2006-01-02" in local time, or a duration ago such as 2h. --until
 defaults to now.`,
 		Args: cobra.ExactArgs(1),
@@ -93,7 +93,7 @@ func formatWakes(out relay.WakeExport) string {
 		return b.String()
 	}
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "TIME\tEVENT\tPATH\tHTTP\tREPLY\tNEXT POLL\tERROR")
+	fmt.Fprintln(tw, "TIME\tEVENT\tPATH\tHTTP\tREPLY\tNEXT POLL\tERROR\tREQUEST IDS")
 	for _, e := range out.Wakes {
 		next := "no poll"
 		if e.NextPoll != nil {
@@ -102,7 +102,7 @@ func formatWakes(out relay.WakeExport) string {
 				next += " (" + e.NextVia + ")"
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", wakeTime(e.At), e.Event, dash(e.Path), dash(e.Status), dash(oneLine(e.Reply)), next, dash(oneLine(e.Error)))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", wakeTime(e.At), e.Event, dash(e.Path), dash(e.Status), dash(oneLine(e.Reply)), next, dash(oneLine(e.Error)), dash(strings.Join(e.RequestIDs, ",")))
 	}
 	_ = tw.Flush()
 	if out.Truncated {

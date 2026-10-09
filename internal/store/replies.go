@@ -101,6 +101,13 @@ func (s *Store) CountUnseenReplies(ctx context.Context, agent string) (int, erro
 	return n, err
 }
 
+// UnseenReplyIDs lists the ids of agent's own requests whose replies it has
+// not seen, oldest request first: the replies CountUnseenReplies counts.
+func (s *Store) UnseenReplyIDs(ctx context.Context, agent string) ([]string, error) {
+	return s.ids(ctx, `SELECT id FROM requests WHERE from_agent = ? AND reply_seen_at = 0 AND `+replyStatusIn+` ORDER BY created_at, rowid`,
+		append([]any{agent}, replyStatuses...)...)
+}
+
 // AgentsWithUnseenReplies returns every agent that has at least one unseen
 // reply to its own requests, in name order. A restarted relay uses it to
 // reschedule the reply wakes its old process held only in memory.

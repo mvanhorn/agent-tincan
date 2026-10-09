@@ -175,6 +175,8 @@ func wakerOptions(f relayFlags, srv *relay.Server) wake.Options {
 		Queued:          srv.QueuedCount,
 		UrgentQueued:    srv.UrgentQueuedCount,
 		UnseenReplies:   srv.UnseenReplies,
+		QueuedIDs:       srv.QueuedIDs,
+		UnseenReplyIDs:  srv.UnseenReplyIDs,
 		LastPoll:        srv.LastPoll,
 		Unanswered:      srv.TellAskers,
 		ReplyGrace:      f.replyGrace,
