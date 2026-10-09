@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -60,6 +61,51 @@ func learnRelayKeyWithin(ctx context.Context, r *client.Relay) {
 	client.LearnRelayKey(ctx, r)
 }
 
+// proxyCredsFlag turns on taking proxy credentials from the environment
+// (client.Config.ProxyCredentialsFromEnv), for join and rejoin.
+const (
+	proxyCredsFlag  = "proxy-credentials-from-env"
+	proxyCredsUsage = "save --proxy without its password; each command takes the current one from HTTPS_PROXY, HTTP_PROXY or ALL_PROXY on the same host (for sandboxes that mint a new proxy password per shell)"
+)
+
+// savedProxyConfig is cfg as join and rejoin save it: with credentials from
+// the environment on, the proxy is saved without its password, which would
+// soon expire.
+func savedProxyConfig(cfg client.Config) client.Config {
+	if cfg.ProxyCredentialsFromEnv {
+		cfg.Proxy = client.WithoutProxyPassword(cfg.Proxy)
+	}
+	return cfg
+}
+
+// applyProxyCredsFlag applies --proxy-credentials-from-env to cfg. Turning it
+// on without a proxy from --proxy or TINCAN_PROXY also drops the password
+// saved in the config: that is the migration a 407 asks for, and the saved
+// password is the one that expired, so DialProxy must borrow the current
+// one from the environment instead.
+func applyProxyCredsFlag(cmd *cobra.Command, cfg *client.Config, on bool) {
+	if !cmd.Flags().Changed(proxyCredsFlag) {
+		return
+	}
+	cfg.ProxyCredentialsFromEnv = on
+	if on && !cmd.Flags().Changed("proxy") && os.Getenv("TINCAN_PROXY") == "" {
+		cfg.Proxy = client.WithoutProxyPassword(cfg.Proxy)
+	}
+}
+
+// printProxyCredsNote says, after join or rejoin, that the proxy password
+// was left out of the config and where commands find it instead.
+func printProxyCredsNote(cmd *cobra.Command, cfg client.Config) {
+	if !cfg.ProxyCredentialsFromEnv || cfg.Proxy == "" {
+		return
+	}
+	host := cfg.Proxy
+	if u, err := url.Parse(cfg.Proxy); err == nil {
+		host = u.Hostname()
+	}
+	cmd.Printf("Proxy password not saved: each command takes it from HTTPS_PROXY, HTTP_PROXY or ALL_PROXY when that proxy's host is %s.\n", host)
+}
+
 // setRelay points cfg at url. The relay key and addresses belong to the old
 // relay, so a different url drops them: if learnRelayInfo then fails, the
 // config must not pair the new address with the old relay's key.
@@ -76,7 +122,7 @@ func agentCmds() []*cobra.Command {
 
 func joinCmd() *cobra.Command {
 	var relayURL, proxy string
-	var replace bool
+	var replace, credsFromEnv bool
 	cmd := &cobra.Command{
 		Use:   "join <code>",
 		Short: "Join this machine to the mesh with an invite code",
@@ -89,10 +135,11 @@ func joinCmd() *cobra.Command {
 			if cmd.Flags().Changed("proxy") {
 				cfg.Proxy = proxy
 			}
+			applyProxyCredsFlag(cmd, &cfg, credsFromEnv)
 			if cfg.Relay == "" {
 				return errors.New("--relay is required the first time (for example http://tincan-relay)")
 			}
-			r, err := client.NewRelay(cfg.Relay, cfg.Proxy)
+			r, err := client.NewRelay(cfg.Relay, cfg.DialProxy())
 			if err != nil {
 				return err
 			}
@@ -111,16 +158,18 @@ func joinCmd() *cobra.Command {
 					client.ConfigPath(), cfg.Agent, name, cfg.Agent, name, cfg.Relay, name, name)
 			}
 			cfg.Agent = name
-			if err := client.SaveConfig(cfg); err != nil {
+			if err := client.SaveConfig(savedProxyConfig(cfg)); err != nil {
 				return err
 			}
 			learnRelayInfo(cmd.Context(), cfg)
 			cmd.Printf("Joined as %q. Config saved to %s\n", name, client.ConfigPath())
+			printProxyCredsNote(cmd, cfg)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL, e.g. http://tincan-relay")
 	cmd.Flags().StringVar(&proxy, "proxy", "", "proxy for relay traffic (for sandboxes whose default proxy cannot reach the tailnet)")
+	cmd.Flags().BoolVar(&credsFromEnv, proxyCredsFlag, false, proxyCredsUsage)
 	cmd.Flags().BoolVar(&replace, "replace", false, "repoint a config that already names a different agent (use TINCAN_CONFIG=<new file> for a second agent instead)")
 	return cmd
 }
@@ -780,7 +829,8 @@ flaky tailnet path does not end the wait.`,
 // waitForInbox long-polls until requests or unseen replies arrive (replies
 // says what the poll does with replies), retrying transient errors with
 // jittered backoff. It gives up only on ctx or a hard refusal
-// (for example, this machine is not a joined agent).
+// (for example, this machine is not a joined agent, or the proxy refused
+// its expired password).
 func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, replies string) (client.Inbox, func(context.Context), error) {
 	backoff := time.Second
 	// Failed pongs retry in the background, so they never hold up the next
@@ -804,7 +854,7 @@ func waitForInbox(ctx context.Context, r *client.Relay, hold time.Duration, repl
 			continue
 		case ctx.Err() != nil:
 			return client.Inbox{}, finish, ctx.Err()
-		case client.IsStatus(err, 403) && !pingFailed:
+		case client.IsStatus(err, 403) && !pingFailed, client.IsProxyAuth(err):
 			return client.Inbox{}, finish, err
 		}
 		select {

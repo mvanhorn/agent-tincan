@@ -74,7 +74,7 @@ func listen(ctx context.Context, r *client.Relay, execCmd string, once bool) err
 		switch {
 		case ctx.Err() != nil:
 			return ctx.Err()
-		case client.IsStatus(err, 403):
+		case client.IsStatus(err, 403), client.IsProxyAuth(err):
 			return err
 		case err != nil:
 			select {

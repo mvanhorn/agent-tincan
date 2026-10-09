@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -177,5 +178,51 @@ func TestRejoinAtNewRelayDropsOldKey(t *testing.T) {
 	}
 	if cfg.RelayKey != "" || cfg.RelayURLs != nil || !cfg.RelayInfoAt.IsZero() {
 		t.Fatalf("the new relay's config kept the old relay's info: %+v", cfg)
+	}
+}
+
+// rejoin with --proxy-credentials-from-env saves the proxy without its
+// password, as join does.
+func TestRejoinProxyCredentialsFromEnvSavesNoPassword(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{})
+	proxy := forwardProxy(t, "rejoin-secret")
+	host := strings.TrimPrefix(proxy.URL, "http://")
+	if _, err := run(t, Root(), "rejoin", "--relay", m.URL("muse"), "--proxy", "http://u:rejoin-secret@"+host, "--proxy-credentials-from-env"); err != nil {
+		t.Fatalf("rejoin: %v", err)
+	}
+	cfg, err := client.LoadConfig()
+	if err != nil || cfg.Agent != "muse" || cfg.Proxy != "http://"+host || !cfg.ProxyCredentialsFromEnv {
+		t.Fatalf("saved config = %+v, %v", cfg, err)
+	}
+}
+
+// The migration the 407 error asks for: client.json holds a proxy password
+// that has since expired, and rejoin --proxy-credentials-from-env (with no
+// --proxy) must dial with the current shell's password from HTTPS_PROXY,
+// not the saved one, then save the proxy with no password at all.
+func TestRejoinProxyCredentialsFromEnvReplacesExpiredSavedPassword(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	proxy := forwardProxy(t, "fresh-secret")
+	host := strings.TrimPrefix(proxy.URL, "http://")
+	hostname, _, _ := strings.Cut(host, ":")
+	useConfig(t, client.Config{Relay: m.URL("muse"), Proxy: "http://u:expired-secret@" + host, Agent: "muse"})
+	t.Setenv("HTTPS_PROXY", "http://u:fresh-secret@"+hostname+":3128")
+	out, err := run(t, Root(), "rejoin", "--proxy-credentials-from-env")
+	if err != nil {
+		t.Fatalf("rejoin: %v", err)
+	}
+	cfg, err := client.LoadConfig()
+	if err != nil || cfg.Agent != "muse" || cfg.Proxy != "http://"+host || !cfg.ProxyCredentialsFromEnv {
+		t.Fatalf("saved config = %+v, %v", cfg, err)
+	}
+	raw, err := os.ReadFile(client.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"expired-secret", "fresh-secret"} {
+		if strings.Contains(string(raw)+out, secret) {
+			t.Fatalf("a proxy password was saved or printed: %s\n%s", raw, out)
+		}
 	}
 }

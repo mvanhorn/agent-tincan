@@ -2,10 +2,14 @@ package client_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -483,5 +487,177 @@ func TestGoodAtLinesThroughClient(t *testing.T) {
 	}
 	if got := goodAt("muse"); got != "phone calls; fast pickup" {
 		t.Fatalf("non-admin changed muse line to %q", got)
+	}
+}
+
+// authProxy is a forward proxy that answers a roster call when the
+// Proxy-Authorization header carries pass, and 407 otherwise. It records the
+// password each call carried.
+func authProxy(t *testing.T, pass string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := ""
+		if raw, ok := strings.CutPrefix(r.Header.Get("Proxy-Authorization"), "Basic "); ok {
+			if dec, err := base64.StdEncoding.DecodeString(raw); err == nil {
+				_, got, _ = strings.Cut(string(dec), ":")
+			}
+		}
+		mu.Lock()
+		seen = append(seen, got)
+		mu.Unlock()
+		if got != pass {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="egress"`)
+			http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"agents":[{"name":"muse","online":true,"wake":"wait"}]}`))
+	}))
+	t.Cleanup(ts.Close)
+	return ts, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+}
+
+// A running process keeps the proxy password its shell had when it started.
+// When that password has rotated and a wrapper has written a fresh one into
+// client.json, the 407 makes the client read the config again and retry once
+// with the rewritten credentials.
+func TestProxy407RetriesWithRewrittenConfig(t *testing.T) {
+	clearProxyEnv(t)
+	proxy, seen := authProxy(t, "fresh")
+	pu, _ := url.Parse(proxy.URL)
+	t.Setenv("HTTPS_PROXY", "http://u:stale@"+pu.Hostname()+":3128")
+	path := filepath.Join(t.TempDir(), "client.json")
+	cfg := client.Config{Relay: "http://tincan-relay", Proxy: proxy.URL, ProxyCredentialsFromEnv: true, Agent: "muse"}
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r, err := client.NewRelayForFile(cfg, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Proxy = "http://u:fresh@" + pu.Host
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := r.Agents(t.Context())
+	if err != nil || len(agents) != 1 {
+		t.Fatalf("Agents = %+v, %v", agents, err)
+	}
+	if got := seen(); !slices.Equal(got, []string{"stale", "fresh"}) {
+		t.Fatalf("proxy saw passwords %q, want stale then fresh", got)
+	}
+}
+
+// With nothing new in the config, a 407 is not retried. The error names the
+// proxy and the fix, and never its password.
+func TestProxy407WithNothingNewFailsClearly(t *testing.T) {
+	clearProxyEnv(t)
+	proxy, seen := authProxy(t, "fresh")
+	pu, _ := url.Parse(proxy.URL)
+	t.Setenv("HTTPS_PROXY", "http://u:stale-secret@"+pu.Hostname()+":3128")
+	path := filepath.Join(t.TempDir(), "client.json")
+	cfg := client.Config{Relay: "http://tincan-relay", Proxy: proxy.URL, ProxyCredentialsFromEnv: true, Agent: "muse"}
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r, err := client.NewRelayForFile(cfg, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Agents(t.Context())
+	if !client.IsProxyAuth(err) {
+		t.Fatalf("Agents error = %v, want a proxy authentication error", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{pu.Host, "407", "--proxy-credentials-from-env", "TINCAN_PROXY", "proxy-sandbox.md"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not say %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "stale-secret") {
+		t.Fatalf("error leaks the proxy password: %q", msg)
+	}
+	if got := seen(); len(got) != 1 {
+		t.Fatalf("proxy saw %d calls (%q), want 1 with no retry", len(got), got)
+	}
+}
+
+// Two calls on one client both fail on the expired password before either
+// reads the config again. The first to read it switches to the fresh
+// credentials; the second then finds the client already on them. It must
+// still retry, since the attempt that failed used the old proxy, rather
+// than give up with a proxy error while working credentials are in use.
+func TestProxy407ConcurrentCallsBothRetry(t *testing.T) {
+	clearProxyEnv(t)
+	var stale sync.WaitGroup
+	stale.Add(2)
+	var mu sync.Mutex
+	seen := map[string]int{}
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := ""
+		if raw, ok := strings.CutPrefix(r.Header.Get("Proxy-Authorization"), "Basic "); ok {
+			if dec, err := base64.StdEncoding.DecodeString(raw); err == nil {
+				_, got, _ = strings.Cut(string(dec), ":")
+			}
+		}
+		mu.Lock()
+		seen[got]++
+		mu.Unlock()
+		if got != "fresh" {
+			// Hold each stale call until both have arrived, so both fail
+			// before either reads the config again.
+			stale.Done()
+			stale.Wait()
+			w.Header().Set("Proxy-Authenticate", `Basic realm="egress"`)
+			http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"agents":[{"name":"muse","online":true,"wake":"wait"}]}`))
+	}))
+	t.Cleanup(proxy.Close)
+	pu, _ := url.Parse(proxy.URL)
+	path := filepath.Join(t.TempDir(), "client.json")
+	cfg := client.Config{Relay: "http://tincan-relay", Proxy: "http://u:stale@" + pu.Host, Agent: "muse"}
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r, err := client.NewRelayForFile(cfg, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Proxy = "http://u:fresh@" + pu.Host
+	if err := client.SaveConfigTo(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Go(func() {
+			agents, err := r.Agents(ctx)
+			if err == nil && len(agents) != 1 {
+				err = fmt.Errorf("got %d agents", len(agents))
+			}
+			errs[i] = err
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("call %d: %v", i, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["stale"] != 2 || seen["fresh"] != 2 {
+		t.Fatalf("proxy saw %v, want 2 stale then 2 fresh", seen)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -108,21 +109,27 @@ func (r *Relay) UploadAttachment(ctx context.Context, name, mime string, body io
 // upload is UploadAttachment without the capability check, for callers
 // that already made it.
 func (r *Relay) upload(ctx context.Context, name, mime string, body io.Reader, size int64) (UploadedAttachment, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", r.Base()+"/v1/attachments?name="+url.QueryEscape(name), body)
-	if err != nil {
-		return UploadedAttachment{}, err
-	}
-	req.ContentLength = size
-	if size < 0 {
-		req.ContentLength = -1
-	}
-	if size == 0 {
-		req.Body = http.NoBody
-	}
-	if mime != "" {
-		req.Header.Set("Content-Type", mime)
-	}
-	resp, err := r.long(req)
+	resp, err := r.do(r.withTimeout(AttachmentTimeout), func(attempt int) (*http.Request, error) {
+		b, err := uploadBody(body, size, attempt)
+		if err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", r.Base()+"/v1/attachments?name="+url.QueryEscape(name), b)
+		if err != nil {
+			return nil, err
+		}
+		req.ContentLength = size
+		if size < 0 {
+			req.ContentLength = -1
+		}
+		if size == 0 {
+			req.Body = http.NoBody
+		}
+		if mime != "" {
+			req.Header.Set("Content-Type", mime)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return UploadedAttachment{}, err
 	}
@@ -141,11 +148,9 @@ func (r *Relay) upload(ctx context.Context, name, mime string, body io.Reader, s
 // its size against MaxAttachmentBytes and its content against the sha256
 // the relay reports.
 func (r *Relay) DownloadAttachment(ctx context.Context, id string, w io.Writer) (DownloadedAttachment, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", r.Base()+"/v1/attachments/"+url.PathEscape(id), nil)
-	if err != nil {
-		return DownloadedAttachment{}, err
-	}
-	resp, err := r.long(req)
+	resp, err := r.do(r.withTimeout(AttachmentTimeout), func(int) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "GET", r.Base()+"/v1/attachments/"+url.PathEscape(id), nil)
+	})
 	if err != nil {
 		return DownloadedAttachment{}, err
 	}
@@ -241,11 +246,73 @@ func attachmentRefs(ids []string) []Attachment {
 	return out
 }
 
-// long performs a transfer with this client's transport and proxy, naming
-// the agent, under AttachmentTimeout rather than the short API timeout.
-func (r *Relay) long(req *http.Request) (*http.Response, error) {
-	r.headers(req)
-	return r.withTimeout(AttachmentTimeout).Do(req)
+// errNoRewind is why an upload whose body cannot be read again is not
+// retried after a 407.
+var errNoRewind = errors.New("the upload body cannot be read again")
+
+// uploadBody is the body for an upload's attempt (0 first). A body that
+// can be read from any offset (a file, or bytes or a string in memory) is
+// given to each attempt as its own reader from where it stood, so a retry
+// sends it whole and never shares a reader with an attempt the transport
+// may still be writing. Any other body is sent once.
+func uploadBody(body io.Reader, size int64, attempt int) (io.Reader, error) {
+	ra, okAt := body.(io.ReaderAt)
+	sk, okSeek := body.(io.Seeker)
+	if okAt && okSeek {
+		start, err := sk.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+		n := size
+		if n < 0 {
+			n = math.MaxInt64 - start
+		}
+		return io.NewSectionReader(ra, start, n), nil
+	}
+	if attempt > 0 {
+		return nil, errNoRewind
+	}
+	return body, nil
+}
+
+// do makes a transfer (an attachment or release download, an upload) with
+// client c, the request newReq builds for each attempt (0 first) naming the
+// agent. A transfer the proxy refused with 407 is made once more if the
+// client now uses a different proxy (see proxyAuthRetry) and otherwise ends
+// with a ProxyAuthError, as a relay call does. The caller closes the
+// response body.
+func (r *Relay) do(c *http.Client, newReq func(attempt int) (*http.Request, error)) (*http.Response, error) {
+	var resp *http.Response
+	var refused error
+	attempt := 0
+	err := r.proxyAuthRetry(func() error {
+		n := attempt
+		attempt++
+		req, err := newReq(n)
+		if errors.Is(err, errNoRewind) && refused != nil {
+			return refused // nothing sent; the first 407 stands
+		}
+		if err != nil {
+			return err
+		}
+		r.headers(req)
+		resp, err = c.Do(req)
+		if err != nil {
+			refused = err
+			return err
+		}
+		if resp.StatusCode == http.StatusProxyAuthRequired {
+			refused = apiError(resp)
+			resp.Body.Close()
+			resp = nil
+			return refused
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // withTimeout is this client's API client (same transport and proxy) with
