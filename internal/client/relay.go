@@ -242,6 +242,7 @@ func NewRelay(base, proxy string) (*Relay, error) {
 	for _, c := range []*http.Client{r.api, r.polls} {
 		if tr, ok := c.Transport.(*http.Transport); ok {
 			tr.Proxy = r.proxyFor
+			tr.OnProxyConnectResponse = proxyConnectStatus
 		}
 	}
 	return r, nil
@@ -762,8 +763,22 @@ func IsProxyAuth(err error) bool {
 // only the status text after the code, "Proxy Authentication Required", so
 // that text is what is matched.
 func proxyAuthFailed(err error) bool {
-	return IsStatus(err, http.StatusProxyAuthRequired) ||
+	return IsStatus(err, http.StatusProxyAuthRequired) || errors.Is(err, errProxyConnect407) ||
 		(err != nil && strings.Contains(err.Error(), http.StatusText(http.StatusProxyAuthRequired)))
+}
+
+// errProxyConnect407 marks a CONNECT the proxy refused with 407, whatever
+// reason phrase it gave.
+var errProxyConnect407 = errors.New("proxy refused the tunnel: 407")
+
+// proxyConnectStatus is the relay transports' OnProxyConnectResponse: it
+// turns a 407 answer to CONNECT into errProxyConnect407, so the refusal is
+// recognized by its status code rather than its wording.
+func proxyConnectStatus(_ context.Context, _ *url.URL, _ *http.Request, res *http.Response) error {
+	if res.StatusCode == http.StatusProxyAuthRequired {
+		return errProxyConnect407
+	}
+	return nil
 }
 
 // proxyAuthRetry makes attempt and, if the proxy refused it with 407, reads

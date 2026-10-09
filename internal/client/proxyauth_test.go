@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,5 +99,38 @@ func TestProxy407OnConnectToHTTPSRelay(t *testing.T) {
 	}
 	if agents, err := r.Agents(t.Context()); err != nil || len(agents) != 1 {
 		t.Fatalf("Agents after the config was rewritten = %+v, %v", agents, err)
+	}
+}
+
+// A proxy may word its 407 any way it likes; the status code is what counts.
+// A refused CONNECT with an unusual reason phrase is still a ProxyAuthError.
+func TestProxy407OnConnectWithOtherReasonPhrase(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("proxy cannot hijack")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		io.WriteString(conn, "HTTP/1.1 407 Authentication Required\r\nContent-Length: 0\r\n\r\n")
+	}))
+	t.Cleanup(proxy.Close)
+	pu, _ := url.Parse(proxy.URL)
+	pu.User = url.UserPassword("u", "s3cret-pass")
+	r, err := NewRelay("https://tincan-relay.example", pu.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Agents(t.Context())
+	if !IsProxyAuth(err) {
+		t.Fatalf("err = %v, want a ProxyAuthError", err)
+	}
+	if strings.Contains(err.Error(), "s3cret-pass") {
+		t.Fatalf("error leaks the password: %v", err)
 	}
 }
