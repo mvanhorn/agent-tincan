@@ -2,10 +2,13 @@ package history
 
 import (
 	"encoding/xml"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mvanhorn/agent-tincan/internal/macapp"
 )
 
 // The example plist in the repo is the template install writes.
@@ -226,5 +229,130 @@ func TestInstallServiceToolDirWithSpace(t *testing.T) {
 func TestSystemdEscape(t *testing.T) {
 	if got := systemdEscape(`/a b\c%d`); got != `/a b\\c%%d` {
 		t.Fatalf("systemdEscape = %q", got)
+	}
+}
+
+// With Agent Tincan.app available, the service starts through its launcher
+// (so Login Items shows "Agent Tincan") and names the app's bundle id.
+func TestInstallServiceDarwinUsesLauncher(t *testing.T) {
+	home := t.TempDir()
+	launcher := "/Users/me/Applications/Agent Tin & can.app/Contents/MacOS/agent-tincan"
+	res, err := InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/it's <here>/tincan", UID: 501, Launcher: launcher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if strings.Contains(s, "__") {
+		t.Fatalf("placeholder left in plist:\n%s", s)
+	}
+	dec := xml.NewDecoder(strings.NewReader(s))
+	var strs []string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if cd, ok := tok.(xml.CharData); ok && strings.TrimSpace(string(cd)) != "" {
+			strs = append(strs, string(cd))
+		}
+	}
+	joined := strings.Join(strs, "|")
+	for _, want := range []string{
+		"ProgramArguments|" + launcher + "|/opt/it's <here>/tincan|history|serve|EnvironmentVariables",
+		"AssociatedBundleIdentifiers|com.agenttincan.app",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("plist missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+// Without the app (a development build), the plist is exactly the template.
+func TestInstallServiceDarwinWithoutAppIsUnchanged(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, CodexDir: "/x", ClaudeDir: "/y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	want := strings.NewReplacer("__TINCAN_BINARY__", "/opt/tincan", "__HOME__", home, "__PATH__", servicePath("darwin", home, "/x", "/y")).Replace(launchdTemplate)
+	if string(b) != want {
+		t.Fatalf("plist differs from the plain template:\n%s", b)
+	}
+}
+
+// A definition that opts out (notes, whose privacy grant must stay scoped)
+// never gets the launcher.
+func TestInstallServiceDefNoLauncher(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallServiceDef(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/L/agent-tincan"},
+		ServiceDef{Label: "com.agenttincan.x", Launchd: launchdTemplate, NoLauncher: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if strings.Contains(string(b), "/L/agent-tincan") || strings.Contains(string(b), "AssociatedBundleIdentifiers") {
+		t.Fatalf("NoLauncher service was wrapped:\n%s", b)
+	}
+}
+
+// The dots web agent's thread arguments still follow the binary when the
+// launcher is first.
+func TestInstallWebServiceDotsUsesLauncher(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallWebService(SourceDots, ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Thread: "01a0efac-8fd4-71f2-8aa9-0004fbd78034", Launcher: "/A/agent-tincan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if !strings.Contains(string(b), "<string>/A/agent-tincan</string>\n    <string>/opt/tincan</string>") || !strings.Contains(string(b), "<string>--thread</string>") {
+		t.Fatalf("dots plist not wrapped in order:\n%s", b)
+	}
+}
+
+// A release build installing a service for a --binary the launcher would
+// refuse (an unsigned or self-built tincan) writes the plain plist, so the
+// service still starts.
+func TestInstallServiceUnsignedBinarySkipsLauncher(t *testing.T) {
+	home := t.TempDir()
+	origEnsure, origVerify := ensureApp, verifyTincan
+	t.Cleanup(func() { ensureApp, verifyTincan = origEnsure, origVerify })
+	ensureApp = func(macapp.Options) (string, error) { return "/A/agent-tincan", nil }
+	verifyTincan = func(string) error { return errors.New("not signed") }
+	res, err := InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/dev/tincan", UID: 501})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if strings.Contains(string(b), "/A/agent-tincan") {
+		t.Fatalf("unsigned binary was wrapped:\n%s", b)
+	}
+	verifyTincan = func(string) error { return nil }
+	res, err = InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/rel/tincan", UID: 501})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(res.Path); !strings.Contains(string(b), "/A/agent-tincan") {
+		t.Fatalf("signed binary was not wrapped:\n%s", b)
+	}
+}
+
+// A failed app install does not block the service: the plain plist is
+// written.
+func TestInstallServiceAppInstallFailureWritesPlainPlist(t *testing.T) {
+	home := t.TempDir()
+	orig := ensureApp
+	t.Cleanup(func() { ensureApp = orig })
+	ensureApp = func(macapp.Options) (string, error) { return "", errors.New("lsregister failed") }
+	res, err := InstallService(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501})
+	if err != nil {
+		t.Fatalf("install failed because the app did: %v", err)
+	}
+	if b, _ := os.ReadFile(res.Path); strings.Contains(string(b), "AssociatedBundleIdentifiers") {
+		t.Fatalf("wrapped without an app:\n%s", b)
 	}
 }

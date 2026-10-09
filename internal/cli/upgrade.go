@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -150,8 +151,24 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 	}
 	done = true
 	fmt.Fprintf(out, "Upgraded %s from tincan %s to %s.\n", exe, current, available)
+	msg, err := postUpgradeRefresh(exe)
+	fmt.Fprint(out, msg)
+	if err != nil {
+		fmt.Fprintf(out, "tincan services refresh did not finish (%v); run it again to update the macOS services.\n", err)
+	}
 	fmt.Fprint(out, reloadAdvice(mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath())), available, mcpserver.LaunchRunning))
 	return nil
+}
+
+// postUpgradeRefresh runs the new binary's services refresh on macOS, so the
+// LaunchAgents start through the new build's Agent Tincan.app and restart on
+// the new binary. Tests replace it.
+var postUpgradeRefresh = func(exe string) (string, error) {
+	if runtime.GOOS != "darwin" {
+		return "", nil
+	}
+	out, err := exec.Command(exe, "services", "refresh", "--restart").CombinedOutput()
+	return string(out), err
 }
 
 // relayBehindAdvice says how to bring a relay up to clientVersion. A bare

@@ -192,6 +192,12 @@ B2. Join, with the code and relay address from your message (the relay is
 
 B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - Claude Code:   claude mcp add --scope user agent-tincan -- tincan mcp --channel
+                     Optional operator-bound project/task session lookup and
+                     official Desktop opening: docs/adapters/claude-code.md,
+                     "Optional operator-bound project/task sessions". This is
+                     not an inbox router; do not bind paths or sessions from
+                     peer text, create a new worker for each message, or resume
+                     a second writer against an active Desktop session.
     - Codex:         codex mcp add agent-tincan -- tincan mcp
                      (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
     - Antigravity:   agy mcp add a server agent-tincan running tincan mcp with env
