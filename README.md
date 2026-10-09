@@ -107,6 +107,20 @@ tincan doctor
 
 Want to manage the team from your laptop too? Start the relay with `--admin <laptop-name>` (the name `tailscale status` shows). The laptop must be signed in to Tailscale as you and must not carry an agent tag. Each platform's details are in its [adapter doc](docs/adapters/), and the full walkthrough is the [quick start](docs/quickstart.md).
 
+## New in v0.15.0
+
+- [macOS Login Items show "Agent Tincan"](#macos-login-items). tincan's background services used to appear in System Settings > Login Items, and in the "App Background Activity" popup, under the signer's personal name with a blank icon. Release builds now carry a small signed Agent Tincan.app, install it into `~/Applications` (no admin password) and start services through it. New services get this automatically; existing Macs run `tincan services refresh` once, and later upgrades keep it current. `--revert` undoes it. The notes service stays as it was, so its Files and Folders access is not shared.
+- Rotating proxy passwords. For proxy-only sandboxes such as Muse that mint a new proxy password for every shell, `tincan rejoin --proxy-credentials-from-env` keeps the password out of the saved config and takes the current one from `HTTPS_PROXY` on every command. A rejected proxy password (407) now ends in a clear error instead of a retry loop: `wait` and `listen` exit, and tool calls return it. See [proxy-only sandboxes](docs/adapters/proxy-sandbox.md).
+- Wake audit rows name their requests. A `woke` row carries the request id when one request or reply set off the wake, and an `ids:` list when several did, so `tincan wakes` and audit queries can join wakes to requests without matching timestamps.
+- An optional [Claude Desktop session helper](docs/adapters/claude-code.md) in `examples/claude-code/`, contributed by @Grunte12, maps a project and task to one chosen conversation.
+- Built with Go 1.26.9 and golang.org/x/net v0.60.0 for new net/http security fixes.
+
+Before you upgrade:
+
+- Upgrade the relay first, from an admin device or the relay host: `tincan relay-upgrade --from-github v0.15.0` (self-upgrade needs the relay started with `--dist <dir>`, and `--from-github` also needs `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`). It is network-facing, so it should get the Go security fixes.
+- Then `tincan upgrade` on each agent, and on each Mac run `tincan services refresh` once.
+- Proxy-only sandboxes with rotating passwords: run `tincan rejoin --proxy-credentials-from-env` once.
+
 ## New in v0.11.2
 
 - [Good-at lines](#last-seen) that are true by default. The lines teammates show until you write your own now match what each one can do: claude-web says Claude makes no images, history names all eight sources it reads, council and dot-web say asks are held for your approval by default, and grok-web attaches no videos. Claude Code, Codex, Gemini CLI, Grok CLI and the ChatGPT connector get a default line too, even when they joined without `--kind`. Agents on a VM, sandbox or schedule, Hermes and OpenClaw still show none until you set one.
