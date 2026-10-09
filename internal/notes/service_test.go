@@ -149,3 +149,20 @@ func TestDefaultPaths(t *testing.T) {
 		t.Fatalf("health path = %s", got)
 	}
 }
+
+// Notes never runs through the launcher: macOS may attribute its Files and
+// Folders grant to the app, which every wrapped service would then share.
+func TestInstallServiceNeverUsesLauncher(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallService(ServiceOptions{
+		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan"},
+		LibraryRoot:    "/Users/me/Notes",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if s := string(b); strings.Contains(s, "/A/agent-tincan") || strings.Contains(s, "AssociatedBundleIdentifiers") {
+		t.Fatalf("notes plist was wrapped:\n%s", s)
+	}
+}

@@ -179,6 +179,11 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 
 	// 6. tincan mcp servers left on another build by an upgrade.
 	add(buildCheck(launches, mcpserver.LaunchRunning))
+	if runtime.GOOS == "darwin" && exe != "" {
+		if env, err := defaultLoginItemsEnv(exe); err == nil {
+			add(loginItemsCheck(env))
+		}
+	}
 
 	rep.OK = true
 	hostProblem := false

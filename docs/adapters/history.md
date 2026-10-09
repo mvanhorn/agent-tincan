@@ -114,6 +114,8 @@ It prints the command that starts the service. On macOS:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist
 ```
 
+On macOS the service starts through Agent Tincan.app, so it shows as "Agent Tincan" in Login Items ([README](../../README.md#macos-login-items)).
+
 On Linux:
 
 ```bash

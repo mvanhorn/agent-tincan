@@ -416,3 +416,24 @@ func TestStaleRecoveryFoldsIntoNextDownAlert(t *testing.T) {
 		t.Errorf("second down alert %q does not carry the missed recovery", msg)
 	}
 }
+
+func TestInstallServiceDarwinUsesLauncher(t *testing.T) {
+	home := t.TempDir()
+	res, err := InstallService(ServiceOptions{
+		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan"},
+		Config:         "/c.json",
+		AlertCmd:       "true",
+		After:          10 * time.Minute,
+		Every:          time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	joined := plistStrings(string(b))
+	for _, want := range []string{"ProgramArguments|/A/agent-tincan|/opt/tincan|relay-watch|--config|/c.json", "AssociatedBundleIdentifiers|com.agenttincan.app"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("plist missing %q:\n%s", want, joined)
+		}
+	}
+}

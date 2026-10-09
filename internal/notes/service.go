@@ -114,6 +114,7 @@ func InstallService(o ServiceOptions) (history.ServiceResult, error) {
 		Systemd:     systemdTemplate,
 		Vars:        []string{"__LIBRARY_ROOT__", o.LibraryRoot, "__HELPER__", o.HelperPath},
 		Unsupported: "no notes service definition for " + goos + "; run tincan notes serve under your own service manager",
+		NoLauncher:  true,
 	})
 }
 

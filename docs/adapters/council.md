@@ -130,6 +130,8 @@ The agent must be named `council`: `tincan council serve` refuses to run unless 
 
 `tincan council install` writes `~/Library/LaunchAgents/com.agenttincan.council.plist` on macOS (a systemd user unit, `tincan-council.service`, on Linux), which runs `tincan council serve` with `TINCAN_CONFIG=~/.config/tincan/council.json`, keeps it running, and logs to `~/Library/Logs/tincan-council.log`. It prints the start command and starts nothing itself. `--binary` names the tincan binary the service runs (default this one).
 
+On macOS the service starts through Agent Tincan.app, so it shows as "Agent Tincan" in Login Items ([README](../../README.md#macos-login-items)).
+
 To run it by hand instead: `tincan council serve`, with `--config` (default `$TINCAN_CONFIG`, else `~/.config/tincan/council.json`) and `--dir` (Council's own folder, default `~/Library/Application Support/tincan-council` on macOS, `~/.local/share/tincan-council` on Linux). It stops cleanly on SIGINT or SIGTERM.
 
 Set `{ "council": { "method": "wait" } }` in the relay's `wake.json`; the service long-polls the relay.
