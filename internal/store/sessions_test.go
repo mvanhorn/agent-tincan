@@ -21,7 +21,7 @@ func askFrom(t *testing.T, s *Store, from, session, to, body string) envelope.Re
 
 func unseenFor(t *testing.T, s *Store, agent, session string) []string {
 	t.Helper()
-	got, err := s.UnseenRepliesFor(context.Background(), agent, session)
+	got, err := s.UnseenRepliesFor(context.Background(), agent, ReplyScope{Session: session, AllLive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestUnseenRepliesBySession(t *testing.T) {
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("session %q sees %v, want %v", tc.session, got, tc.want)
 		}
-		if n, err := s.CountUnseenRepliesFor(ctx, "hermes", tc.session); err != nil || n != len(tc.want) {
+		if n, err := s.CountUnseenRepliesFor(ctx, "hermes", ReplyScope{Session: tc.session, AllLive: true}); err != nil || n != len(tc.want) {
 			t.Errorf("session %q counts %d, %v; want %d", tc.session, n, err, len(tc.want))
 		}
 	}
@@ -119,5 +119,46 @@ func TestSessionColumnsMigrateOnOpen(t *testing.T) {
 	reply(t, s, req, envelope.StatusAnswered, "done")
 	if got := unseenFor(t, s, "hermes", "a"); !slices.Equal(got, []string{req.ID}) {
 		t.Fatalf("session a after migration sees %v, want [%s]", got, req.ID)
+	}
+}
+
+// Once the relay knows which sessions are still live, a reply to a session
+// that is not (a closed window, or one whose MCP server restarted under a
+// new id) opens to the others, while a live session's replies stay its own.
+func TestUnseenRepliesOpenWhenSessionIsGone(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	a := askFrom(t, s, "hermes", "a", "muse", "from A")
+	b := askFrom(t, s, "hermes", "b", "muse", "from B")
+	gone := askFrom(t, s, "hermes", "gone", "muse", "from a closed window")
+	for _, req := range []envelope.Request{a, b, gone} {
+		reply(t, s, req, envelope.StatusAnswered, "done")
+	}
+	for _, tc := range []struct {
+		name  string
+		scope ReplyScope
+		want  []string
+	}{
+		{"a with b live", ReplyScope{Session: "a", Live: []string{"b"}}, []string{a.ID, gone.ID}},
+		{"a listed live itself", ReplyScope{Session: "a", Live: []string{"a", "b"}}, []string{a.ID, gone.ID}},
+		{"b alone", ReplyScope{Session: "b"}, []string{a.ID, b.ID, gone.ID}},
+		{"a keeps everyone", ReplyScope{Session: "a", Live: []string{"b"}, AllLive: true}, []string{a.ID}},
+	} {
+		got, err := s.UnseenRepliesFor(ctx, "hermes", tc.scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, r := range got {
+			ids = append(ids, r.Request.ID)
+		}
+		slices.Sort(ids)
+		slices.Sort(tc.want)
+		if !slices.Equal(ids, tc.want) {
+			t.Errorf("%s: sees %v, want %v", tc.name, ids, tc.want)
+		}
+		if n, err := s.CountUnseenRepliesFor(ctx, "hermes", tc.scope); err != nil || n != len(tc.want) {
+			t.Errorf("%s: counts %d, %v; want %d", tc.name, n, err, len(tc.want))
+		}
 	}
 }

@@ -55,23 +55,50 @@ const ParentPreviewChars = 1000
 // while agent was handling a request addressed to it carries that parent's
 // id, sender, body preview, and current status.
 func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
-	return s.UnseenRepliesFor(ctx, agent, "")
+	return s.UnseenRepliesFor(ctx, agent, ReplyScope{})
 }
 
-// sessionFilter narrows a query on requests q to the replies session may
-// see: its own requests and those sent with no session. An empty session
-// sees every request, as before sessions existed.
-func sessionFilter(q, session string) (string, []any) {
-	if session == "" {
+// ReplyScope is which of an agent's unseen replies one session sees.
+type ReplyScope struct {
+	// Session is the session asking; "" sees every reply, as before
+	// sessions existed.
+	Session string
+	// Live lists the agent's other sessions that are still calling the
+	// relay. Replies to their requests stay theirs. A reply to a session
+	// not in Live (its window closed, or its MCP server restarted under a
+	// new id) is open to any session, so it is never stranded.
+	Live []string
+	// AllLive keeps every other session's replies to that session, for a
+	// relay too newly started to know which sessions are gone.
+	AllLive bool
+}
+
+// sessionFilter narrows a query on requests q to the replies scope sees:
+// replies to its own requests, to requests sent with no session, and to
+// requests from sessions that are no longer live.
+func sessionFilter(q string, scope ReplyScope) (string, []any) {
+	if scope.Session == "" {
 		return "", nil
 	}
-	return ` AND ` + q + `from_session IN (?, '')`, []any{session}
+	if scope.AllLive {
+		return ` AND ` + q + `from_session IN (?, '')`, []any{scope.Session}
+	}
+	var live []any
+	for _, l := range scope.Live {
+		if l != "" && l != scope.Session {
+			live = append(live, l)
+		}
+	}
+	if len(live) == 0 {
+		return "", nil
+	}
+	return ` AND ` + q + `from_session NOT IN (?` + strings.Repeat(", ?", len(live)-1) + `)`, live
 }
 
-// UnseenRepliesFor is UnseenReplies seen from session: only replies to
-// requests sent from session or with no session.
-func (s *Store) UnseenRepliesFor(ctx context.Context, agent, session string) ([]envelope.Result, error) {
-	where, sargs := sessionFilter("q.", session)
+// UnseenRepliesFor is UnseenReplies as scope sees them: replies to
+// requests from other live sessions are left out.
+func (s *Store) UnseenRepliesFor(ctx context.Context, agent string, scope ReplyScope) ([]envelope.Result, error) {
+	where, sargs := sessionFilter("q.", scope)
 	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
 	args = append(append(args, sargs...), MaxUnseenReplies)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments, q.reply_generation,
@@ -112,14 +139,14 @@ func (s *Store) UnseenRepliesFor(ctx context.Context, agent, session string) ([]
 // CountUnseenReplies returns how many replies to agent's requests it has not
 // seen, without the MaxUnseenReplies bound.
 func (s *Store) CountUnseenReplies(ctx context.Context, agent string) (int, error) {
-	return s.CountUnseenRepliesFor(ctx, agent, "")
+	return s.CountUnseenRepliesFor(ctx, agent, ReplyScope{})
 }
 
-// CountUnseenRepliesFor is CountUnseenReplies seen from session, counting
+// CountUnseenRepliesFor is CountUnseenReplies as scope sees them, counting
 // what UnseenRepliesFor would return.
-func (s *Store) CountUnseenRepliesFor(ctx context.Context, agent, session string) (int, error) {
+func (s *Store) CountUnseenRepliesFor(ctx context.Context, agent string, scope ReplyScope) (int, error) {
 	var n int
-	where, sargs := sessionFilter("", session)
+	where, sargs := sessionFilter("", scope)
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE from_agent = ? AND reply_seen_at = 0 AND `+replyStatusIn+where,
 		append(append([]any{agent}, replyStatuses...), sargs...)...).Scan(&n)
 	return n, err

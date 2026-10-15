@@ -503,7 +503,7 @@ In the MCP tools, received images show as images. Other files are saved as `<att
 
 An `ask` may return before the answer does, and the asker does not have to hold its turn open. When the reply lands, the asker is woken too, and `check_inbox` shows replies to its own requests (with what it asked) before new requests, so it can finish the work that was waiting.
 
-Several Claude Code windows on one machine can share one agent. Each `tincan mcp` names its own session to the relay, so each window gets the replies to its own asks and no one else's, and its questions are filed under its own work. `TINCAN_SESSION=<name>` names the session for any tincan command; `tincan inbox` without it still sees every reply. See [Sessions within one agent](docs/protocol.md#sessions-within-one-agent).
+Several Claude Code windows on one machine can share one agent. Each `tincan mcp` names its own session to the relay, so each window gets the replies to its own asks and no one else's, and its questions are filed under its own work. A reply to a window that has closed, or restarted its tincan server, goes to the next window that checks once the old one has been quiet for 10 minutes. `TINCAN_SESSION=<name>` names the session for any tincan command; `tincan inbox` without it still sees every reply. See [Sessions within one agent](docs/protocol.md#sessions-within-one-agent).
 
 - A reply starts unseen. It counts as seen once the asker reads it with `get_reply`, an inline `ask` wait, or `check_inbox`. A reply lost on the way comes back on the next poll.
 - A webhook or email agent is woken for a reply only if it is still unseen after the reply grace period (`tincan relay --reply-grace`, default 60 seconds), so an answer read inline never causes a second wake.

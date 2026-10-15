@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -36,6 +37,9 @@ func (h *harness) sendFrom(addr, session, to, body string) envelope.Request {
 func (h *harness) pollReplies(addr, session, mode string) []string {
 	h.t.Helper()
 	rec := h.raw(addr, "GET", "/v1/poll?replies="+mode+"&hold=0", nil, 0, sessionHeader(session))
+	if rec.Code == http.StatusNoContent {
+		return []string{}
+	}
 	if rec.Code != http.StatusOK {
 		h.t.Fatalf("poll from session %q: status %d: %s", session, rec.Code, rec.Body)
 	}
@@ -148,4 +152,51 @@ func TestSessionHeaderValidated(t *testing.T) {
 	}
 	h.sendFrom(grokAddr, strings.Repeat("x", 64), "muse", "longest allowed")
 	h.sendFrom(grokAddr, "Mcp-1.2_3", "muse", "every allowed character")
+}
+
+// A reply to a session that stops calling the relay (its window closed, or
+// its MCP server restarted and took a new id) is not stranded: once that
+// session has been quiet for SessionGrace, the next session to poll gets
+// it. While the asking session keeps calling, its reply stays its own.
+func TestReplyToGoneSessionOpensAfterGrace(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	clk.advance(SessionGrace) // past the just-started window
+	a := h.sendFrom(grokAddr, "session-a", "muse", "from A")
+	h.do(museAddr, "POST", "/v1/requests/"+a.ID+"/claim", "", http.StatusOK, nil)
+	h.do(museAddr, "POST", "/v1/requests/"+a.ID+"/reply", `{"body":"done"}`, http.StatusOK, nil)
+
+	clk.advance(SessionGrace - time.Minute)
+	if got := h.pollReplies(grokAddr, "session-b", client.RepliesKeep); len(got) != 0 {
+		t.Fatalf("session B saw %v while A was still live", got)
+	}
+	h.pollReplies(grokAddr, "session-a", client.RepliesKeep) // A is still running
+	clk.advance(SessionGrace - time.Minute)
+	if got := h.pollReplies(grokAddr, "session-b", client.RepliesKeep); len(got) != 0 {
+		t.Fatalf("session B saw %v though A polled %s ago", got, SessionGrace-time.Minute)
+	}
+
+	clk.advance(2 * time.Minute) // A has now been quiet past SessionGrace
+	if got := h.pollReplies(grokAddr, "session-b", client.RepliesTake); !slices.Equal(got, []string{a.ID}) {
+		t.Fatalf("session B take = %v after A went quiet, want [%s]", got, a.ID)
+	}
+}
+
+// Session activity is in memory only, so right after the relay starts it
+// cannot tell a quiet session from a gone one: for SessionGrace every other
+// session's replies stay with that session.
+func TestReplyScopeKeepsEverySessionRightAfterStart(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	if got := h.srv.replyScope("grokbot", "session-b"); !got.AllLive {
+		t.Fatalf("scope just after start = %+v, want AllLive", got)
+	}
+	if got := h.srv.replyScope("grokbot", ""); got.AllLive || got.Session != "" {
+		t.Fatalf("sessionless scope = %+v, want every reply", got)
+	}
+	h.srv.touchSession("grokbot", "session-a")
+	clk.advance(SessionGrace)
+	h.srv.touchSession("grokbot", "session-c")
+	got := h.srv.replyScope("grokbot", "session-b")
+	if got.AllLive || !slices.Equal(got.Live, []string{"session-c"}) {
+		t.Fatalf("scope after grace = %+v, want only session-c live", got)
+	}
 }

@@ -184,6 +184,10 @@ type Server struct {
 	// back whenever it changes.
 	versions     map[string]string
 	pollFeatures map[string]pollFeatures
+	// sessions is when each agent's sessions (SessionHeader) last called,
+	// so a poll can tell a session that is still running from one that is
+	// gone. In memory only; see replyScope.
+	sessions map[string]map[string]time.Time
 	// started is when this relay process started. lastPoll is not
 	// persisted, so a schedule agent that has not polled since then is
 	// measured from here rather than flagged overdue by a restart.
@@ -238,7 +242,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
+		versionWritten: map[string]time.Time{}, sessions: map[string]map[string]time.Time{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
@@ -513,6 +517,9 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 		}))
 	}
 	s.seen(r.Context(), res.Name, r.Header.Get(client.VersionHeader))
+	if sess, err := session(r); err == nil {
+		s.touchSession(res.Name, sess)
+	}
 	markHeld(r, res.Name)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/poll" {
 		supported := false
@@ -795,7 +802,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		var more int
 		if replies != client.RepliesNone {
 			var err error
-			if reps, more, err = s.unseenReplies(r.Context(), name, sess); err != nil {
+			if reps, more, err = s.unseenReplies(r.Context(), name, s.replyScope(name, sess)); err != nil {
 				writeErr(w, http.StatusInternalServerError, err)
 				return
 			}
@@ -916,10 +923,10 @@ const MaxPeekPending = 50
 const MaxRepliesBytes = 1 << 20
 
 // unseenReplies returns the oldest of agent's unseen replies that fit in
-// MaxRepliesBytes, and how many more are waiting beyond them, as session
-// sees them ("" sees every reply).
-func (s *Server) unseenReplies(ctx context.Context, agent, session string) ([]envelope.Result, int, error) {
-	reps, err := s.store.UnseenRepliesFor(ctx, agent, session)
+// MaxRepliesBytes, and how many more are waiting beyond them, as scope sees
+// them.
+func (s *Server) unseenReplies(ctx context.Context, agent string, scope store.ReplyScope) ([]envelope.Result, int, error) {
+	reps, err := s.store.UnseenRepliesFor(ctx, agent, scope)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -948,7 +955,7 @@ func (s *Server) unseenReplies(ctx context.Context, agent, session string) ([]en
 	if !cut {
 		return reps, 0, nil
 	}
-	total, err := s.store.CountUnseenRepliesFor(ctx, agent, session)
+	total, err := s.store.CountUnseenRepliesFor(ctx, agent, scope)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -996,6 +1003,62 @@ func emptyIfNil[T any](v []T) []T {
 // maxSession bounds a SessionHeader value.
 const maxSession = 64
 
+// SessionGrace is how long a session may go without calling the relay
+// before its unread replies open to the agent's other sessions. A channel
+// MCP server peeks every DefaultPollHold, so a live window stays well
+// inside it; a window that closed or restarted its MCP server (and so took
+// a new session id) stops calling, and after SessionGrace whichever window
+// polls next gets the reply instead of nobody.
+const SessionGrace = 10 * time.Minute
+
+// touchSession records that agent's session called the relay now, and
+// forgets the agent's sessions that have been quiet past SessionGrace.
+func (s *Server) touchSession(agent, session string) {
+	if session == "" {
+		return
+	}
+	now := s.cfg.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.sessions[agent]
+	if m == nil {
+		m = map[string]time.Time{}
+		s.sessions[agent] = m
+	}
+	m[session] = now
+	for k, t := range m {
+		if now.Sub(t) >= SessionGrace {
+			delete(m, k)
+		}
+	}
+}
+
+// replyScope is which of agent's unseen replies session sees: its own,
+// those to requests sent with no session, and those to sessions that have
+// not called within SessionGrace. Session activity is not persisted, so
+// for SessionGrace after the relay starts every other session counts as
+// live rather than gone.
+func (s *Server) replyScope(agent, session string) store.ReplyScope {
+	scope := store.ReplyScope{Session: session}
+	if session == "" {
+		return scope
+	}
+	now := s.cfg.Now()
+	if now.Sub(s.started) < SessionGrace {
+		scope.AllLive = true
+		return scope
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, t := range s.sessions[agent] {
+		if k != session && now.Sub(t) < SessionGrace {
+			scope.Live = append(scope.Live, k)
+		}
+	}
+	slices.Sort(scope.Live)
+	return scope
+}
+
 // session returns the caller's SessionHeader, "" when it sends none. A
 // session only routes replies and files asks inside the caller's agent;
 // identity still comes from Server.agent alone. A malformed value is an
@@ -1007,7 +1070,7 @@ func session(r *http.Request) (string, error) {
 		return "", fmt.Errorf("%s is longer than %d bytes", client.SessionHeader, maxSession)
 	}
 	for _, c := range v {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '_' && c != '-' {
 			return "", fmt.Errorf("%s may use only letters, digits, '.', '_', and '-'", client.SessionHeader)
 		}
 	}
@@ -1551,6 +1614,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.pollFeatures, in.Name)
 	delete(s.storedVersion, in.Name)
 	delete(s.versionWritten, in.Name)
+	delete(s.sessions, in.Name)
 	s.mu.Unlock()
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": in.Name, "cancelled": len(ids)})
