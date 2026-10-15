@@ -28,6 +28,10 @@
 #           its own sandbox (--sandbox: seatbelt on macOS), writing only in
 #           the workdir and the operator's write roots.
 #
+# Each run is recorded, with the workdir and the session id the engine's
+# JSON output reports, in a private list beside TINCAN_CONFIG
+# (<name>.wake-sessions), so the history agent leaves wake runs out.
+#
 # Settings, read from the listener's environment (the library's settings,
 # TINCAN_WAKE_*, are listed in tincan-wake-lib.sh):
 #
@@ -68,6 +72,11 @@ if [ ! -f "$TINCAN_WAKE_LIB" ]; then
 fi
 # shellcheck source=SCRIPTDIR/../lib/tincan-wake-lib.sh
 . "$TINCAN_WAKE_LIB"
+
+# TINCAN_CONFIG itself is passed on as given; the wake's own uses of it
+# need an absolute path, since the run is started from the workdir.
+cfg=$(tincan_wake_config_path "$TINCAN_CONFIG")
+SESSIONS=$(tincan_wake_beside_config "$cfg" .wake-sessions)
 
 ENGINE=${TINCAN_GEMINI_ENGINE:-agy}
 WORKDIR=${TINCAN_GEMINI_WORKDIR:-$HOME/tincan-gemini}
@@ -182,9 +191,7 @@ tincan_wake_check_identity gemini_mcp_list
 # agent name read from the config ("default" when it is missing or not a
 # plain name, as tincan does).
 gemini_attachment_dir() {
-  _cfg=$TINCAN_CONFIG
-  # shellcheck disable=SC2088 # a literal ~/ prefix, which tincan expands
-  case $_cfg in "~/"*) _cfg=$HOME/${_cfg#"~/"} ;; esac
+  _cfg=$cfg
   _agent=
   if [ -r "$_cfg" ]; then
     case $(gemini_json_tool) in
@@ -247,11 +254,17 @@ err=$state/err.$$
 # library's EXIT trap: remove the captured output there too, then run the
 # library's own cleanup (the engine's process tree and the lock).
 trap 'rm -f "$out" "$err"; _tw_cleanup' EXIT
+# The workdir is recorded before the run, so even a run the timeout kills
+# is known to the history agent; the session id once the engine reports it.
 cd "$WORKDIR"
+workdir_c=$(pwd -P)
+tincan_wake_record_session "$SESSIONS" "$workdir_c"
 status=0
 tincan_wake_run "$@" -p "$PROMPT" >"$out" 2>"$err" || status=$?
 cat "$out"
 cat "$err" >&2
+sid=$(sed -n 's/.*"session_\{0,1\}[iI]d": *"\([A-Za-z0-9._-]*\)".*/\1/p' "$out" | head -n 1)
+[ -z "$sid" ] || tincan_wake_record_session "$SESSIONS" "$workdir_c" "$sid"
 auth=
 if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
   if [ "$ENGINE" = gemini ] && [ "$status" -eq 41 ]; then

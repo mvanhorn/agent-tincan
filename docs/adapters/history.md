@@ -1,17 +1,17 @@
 # History agent
 
-The `history` agent answers teammates' questions about what the owner (you) asked in eight places: ChatGPT (chatgpt.com), claude.ai, Grok (grok.com), Gemini (gemini.google.com), Microsoft Copilot (copilot.com, a personal Microsoft account), Codex (CLI and desktop app), Claude Code and Grok CLI (xAI's Grok Build, the `grok` command). Ask it things like "what was the last thing I asked ChatGPT? send the image" or "find my recent Codex thread about the relay" (your name in place of "I" works too) and it replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments.
+The `history` agent answers teammates' questions about what the owner (you) asked in thirteen places: ChatGPT (chatgpt.com), claude.ai, Grok (grok.com), Gemini (gemini.google.com), Microsoft Copilot (copilot.com, a personal Microsoft account), Codex (CLI and desktop app), Claude Code, Grok CLI (xAI's Grok Build, the `grok` command), Cursor (the `cursor-agent` CLI and the editor), GitHub Copilot CLI, Gemini CLI and OpenCode. Ask it things like "what was the last thing I asked ChatGPT? send the image" or "find my recent Codex thread about the relay" (your name in place of "I" works too) and it replies with the prompt, a short excerpt of the answer, and the images from that turn as real attachments.
 
 It is a Go service, `tincan history serve`, that runs on your Mac under launchd (or a systemd user unit on Linux), outside any Codex sandbox. It is not an LLM agent. For each request it:
 
 1. Checks access. By default any agent joined to your relay may ask. If you wrote an allowlist file, every agent in the request's chain, as the relay recorded it, must be on it; otherwise it declines and names the agent.
 2. Turns the question into a structured query (source, mode, search terms, conversation id, count, whether images are wanted, and whether to pick the most recent turn that had images) with one tool-less `codex exec` call that sees only the question text. A request that is already a structured query (see [Structured queries](#structured-queries)) skips this step and never reaches a model.
-3. Reads the source: Codex, Claude Code and Grok CLI from their local logs, ChatGPT, claude.ai, Grok, Gemini and Copilot live through the Tincan Chrome extension in your logged-in Chrome. Grok is read only once you grant the extension grok.com on its options page (see [Install](#install)), and Gemini and Copilot only once they are granted there too (see [web-agents.md](web-agents.md#gemini) for how Gemini is read and [web-agents.md](web-agents.md#copilot) for Copilot). Reading Copilot's chat list opens copilot.com in a background tab of the extension's own for a few seconds, like a send, because the list has no data the extension may fetch; each conversation is then read from copilot.com's page data with your cookies. The extension never reads Copilot's tokens.
+3. Reads the source: Codex, Claude Code, Grok CLI, Cursor, Copilot CLI, Gemini CLI and OpenCode from their local logs and databases on this machine (see [Coding CLIs](#coding-clis)), ChatGPT, claude.ai, Grok, Gemini and Copilot live through the Tincan Chrome extension in your logged-in Chrome. Grok is read only once you grant the extension grok.com on its options page (see [Install](#install)), and Gemini and Copilot only once they are granted there too (see [web-agents.md](web-agents.md#gemini) for how Gemini is read and [web-agents.md](web-agents.md#copilot) for Copilot). Reading Copilot's chat list opens copilot.com in a background tab of the extension's own for a few seconds, like a send, because the list has no data the extension may fetch; each conversation is then read from copilot.com's page data with your cookies. The extension never reads Copilot's tokens.
 4. Fills in a fixed reply template and attaches the images.
 
 By default, lookups cover the 50 most recent conversations per source, up to 30 days old. You can change that window (see [Window](#window)).
 
-It answers about what you typed, not what your agents typed. Codex `codex exec` runs, Claude Code SDK runs and grok-cli wake runs are left out, and so are the ChatGPT, claude.ai, Grok, Gemini and Copilot conversations that the chatgpt-web, claude-web, grok-web, gemini-web and copilot-web agents sent messages into (they list them in `~/.config/tincan/web-agent-<site>-conversations.json`, ids only). `tincan history <source> --all` includes them, marked as automated.
+It answers about what you typed, not what your agents typed. Codex `codex exec` runs, Claude Code SDK runs, the wake runs of command-woken CLI teammates (grok-cli, cursor-cli, copilot-cli, gemini-cli, opencode) and OpenCode subagent tasks are left out, and so are the ChatGPT, claude.ai, Grok, Gemini and Copilot conversations that the chatgpt-web, claude-web, grok-web, gemini-web and copilot-web agents sent messages into (they list them in `~/.config/tincan/web-agent-<site>-conversations.json`, ids only). `tincan history <source> --all` includes them, marked as automated.
 
 ## Grok CLI
 
@@ -26,6 +26,24 @@ The grok-cli teammate's wake ([grok-cli.md](grok-cli.md)) runs Grok with a Grok 
 - it ran with the wake's sandbox profile (`tincan-wake`), or with a wake home's `.grok` as its Grok home.
 
 The reader looks for wake lists and homes only in `~/.config/tincan`, so keep a grok-cli teammate's tincan config there.
+
+## Coding CLIs
+
+Cursor, Copilot CLI, Gemini CLI and OpenCode are read from their own stores on this machine, never through a model, the same way as Grok CLI. Each reader honors the CLI's own home override, so it reads the same place the CLI writes. Prompts are what you typed: the context blocks, reminders and expanded file contents each CLI adds are skipped, and so are tool calls and tool output. The reply is the last thing the model said in that turn. If a store is missing, the reply is "No <source> history was found on this machine". Images are not read from these sources yet.
+
+| Source | Store | Override |
+|---|---|---|
+| `cursor-cli` | `~/.cursor/chats/<hash>/<session id>/`: `meta.json` (working directory, times) and `store.db`, a SQLite database of message blobs | `$CURSOR_CONFIG_DIR`, then `$XDG_CONFIG_HOME/cursor` |
+| `cursor-ide` | `state.vscdb` in Cursor's `User/globalStorage` (`~/Library/Application Support/Cursor` on macOS, `~/.config/Cursor` on Linux), a SQLite key/value database whose `composerData:` and `bubbleId:` rows hold the editor's chats | none |
+| `copilot-cli` | `~/.copilot/session-state/<session id>/`: `workspace.yaml` (working directory, name, times) and `events.jsonl` | `$COPILOT_HOME` |
+| `gemini-cli` | `~/.gemini/tmp/<project>/chats/session-*.jsonl` (older versions: `session-*.json`), with `.project_root` naming the project's directory. Subagent sessions are skipped. Antigravity's store is not read | `$GEMINI_CLI_HOME` (its `.gemini`) |
+| `opencode` | `~/.local/share/opencode/opencode.db`, a SQLite database (`session`, `message` and `part` tables) | `$XDG_DATA_HOME`, `$OPENCODE_DB` |
+
+Cursor and OpenCode keep their SQLite databases open and write recent chats to the `-wal` file first, so the reader never opens the original. It copies the database with its `-wal` and `-shm` files into a new private (0700) temporary directory, reads the copy, and deletes it after every read, including one that fails.
+
+Say "CLI" for the terminal tools: "what did I ask Gemini about rent" reads your gemini.google.com chats, and "what did I ask gemini cli about the Makefile" reads Gemini CLI sessions. The same goes for Copilot (copilot.com) and Copilot CLI. "Cursor" alone means the editor; say "Cursor CLI" or `cursor-agent` for the terminal one.
+
+A session is a wake run, left out unless `--all`, when its id is in any `~/.config/tincan/<name>.wake-sessions` list or its working directory is a wake's working directory (the list's `workdir` line) or inside a wake home (`~/.config/tincan/<name>.wake`), as for Grok CLI. OpenCode sessions with a parent session are subagent tasks and are treated the same way. Sessions in the history service's own scratch directory are never reported.
 
 ## Allowlist
 
@@ -75,7 +93,7 @@ The JSON may also start on the marker line: `query: {"source": "codex", "mode": 
 
 The object takes only these fields, the same schema the query step produces:
 
-- `source`: `chatgpt`, `claude-ai`, `grok`, `gemini`, `copilot`, `codex`, `claude-code` or `grok-cli` (required). `grok` is your own Grok chats on grok.com; `grok-cli` is your Grok CLI sessions on this machine. `gemini` is the Gemini app and website (gemini.google.com), not the Gemini CLI. `copilot` is Microsoft Copilot with a personal Microsoft account (copilot.microsoft.com, now copilot.com), not GitHub Copilot.
+- `source`: `chatgpt`, `claude-ai`, `grok`, `gemini`, `copilot`, `codex`, `claude-code`, `grok-cli`, `cursor-cli`, `cursor-ide`, `copilot-cli`, `gemini-cli` or `opencode` (required). `grok` is your own Grok chats on grok.com; `grok-cli` is your Grok CLI sessions on this machine. `gemini` is the Gemini app and website (gemini.google.com); `gemini-cli` is the Gemini CLI. `copilot` is Microsoft Copilot with a personal Microsoft account (copilot.microsoft.com, now copilot.com); `copilot-cli` is the GitHub Copilot CLI.
 - `mode`: `latest`, `search` or `conversation` (required).
 - `terms`: the words to search for, up to 8 of up to 100 bytes each, none blank (only with `search`).
 - `conversation_id`: the conversation to read (only with `conversation`).
@@ -136,9 +154,9 @@ After install, check it from another agent: `tincan ask history "what was the la
 
 ## Privacy
 
-- The service reads your chats. That is its whole job. By default every joined agent may ask it, so any agent on your relay can read your conversation history. If some of your agents should not, write the allowlist file and list only the ones you trust. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on your machine (such as the Codex wake, which runs `tincan history codex`, or the grok-cli wake) can read local Codex, Claude Code and Grok CLI history directly.
+- The service reads your chats. That is its whole job. By default every joined agent may ask it, so any agent on your relay can read your conversation history. If some of your agents should not, write the allowlist file and list only the ones you trust. The allowlist governs requests to the history agent, not local shell access: an agent with a shell on your machine (such as the Codex wake, which runs `tincan history codex`, or the grok-cli wake) can read local Codex, Claude Code, Grok CLI, Cursor, Copilot CLI, Gemini CLI and OpenCode history directly.
 - With an allowlist file, access is checked on the whole relay-recorded chain, in Go, before any LLM sees the request.
-- The LLM step sees only the question text, and a structured query skips it entirely. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the Codex, Claude Code and Grok CLI readers never report. Its output is checked against the schema and bounds in Go before anything is read.
+- The LLM step sees only the question text, and a structured query skips it entirely. It runs as `codex exec --sandbox read-only` with `--ignore-user-config` (so no MCP servers from `~/.codex/config.toml`, including agent-tincan), `-c mcp_servers={}`, plugins, apps, the shell tool, browser use, computer use, image generation and web search disabled, `--ephemeral` (no session file), approvals off, from an empty scratch directory under `~/.config/tincan/history-scratch` that the local CLI readers never report. Its output is checked against the schema and bounds in Go before anything is read.
 - Retrieved chat content is never sent to an LLM. Replies are filled in from a fixed template in Go, so text inside your chats cannot steer the service.
 - Images are written to a private per-request temporary directory (0700, files 0600), uploaded to the relay, and the directory is removed after the reply, including on errors. On the relay they follow its attachment retention.
 - Chrome is never quit or restarted. Live reads use the extension's fixed read operations with your existing session; no cookie or token leaves the browser.
@@ -150,10 +168,10 @@ Replies and what to do:
 - "Declined: X is not on the history allowlist": add X to `~/.config/tincan/history-allow.txt` if you want it to have access.
 - "Declined: this request came through X, which is not on the history allowlist": an allowed agent was asked by X and passed the question on. Ask X's owner, or add X.
 - "Declined: the history agent could not read its allowlist": fix the file's permissions or the bad name in it. The log says which.
-- "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing I asked ChatGPT? send the image".
+- "Please ask a clearer question naming ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Grok CLI, Cursor, Copilot CLI, Gemini CLI or OpenCode": the query step could not tell what was asked, or asked for something out of bounds. Rephrase, for example "what was the last thing I asked ChatGPT? send the image".
 - "The structured query was not valid" or "The structured query is too long": the request started with a `query:` line but its JSON was not one object with only the accepted fields in bounds, or the request was over 4000 bytes. The reply lists the fields; see [Structured queries](#structured-queries).
 - "its query step failed": `codex exec` did not run. Check that `codex` is on the service's `PATH` and logged in (`codex login status`), then see `~/Library/Logs/tincan-history.log`.
-- "No Codex history was found on this machine" (on the CLI, "no Codex history found in ~/.codex"; the same for Claude Code and Grok CLI): that tool has not been used on this machine yet, or keeps its history elsewhere (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`; the service reads them from its own environment).
+- "No Codex history was found on this machine" (on the CLI, "no Codex history found in ~/.codex"; the same for Claude Code, Grok CLI and the [coding CLIs](#coding-clis)): that tool has not been used on this machine yet, or keeps its history elsewhere (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME` and the overrides in the coding CLIs table; the service reads them from its own environment).
 - "source unavailable: chatgpt: Chrome is not running": start Chrome. Local sources still work.
 - "source unavailable: ...: the Tincan Chrome extension is not connected": install or enable the extension, then run `tincan history install` again.
 - "source unavailable: ...: not logged in to chatgpt.com in Chrome" (or claude.ai, grok.com, gemini.google.com): log in in Chrome. Gemini is read with the first Google account signed in to Chrome.

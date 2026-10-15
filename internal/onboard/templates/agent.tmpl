@@ -8,7 +8,7 @@ Service.
 Never print a secret value. Name the wake.json field that holds a secret and
 say to set it in the file only. Wake messages carry only the waiting counts.
 Fresh-session kinds (freshSession in onboard.go: hermes, openclaw, codex,
-gemini-cli, grok-cli) must carry instructions.fresh. They also commonly share a machine with another
+gemini-cli, grok-cli, copilot-cli, cursor-cli) must carry instructions.fresh. They also commonly share a machine with another
 agent, so every tincan command in their join, setup and self-heal lines
 carries a per-agent TINCAN_CONFIG (template "cfg"), their MCP entries set that
 env, and their rejoin names the agent; OwnConfig is set for them.
@@ -163,8 +163,16 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 {{template "instructions.codex" .}}
 {{- end -}}
 
+{{- define "instructions.copilot-cli" -}}
+{{template "instructions.codex" .}}
+{{- end -}}
+
+{{- define "instructions.cursor-cli" -}}
+{{template "instructions.codex" .}}
+{{- end -}}
+
 {{- define "instructions.history" -}}
-{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
+{{.Name}} is a service (tincan history serve), not a model, so there is nothing to paste into a model. It answers teammates' questions about what {{.Owner}} asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Cursor (CLI and IDE), OpenCode, and the Gemini, Copilot and Grok CLIs, with the images from that turn attached. Only agents on its allowlist may ask, and every agent in a request's chain must be on it.
 {{- end -}}
 
 {{- define "instructions.council" -}}
@@ -340,8 +348,32 @@ On the relay host, in wake.json: set {{.Name}} to method "command". No secret fi
 Put the standing instructions in AGENTS.md in the workdir (~/.config/tincan/{{.Name}}.wake/work), or in the prompt the listener passes.
 {{- end -}}
 
+{{- define "setup.copilot-cli" -}}
+Install GitHub Copilot CLI (copilot) on that machine, on a Copilot subscription. copilot --version must print "GitHub Copilot CLI X.Y.Z"; the wake refuses anything else. This needs a relay from this release; on an older relay, invite without --kind.
+The wake runs copilot with COPILOT_HOME=~/.config/tincan/{{.Name}}.wake/.copilot, so none of {{.OwnerPoss}} own MCP servers, plugins or hooks load. There is no MCP step: before every run the wake writes the agent-tincan server itself (the tincan on the listener's PATH, or TINCAN_BIN, running tincan mcp with this teammate's TINCAN_CONFIG). Keep the wake home's .copilot/mcp-config.json empty, or list what you add there in TINCAN_WAKE_ALLOWED_SERVERS.
+Log in once, in the wake home: COPILOT_HOME=~/.config/tincan/{{.Name}}.wake/.copilot copilot login. Or set COPILOT_GITHUB_TOKEN in the listener's environment only, never in chat or wake.json.
+Get the wake script: copy examples/copilot-cli/copilot-wake.sh and examples/lib/tincan-wake-lib.sh from the agent-tincan repo (they are not in the release downloads) into ~/bin, and chmod +x ~/bin/copilot-wake.sh. It takes a lock, refuses to run unless copilot is GitHub Copilot CLI and its MCP config holds exactly one agent-tincan server with this teammate's TINCAN_CONFIG, and backs off and tells TINCAN_WAKE_OPERATOR once when runs keep failing or the login expires. Reading the config needs jq or python3.
+Confinement: the wake runs copilot -p with one --allow-tool 'agent-tincan(<tool>)' per Agent Tincan tool, and never --allow-all-tools, --allow-all or --yolo; it clears COPILOT_ALLOW_ALL and keeps the built-in GitHub MCP servers off (--disable-builtin-mcps). A wake run reads files in its workdir (~/.config/tincan/{{.Name}}.wake/work) and does not edit files or run commands; see docs/adapters/copilot-cli.md.
+Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec ~/bin/copilot-wake.sh
+The listener runs the script whenever requests or replies are waiting; the script tells copilot to run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty.
+On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
+Put the standing instructions in AGENTS.md in the workdir (~/.config/tincan/{{.Name}}.wake/work), or in the prompt the listener passes.
+{{- end -}}
+
+{{- define "setup.cursor-cli" -}}
+Install Cursor's CLI agent (cursor-agent) on that machine. cursor-agent --version must print a build like "2026.10.14-0f9edde"; the wake refuses anything else. This needs a relay from this release; on an older relay, invite without --kind.
+There is no MCP step: before every run the wake rewrites .cursor/mcp.json (only the agent-tincan server, running tincan mcp with this teammate's TINCAN_CONFIG) and .cursor/cli.json (only the Agent Tincan tools allowed) in its workspace, ~/.config/tincan/{{.Name}}.wake/work. Wake runs use a private Cursor config directory (CURSOR_CONFIG_DIR=~/.config/tincan/{{.Name}}.wake/.cursor), so your ~/.cursor cli-config.json allow entries, mcp.json servers and hooks do not apply; the wake refuses to run if that directory's mcp.json names any server other than agent-tincan or holds a hooks.json, and wake chats stay there, out of your own Cursor history.
+Log in once: cursor-agent login. Or set CURSOR_API_KEY in the listener's environment only, never in chat or wake.json.
+Get the wake script: copy examples/cursor-cli/cursor-wake.sh and examples/lib/tincan-wake-lib.sh from the agent-tincan repo (they are not in the release downloads) into ~/bin, and chmod +x ~/bin/cursor-wake.sh. It takes a lock, refuses to run unless the MCP configs hold exactly one agent-tincan server with this teammate's TINCAN_CONFIG and the workspace has no .cursor/hooks.json, and backs off and tells TINCAN_WAKE_OPERATOR once when runs keep failing or the login expires. Reading the configs needs jq or python3.
+Confinement: the wake runs cursor-agent -p with --approve-mcps --trust and never --force or --yolo, so only the Agent Tincan tools are approved. If runs hang, set a shorter TINCAN_WAKE_TIMEOUT in the listener's environment; see docs/adapters/cursor-cli.md.
+Keep a listener running on that machine (launchd, systemd or a terminal): {{template "cfg" .}}tincan listen --exec ~/bin/cursor-wake.sh
+The listener runs the script whenever requests or replies are waiting; the script tells cursor-agent to run check_inbox, finish any work a reply was waiting on, handle and reply to every request, and repeat until the inbox is empty.
+On the relay host, in wake.json: set {{.Name}} to method "command". No secret fields.
+Put the standing instructions in AGENTS.md in the workdir (~/.config/tincan/{{.Name}}.wake/work), or in the prompt the listener passes.
+{{- end -}}
+
 {{- define "setup.history" -}}
-Run it on the machine where {{.Owner}} uses Chrome, Codex, Claude Code and Grok CLI; it reads their history there. codex must be installed and logged in for the query step (check with codex login status).
+Run it on the machine where {{.Owner}} uses Chrome, Codex, Claude Code, Cursor (CLI and IDE), OpenCode, and the Gemini, Copilot and Grok CLIs; it reads their history there. codex must be installed and logged in for the query step (check with codex login status).
 Install the native messaging host and the service definition: tincan history install (with --extension-dir <folder> when the extension is loaded unpacked, see below). It writes the Chrome native messaging host manifest and the service definition (a launchd agent on macOS, a systemd user unit on Linux), then prints the command that starts the service. It starts nothing itself.
 Start the service with the printed command (macOS: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.history.plist; Linux: systemctl --user daemon-reload && systemctl --user enable --now tincan-history.service).
 The only human step: install the Tincan Chrome extension from the Chrome Web Store (<Chrome Web Store link, not yet published>) and accept its permission dialog (chatgpt.com, claude.ai, native messaging). Until the store listing is live: unzip tincan-history-extension.zip from the release into a folder you will keep (for example ~/tincan-extension), open chrome://extensions, turn on Developer mode, click Load unpacked and pick that folder, then run tincan history install --extension-dir ~/tincan-extension (from a repo checkout, the extension/ folder works the same way).
@@ -451,7 +483,9 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.codex"}}OpenAI Codex CLI woken by tincan listen{{end -}}
 {{- define "title.gemini-cli"}}Gemini through Antigravity CLI or Gemini CLI, woken by tincan listen{{end -}}
 {{- define "title.grok-cli"}}xAI Grok Build CLI woken by tincan listen{{end -}}
-{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats{{end -}}
+{{- define "title.copilot-cli"}}GitHub Copilot CLI woken by tincan listen{{end -}}
+{{- define "title.cursor-cli"}}Cursor CLI agent woken by tincan listen{{end -}}
+{{- define "title.history"}}History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Cursor, OpenCode and Gemini/Copilot/Grok CLI chats{{end -}}
 {{- define "title.notes"}}Notes service for Agent Notes on the Mac{{end -}}
 {{- define "title.council"}}Council service that puts one question to every model on the team{{end -}}
 {{- define "title.chatgpt-web"}}ChatGPT as a teammate, through your logged-in browser{{end -}}

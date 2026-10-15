@@ -14,7 +14,7 @@ import (
 // and hosting shapes and owner-configured frameworks have none. A new service
 // kind without a line fails here.
 func TestStockGoodAtCoversServiceAndProductKinds(t *testing.T) {
-	products := []string{KindClaudeCode, KindCodex, KindGeminiCLI, KindGrokCLI, KindChatGPT, KindSesame}
+	products := []string{KindClaudeCode, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindChatGPT, KindSesame}
 	none := []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindScheduled, KindGeneric, KindHermes, KindOpenClaw}
 	want := slices.Clone(products)
 	for _, k := range Kinds {
@@ -52,7 +52,7 @@ func TestStockGoodAtCoversServiceAndProductKinds(t *testing.T) {
 // The lines that were wrong now name what the kind actually does.
 func TestStockGoodAtLineContent(t *testing.T) {
 	history := StockGoodAt("", KindHistory)
-	for _, s := range []string{"ChatGPT", "claude.ai", "Claude Code", "Grok CLI", "images"} {
+	for _, s := range []string{"ChatGPT", "claude.ai", "Claude Code", "Grok CLI", "Cursor", "OpenCode", "Gemini/Copilot/Grok CLI", "images"} {
 		if !strings.Contains(history, s) {
 			t.Errorf("history line %q lacks %q", history, s)
 		}

@@ -117,9 +117,9 @@ A5. Join this machine's own agent (you), if you are one of the team:
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
-    history, council, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
+    copilot-cli, cursor-cli, history, council, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
     copilot-web, dot-web, scheduled, generic.
-    (gemini-cli, grok-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web and scheduled need a relay from this
+    (gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>. dot-web is the exception: web serve
     --site dots refuses to start unless the relay records the dot-web kind,
@@ -217,6 +217,11 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
     - Grok Build CLI (grok-cli teammate): not in ~/.grok. It runs in a wake home of
                      its own (~/.config/tincan/<your-name>.wake); follow the setup
                      steps in your onboard block (B4) and docs/adapters/grok-cli.md.
+    - GitHub Copilot CLI (copilot-cli teammate) and Cursor CLI (cursor-cli teammate):
+                     no MCP step. Their wake scripts write the agent-tincan server
+                     before every run into a config folder of their own, so there is
+                     nothing to add to ~/.copilot or ~/.cursor. Follow your onboard block (B4) and
+                     docs/adapters/copilot-cli.md or docs/adapters/cursor-cli.md.
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}

@@ -1,6 +1,7 @@
 // Package history reads Matt's conversations with ChatGPT, claude.ai, Grok,
-// Gemini, Copilot, Codex, Claude Code and Grok CLI so the history agent can answer "what did Matt last ask"
-// and send back the images from that turn.
+// Gemini, Copilot, Codex, Claude Code, Grok CLI, Cursor (CLI and IDE),
+// Copilot CLI, Gemini CLI and OpenCode so the history agent can answer
+// "what did Matt last ask" and send back the images from that turn.
 //
 // Every source is an adapter behind Reader. Adapters share one Query shape,
 // one recency window and one image pipeline: readers return image bytes,
@@ -39,6 +40,11 @@ const (
 	SourceGemini     Source = "gemini"
 	SourceCopilot    Source = "copilot"
 	SourceGrokCLI    Source = "grok-cli"
+	SourceCursorCLI  Source = "cursor-cli"
+	SourceCursorIDE  Source = "cursor-ide"
+	SourceCopilotCLI Source = "copilot-cli"
+	SourceGeminiCLI  Source = "gemini-cli"
+	SourceOpenCode   Source = "opencode"
 	// SourcePerplexity is www.perplexity.ai. It fronts the perplexity-web
 	// agent only and is not a history source (not in Sources).
 	SourcePerplexity Source = "perplexity"
@@ -49,7 +55,8 @@ const (
 
 // Sources lists every valid history Source: the live sites that are
 // history sources, in the site table's order, then the local sources.
-var Sources = append(historySiteSources(), SourceCodex, SourceClaudeCode, SourceGrokCLI)
+var Sources = append(historySiteSources(), SourceCodex, SourceClaudeCode, SourceGrokCLI,
+	SourceCursorCLI, SourceCursorIDE, SourceCopilotCLI, SourceGeminiCLI, SourceOpenCode)
 
 // Mode is what a query asks for.
 type Mode string

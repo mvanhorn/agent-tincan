@@ -42,6 +42,26 @@ func historyReader(source string) (history.Reader, error) {
 		r := history.NewGrokCLI()
 		r.Now = historyNow
 		return r, nil
+	case history.SourceCursorCLI:
+		r := history.NewCursorCLI()
+		r.Now = historyNow
+		return r, nil
+	case history.SourceCursorIDE:
+		r := history.NewCursorIDE()
+		r.Now = historyNow
+		return r, nil
+	case history.SourceCopilotCLI:
+		r := history.NewCopilotCLI()
+		r.Now = historyNow
+		return r, nil
+	case history.SourceGeminiCLI:
+		r := history.NewGeminiCLI()
+		r.Now = historyNow
+		return r, nil
+	case history.SourceOpenCode:
+		r := history.NewOpenCode()
+		r.Now = historyNow
+		return r, nil
 	}
 	return nil, fmt.Errorf("unknown history source %q (want %s)", source, history.SourceNames())
 }
@@ -51,10 +71,11 @@ func historyCmd() *cobra.Command {
 	var all, latest, asJSON bool
 	var search, id, imagesDir string
 	cmd := &cobra.Command{
-		Use:   "history <chatgpt|claude-ai|grok|gemini|copilot|codex|claude-code|grok-cli>",
-		Short: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI history",
-		Long: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code or Grok CLI history. With no mode flag it shows the latest prompt the owner typed.\n" +
-			"Unattended runs (codex exec wakes, Claude Code SDK sessions, grok-cli wakes, and chats the chatgpt-web, claude-web, grok-web, gemini-web and copilot-web agents sent into) are left out unless --all is given.\n" +
+		Use:   "history <chatgpt|claude-ai|grok|gemini|copilot|codex|claude-code|grok-cli|cursor-cli|cursor-ide|copilot-cli|gemini-cli|opencode>",
+		Short: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Grok CLI, Cursor, Copilot CLI, Gemini CLI or OpenCode history",
+		Long: "Read the owner's ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Grok CLI, Cursor (cursor-cli, cursor-ide), Copilot CLI, Gemini CLI or OpenCode history. With no mode flag it shows the latest prompt the owner typed.\n" +
+			"gemini and copilot are the web apps; gemini-cli and copilot-cli are the terminal CLIs on this machine.\n" +
+			"Unattended runs (codex exec wakes, Claude Code SDK sessions, the wake runs of command-woken CLI teammates recorded in ~/.config/tincan/<name>.wake-sessions, OpenCode subagent tasks, and chats the chatgpt-web, claude-web, grok-web, gemini-web and copilot-web agents sent into) are left out unless --all is given.\n" +
 			"chatgpt, claude-ai, grok, gemini and copilot are read live through the Tincan Chrome extension and the user's logged-in Chrome; run tincan history install once.\n" +
 			"Copilot's chat list is read from copilot.com's sidebar in a background tab the extension opens, and has no dates.\n" +
 			"Latest and search look back through the last 50 conversations, up to 30 days; --max and --days widen or narrow that\n" +
@@ -125,7 +146,7 @@ func historyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&list, "list", 20, "list the N most recent conversations with their working directory")
-	cmd.Flags().BoolVar(&all, "all", false, "include unattended runs (codex exec, Claude Code SDK, grok-cli wakes) and the web agents' chats")
+	cmd.Flags().BoolVar(&all, "all", false, "include unattended runs (codex exec, Claude Code SDK, CLI wakes) and the web agents' chats")
 	cmd.Flags().BoolVar(&latest, "latest", false, "show the latest prompt and its reply (default)")
 	cmd.Flags().StringVar(&search, "search", "", "find recent conversations whose title or a prompt contains every word")
 	cmd.Flags().StringVar(&id, "id", "", "show one conversation by id")

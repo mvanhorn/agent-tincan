@@ -29,7 +29,7 @@ var tincanCmd = regexp.MustCompile(`(?:TINCAN_CONFIG=\S+ )?tincan (?:join|rejoin
 // every generated tincan command, set it in their MCP entry, and name the
 // agent on rejoin, so a second agent never acts as the first.
 func TestSharedKindsCarryPerAgentConfig(t *testing.T) {
-	shared := []string{KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI}
+	shared := []string{KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI}
 	var roster []Member
 	for _, kind := range shared {
 		roster = append(roster, Member{Name: "a-" + kind, Kind: kind})
@@ -56,7 +56,7 @@ func TestSharedKindsCarryPerAgentConfig(t *testing.T) {
 		if !strings.Contains(setup, "TINCAN_CONFIG") || !strings.Contains(setup, "~/.config/tincan/"+name+".json") {
 			t.Errorf("%s MCP setup should set env TINCAN_CONFIG:\n%s", kind, setup)
 		}
-		if (kind == KindCodex || kind == KindGeminiCLI || kind == KindGrokCLI) && !strings.Contains(setup, prefix+"tincan listen --exec") {
+		if (kind == KindCodex || kind == KindGeminiCLI || kind == KindGrokCLI || kind == KindCopilotCLI || kind == KindCursorCLI) && !strings.Contains(setup, prefix+"tincan listen --exec") {
 			t.Errorf("codex listener lacks the per-agent config:\n%s", setup)
 		}
 		if strings.Contains(txt, "If another agent already runs on this machine") {

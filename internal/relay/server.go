@@ -301,8 +301,9 @@ func (s *Server) preparer() Preparer {
 // Connector links virtual agents (ChatGPT through the gateway).
 type Connector interface {
 	// Connect binds the virtual agent and returns a one-time login code and
-	// the public URL to add as a connector.
-	Connect(ctx context.Context, name string) (code, url string, err error)
+	// the public URL to add as a connector. Without replace it refuses a
+	// name held by a real tailnet node.
+	Connect(ctx context.Context, name string, replace bool) (code, url string, err error)
 	// Revoke drops every token the agent holds.
 	Revoke(ctx context.Context, name string) error
 }
@@ -1816,12 +1817,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Name string `json:"name"`
+		// Replace lets the connect take a name held by a real tailnet node.
+		// Optional: an older CLI omits it and gets the refusal.
+		Replace bool `json:"replace,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" {
 		writeErr(w, http.StatusBadRequest, errors.New("name is required"))
 		return
 	}
-	code, url, err := s.conn.Connect(r.Context(), in.Name)
+	code, url, err := s.conn.Connect(r.Context(), in.Name, in.Replace)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return

@@ -195,6 +195,29 @@ func TestHistoryPerplexityIsUnknownSource(t *testing.T) {
 	}
 }
 
+// The new local CLI sources are history sources: cursor-ide is accepted
+// (with no Cursor install it says so, rather than "unknown source"), and
+// an unknown source lists every valid name.
+func TestHistoryAcceptsNewCLISources(t *testing.T) {
+	historyEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	_, err := run(t, Root(), "history", "cursor-ide")
+	if err == nil || !strings.Contains(err.Error(), "no Cursor IDE history found in") || strings.Contains(err.Error(), "unknown history source") {
+		t.Fatalf("cursor-ide: err = %v", err)
+	}
+	for _, src := range []string{"cursor-cli", "copilot-cli", "gemini-cli", "opencode"} {
+		if _, err := historyReader(src); err != nil {
+			t.Errorf("%s: %v", src, err)
+		}
+	}
+	_, err = run(t, Root(), "history", "cursor")
+	if err == nil || !strings.Contains(err.Error(), `unknown history source "cursor"`) || !strings.Contains(err.Error(), "cursor-cli, cursor-ide, copilot-cli, gemini-cli or opencode") {
+		t.Fatalf("unknown source: err = %v", err)
+	}
+}
+
 // ageMascot makes the fixture's "Old mascot" Codex thread 60 days old.
 func ageMascot(t *testing.T, codexHome string) {
 	t.Helper()

@@ -38,6 +38,12 @@ func mcpConfigFiles(extra []string) []string {
 	if grokHome == "" {
 		grokHome = filepath.Join(home, ".grok")
 	}
+	// GitHub Copilot CLI reads $COPILOT_HOME/mcp-config.json, ~/.copilot
+	// by default.
+	copilotHome := os.Getenv("COPILOT_HOME")
+	if copilotHome == "" {
+		copilotHome = filepath.Join(home, ".copilot")
+	}
 	// The gemini-cli wake's settings name the configs its engines read:
 	// the ones it points them at, and the workspace configs in its
 	// working directory.
@@ -51,6 +57,7 @@ func mcpConfigFiles(extra []string) []string {
 		filepath.Join(home, ".cursor", "mcp.json"),
 		filepath.Join(home, ".codex", "config.toml"),
 		filepath.Join(grokHome, "config.toml"),
+		filepath.Join(copilotHome, "mcp-config.json"),
 		filepath.Join(home, ".gemini", "settings.json"),
 		// Antigravity CLI (agy), the gemini-cli teammate's default engine.
 		// agy mcp add is reported to write here; the location comes from

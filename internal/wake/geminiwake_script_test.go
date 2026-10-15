@@ -589,3 +589,34 @@ func TestGeminiWakeUpgradeNoticeAlone(t *testing.T) {
 		t.Fatalf("with work waiting: %v, %d runs\nstderr:\n%s", r.err, len(h.runs()), r.stderr)
 	}
 }
+
+// Each run's session id, from the engine's JSON output, is recorded with
+// the workdir in a private list beside the teammate's config
+// (<name>.wake-sessions), so the history agent can leave wake runs out.
+func TestGeminiWakeRecordsSessions(t *testing.T) {
+	for _, engine := range [][]string{
+		{"TINCAN_GEMINI_ALLOW_UNCONFINED=1"},
+		{"TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy-key"},
+	} {
+		t.Run(engine[0], func(t *testing.T) {
+			h := newGeminiHarness(t)
+			sid := "3f2b8c1d-6a4e-4f7b-9c0d-2e1f3a4b5c6d"
+			r := h.run(append(engine, `FAKE_STDOUT={"session_id": "`+sid+`", "response":"done"}`)...)
+			if r.err != nil {
+				t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+			}
+			sessions := filepath.Join(filepath.Dir(h.config), "gemini-cli.wake-sessions")
+			st, err := os.Stat(sessions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Mode().Perm() != 0o600 {
+				t.Errorf("session list mode %v, want 0600", st.Mode().Perm())
+			}
+			list, _ := os.ReadFile(sessions)
+			if string(list) != "workdir "+canonical(t, h.wd)+"\n"+sid+"\n" {
+				t.Fatalf("session list:\n%s\nwant the workdir and %s", list, sid)
+			}
+		})
+	}
+}

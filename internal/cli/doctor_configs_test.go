@@ -506,3 +506,49 @@ func TestFindMCPConfigsReadsGrokWakeHome(t *testing.T) {
 		t.Fatal("doctor with GROK_HOME at the wake home did not read its config.toml")
 	}
 }
+
+// GitHub Copilot CLI keeps its MCP servers in ~/.copilot/mcp-config.json
+// ($COPILOT_HOME when set).
+func TestFindMCPConfigsReadsCopilotConfig(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "tincan")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"mcpServers":{"agent-tincan":{"type":"local","command":"` + exe + `","args":["mcp"],"env":{"TINCAN_CONFIG":"/Users/x/.config/tincan/copilot-cli.json"},"tools":["*"]}}}`)
+	write := func(home string) string {
+		t.Helper()
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f := filepath.Join(home, "mcp-config.json")
+		if err := os.WriteFile(f, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	entriesIn := func(f string) []mcpConfigEntry {
+		var out []mcpConfigEntry
+		for _, e := range findMCPConfigs(nil) {
+			if e.File == f {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("COPILOT_HOME", "")
+	f := write(filepath.Join(home, ".copilot"))
+	es := entriesIn(f)
+	if len(es) != 1 || es[0].Name != "agent-tincan" || es[0].Command != exe || len(es[0].Problems) != 0 {
+		t.Fatalf("~/.copilot/mcp-config.json entries = %+v", es)
+	}
+	if c := configCheck(es, exe); c.Status != "ok" {
+		t.Fatalf("copilot entry: got %+v", c)
+	}
+	t.Setenv("COPILOT_HOME", filepath.Join(dir, "copilot-home"))
+	if es := entriesIn(write(filepath.Join(dir, "copilot-home"))); len(es) != 1 {
+		t.Fatalf("$COPILOT_HOME/mcp-config.json entries = %+v", es)
+	}
+}

@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -28,16 +30,28 @@ func (v virtualResolver) WhoIs(ctx context.Context, addr string) (Node, error) {
 	return v.Resolver.WhoIs(ctx, addr)
 }
 
+// ErrRealNodeBound refuses a virtual bind that would take over the name of
+// an agent joined from a real tailnet node.
+var ErrRealNodeBound = errors.New("connecting would take its name from that machine; pass --replace to move it to the gateway")
+
 // BindVirtual joins a virtual agent (for example chatgpt) directly, without
 // an invite code. Only the relay calls this, when an admin connects the
-// gateway.
-func (d *Directory) BindVirtual(ctx context.Context, name string) error {
+// gateway. A name already bound to a real tailnet node is refused unless
+// replace is set; a name that is already virtual rebinds either way.
+func (d *Directory) BindVirtual(ctx context.Context, name string, replace bool) error {
 	if !nameRE.MatchString(name) {
 		return ErrUnknownAgent
 	}
-	prev, _, err := d.Agent(ctx, name)
+	// Hold the join lock so an invite redeemed for this name cannot land
+	// between the check below and the write.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	prev, ok, err := d.Agent(ctx, name)
 	if err != nil {
 		return err
+	}
+	if ok && !replace && !strings.HasPrefix(prev.NodeID, VirtualPrefix) {
+		return fmt.Errorf("%q is a tailnet agent on %s: %w", name, prev.NodeName, ErrRealNodeBound)
 	}
 	return d.store.PutAgent(ctx, Agent{Name: name, NodeID: VirtualAddr(name), NodeName: VirtualAddr(name), JoinedAt: d.cfg.Now(), Kind: prev.Kind})
 }

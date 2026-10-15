@@ -36,6 +36,7 @@ const neutralConnectSteps = `%q is ready to connect.
 
 func connectCmd() *cobra.Command {
 	var socket, relayURL string
+	var replace bool
 	cmd := &cobra.Command{
 		Use:   "connect <name>",
 		Short: "Connect a cloud agent that cannot join the tailnet (ChatGPT, Sesame) through the gateway (admin)",
@@ -49,7 +50,11 @@ func connectCmd() *cobra.Command {
 				Code string `json:"code"`
 				URL  string `json:"url"`
 			}
-			if err := r.Raw(cmd.Context(), "POST", "/v1/admin/connect", map[string]string{"name": args[0]}, &out); err != nil {
+			in := struct {
+				Name    string `json:"name"`
+				Replace bool   `json:"replace,omitempty"`
+			}{Name: args[0], Replace: replace}
+			if err := r.Raw(cmd.Context(), "POST", "/v1/admin/connect", in, &out); err != nil {
 				return err
 			}
 			steps, ok := connectSteps[onboard.RuntimeKind(args[0])]
@@ -62,5 +67,6 @@ func connectCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
+	cmd.Flags().BoolVar(&replace, "replace", false, "take over a name held by an agent joined from a tailnet machine")
 	return cmd
 }

@@ -306,7 +306,7 @@ func TestRemoveCancelsRequestsTheAgentSent(t *testing.T) {
 
 type failingConnector struct{}
 
-func (failingConnector) Connect(context.Context, string) (string, string, error) {
+func (failingConnector) Connect(context.Context, string, bool) (string, string, error) {
 	return "", "", errors.New("unused")
 }
 func (failingConnector) Revoke(context.Context, string) error { return errors.New("token store down") }
@@ -1373,7 +1373,7 @@ func TestAgentsListShowsNodeToAdminOnly(t *testing.T) {
 	var inv struct{ Code string }
 	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"dot"}`, http.StatusOK, &inv)
 	h.do(dotAddr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
-	if err := h.srv.dir.BindVirtual(t.Context(), "chatgpt"); err != nil {
+	if err := h.srv.dir.BindVirtual(t.Context(), "chatgpt", false); err != nil {
 		t.Fatal(err)
 	}
 

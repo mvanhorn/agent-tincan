@@ -323,9 +323,10 @@ type Connector struct {
 	Base  string
 }
 
-// Connect binds the virtual agent and mints a login code.
-func (c Connector) Connect(ctx context.Context, name string) (string, string, error) {
-	if err := c.Dir.BindVirtual(ctx, name); err != nil {
+// Connect binds the virtual agent and mints a login code. It refuses a name
+// held by a real tailnet node unless replace is set.
+func (c Connector) Connect(ctx context.Context, name string, replace bool) (string, string, error) {
+	if err := c.Dir.BindVirtual(ctx, name, replace); err != nil {
 		return "", "", err
 	}
 	code, err := c.OAuth.MintLoginCode(ctx, name)

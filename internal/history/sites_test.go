@@ -155,7 +155,7 @@ func TestSiteTableNames(t *testing.T) {
 	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity, copilot or dots" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web, copilot-web or dot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
-	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code or grok-cli" {
+	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code, grok-cli, cursor-cli, cursor-ide, copilot-cli, gemini-cli or opencode" {
 		t.Fatalf("sources %q", SourceNames())
 	}
 	want := map[Source][3]string{
@@ -222,7 +222,8 @@ func TestConversationRefHosts(t *testing.T) {
 // Perplexity fronts a web agent only: it is not a history source, has no
 // list or file operation, and the history prose leaves it out.
 func TestPerplexityIsNotAHistorySource(t *testing.T) {
-	want := []Source{SourceChatGPT, SourceClaudeAI, SourceGrok, SourceGemini, SourceCopilot, SourceCodex, SourceClaudeCode, SourceGrokCLI}
+	want := []Source{SourceChatGPT, SourceClaudeAI, SourceGrok, SourceGemini, SourceCopilot, SourceCodex, SourceClaudeCode, SourceGrokCLI,
+		SourceCursorCLI, SourceCursorIDE, SourceCopilotCLI, SourceGeminiCLI, SourceOpenCode}
 	if len(Sources) != len(want) {
 		t.Fatalf("Sources = %v", Sources)
 	}

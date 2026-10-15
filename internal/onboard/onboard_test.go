@@ -316,6 +316,75 @@ func TestGrokCLIBlock(t *testing.T) {
 	}
 }
 
+// copilot-cli and cursor-cli are command-woken fresh-session kinds: their
+// blocks copy the wake script and library, run the listener with this
+// teammate's config, set wake.json to command, and state the confinement:
+// only the Agent Tincan tools are approved, never blanket approval.
+func TestCopilotAndCursorCLIBlocks(t *testing.T) {
+	cases := []struct {
+		kind, title string
+		want, never []string
+	}{
+		{KindCopilotCLI, "Copilot", []string{
+			"copilot --version", "COPILOT_HOME=~/.config/tincan/copilot-cli.wake/.copilot copilot login", "COPILOT_GITHUB_TOKEN",
+			"examples/copilot-cli/copilot-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x ~/bin/copilot-wake.sh",
+			"TINCAN_CONFIG=~/.config/tincan/copilot-cli.json tincan listen --exec ~/bin/copilot-wake.sh",
+			"--allow-tool 'agent-tincan(<tool>)'", "--disable-builtin-mcps",
+			`method "command"`, "docs/adapters/copilot-cli.md",
+		}, []string{"--allow-all-tools", "--yolo"}},
+		{KindCursorCLI, "Cursor", []string{
+			"cursor-agent --version", "cursor-agent login", "CURSOR_API_KEY",
+			"examples/cursor-cli/cursor-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x ~/bin/cursor-wake.sh",
+			"TINCAN_CONFIG=~/.config/tincan/cursor-cli.json tincan listen --exec ~/bin/cursor-wake.sh",
+			"CURSOR_CONFIG_DIR", "hooks.json", "TINCAN_WAKE_TIMEOUT",
+			`method "command"`, "docs/adapters/cursor-cli.md",
+		}, []string{"--force", "--yolo"}},
+	}
+	for _, c := range cases {
+		k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: c.kind, Kind: c.kind}}})
+		a := block(t, k, c.kind)
+		if a.Kind != c.kind || a.Wake != "command" {
+			t.Fatalf("block kind %q wake %q, want %s and command", a.Kind, a.Wake, c.kind)
+		}
+		if !strings.Contains(a.Instructions, "drain the whole inbox") {
+			t.Errorf("%s instructions lack the fresh-session rules:\n%s", c.kind, a.Instructions)
+		}
+		setup := strings.Join(a.Setup, "\n")
+		for _, want := range c.want {
+			if !strings.Contains(setup, want) {
+				t.Errorf("%s setup missing %q:\n%s", c.kind, want, setup)
+			}
+		}
+		// The block may say what the wake never passes, but never as a
+		// flag to run with: each forbidden flag appears only after "never".
+		for _, bad := range c.never {
+			for i := strings.Index(setup, bad); i >= 0; {
+				if !strings.Contains(setup[max(0, i-40):i], "never") {
+					t.Errorf("%s setup renders %q outside a never clause:\n%s", c.kind, bad, setup)
+				}
+				j := strings.Index(setup[i+len(bad):], bad)
+				if j < 0 {
+					break
+				}
+				i += len(bad) + j
+			}
+		}
+		// The runtime name alone maps to the kind, and the recipe invites with it.
+		k = build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: c.kind}}})
+		if b := block(t, k, c.kind); b.Kind != c.kind {
+			t.Fatalf("runtime name %s resolved to %q", c.kind, b.Kind)
+		}
+		r := recipe(t, k, c.kind)
+		all := strings.Join(r.Steps, "\n")
+		if !strings.Contains(r.Title, c.title) || !strings.Contains(all, "tincan invite <name> --kind "+c.kind) {
+			t.Fatalf("%s recipe: %+v", c.kind, r)
+		}
+		if !strings.Contains(all, "tincan listen --exec ~/bin/") {
+			t.Errorf("%s recipe lacks the listener line:\n%s", c.kind, all)
+		}
+	}
+}
+
 func TestCodexSetupUsesWakeScript(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "codex", Wake: "command", Kind: "codex"}}})
 	setup := strings.Join(block(t, k, "codex").Setup, "\n")
@@ -476,7 +545,7 @@ func TestHistoryBlock(t *testing.T) {
 	if want := "TINCAN_CONFIG=~/.config/tincan/history.json tincan join <code> --relay " + relayURL; a.Join != want {
 		t.Errorf("history join = %q, want %q", a.Join, want)
 	}
-	for _, want := range []string{"service", "nothing to paste", "asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI"} {
+	for _, want := range []string{"service", "nothing to paste", "asked ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Cursor (CLI and IDE), OpenCode, and the Gemini, Copilot and Grok CLIs"} {
 		if !strings.Contains(a.Instructions, want) {
 			t.Errorf("history instructions missing %q:\n%s", want, a.Instructions)
 		}
@@ -504,7 +573,7 @@ func TestHistoryBlock(t *testing.T) {
 		t.Errorf("history setup assumes a repo checkout:\n%s", setup)
 	}
 	r := recipe(t, k, "history")
-	if want := "History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code and Grok CLI chats"; r.Title != want {
+	if want := "History service for ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Cursor, OpenCode and Gemini/Copilot/Grok CLI chats"; r.Title != want {
 		t.Errorf("history recipe title = %q, want %q", r.Title, want)
 	}
 	all := strings.Join(r.Steps, "\n")

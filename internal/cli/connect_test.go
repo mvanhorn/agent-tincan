@@ -145,3 +145,49 @@ func TestConnectWithoutGatewayNamesTheFlag(t *testing.T) {
 		t.Errorf("error = %q", msg)
 	}
 }
+
+// Connecting a name a real tailnet agent holds is refused and names
+// --replace; the agent keeps its node, and a product-scoped name connects.
+// With --replace the name moves to the gateway and keeps its stored kind.
+func TestConnectRefusesRealAgentName(t *testing.T) {
+	m := gatewayMesh(t)
+	m.JoinOnMachineOf(t, "instinct", "claude-code")
+	if _, err := run(t, kindCmd(), "claude-code", "claude-code", "--relay", m.URL("admin")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := run(t, connectCmd(), "claude-code", "--relay", m.URL("admin"))
+	if err == nil || !strings.Contains(err.Error(), "--replace") {
+		t.Fatalf("connect claude-code: %v", err)
+	}
+	if a, _, _ := m.Dir.Agent(t.Context(), "claude-code"); a.NodeID != "nINST" {
+		t.Fatalf("refused connect changed the node: %+v", a)
+	}
+	connectOut(t, m, "claude-ai")
+
+	if _, err := run(t, connectCmd(), "claude-code", "--replace", "--relay", m.URL("admin")); err != nil {
+		t.Fatalf("connect --replace: %v", err)
+	}
+	a, _, _ := m.Dir.Agent(t.Context(), "claude-code")
+	if a.NodeID != "virtual:claude-code" || a.Kind != "claude-code" {
+		t.Fatalf("after --replace: %+v", a)
+	}
+}
+
+// Reconnecting a name that is already on the gateway needs no --replace.
+func TestReconnectVirtualNameNeedsNoReplace(t *testing.T) {
+	m := gatewayMesh(t)
+	connectOut(t, m, "claude-ai")
+	connectOut(t, m, "claude-ai")
+}
+
+// An older CLI sends only the name. It gets the refusal, not a takeover.
+func TestConnectWithoutReplaceFieldIsRefused(t *testing.T) {
+	m := gatewayMesh(t)
+	err := m.Client(t, "admin").Raw(t.Context(), "POST", "/v1/admin/connect", map[string]string{"name": "muse"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "--replace") {
+		t.Fatalf("connect muse without replace: %v", err)
+	}
+	if a, _, _ := m.Dir.Agent(t.Context(), "muse"); a.NodeID != "nMUSE" {
+		t.Fatalf("muse lost its node: %+v", a)
+	}
+}

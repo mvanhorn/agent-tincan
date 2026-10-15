@@ -1,0 +1,11 @@
+{"sessionId": "0g0g0000-0000-4000-8000-000000000001", "projectHash": "x", "startTime": "2026-09-21T08:00:00.000Z", "lastUpdated": "2026-09-21T08:00:00.000Z", "kind": "main"}
+{"id": "u1", "timestamp": "2026-09-21T08:00:00.000Z", "type": "user", "content": [{"text": "why does the Makefile rebuild everything"}]}
+{"id": "g1", "timestamp": "2026-09-21T08:00:05.000Z", "type": "gemini", "content": "", "toolCalls": [{"id": "t1", "name": "read_file", "args": {}, "status": "success", "timestamp": "2026-09-21T08:00:04.000Z", "result": [{"text": "all: build"}]}]}
+{"$patch": {"id": "g1", "content": "The all target has no prerequisites list, so it always runs."}}
+{"id": "u2", "timestamp": "2026-09-21T09:00:00.000Z", "type": "user", "content": [{"text": "an abandoned question"}]}
+{"id": "g2", "timestamp": "2026-09-21T09:00:05.000Z", "type": "gemini", "content": "an abandoned answer"}
+{"$rewindTo": "u2"}
+{"id": "i1", "timestamp": "2026-09-21T09:30:00.000Z", "type": "info", "content": "Switched model"}
+{"id": "u3", "timestamp": "2026-09-21T09:50:00.000Z", "type": "user", "content": [{"text": "<expanded file contents>"}], "displayContent": [{"text": "fix it in @Makefile"}]}
+{"id": "g3", "timestamp": "2026-09-21T09:50:09.000Z", "type": "gemini", "content": [{"text": "Added the prerequisites."}]}
+{"$set": {"lastUpdated": "2026-09-21T10:00:00.000Z", "summary": "Makefile rebuilds"}}

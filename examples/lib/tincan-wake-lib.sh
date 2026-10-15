@@ -667,3 +667,138 @@ tincan_wake_run() {
   tincan_wake_record_failure "exit status $_tw_run_status"
   return "$_tw_run_status"
 }
+
+# tincan_wake_uuid prints a new lowercase UUID (uuidgen,
+# /proc/sys/kernel/random/uuid or python3), or fails.
+tincan_wake_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    _tw_uuid=$(uuidgen | tr 'A-F' 'a-f')
+  elif [ -r /proc/sys/kernel/random/uuid ]; then
+    _tw_uuid=$(cat /proc/sys/kernel/random/uuid)
+  elif command -v python3 >/dev/null 2>&1; then
+    _tw_uuid=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  else
+    return 1
+  fi
+  printf '%s\n' "$_tw_uuid" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || return 1
+  printf '%s\n' "$_tw_uuid"
+}
+
+# tincan_wake_record_session LIST WORKDIR [ID] records a wake run in LIST,
+# the private <name>.wake-sessions file beside the teammate's config that
+# the history agent reads to leave wake runs out: a "workdir <path>" line
+# once, then ID on a line of its own when one is given (letters, digits,
+# dot, dash and underscore only; anything else is skipped). The file is
+# made mode 600. A list that cannot be written is only logged.
+tincan_wake_record_session() {
+  if ! { (umask 077 && touch "$1") && chmod 600 "$1"; } 2>/dev/null; then
+    tincan_wake_log "cannot record this run in $1; the history agent may list it as the owner's"
+    return 0
+  fi
+  grep -qxF "workdir $2" "$1" 2>/dev/null || printf 'workdir %s\n' "$2" >>"$1"
+  [ -n "${3:-}" ] || return 0
+  if printf '%s\n' "$3" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+    printf '%s\n' "$3" >>"$1"
+  else
+    tincan_wake_log "not recording the session id \"$3\": not a plain id"
+  fi
+}
+
+# tincan_wake_json_string prints $1 as a JSON string, quotes and
+# backslashes escaped. For paths, which hold no control characters.
+tincan_wake_json_string() {
+  printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"
+}
+
+# tincan_wake_mcp_json TOOL FILE... prints the mcpServers of each JSON
+# config FILE that exists as tincan_wake_check_identity's listing lines:
+# name, TINCAN_CONFIG, command and args. TOOL is jq or python3.
+tincan_wake_mcp_json() {
+  _tw_tool=$1
+  shift
+  for _tw_f in "$@"; do
+    [ -e "$_tw_f" ] || continue
+    case $_tw_tool in
+      jq)
+        jq -r '(.mcpServers // {}) | to_entries[]
+          | [.key,
+             ((.value.env // {}).TINCAN_CONFIG // "" | tostring),
+             ([.value.command // .value.url // ""]
+               + ((.value.args // []) | map(tostring)) | join(" "))]
+          | map(gsub("[\t\n]"; " ")) | join("\t")' "$_tw_f" || return 1
+        ;;
+      python3)
+        python3 -c '
+import json, sys
+servers = json.load(open(sys.argv[1])).get("mcpServers") or {}
+for name, v in servers.items():
+    env = v.get("env") or {}
+    cmd = [v.get("command") or v.get("url") or ""]
+    cmd += [str(a) for a in (v.get("args") or [])]
+    row = [name, str(env.get("TINCAN_CONFIG") or ""), " ".join(cmd)]
+    print("\t".join(x.replace("\t", " ").replace("\n", " ") for x in row))
+' "$_tw_f" || return 1
+        ;;
+      *)
+        tincan_wake_log "reading $_tw_f needs jq or python3 on PATH"
+        return 1
+        ;;
+    esac
+  done
+}
+
+# tincan_wake_json_tool prints the JSON reader to use: $1 when set (jq or
+# python3), else jq when on PATH, else python3; nothing when that tool is
+# missing.
+tincan_wake_json_tool() {
+  _tw_jt=${1:-}
+  if [ -z "$_tw_jt" ]; then
+    if command -v jq >/dev/null 2>&1; then _tw_jt=jq; else _tw_jt=python3; fi
+  fi
+  case $_tw_jt in
+    jq | python3) command -v "$_tw_jt" >/dev/null 2>&1 && echo "$_tw_jt" ;;
+  esac
+  return 0
+}
+
+# tincan_wake_tools lists the Agent Tincan tools (internal/mcpserver), the
+# only ones a wake that allowlists tools lets a run use.
+# shellcheck disable=SC2034 # read by the wake scripts
+tincan_wake_tools="ask get_reply check_inbox claim progress reply answer cancel list_agents onboard get_attachment trace search"
+
+# tincan_wake_config_path CONFIG prints CONFIG with a leading ~/ expanded
+# (as tincan does) and made absolute against the current directory, for a
+# wake that starts its run from another directory.
+tincan_wake_config_path() {
+  _tw_cp=$1
+  # shellcheck disable=SC2088 # a literal ~/ prefix, which tincan expands
+  case $_tw_cp in "~/"*) _tw_cp=$HOME/${_tw_cp#"~/"} ;; esac
+  case $_tw_cp in /*) ;; *) _tw_cp=$(pwd -P)/$_tw_cp ;; esac
+  printf '%s\n' "$_tw_cp"
+}
+
+# tincan_wake_beside_config CONFIG SUFFIX prints <dir>/<name>SUFFIX, where
+# <dir> is CONFIG's directory and <name> its file name without .json: the
+# wake's files kept beside the teammate's config (.wake-sessions, the list
+# tincan_wake_record_session writes; .wake, a wake home; .wake-state).
+tincan_wake_beside_config() {
+  printf '%s\n' "$(dirname -- "$1")/$(basename -- "$1" .json)$2"
+}
+
+# tincan_wake_resolve_tincan sets tincan_wake_tincan to the absolute path of
+# the tincan binary (TINCAN_BIN, else tincan, on PATH), for an MCP config
+# the wake writes. It refuses to wake when tincan is missing, or when the
+# name is not a program (a shell function or alias, say).
+tincan_wake_resolve_tincan() {
+  tincan_wake_tincan=$(command -v "${TINCAN_BIN:-tincan}" 2>/dev/null) || tincan_wake_refuse "${TINCAN_BIN:-tincan} is not installed or not on PATH"
+  case $tincan_wake_tincan in /*) ;; *) tincan_wake_refuse "${TINCAN_BIN:-tincan} is not a program on PATH; set TINCAN_BIN to the tincan binary's path" ;; esac
+}
+
+# tincan_wake_write_file FILE writes stdin to FILE through a temporary file
+# beside it, and refuses to wake when it cannot.
+tincan_wake_write_file() {
+  if ! { cat >"$1.$$" && mv -f "$1.$$" "$1"; } 2>/dev/null; then
+    rm -f "$1.$$"
+    tincan_wake_refuse "cannot write $1"
+  fi
+}

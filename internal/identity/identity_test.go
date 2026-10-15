@@ -567,13 +567,13 @@ func TestGoodAtSurvivesMoveAndVirtualRebind(t *testing.T) {
 		t.Fatalf("after move: %+v", a)
 	}
 
-	if err := dir.BindVirtual(ctx, "chatgpt"); err != nil {
+	if err := dir.BindVirtual(ctx, "chatgpt", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := dir.SetGoodAt(ctx, identity.LocalAdmin, "chatgpt", "web research"); err != nil {
 		t.Fatal(err)
 	}
-	if err := dir.BindVirtual(ctx, "chatgpt"); err != nil {
+	if err := dir.BindVirtual(ctx, "chatgpt", false); err != nil {
 		t.Fatal(err)
 	}
 	if a, _, _ := store.AgentByName(ctx, "chatgpt"); a.GoodAt != "web research" {

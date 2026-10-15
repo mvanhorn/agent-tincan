@@ -145,7 +145,8 @@ Each nudge, the script:
 4. Runs the engine in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`) with a prompt that tells it to call check_inbox, finish work waiting on replies, handle and reply to every request, and repeat until the inbox is empty:
    - agy: `agy --output-format json --dangerously-skip-permissions -p <prompt>`
    - gemini: `gemini --sandbox --approval-mode=yolo --output-format json --allowed-mcp-server-names agent-tincan [--include-directories <root>]... --include-directories <attachments dir> -p <prompt>`, where the tincan server's name is whatever the identity check found, and the attachments directory is `attachments/<agent>` beside `TINCAN_CONFIG` (created with mode 700), where `tincan mcp` saves the files teammates send.
-5. Kills the run and everything it started after `TINCAN_WAKE_TIMEOUT` seconds, counts failures, and backs off after three in a row (`TINCAN_WAKE_MAX_FAILURES`, `TINCAN_WAKE_BACKOFF`), telling `TINCAN_WAKE_OPERATOR` once. One successful run clears it.
+5. Records the run in `<name>.wake-sessions` beside the teammate's config (`~/.config/tincan/gemini-cli.wake-sessions`, mode 600): the workdir before the run, and the session id the engine's JSON output reports (`session_id`) after it, so the history agent leaves wake runs out. A run the timeout kills is recorded by its workdir alone.
+6. Kills the run and everything it started after `TINCAN_WAKE_TIMEOUT` seconds, counts failures, and backs off after three in a row (`TINCAN_WAKE_MAX_FAILURES`, `TINCAN_WAKE_BACKOFF`), telling `TINCAN_WAKE_OPERATOR` once. One successful run clears it.
 
 The header of `examples/lib/tincan-wake-lib.sh` lists the library's settings.
 
