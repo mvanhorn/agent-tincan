@@ -652,6 +652,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.FromSession, err = session(r); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	prep := s.preparer()
 	if err := prep.Prepare(r.Context(), &req); err != nil {
 		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
@@ -756,6 +760,11 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		return
 	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	hold := durationParam(r, "hold", s.cfg.PollHold, s.cfg.PollHold)
 	peek := r.URL.Query().Get("peek") == "1"
 	replies := r.URL.Query().Get("replies")
@@ -786,7 +795,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		var more int
 		if replies != client.RepliesNone {
 			var err error
-			if reps, more, err = s.unseenReplies(r.Context(), name); err != nil {
+			if reps, more, err = s.unseenReplies(r.Context(), name, sess); err != nil {
 				writeErr(w, http.StatusInternalServerError, err)
 				return
 			}
@@ -907,9 +916,10 @@ const MaxPeekPending = 50
 const MaxRepliesBytes = 1 << 20
 
 // unseenReplies returns the oldest of agent's unseen replies that fit in
-// MaxRepliesBytes, and how many more are waiting beyond them.
-func (s *Server) unseenReplies(ctx context.Context, agent string) ([]envelope.Result, int, error) {
-	reps, err := s.store.UnseenReplies(ctx, agent)
+// MaxRepliesBytes, and how many more are waiting beyond them, as session
+// sees them ("" sees every reply).
+func (s *Server) unseenReplies(ctx context.Context, agent, session string) ([]envelope.Result, int, error) {
+	reps, err := s.store.UnseenRepliesFor(ctx, agent, session)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -938,7 +948,7 @@ func (s *Server) unseenReplies(ctx context.Context, agent string) ([]envelope.Re
 	if !cut {
 		return reps, 0, nil
 	}
-	total, err := s.store.CountUnseenReplies(ctx, agent)
+	total, err := s.store.CountUnseenRepliesFor(ctx, agent, session)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -983,12 +993,38 @@ func emptyIfNil[T any](v []T) []T {
 	return v
 }
 
+// maxSession bounds a SessionHeader value.
+const maxSession = 64
+
+// session returns the caller's SessionHeader, "" when it sends none. A
+// session only routes replies and files asks inside the caller's agent;
+// identity still comes from Server.agent alone. A malformed value is an
+// error rather than ignored, so a bad TINCAN_SESSION does not look like
+// sessions failing to scope.
+func session(r *http.Request) (string, error) {
+	v := r.Header.Get(client.SessionHeader)
+	if len(v) > maxSession {
+		return "", fmt.Errorf("%s is longer than %d bytes", client.SessionHeader, maxSession)
+	}
+	for _, c := range v {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return "", fmt.Errorf("%s may use only letters, digits, '.', '_', and '-'", client.SessionHeader)
+		}
+	}
+	return v, nil
+}
+
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	name := s.agent(w, r)
 	if name == "" {
 		return
 	}
-	req, err := s.store.ClaimLeases(r.Context(), r.PathValue("id"), name, s.cfg.ClaimLease, s.cfg.urgentLease())
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	req, err := s.store.ClaimLeasesFrom(r.Context(), r.PathValue("id"), name, sess, s.cfg.ClaimLease, s.cfg.urgentLease())
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return

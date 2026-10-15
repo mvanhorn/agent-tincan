@@ -33,6 +33,12 @@ const HeldHeader = "X-Tincan-Held"
 // call, so the roster can show which agents are behind.
 const VersionHeader = "X-Tincan-Version"
 
+// SessionHeader names the client session a call comes from, so several
+// sessions sharing one agent (Claude Code windows on one machine, say) each
+// get the replies to their own requests. It is a routing label inside the
+// agent, never an identity. Old relays ignore it.
+const SessionHeader = "X-Tincan-Session"
+
 // FeaturesHeader advertises capabilities supported by this client.
 const FeaturesHeader = "X-Tincan-Features"
 
@@ -200,6 +206,7 @@ type Relay struct {
 	polls    *http.Client
 	agent    string // sent as AgentHeader when set
 	version  string // sent as VersionHeader when set
+	session  string // sent as SessionHeader when set
 
 	heldMu  sync.Mutex
 	held    []envelope.Held // from the last response's HeldHeader
@@ -735,7 +742,17 @@ func (r *Relay) headers(req *http.Request) {
 		req.Header.Set(VersionHeader, r.version)
 	}
 	req.Header.Set(PlatformHeader, runtime.GOOS+"_"+runtime.GOARCH)
+	if r.session != "" {
+		req.Header.Set(SessionHeader, r.session)
+	}
 }
+
+// SetSession names the session every later call comes from (SessionHeader);
+// "" names none. Set it before the client is shared between goroutines.
+func (r *Relay) SetSession(session string) { r.session = session }
+
+// Session is the session set by SetSession.
+func (r *Relay) Session() string { return r.session }
 
 // ProxyAuthError is a relay call the proxy refused with HTTP 407: the proxy
 // credentials have expired or are wrong, and the config offered nothing

@@ -82,12 +82,26 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if err != nil {
 		return err
 	}
-	if req.Kind == envelope.KindPing && ok {
+	// A session label files an ask under the session's own claim, but never
+	// loosens a check: when the agent-wide rule would continue a claim the
+	// session-scoped one does not, the ask keeps that claim's chain and hop
+	// for the cycle, hop, and allowlist checks, and only starts its own
+	// trace.
+	guard, guarded := parent, ok
+	if !ok && req.ParentID == "" && req.FromSession != "" {
+		if guard, guarded, err = p.st.OpenClaim(ctx, req.From); err != nil {
+			return err
+		}
+	}
+	if req.Kind == envelope.KindPing && guarded {
 		return reject(http.StatusBadRequest, errors.New("ping cannot continue a request chain"))
 	}
 	if ok {
 		req.ParentID, req.TraceID, req.Hop = parent.ID, parent.TraceID, parent.Hop+1
 		req.Chain = append(slices.Clone(parent.Chain), req.From)
+	} else if guarded {
+		req.ParentID, req.TraceID, req.Hop = "", "", guard.Hop+1
+		req.Chain = append(slices.Clone(guard.Chain), req.From)
 	} else {
 		req.ParentID, req.TraceID, req.Hop, req.Chain = "", "", 1, []string{req.From}
 	}
@@ -163,9 +177,13 @@ func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request, parent e
 
 // parent resolves the request's parent: the one it names, or else the
 // request the sender currently has claimed. The model cannot opt out of a
-// chain by leaving the parent blank.
+// chain by leaving the parent blank. A sender that names a session continues
+// only a claim made from that session or with none (see Prepare).
 func (p *Policy) parent(ctx context.Context, req *envelope.Request) (envelope.Request, bool, error) {
 	if req.ParentID == "" {
+		if req.FromSession != "" {
+			return p.st.OpenClaimFor(ctx, req.From, req.FromSession)
+		}
 		return p.st.OpenClaim(ctx, req.From)
 	}
 	parent, status, err := p.st.Request(ctx, req.ParentID)

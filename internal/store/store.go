@@ -175,7 +175,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate urgent: %w", err)
 	}
-	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}} {
+	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}, {"from_session", "TEXT NOT NULL DEFAULT ''"}, {"claim_session", "TEXT NOT NULL DEFAULT ''"}} {
 		var exists bool
 		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)", col.name).Scan(&exists); err != nil {
 			db.Close()
@@ -721,10 +721,10 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -941,6 +941,13 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 // claimed_at records when this claim began; claiming again while claimed
 // keeps it.
 func (s *Store) ClaimLeases(ctx context.Context, id, agent string, lease, urgentLease time.Duration) (envelope.Request, error) {
+	return s.ClaimLeasesFrom(ctx, id, agent, "", lease, urgentLease)
+}
+
+// ClaimLeasesFrom is ClaimLeases from the claimer's session, which is
+// recorded with the claim like claimed_at: claiming again while claimed
+// keeps the first session. "" is a claim made with no session.
+func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, lease, urgentLease time.Duration) (envelope.Request, error) {
 	req, _, err := s.lookup(ctx, id)
 	if err != nil {
 		return envelope.Request{}, err
@@ -950,10 +957,11 @@ func (s *Store) ClaimLeases(ctx context.Context, id, agent string, lease, urgent
 	}
 	now := s.now()
 	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
-		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END, updated_at = ?
+		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
+		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?
 		WHERE id = ? AND status IN (?, ?, ?) AND expires_at > ?`,
 		string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
-		string(envelope.StatusClaimed), now.UnixMilli(), now.UnixMilli(), id,
+		string(envelope.StatusClaimed), now.UnixMilli(), string(envelope.StatusClaimed), session, now.UnixMilli(), id,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli())
 	if err != nil {
 		return envelope.Request{}, err
@@ -1232,8 +1240,21 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 // request continues, so it reports none and the request starts a new chain.
 // Claimed notifies never count: nothing closes them.
 func (s *Store) OpenClaim(ctx context.Context, agent string) (envelope.Request, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE to_agent = ? AND status = ? AND kind = ?
+	return s.openClaim(ctx, `SELECT `+requestCols+` FROM requests WHERE to_agent = ? AND status = ? AND kind = ?
 		ORDER BY updated_at DESC LIMIT 2`, agent, string(envelope.StatusClaimed), string(envelope.KindAsk))
+}
+
+// OpenClaimFor is OpenClaim counting only the claims made from session or
+// with no session, so a session's ask is filed under its own work and not
+// under another session's. The relay still checks the ask against
+// OpenClaim; see policy.Prepare.
+func (s *Store) OpenClaimFor(ctx context.Context, agent, session string) (envelope.Request, bool, error) {
+	return s.openClaim(ctx, `SELECT `+requestCols+` FROM requests WHERE to_agent = ? AND status = ? AND kind = ? AND claim_session IN (?, '')
+		ORDER BY updated_at DESC LIMIT 2`, agent, string(envelope.StatusClaimed), string(envelope.KindAsk), session)
+}
+
+func (s *Store) openClaim(ctx context.Context, query string, args ...any) (envelope.Request, bool, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return envelope.Request{}, false, err
 	}

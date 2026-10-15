@@ -112,6 +112,9 @@ type Request struct {
 	// WasHeld and Approved are persisted relay-only approval history.
 	WasHeld  bool `json:"-"`
 	Approved bool `json:"-"`
+	// FromSession is the sender's session label (SessionHeader), a
+	// relay-only routing label inside one agent, never an identity.
+	FromSession string `json:"-"`
 }
 
 // RedactFor hides content that the owner has never released to other agents.

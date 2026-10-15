@@ -55,13 +55,30 @@ const ParentPreviewChars = 1000
 // while agent was handling a request addressed to it carries that parent's
 // id, sender, body preview, and current status.
 func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Result, error) {
+	return s.UnseenRepliesFor(ctx, agent, "")
+}
+
+// sessionFilter narrows a query on requests q to the replies session may
+// see: its own requests and those sent with no session. An empty session
+// sees every request, as before sessions existed.
+func sessionFilter(q, session string) (string, []any) {
+	if session == "" {
+		return "", nil
+	}
+	return ` AND ` + q + `from_session IN (?, '')`, []any{session}
+}
+
+// UnseenRepliesFor is UnseenReplies seen from session: only replies to
+// requests sent from session or with no session.
+func (s *Store) UnseenRepliesFor(ctx context.Context, agent, session string) ([]envelope.Result, error) {
+	where, sargs := sessionFilter("q.", session)
 	args := append([]any{ParentPreviewChars, agent}, replyStatuses...)
-	args = append(args, MaxUnseenReplies)
+	args = append(append(args, sargs...), MaxUnseenReplies)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixed("q.", requestCols)+`, p.from_agent, p.status, p.body, p.created_at, p.attachments, q.reply_generation,
 		COALESCE(par.id, ''), COALESCE(par.from_agent, ''), CASE WHEN par.was_held = 1 AND par.approved = 0 AND par.from_agent != q.from_agent THEN 'waiting for the owner''s approval' ELSE COALESCE(substr(par.body, 1, ?), '') END, COALESCE(par.status, '')
 		FROM requests q JOIN replies p ON p.request_id = q.id
 		LEFT JOIN requests par ON q.parent_id != '' AND par.id = q.parent_id AND par.to_agent = q.from_agent
-		WHERE q.from_agent = ? AND q.reply_seen_at = 0 AND q.`+replyStatusIn+`
+		WHERE q.from_agent = ? AND q.reply_seen_at = 0 AND q.`+replyStatusIn+where+`
 		ORDER BY p.created_at, q.id LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -95,9 +112,16 @@ func (s *Store) UnseenReplies(ctx context.Context, agent string) ([]envelope.Res
 // CountUnseenReplies returns how many replies to agent's requests it has not
 // seen, without the MaxUnseenReplies bound.
 func (s *Store) CountUnseenReplies(ctx context.Context, agent string) (int, error) {
+	return s.CountUnseenRepliesFor(ctx, agent, "")
+}
+
+// CountUnseenRepliesFor is CountUnseenReplies seen from session, counting
+// what UnseenRepliesFor would return.
+func (s *Store) CountUnseenRepliesFor(ctx context.Context, agent, session string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE from_agent = ? AND reply_seen_at = 0 AND `+replyStatusIn,
-		append([]any{agent}, replyStatuses...)...).Scan(&n)
+	where, sargs := sessionFilter("", session)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE from_agent = ? AND reply_seen_at = 0 AND `+replyStatusIn+where,
+		append(append([]any{agent}, replyStatuses...), sargs...)...).Scan(&n)
 	return n, err
 }
 

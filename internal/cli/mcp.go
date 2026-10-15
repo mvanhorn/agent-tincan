@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -43,6 +45,12 @@ for another session or a later check. Start Claude Code with:
 			if err != nil {
 				return err
 			}
+			if r.Session() == "" {
+				// One Claude Code session runs one MCP server, so a fresh
+				// id per process gives each session the replies to its own
+				// asks. One-shot CLI commands name no session and see all.
+				r.SetSession(newSession())
+			}
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			watch := mcpserver.Watch(mcpserver.NewBuildWatch(ownBinary(), Version))
 			if !channel {
@@ -57,6 +65,13 @@ for another session or a later check. Start Claude Code with:
 	}
 	cmd.Flags().BoolVar(&channel, "channel", false, "announce waiting teammate requests and replies in a running Claude Code session (channels preview)")
 	return cmd
+}
+
+// newSession returns a random session id for one MCP server process.
+func newSession() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return "mcp-" + hex.EncodeToString(b)
 }
 
 // ownBinary is the path of the running tincan binary with symlinks
