@@ -54,7 +54,12 @@ for another session or a later check. Start Claude Code with:
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			watch := mcpserver.Watch(mcpserver.NewBuildWatch(ownBinary(), Version))
 			if !channel {
-				return mcpserver.New(r, Version, files, watch).Run(cmd.Context(), mcpserver.StdioRecorded(rec))
+				// Without a channel nothing calls the relay between tool
+				// calls, so keep this session live while the window is open.
+				ctx, cancel := context.WithCancel(cmd.Context())
+				defer cancel()
+				go keepSession(ctx, r, sessionKeepalive)
+				return mcpserver.New(r, Version, files, watch).Run(ctx, mcpserver.StdioRecorded(rec))
 			}
 			t := mcpserver.NewChannelTransport(mcpserver.StdioRecorded(rec))
 			ctx, cancel := context.WithCancel(cmd.Context())
@@ -65,6 +70,32 @@ for another session or a later check. Start Claude Code with:
 	}
 	cmd.Flags().BoolVar(&channel, "channel", false, "announce waiting teammate requests and replies in a running Claude Code session (channels preview)")
 	return cmd
+}
+
+// sessionKeepalive is how often an MCP server without a channel calls the
+// relay, well inside relay.SessionGrace, so a window that is open but quiet
+// does not count as gone and lose its replies to another window. A channel
+// server needs none: it peeks every DefaultPollHold.
+const sessionKeepalive = 2 * time.Minute
+
+// keepSession calls whoami every interval until ctx ends. Whoami marks the
+// agent active and its session live, but is not a poll: it takes nothing and
+// does not make the agent look online on the roster.
+func keepSession(ctx context.Context, r *client.Relay, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			if _, err := r.WhoAmI(cctx); err != nil && ctx.Err() == nil {
+				log.Printf("tincan mcp: keep session: %v", err)
+			}
+			cancel()
+		}
+	}
 }
 
 // newSession returns a random session id for one MCP server process.

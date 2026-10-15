@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"testing"
 	"time"
@@ -36,4 +39,38 @@ func TestNewSessionIsUniqueAndValid(t *testing.T) {
 	if a == b || !valid.MatchString(a) || !valid.MatchString(b) {
 		t.Fatalf("sessions %q and %q", a, b)
 	}
+}
+
+// An MCP server without a channel calls whoami on a timer, naming its
+// session, so a quiet but open window stays live and keeps its replies.
+func TestKeepSessionCallsWhoAmIWithSession(t *testing.T) {
+	calls := make(chan string, 8)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/whoami" {
+			calls <- r.Header.Get(client.SessionHeader)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"muse"}`))
+	}))
+	defer ts.Close()
+	r, err := client.NewRelay(ts.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetSession("mcp-test")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { keepSession(ctx, r, 10*time.Millisecond); close(done) }()
+	for range 2 {
+		select {
+		case got := <-calls:
+			if got != "mcp-test" {
+				t.Fatalf("whoami named session %q, want mcp-test", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no whoami call")
+		}
+	}
+	cancel()
+	<-done
 }

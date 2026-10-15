@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
 // sendFrom is send from a session.
@@ -48,6 +49,14 @@ func TestSessionFilesAskButKeepsChecks(t *testing.T) {
 	}
 	if other.Hop != 2 || !slices.Equal(other.Chain, []string{"grokbot", "instinct"}) {
 		t.Fatalf("session b's ask lost the chain checks: hop %d chain %v", other.Hop, other.Chain)
+	}
+	// Its trace starts at hop 2 with no parent; it is still a trace root.
+	traces, err := f.st.RecentTraces(context.Background(), 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(traces, func(st store.TraceStep) bool { return st.Request.ID == other.ID }) {
+		t.Fatalf("recent traces leave out session b's own trace %s", other.TraceID)
 	}
 	if _, err := f.sendFrom(t, "instinct", "made-up", "grokbot"); !errors.Is(err, ErrCycle) {
 		t.Fatalf("made-up session asking back to grokbot: %v, want a cycle", err)
