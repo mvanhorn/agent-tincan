@@ -188,6 +188,10 @@ func Open(path string) (*Store, error) {
 			}
 		}
 	}
+	if err := s.migrateLeaseLapsed(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate lease lapsed: %w", err)
+	}
 	if err := s.migrateSearch(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate search: %w", err)
@@ -246,6 +250,22 @@ func (s *Store) migrateUrgent() error {
 		return nil
 	}
 	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+// migrateLeaseLapsed adds lease_lapsed_at, when Sweep last put the request
+// back in the queue because its claim lease ran out (unix millis, NULL when
+// it has not lapsed since its last claim or reply). The roster reads it to
+// say a claim lapsed; a relay that predates it never sets or reads it.
+func (s *Store) migrateLeaseLapsed() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'lease_lapsed_at')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN lease_lapsed_at INTEGER`)
 	return err
 }
 
@@ -856,10 +876,17 @@ func (s *Store) OpenAsks(ctx context.Context, agent string) ([]envelope.Request,
 
 // QueueStat is one agent's backlog: requests waiting to be claimed, the
 // creation time of the oldest of them, and claims whose lease is still live.
+// OldestClaim is when the oldest live claim began and ClaimAsker who sent
+// that request, so the roster can say whose work a busy agent is on without
+// reading any request text. Lapsed counts waiting requests whose last claim
+// ran out of lease with no claim, progress note or reply since.
 type QueueStat struct {
 	Queued       int
 	OldestQueued time.Time
 	Claimed      int
+	OldestClaim  time.Time
+	ClaimAsker   string
+	Lapsed       int
 }
 
 // QueueStats returns every agent's backlog in one grouped query. Expired and
@@ -867,7 +894,10 @@ type QueueStat struct {
 // automatically, never work) are not counted.
 func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	now := s.now().UnixMilli()
-	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*), MIN(created_at)
+	// Each group has exactly one MIN, so SQLite takes the bare from_agent
+	// from the row holding it: for claims, the asker of the oldest claim.
+	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*),
+		MIN(CASE WHEN status = 'claimed' THEN claimed_at ELSE created_at END), from_agent, SUM(lease_lapsed_at IS NOT NULL)
 		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
 		AND (status != 'claimed' OR lease_until > ?) AND kind != 'ping' GROUP BY to_agent, status`, now, now)
 	if err != nil {
@@ -876,16 +906,20 @@ func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	defer rows.Close()
 	out := make(map[string]QueueStat)
 	for rows.Next() {
-		var agent, status string
-		var count int
+		var agent, status, asker string
+		var count, lapsed int
 		var oldest int64
-		if err := rows.Scan(&agent, &status, &count, &oldest); err != nil {
+		if err := rows.Scan(&agent, &status, &count, &oldest, &asker, &lapsed); err != nil {
 			return nil, err
 		}
 		stat := out[agent]
 		if status == string(envelope.StatusClaimed) {
 			stat.Claimed += count
+			if oldest > 0 {
+				stat.OldestClaim, stat.ClaimAsker = time.UnixMilli(oldest), asker
+			}
 		} else {
+			stat.Lapsed += lapsed
 			stat.Queued += count
 			at := time.UnixMilli(oldest)
 			if stat.OldestQueued.IsZero() || at.Before(stat.OldestQueued) {
@@ -958,7 +992,7 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 	now := s.now()
 	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
 		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
-		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?
+		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL
 		WHERE id = ? AND status IN (?, ?, ?) AND expires_at > ?`,
 		string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
 		string(envelope.StatusClaimed), now.UnixMilli(), string(envelope.StatusClaimed), session, now.UnixMilli(), id,
@@ -985,7 +1019,7 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return envelope.ErrBodyTooLarge
 	}
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?,
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?, lease_lapsed_at = NULL,
 		lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END
 		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
 		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
@@ -1040,7 +1074,7 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 		where = " AND " + emailReplyGuard
 		args = append(args, now.UnixMilli())
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1, lease_lapsed_at = NULL
 		WHERE id = ? AND status IN (?, ?, ?)`+where, args...)
 	if err != nil {
 		return envelope.Reply{}, err
@@ -1224,10 +1258,14 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		string(envelope.StatusExpired), now, string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
+	// A claim that ran out of lease is marked lapsed, so the roster can say
+	// so until the agent claims or answers the request again; a delivery
+	// lease running out is not the agent's lapse.
 	for _, prev := range []envelope.Status{envelope.StatusDelivered, envelope.StatusClaimed} {
-		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0
+		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0,
+		lease_lapsed_at = CASE WHEN status = ? THEN ? ELSE lease_lapsed_at END
 		WHERE status = ? AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ?`,
-			string(envelope.StatusQueued), now, string(prev), now); err != nil {
+			string(envelope.StatusQueued), now, string(envelope.StatusClaimed), now, string(prev), now); err != nil {
 			return nil, err
 		}
 	}

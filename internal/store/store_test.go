@@ -912,3 +912,107 @@ func TestQueueStatsIgnoresPings(t *testing.T) {
 		t.Fatalf("muse after ping claim = %+v", got)
 	}
 }
+
+// The roster names whose request a busy agent is working on: QueueStats
+// reports the oldest live claim's start and asker, and claims that lapsed
+// are not live.
+func TestQueueStatsOldestClaim(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	first := ask(t, s, "claude-code", "codex", "first")
+	second := ask(t, s, "grokbot", "codex", "second")
+	if _, err := s.ClaimLeases(ctx, first.ID, "codex", 30*time.Minute, 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	claimedAt := c.t
+	c.advance(5 * time.Minute)
+	if _, err := s.ClaimLeases(ctx, second.ID, "codex", 30*time.Minute, 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.QueueStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stats["codex"]
+	if got.Claimed != 2 || got.ClaimAsker != "claude-code" || !got.OldestClaim.Equal(claimedAt) {
+		t.Fatalf("codex = %+v", got)
+	}
+}
+
+// AE4: Sweep marks a claim whose lease ran out, so the roster can say the
+// claim lapsed while the request waits in the queue again. Claiming it
+// again, or answering it, clears the mark; a delivery lease running out is
+// not a lapsed claim.
+func TestSweepMarksLapsedClaim(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	lapsed, err := s.Enqueue(ctx, envelope.Request{From: "claude-code", To: "codex", Kind: envelope.KindAsk, Body: "summarize", Hop: 1, Chain: []string{}}, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := ask(t, s, "claude-code", "codex", "other")
+	if _, err := s.ClaimLeases(ctx, lapsed.ID, "codex", 30*time.Minute, 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE requests SET status = 'delivered', lease_until = ? WHERE id = ?`, c.t.Add(time.Minute).UnixMilli(), delivered.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(31 * time.Minute)
+	if _, err := s.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.QueueStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stats["codex"]; got.Lapsed != 1 || got.Queued != 2 || got.Claimed != 0 {
+		t.Fatalf("after the lease lapsed: %+v", got)
+	}
+	// Delivered again on a poll, it still counts until claimed.
+	if _, err := s.Deliver(ctx, "codex", 10, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if stats, _ = s.QueueStats(ctx); stats["codex"].Lapsed != 1 {
+		t.Fatalf("after redelivery: %+v", stats["codex"])
+	}
+	if _, err := s.ClaimLeases(ctx, lapsed.ID, "codex", 30*time.Minute, 10*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if stats, _ = s.QueueStats(ctx); stats["codex"].Lapsed != 0 {
+		t.Fatalf("after claiming again: %+v", stats["codex"])
+	}
+	// Lapse again, then answer straight from the queue.
+	c.advance(31 * time.Minute)
+	if _, err := s.Sweep(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if stats, _ = s.QueueStats(ctx); stats["codex"].Lapsed != 1 {
+		t.Fatalf("second lapse: %+v", stats["codex"])
+	}
+	if _, err := s.Reply(ctx, lapsed.ID, "codex", envelope.Reply{Status: envelope.StatusAnswered, Body: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if stats, _ = s.QueueStats(ctx); stats["codex"].Lapsed != 0 {
+		t.Fatalf("after the answer: %+v", stats["codex"])
+	}
+}
+
+// The lapsed-claim column is added once; reopening a migrated database
+// changes nothing.
+func TestLeaseLapsedMigrationIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	for range 2 {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('requests') WHERE name = 'lease_lapsed_at'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		s.Close()
+		if n != 1 {
+			t.Fatalf("lease_lapsed_at columns = %d", n)
+		}
+	}
+}

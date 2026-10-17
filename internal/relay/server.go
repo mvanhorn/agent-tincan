@@ -78,7 +78,7 @@ func (c *Config) defaults() {
 		c.DeliveryLease = 2 * time.Minute
 	}
 	if c.ClaimLease == 0 {
-		c.ClaimLease = 30 * time.Minute
+		c.ClaimLease = DefaultClaimLease
 	}
 	if c.UrgentClaimLease == 0 {
 		c.UrgentClaimLease = DefaultUrgentClaimLease
@@ -106,6 +106,11 @@ func (c *Config) defaults() {
 	}
 	c.Attachments.defaults()
 }
+
+// DefaultClaimLease is how long a claim lasts without a reply or progress
+// note before the request is requeued. It is also how long after a start
+// the relay waits before it calls any agent stuck.
+const DefaultClaimLease = 30 * time.Minute
 
 // DefaultUrgentClaimLease is how long a claim on an urgent request lasts
 // without a reply or progress note before the request is requeued (and its
@@ -1432,17 +1437,32 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if !admin && s.agent(w, r) == "" {
 		return
 	}
-	agents, err := s.dir.Agents(r.Context())
+	out, err := s.roster(r.Context(), admin)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	persisted, err := s.store.AgentsLastSeen(r.Context())
+	res := map[string]any{"agents": out}
+	if s.cfg.Version != "" {
+		res["relay_version"] = s.cfg.Version
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// roster builds every joined agent's roster entry, with node fields only
+// for an admin caller. Only the directory read can fail it; the other
+// reads are logged and the entries carry what the relay still knows.
+func (s *Server) roster(ctx context.Context, admin bool) ([]client.AgentInfo, error) {
+	agents, err := s.dir.Agents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	persisted, err := s.store.AgentsLastSeen(ctx)
 	if err != nil {
 		// The in-memory times still answer for this run of the relay.
 		log.Printf("agents last seen: %v", err)
 	}
-	stats, err := s.store.QueueStats(r.Context())
+	stats, err := s.store.QueueStats(ctx)
 	if err != nil {
 		log.Printf("agents queue stats: %v", err)
 	}
@@ -1461,14 +1481,15 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	var polls map[string]time.Time
 	if len(wakes) > 0 {
 		// A poll persisted before a restart may have answered a wake.
-		if polls, err = s.store.AgentsLastPoll(r.Context()); err != nil {
+		if polls, err = s.store.AgentsLastPoll(ctx); err != nil {
 			log.Printf("agents last poll: %v", err)
 		}
 	}
-	webFacts, err := s.store.WebStatuses(r.Context())
+	webFacts, err := s.store.WebStatuses(ctx)
 	if err != nil {
 		log.Printf("agents web status: %v", err)
 	}
+	quietUntil := s.started.Add(s.cfg.ClaimLease)
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -1503,14 +1524,11 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		webFacts[a.Name].Apply(a, &info.Target)
 		info.WorkingOn, info.WorkingOnOthers = s.currentWorkingOn(a.Name, now)
+		applyStatus(&info, computeStatus(statusFacts{online: info.Online, wake: info.Wake, stat: stat, target: info.Target}, now, quietUntil))
 		out = append(out, info)
 	}
 	s.mu.Unlock()
-	res := map[string]any{"agents": out}
-	if s.cfg.Version != "" {
-		res["relay_version"] = s.cfg.Version
-	}
-	writeJSON(w, http.StatusOK, res)
+	return out, nil
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {

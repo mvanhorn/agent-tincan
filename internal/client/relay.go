@@ -68,10 +68,20 @@ func ClampWait(d time.Duration) time.Duration { return min(max(d, 0), MaxInlineW
 
 // AgentInfo is one joined agent as the relay reports it.
 type AgentInfo struct {
-	UpgradeAvailable string    `json:"upgrade_available,omitempty"`
-	Name             string    `json:"name"`
-	Online           bool      `json:"online"`
-	LastPoll         time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
+	UpgradeAvailable string `json:"upgrade_available,omitempty"`
+	Name             string `json:"name"`
+	Online           bool   `json:"online"`
+	// Status is the relay's one word for what the agent is doing (StatusBusy,
+	// StatusIdle, StatusStuck or StatusOffline), computed once on the relay
+	// so every surface shows the same thing. StatusReason says why a stuck
+	// agent is stuck ("claim lapsed"); BusyFor names the asker whose request
+	// a busy agent holds and BusySince when it claimed it. They never carry
+	// request text. All are empty from relays that predate them.
+	Status       string    `json:"status,omitempty"`
+	StatusReason string    `json:"status_reason,omitempty"`
+	BusyFor      string    `json:"busy_for,omitempty"`
+	BusySince    time.Time `json:"busy_since,omitzero"`
+	LastPoll     time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
 	// LastActive is the agent's last call of any kind (send, reply, get,
 	// poll), kept across relay restarts.
 	LastActive time.Time `json:"last_active,omitzero"`
@@ -110,6 +120,17 @@ type AgentInfo struct {
 	// at the top level of each roster entry.
 	envelope.Target
 }
+
+// The statuses a relay reports in AgentInfo.Status. Busy means the agent
+// holds live claimed work or its host says it is working; stuck means work
+// waits on it and nothing is moving; idle and offline split the rest by
+// whether it is polling now.
+const (
+	StatusBusy    = "busy"
+	StatusIdle    = "idle"
+	StatusStuck   = "stuck"
+	StatusOffline = "offline"
+)
 
 // Roster is the relay's agent list with what the relay says about itself.
 type Roster struct {
