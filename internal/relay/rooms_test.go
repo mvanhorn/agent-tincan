@@ -828,6 +828,19 @@ func TestRoomMentionNameEndingInDash(t *testing.T) {
 	take(t, m, "dev-")
 }
 
+// Names that resolve to the same agent ask it once.
+func TestRoomMentionDashVariantsAskOnce(t *testing.T) {
+	m := mentionMesh(t)
+	res := post(t, m, "muse", "@codex- then @codex-- please")
+	if got := res.Post.Mentions; len(got) != 1 || got[0].Agent != "codex" {
+		t.Fatalf("mentions = %+v notices %v", got, res.Notices)
+	}
+	take(t, m, "codex")
+	if in, err := m.Client(t, "codex").Poll(t.Context(), time.Millisecond); err != nil || len(in.Requests) != 0 {
+		t.Fatalf("codex asked twice: %+v %v", in, err)
+	}
+}
+
 // A poster taken out of the room, or that approval.json starts holding,
 // no longer reads the room's text through its own mention asks: get,
 // unseen replies, trace and search all show the placeholder.

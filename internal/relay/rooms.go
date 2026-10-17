@@ -377,6 +377,7 @@ func (s *Server) sendMentions(ctx context.Context, post *envelope.RoomPost, sess
 	var notices, over []string
 	var earlier []envelope.RoomPost // the context web members get, read once
 	readEarlier := false
+	handled := map[string]bool{} // resolved names, so @codex- and @codex-- ask codex once
 	for _, name := range names {
 		if name == post.Author {
 			continue
@@ -385,14 +386,15 @@ func (s *Server) sendMentions(ctx context.Context, post *envelope.RoomPost, sess
 		if err == nil && !ok && strings.HasSuffix(name, "-") {
 			// @codex- with no agent codex-: the dashes were punctuation.
 			name = strings.TrimRight(name, "-")
-			if name == post.Author || slices.Contains(names, name) {
+			if name == post.Author {
 				continue
 			}
 			a, ok, err = s.dir.Agent(ctx, name)
 		}
-		if err != nil || !ok {
+		if err != nil || !ok || handled[name] {
 			continue
 		}
+		handled[name] = true
 		reason := ""
 		switch {
 		case !slices.Contains(rm.Members, name):
