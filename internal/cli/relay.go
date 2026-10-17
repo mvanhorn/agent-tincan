@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/gateway"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/phone"
 	"github.com/mvanhorn/agent-tincan/internal/policy"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/store"
@@ -72,6 +74,11 @@ Admin commands (invite, remove) are accepted from the local admin socket in
 the state dir and from machines named in --admin that carry no Tailscale tags
 (and, with --admin-login, are owned by a listed login). Tag agent machines
 (e.g. tag:agent) so they can never be admins.
+
+Admin devices can also open the phone page at /phone/ (see docs/phone.md).
+When the tailnet issues the relay an HTTPS certificate, the relay serves it
+over HTTPS on port 443 under its MagicDNS name too; it logs the page's
+address at startup either way.
 
 Wake settings (webhook URLs, email addresses, keys) live in wake.json in the
 state dir, chmod 600. They are never sent to agents. A webhook or email agent
@@ -498,11 +505,25 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	}
 	admin := client.Configure(&http.Server{Handler: srv.AdminHandler()}, client.RelayAPI)
 
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	servers := []*http.Server{api, admin}
 	closeGW := func() {}
 	go func() { errc <- api.Serve(ln) }()
 	go func() { errc <- admin.Serve(aln) }()
+	// The phone page is served on every tailnet listener. With HTTPS from
+	// the tailnet it also gets its own TLS listener, hardened like the
+	// plain one with the certificate name added to the names it accepts;
+	// without it the page works over HTTP, minus push alerts.
+	if tln, certName, err := phoneTLS(ctx, who); err != nil {
+		log.Printf("phone page: %s (no HTTPS: %v; push alerts are off, so the approval notify teammate is the alert path)", phonePageURL(urls, ln), err)
+	} else {
+		defer tln.Close()
+		tlsHosts := append(slices.Clone(hosts), certName)
+		web := client.Configure(&http.Server{Handler: relay.HardenForBrowsers(srv.Handler(), tlsHosts)}, client.RelayAPI)
+		go func() { errc <- web.Serve(tln) }()
+		servers = append(servers, web)
+		log.Printf("phone page: https://%s%s", certName, phone.Prefix)
+	}
 	if f.gateway {
 		gln, base, closeGWFn, err := gatewayListener(ctx, f)
 		if err != nil {
@@ -589,6 +610,38 @@ func relayHosts(names, urls []string, listenAt string) ([]string, error) {
 	return out, nil
 }
 
+// phonePageURL is the phone page on the relay's plain listener: under the
+// first address it advertises, else the listener's own address.
+func phonePageURL(urls []string, ln net.Listener) string {
+	base := "http://" + ln.Addr().String()
+	if len(urls) > 0 {
+		base = strings.TrimSuffix(urls[0], "/")
+	}
+	return base + phone.Prefix
+}
+
+// tlsTailnet is a relay resolver whose tailnet can also serve HTTPS: it
+// opens a TLS listener with the node's tailnet certificate and returns the
+// certificate's name.
+type tlsTailnet interface {
+	ListenTLS(ctx context.Context) (net.Listener, string, error)
+}
+
+// errNoCertificates is why there is no HTTPS when the tailnet issues the
+// relay no certificate name.
+var errNoCertificates = errors.New("this tailnet has HTTPS certificates turned off (Tailscale admin console, DNS page, HTTPS Certificates)")
+
+// phoneTLS opens the phone page's HTTPS listener (KTD15), or says why it
+// cannot. A tailscale serve front is not supported: the relay would see
+// every request come from 127.0.0.1 and could not tell devices apart.
+func phoneTLS(ctx context.Context, who relayResolver) (net.Listener, string, error) {
+	t, ok := who.(tlsTailnet)
+	if !ok {
+		return nil, "", errors.New("this relay's tailnet connection cannot serve HTTPS")
+	}
+	return t.ListenTLS(ctx)
+}
+
 // relayDrainTimeout bounds how long shutdown waits for calls in flight
 // before closing their connections. Held long polls do not count: they
 // answer as soon as shutdown starts.
@@ -637,7 +690,8 @@ var openRelayNet = func(ctx context.Context, f relayFlags, listenAt string) (net
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		return ln, who, func() {}, nil
+		host, _, _ := net.SplitHostPort(listenAt)
+		return ln, hostTailnet{who, host}, func() {}, nil
 	}
 	ts := &tsnet.Server{Hostname: f.hostname, Dir: filepath.Join(f.stateDir, "tsnet"), AuthKey: os.Getenv("TS_AUTHKEY")}
 	fail := func(err error) (net.Listener, relayResolver, func(), error) {
@@ -655,7 +709,43 @@ var openRelayNet = func(ctx context.Context, f relayFlags, listenAt string) (net
 	if err != nil {
 		return fail(err)
 	}
-	return ln, tailnetResolver{identity.NewLocalResolver(lc), ts.Dial}, func() { ts.Close() }, nil
+	listenTLS := func(context.Context) (net.Listener, string, error) {
+		domains := ts.CertDomains()
+		if len(domains) == 0 {
+			return nil, "", errNoCertificates
+		}
+		ln, err := ts.ListenTLS("tcp", ":443")
+		if err != nil {
+			return nil, "", err
+		}
+		return ln, domains[0], nil
+	}
+	return ln, tailnetResolver{identity.NewLocalResolver(lc), ts.Dial, listenTLS}, func() { ts.Close() }, nil
+}
+
+// hostTailnet is the --listen relay's resolver: the host's tailscaled,
+// which also serves HTTPS on the --listen address with the host's tailnet
+// certificate.
+type hostTailnet struct {
+	*identity.LocalResolver
+	ip string
+}
+
+// ListenTLS listens on port 443 of the --listen address with the host
+// tailscaled's certificate for this machine.
+func (h hostTailnet) ListenTLS(ctx context.Context) (net.Listener, string, error) {
+	domains, err := h.CertDomains(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(domains) == 0 {
+		return nil, "", errNoCertificates
+	}
+	ln, err := tls.Listen("tcp", net.JoinHostPort(h.ip, "443"), &tls.Config{GetCertificate: h.GetCertificate, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return nil, "", err
+	}
+	return ln, domains[0], nil
 }
 
 // tailnetDialer is a relay resolver that can also open connections to
@@ -669,7 +759,13 @@ type tailnetDialer interface {
 // tailscaled has no TUN device (wakeHTTPClient).
 type tailnetResolver struct {
 	relayResolver
-	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
+	listenTLS func(ctx context.Context) (net.Listener, string, error)
+}
+
+// ListenTLS opens the node's HTTPS listener on port 443.
+func (r tailnetResolver) ListenTLS(ctx context.Context) (net.Listener, string, error) {
+	return r.listenTLS(ctx)
 }
 
 // DialTailnet dials addr from the relay's tsnet node.

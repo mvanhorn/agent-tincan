@@ -23,6 +23,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
+	"github.com/mvanhorn/agent-tincan/internal/phone"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
@@ -233,6 +234,10 @@ type Server struct {
 	emailCursor map[string]time.Time
 	emailRetry  map[string]map[string]wake.MailMessage
 
+	// nonces are the decision nonces handed to the phone page with each
+	// held request (see phone.go).
+	nonces *nonceBook
+
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
 	stopOnce sync.Once
@@ -260,7 +265,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, sessions: map[string]map[string]time.Time{}, socketWake: map[string]map[string]time.Time{}, workingOn: map[string]map[string]workingOnEntry{}, hostStatus: map[string]map[string]hostStatusEntry{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
+		versionWritten: map[string]time.Time{}, sessions: map[string]map[string]time.Time{}, socketWake: map[string]map[string]time.Time{}, workingOn: map[string]map[string]workingOnEntry{}, hostStatus: map[string]map[string]hostStatusEntry{}, silent: map[string]silentEpisode{}, nonces: newNonceBook(), stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
@@ -395,6 +400,7 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/relay/upgrade", s.handleSelfUpgrade)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
+	mux.HandleFunc("GET "+phone.Prefix, s.handlePhone)
 }
 
 // AdminHandler serves only admin routes and treats every caller as the local
@@ -2088,15 +2094,29 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 	// Each entry also names the target's kind, so the owner sees a council ask
 	// (which goes on to every model vendor) for what it is. The attachments'
 	// names and sizes already ride on the request. Old clients ignore to_kind.
+	// A browser (the phone page) also gets one approve and one deny nonce per
+	// entry, bound to this device; it must send the nonce back to decide.
 	type heldRequest struct {
 		envelope.Request
-		ToKind string `json:"to_kind,omitempty"`
+		ToKind         string    `json:"to_kind,omitempty"`
+		ApproveNonce   string    `json:"approve_nonce,omitempty"`
+		DenyNonce      string    `json:"deny_nonce,omitempty"`
+		NonceExpiresAt time.Time `json:"nonce_expires_at,omitzero"`
 	}
+	var node string
+	if browserMarked(r) {
+		node = s.callerNode(r).ID
+	}
+	now := s.cfg.Now()
 	out := make([]heldRequest, len(reqs))
 	kinds := map[string]string{} // target -> kind, for the lookups that succeeded
 	for i, req := range reqs {
 		req.Body = approvalPreview(req.Body)
 		out[i] = heldRequest{Request: req}
+		if node != "" {
+			out[i].ApproveNonce, out[i].NonceExpiresAt = s.nonces.issue(nonceKey{id: req.ID, decision: "approve", node: node}, now)
+			out[i].DenyNonce, _ = s.nonces.issue(nonceKey{id: req.ID, decision: "deny", node: node}, now)
+		}
 		kind, seen := kinds[req.To]
 		if !seen {
 			a, ok, err := s.lookupAgent(r.Context(), req.To)
@@ -2113,58 +2133,115 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// decisionBody is the body of an approve or deny. Reason is the owner's
+// note on a denial. Nonce is required from a browser (the phone page): one
+// the held listing issued to this device for this request and decision.
+type decisionBody struct {
+	Reason string `json:"reason"`
+	Nonce  string `json:"nonce"`
+}
+
+// readDecision reads an approve or deny body, which the CLI may leave
+// empty. It writes the error and returns false when the body is bad.
+func readDecision(w http.ResponseWriter, r *http.Request) (decisionBody, bool) {
+	var in decisionBody
+	if err := json.NewDecoder(io.LimitReader(r.Body, envelope.DefaultMaxBody+1024)).Decode(&in); err != nil && err != io.EOF {
+		writeErr(w, http.StatusBadRequest, err)
+		return in, false
+	}
+	if len(in.Reason) > envelope.DefaultMaxBody {
+		writeErr(w, http.StatusBadRequest, envelope.ErrBodyTooLarge)
+		return in, false
+	}
+	return in, true
+}
+
+// handleApprove releases a held request. A browser must send a nonce from
+// the held listing, and gets the final state back, not an error, when the
+// hold had already ended (a second tap, another device, the CLI).
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.isAdmin(r) {
 		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
 		return
 	}
+	page := browserMarked(r)
+	var in decisionBody
+	if page {
+		var ok bool
+		if in, ok = readDecision(w, r); !ok {
+			return
+		}
+	}
 	s.Sweep(r.Context())
 	id := r.PathValue("id")
+	if page && !s.takeDecisionNonce(r, id, "approve", in.Nonce) {
+		s.writeDecided(w, r, id)
+		return
+	}
 	ttl := s.cfg.RequestTTL
 	if held, _, err := s.store.Request(r.Context(), id); err == nil {
 		ttl = s.requestTTL(r.Context(), held.To)
 	}
 	req, err := s.store.Release(r.Context(), id, ttl)
 	if err != nil {
+		if page && errors.Is(err, store.ErrWrongState) {
+			s.writeDecided(w, r, id)
+			return
+		}
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	s.record(r.Context(), "approved", req.ID, req.TraceID, s.remote(r), "")
+	s.nonces.void(req.ID)
+	s.record(r.Context(), "approved", req.ID, req.TraceID, s.remote(r), s.deviceDetail(r))
 	s.hub.notify(requestKey(req.ID))
 	s.hub.notify(inboxKey(req.To))
 	if s.events != nil {
 		s.events.Queued(r.Context(), req)
 	}
+	if page {
+		writeJSON(w, http.StatusOK, pageDecision{ID: req.ID, Status: envelope.StatusQueued})
+		return
+	}
 	writeJSON(w, http.StatusOK, req)
 }
 
+// handleDeny declines a held request with the owner's reason; a browser
+// needs a nonce as for handleApprove.
 func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	if !s.isAdmin(r) {
 		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
 		return
 	}
-	var in struct {
-		Reason string `json:"reason"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, envelope.DefaultMaxBody+1024)).Decode(&in); err != nil && err != io.EOF {
-		writeErr(w, http.StatusBadRequest, err)
+	in, ok := readDecision(w, r)
+	if !ok {
 		return
 	}
-	if len(in.Reason) > envelope.DefaultMaxBody {
-		writeErr(w, http.StatusBadRequest, envelope.ErrBodyTooLarge)
-		return
-	}
+	page := browserMarked(r)
 	s.Sweep(r.Context())
-	req, err := s.store.DenyHeld(r.Context(), r.PathValue("id"), in.Reason)
+	id := r.PathValue("id")
+	if page && !s.takeDecisionNonce(r, id, "deny", in.Nonce) {
+		s.writeDecided(w, r, id)
+		return
+	}
+	req, err := s.store.DenyHeld(r.Context(), id, in.Reason)
 	if err != nil {
+		if page && errors.Is(err, store.ErrWrongState) {
+			s.writeDecided(w, r, id)
+			return
+		}
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	s.record(r.Context(), "denied", req.ID, req.TraceID, s.remote(r), "")
+	s.nonces.void(req.ID)
+	s.record(r.Context(), "denied", req.ID, req.TraceID, s.remote(r), s.deviceDetail(r))
 	s.hub.notify(requestKey(req.ID))
 	s.hub.notify(inboxKey(req.From))
 	if replier, ok := s.events.(Replier); ok {
 		replier.Replied(r.Context(), req)
+	}
+	if page {
+		writeJSON(w, http.StatusOK, pageDecision{ID: req.ID, Status: envelope.StatusDeclined})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "declined"})
 }

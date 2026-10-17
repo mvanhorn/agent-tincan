@@ -68,6 +68,9 @@ func TestRelayProcessHelper(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "url"), []byte(url), 0o600); err != nil {
 			return nil, nil, nil, err
 		}
+		if os.Getenv(relayHelperTLSEnv) != "" {
+			return ln, loopbackTLSTailnet{loopbackTailnet{url}, dir}, func() {}, nil
+		}
 		return ln, loopbackTailnet{url}, func() {}, nil
 	}
 	cmd := relayCmd()

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0f5f5c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tincan">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Tincan</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <h1>Tincan</h1>
+  <p id="conn" class="conn">Loading</p>
+</header>
+<p id="live" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+<main>
+  <p id="banner" class="banner" hidden></p>
+
+  <section id="held" aria-labelledby="held-title">
+    <h2 id="held-title">Held for approval <span id="held-count" class="count">0</span></h2>
+    <p id="held-empty" class="empty" hidden>No held asks.</p>
+    <ol id="held-list" class="cards"></ol>
+  </section>
+
+  <section id="team" aria-labelledby="team-title">
+    <h2 id="team-title">Team</h2>
+    <p id="team-empty" class="empty" hidden>No agents have joined yet.</p>
+    <ol id="team-list" class="roster"></ol>
+  </section>
+</main>
+</body>
+</html>

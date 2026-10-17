@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -149,4 +150,19 @@ func selfNames(self *ipnstate.PeerStatus) []string {
 		out = append(out, ip.String())
 	}
 	return out
+}
+
+// CertDomains are the HTTPS certificate names Tailscale issues for this
+// node, empty when HTTPS certificates are off for the tailnet.
+func (r *LocalResolver) CertDomains(ctx context.Context) ([]string, error) {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tailnet status: %w", err)
+	}
+	return st.CertDomains, nil
+}
+
+// GetCertificate gets this node's tailnet certificate for a TLS handshake.
+func (r *LocalResolver) GetCertificate(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return r.lc.GetCertificate(hi)
 }

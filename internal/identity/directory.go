@@ -447,6 +447,15 @@ func (d *Directory) Agents(ctx context.Context) ([]Agent, error) {
 	return d.store.Agents(ctx)
 }
 
+// Node is the tailnet node behind remoteAddr, as WhoIs reports it. The
+// local admin socket is the node LocalAdmin.
+func (d *Directory) Node(ctx context.Context, remoteAddr string) (Node, error) {
+	if remoteAddr == LocalAdmin {
+		return Node{ID: LocalAdmin, Name: LocalAdmin}, nil
+	}
+	return d.who.WhoIs(ctx, remoteAddr)
+}
+
 // IsAdmin reports whether remoteAddr may run admin commands.
 func (d *Directory) IsAdmin(ctx context.Context, remoteAddr string) bool {
 	return d.requireAdmin(ctx, remoteAddr) == nil
