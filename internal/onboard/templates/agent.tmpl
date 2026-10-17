@@ -36,6 +36,7 @@ If another agent already runs on this machine, prefix every tincan command (join
 {{- define "join.default"}}{{template "cfg" .}}tincan join <code> --relay {{.RelayURL}}{{end -}}
 {{- define "join.proxy-sandbox"}}tincan join <code> --relay {{.RelayURL}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end -}}
 {{- define "join.chatgpt"}}tincan connect chatgpt (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
+{{- define "join.phone"}}Join this phone, on the relay's phone page ({{.RelayURL}}/phone/) opened on the phone; no invite code to carry{{end -}}
 {{- define "join.sesame"}}tincan connect {{.Name}} (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
 
 {{- define "instructions.common" -}}
@@ -162,6 +163,10 @@ You are started by tincan listen with a check-inbox prompt whenever teammates' r
 
 {{- define "instructions.grok-cli" -}}
 {{template "instructions.codex" .}}
+{{- end -}}
+
+{{- define "instructions.phone" -}}
+{{.Name}} is {{.OwnerPoss}} phone, not a model, so there is nothing to paste. {{.Owner}} asks teammates from the phone page as {{.Name}} and reads the replies there. It never answers: do not ask or notify {{.Name}}; when you need {{.Owner}}, reach them as you normally do. Reply to {{.Name}}'s asks like any teammate's.
 {{- end -}}
 
 {{- define "instructions.history" -}}
@@ -452,6 +457,13 @@ Requests to {{.Name}} are held for {{.OwnerPoss}} approval by default, even with
 The dot asks teammates by writing @tincan ask <agent> <request> as the first line of a message in its DM; {{.Name}} sends the ask and types the answer back starting with [tincan-reply from <agent>]. Nothing is installed on the dot. To limit whom the dot may ask, list agents one per line in ~/.config/tincan/dot-web-send.txt (no file means any joined agent), or gate those targets in approval.json with from: ["{{.Name}}"].
 {{- end -}}
 
+{{- define "setup.phone" -}}
+The phone must be an admin device: add its machine name (from tailscale status) to the relay's --admin list and restart the relay. It must be signed in to Tailscale as {{.Owner}} and carry no tag.
+On the phone, open the relay's phone page at {{.RelayURL}}/phone/ (the relay logs the exact address at startup, https when the tailnet has HTTPS certificates) and tap Join this phone. The page invites and joins the phone as its own agent with kind phone; there is no code to copy.
+Its wake method is none: it asks teammates and reads their replies on the page, and never answers, so teammates do not ask it.
+If the page says the phone is not joined (after the phone's Tailscale node was replaced, say), tap Join this phone again.
+{{- end -}}
+
 {{- define "setup.generic" -}}
 {{template "setup.tools" .}}
 On the relay host, in wake.json (chmod 600): set {{.Name}} to its wake method ({{.Wake}} now; one of webhook, email, wait, channel, command, schedule, none). Secret fields: url, bearer_token and hmac_secret for webhook; email_to, agentmail_inbox and agentmail_key for email. Set them in the file only.
@@ -483,5 +495,6 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.perplexity-web"}}Perplexity (www.perplexity.ai) as a teammate, with source links, through your logged-in browser{{end -}}
 {{- define "title.copilot-web"}}Microsoft Copilot (copilot.com, personal account) as a teammate, through your logged-in browser{{end -}}
 {{- define "title.dot-web"}}Your OpenAI dot (chatgpt.com/dots) as a teammate, held for your approval, through your logged-in browser{{end -}}
+{{- define "title.phone"}}Your phone, joined from the relay's phone page{{end -}}
 {{- define "title.scheduled"}}An agent that checks on its own schedule (a platform cron){{end -}}
 {{- define "title.generic"}}Any other agent{{end -}}

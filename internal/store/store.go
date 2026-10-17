@@ -236,6 +236,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate failover: %w", err)
 	}
+	if err := s.migratePush(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate push subscriptions: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -1422,6 +1426,13 @@ func (s *Store) Held(ctx context.Context) ([]envelope.Request, error) {
 	}
 	defer rows.Close()
 	return scanRequests(rows)
+}
+
+// CountHeld counts the held requests Held would list: held and unexpired.
+func (s *Store) CountHeld(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE status = ? AND expires_at > ?`, string(envelope.StatusHeld), s.now().UnixMilli()).Scan(&n)
+	return n, err
 }
 
 // Release queues a held request with a fresh delivery TTL and its original creation time.

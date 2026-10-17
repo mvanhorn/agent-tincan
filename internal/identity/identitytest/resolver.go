@@ -74,3 +74,16 @@ func (r *Resolver) WhoIs(_ context.Context, addr string) (identity.Node, error) 
 	}
 	return n, nil
 }
+
+// LookupNode implements identity.NodeLookup: the node with stable id, as
+// some address maps to it now.
+func (r *Resolver) LookupNode(_ context.Context, id string) (identity.Node, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.nodes {
+		if n.ID == id {
+			return n, true, nil
+		}
+	}
+	return identity.Node{}, false, nil
+}

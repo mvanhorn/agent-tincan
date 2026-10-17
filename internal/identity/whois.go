@@ -2,12 +2,14 @@ package identity
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn/ipnstate"
 )
 
 // Node is the tailnet machine a connection came from.
@@ -81,6 +83,32 @@ func (r *LocalResolver) NodeOnline(ctx context.Context, stableID string) (online
 	return false, false, nil
 }
 
+// LookupNode implements NodeLookup from the tailnet peer list.
+func (r *LocalResolver) LookupNode(ctx context.Context, stableID string) (Node, bool, error) {
+	st, err := r.lc.Status(ctx)
+	if err != nil {
+		return Node{}, false, fmt.Errorf("tailnet status: %w", err)
+	}
+	peers := []*ipnstate.PeerStatus{st.Self}
+	for _, p := range st.Peer {
+		peers = append(peers, p)
+	}
+	for _, p := range peers {
+		if p == nil || string(p.ID) != stableID {
+			continue
+		}
+		n := Node{ID: stableID, Name: shortName(p.DNSName)}
+		if p.Tags != nil {
+			n.Tags = p.Tags.AsSlice()
+		}
+		if u, ok := st.User[p.UserID]; ok {
+			n.User = u.LoginName
+		}
+		return n, true, nil
+	}
+	return Node{}, false, nil
+}
+
 // Probe fails when the LocalAPI is unreachable. --listen mode calls it at
 // startup and refuses to run rather than skip attribution.
 func (r *LocalResolver) Probe(ctx context.Context) error {
@@ -96,7 +124,10 @@ func shortName(fqdn string) string {
 	return name
 }
 
-var _ NodeStatus = (*LocalResolver)(nil)
+var (
+	_ NodeStatus = (*LocalResolver)(nil)
+	_ NodeLookup = (*LocalResolver)(nil)
+)
 
 // SelfURLs are the relay URLs this tailnet node answers on for port: its
 // MagicDNS name first (it outlives an IP change), then its IPv4 address.
@@ -122,4 +153,45 @@ func (r *LocalResolver) SelfURLs(ctx context.Context, port int) []string {
 		}
 	}
 	return out
+}
+
+// SelfNames are the names this tailnet node answers to, read from the same
+// status as SelfURLs: its MagicDNS full and short names and every tailnet
+// IP. The relay accepts only these (and its --listen address) in Host on
+// its tailnet listener (relay.HardenForBrowsers).
+func (r *LocalResolver) SelfNames(ctx context.Context) []string {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil {
+		return nil
+	}
+	return selfNames(st.Self)
+}
+
+func selfNames(self *ipnstate.PeerStatus) []string {
+	if self == nil {
+		return nil
+	}
+	var out []string
+	if name := strings.TrimSuffix(self.DNSName, "."); name != "" {
+		out = append(out, name, shortName(name))
+	}
+	for _, ip := range self.TailscaleIPs {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// CertDomains are the HTTPS certificate names Tailscale issues for this
+// node, empty when HTTPS certificates are off for the tailnet.
+func (r *LocalResolver) CertDomains(ctx context.Context) ([]string, error) {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tailnet status: %w", err)
+	}
+	return st.CertDomains, nil
+}
+
+// GetCertificate gets this node's tailnet certificate for a TLS handshake.
+func (r *LocalResolver) GetCertificate(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return r.lc.GetCertificate(hi)
 }

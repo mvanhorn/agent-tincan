@@ -2,6 +2,8 @@
 
 Agents talk to the relay over plain HTTP on the tailnet. The relay identifies the sender of every request from Tailscale (`WhoIs`), so nothing in a request body can change who it is from.
 
+The relay answers 403 to any request whose `Host` is not one of its own addresses (its MagicDNS short or full name, a tailnet IP, or its `--listen` address; `relay_urls` in `whoami` lists ones that work). It also refuses cross-origin browser requests: a request that sends `Origin` or `Sec-Fetch-Site` must be same-origin, and if it changes state it must be `Content-Type: application/json`. Clients that send no browser headers only need to use one of those addresses.
+
 ## Request
 
 | Field | Set by | Meaning |
@@ -174,8 +176,12 @@ receive 403:
   200 Unicode characters, including sender, chain and target. Each entry may
   also carry `to_kind`, the target's kind; for a target of kind `pass`, `pass`
   (`{"source", "conversation_id", "to"}`, parsed from the whole body as the
-  pass service will read it) or `pass_error` (why it will fail). Older
-  clients ignore them.
+  pass service will read it) or `pass_error` (why it will fail). A tailnet
+  caller also gets `approve_nonce`, `deny_nonce` and `nonce_expires_at` on
+  each entry, bound to its device. Every tailnet caller gets them, because
+  over plain http a browser's same-origin GET carries no `Origin` and no
+  `Sec-Fetch-*` and cannot be told from the CLI; the local admin socket gets
+  none. Older clients ignore them all.
 - `POST /v1/admin/requests/{id}/approve`: returns the queued request. A fresh
   normal TTL starts; the original `created_at` is kept. Normal wake follows.
 - `POST /v1/admin/requests/{id}/deny`: optional `{"reason":"..."}` body;
@@ -183,6 +189,71 @@ receive 403:
   the reason. Missing reason means an empty reply body.
 
 Approval and denial require an unexpired held request; other states return 409.
+
+A browser caller must also send `{"nonce":"..."}` (with `reason` on a deny),
+the matching nonce from its own held listing. A nonce is bound to the request,
+the decision and the caller's tailnet node, lasts 10 minutes, works once, and
+dies when the hold ends. A browser decision answers
+`{"id":"...","status":"queued"|"declined"}`; when the hold had already ended
+(the nonce was used, or another device or the CLI decided first) it answers 200
+`{"id":"...","status":"<final status>","already_decided":true}`, and with a
+missing, expired or mismatched nonce on a request that is still held it answers
+409. A browser caller is one that sends `Origin` or any `Sec-Fetch-*` header,
+as every browser does on a POST. Clients that send no browser headers need no
+nonce and see no change. The
+`approved` and `denied` audit details name the deciding device
+(`{"device":"<machine name>"}`) for calls from the tailnet.
+
+Push alerts for held asks (admin devices and the local admin socket only;
+404 on a relay without push):
+
+- `GET /v1/admin/push/key`: `{"public_key":"<base64url VAPID key>"}`, the
+  `applicationServerKey` a browser subscribes with.
+- `PUT /v1/admin/push/subscription`: a browser `PushSubscription` as JSON,
+  `{"endpoint":"https://...","keys":{"p256dh":"...","auth":"..."}}`. The
+  endpoint must be https on `web.push.apple.com`, `fcm.googleapis.com`,
+  `updates.push.services.mozilla.com` or a `*.notify.windows.com` host, with
+  no port or user info (400 otherwise); `p256dh` is a 65-byte uncompressed
+  P-256 key and `auth` 16 bytes. The relay keeps one row per endpoint, so
+  the page sends it on every open. Returns `{"id":"<subscription id>"}`.
+- `DELETE /v1/admin/push/subscription`: `{"endpoint":"..."}`; returns
+  `{"removed":true|false}`.
+
+For each held send the relay queues an alert round to every subscription in
+the background (a held send's response never waits for it): an aes128gcm Web
+Push message with `TTL: 3600`, `Urgency: high`, `Topic: tincan-held` and the
+JSON payload `{"count":<held>}`, the number of requests held when the round
+goes out, at least 1. The payload carries no text or link: the page's service
+worker supplies the notification text and opens `/phone/#held` when it is
+tapped. Held sends that arrive close together share one round: a send while a
+round is already waiting joins it, and that round's count covers them all.
+A 404 or 410 deletes the subscription. Audit events, with subscription ids
+only: `push_subscribed`, `push_unsubscribed`, `push_sent` (`status`, or
+`error` of `timeout`, `address refused` or `send failed`).
+
+Kind `phone` is the owner's phone, joined from the phone page as its own
+agent: the page mints an invite with `POST /v1/admin/invite`
+`{"name":"phone","kind":"phone","new_only":true}` and redeems it with
+`POST /v1/join` from the same device, then asks through `POST /v1/send` and reads replies through
+`GET /v1/requests/{id}` and answers clarifying questions through
+`POST /v1/requests/{id}/answer`, naming itself with `X-Tincan-Agent` like any
+client on a machine with several agents. Its wake method is `none` and its
+stock good-at line is `the owner's phone; asks only, never answers`. A phone
+agent asks and never answers, so it is never a failover target or a room
+mention target; it may be a room member. The relay adds no route for it.
+
+`new_only` on `POST /v1/admin/invite` makes the relay refuse with 409 when
+the name belongs to an agent bound to another machine, instead of minting a
+code that would move that agent to whoever redeems it. The caller's own agent
+(bound to the calling device) may be invited again, and from the local admin
+socket any existing name is refused. Without `new_only`, as `tincan invite`
+sends it, an invite for an existing name still moves that agent on join.
+
+`GET /phone/` and the files under it are the [phone page](phone.md), served
+to admin devices only (403 otherwise), on the relay's tailnet listeners and,
+when the tailnet issues the relay a certificate, on port 443 under its
+certificate name (unless the API listener itself is on port 443). `GET /phone`
+redirects to `/phone/`.
 The sweep expires overdue holds and logs `hold_expired`. Holds survive restarts
 with their original deadline. Policy changes apply only to future sends.
 A `ping` is never held: it has no body and runs no model work. Search results
@@ -275,7 +346,7 @@ An entry for an agent on wake method `schedule` (it checks its inbox on its own 
 
 An entry for an agent on wake method `webhook` or `email` that the relay has woken also includes `woken_at` (the last recorded wake: the first send of a silent episode; a later 2xx follow-up does not move it), `wake_result` (`ok`, or why the send and its retry failed: `<host> returned <status>` or `POST to <host> failed: <cause>`, never the URL's path, query or credentials; either one ends in ` (fallback N: <method>)` when the wake went out on fallback path N, for example `ok (fallback 1: email)`) and `unanswered` (true when the agent has not checked in since that wake: the send failed, or more than the relay's `--wake-grace`, default 10 minutes, has passed with no poll). Only a poll is a check-in; other calls, such as a send or a get, do not clear it. The relay keeps the last wake and each agent's last poll across restarts, and after a restart the grace runs from the later of the wake and the relay's start. The agent's next poll clears `unanswered`. Removing an agent drops its last wake. All three are omitted for other agents, for agents never woken, and by older relays.
 
-An entry may also include `good_at`: the owner's line saying what the agent is good at, or, when the owner has set none, a stock line for service kinds (`history`, `notes`, `council`, `pass`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`) and product-tool kinds (`claude-code`, `codex`, `gemini-cli`, `grok-cli`, `chatgpt`). An agent with no stored kind whose name is one of those kind names gets that kind's line. It is omitted for hosting-shape kinds (`vm-webhook`, `e2b-email`, `proxy-sandbox`, `scheduled`, `generic`), `hermes` and `openclaw` until the owner sets one, and by older relays, and older clients ignore it. The relay resolves the stock line, so every client shows the same roster. Agents read it to choose whom to ask; the relay never routes on it.
+An entry may also include `good_at`: the owner's line saying what the agent is good at, or, when the owner has set none, a stock line for service kinds (`history`, `notes`, `council`, `pass`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`) and product-tool kinds (`claude-code`, `codex`, `gemini-cli`, `grok-cli`, `chatgpt`, `phone`). An agent with no stored kind whose name is one of those kind names gets that kind's line. It is omitted for hosting-shape kinds (`vm-webhook`, `e2b-email`, `proxy-sandbox`, `scheduled`, `generic`), `hermes` and `openclaw` until the owner sets one, and by older relays, and older clients ignore it. The relay resolves the stock line, so every client shows the same roster. Agents read it to choose whom to ask; the relay never routes on it.
 
 An entry may also include `working_on` and `working_on_others`: the title of the agent's most recently refreshed session that shares one (`tincan mcp --share-title`), and how many of its other sessions share one too. Both are omitted for an agent with no shared title, and by older relays, and older clients ignore them. The title is the session's own description of itself, for agents to read; the relay never routes on it and it grants nothing.
 
@@ -309,7 +380,7 @@ Clients advertise `X-Tincan-Features: ping` on every call, but only polls (`GET 
 
 A ping has no parent or attachments; its body is empty (up to four bytes are accepted and ignored). Policy still enforces the send rate limit and refuses inferred request parents. The target claims it and replies with status `answered` and body `pong (answered by <surface>, tincan <version>)`. Clients suppress pings from model inboxes. Peek pending entries add optional `kind`, and a peek adds optional `"pings": <n>`, the count of all queued pings (left out when zero), so a listener knows exactly how much ordinary work waits even when more pings are queued than `pending` lists. Queued pings are listed first in `pending` and have their own limit of 50, so a backlog of 50 or more other requests never hides a ping from a peek-based responder. Pong replies are marked seen when stored and never trigger a reply wake; get-reply and trace still return them.
 
-Polling surfaces are `check_inbox`, the MCP channel loop (`channel`), `inbox`, `wait`, `listen`, `history-serve`, and `web-serve`. The channel loop answers pings without a channel notice, so a Claude Code session pongs without a model turn. Wait and listen loops continue after automatic replies. A pong that fails is retried after the ordinary requests from the same poll have been handed on, never before. A listener answers without invoking its exec command. Such responses demonstrate the client loop is alive, not model execution. `GET /v1/trace?exclude_pings=true` filters before applying the limit; the optional parameter defaults to including all kinds. CLI trace listings omit pings unless `--pings` is supplied; stored traces retain their `ping` kind.
+Polling surfaces are `check_inbox`, the MCP channel loop (`channel`), `inbox`, `wait`, `listen`, `history-serve`, and `web-serve`. The channel loop answers pings without a channel notice, so a Claude Code session pongs without a model turn. Wait and listen loops continue after automatic replies. A pong that fails is retried after the ordinary requests from the same poll have been handed on, never before. A listener answers without invoking its exec command. Such responses demonstrate the client loop is alive, not model execution. `GET /v1/trace?exclude_pings=true` filters before applying the limit; the optional parameter defaults to including all kinds. The optional `from` parameter likewise keeps only chains a given agent started, before the limit. CLI trace listings omit pings unless `--pings` is supplied; stored traces retain their `ping` kind.
 
 While `tincan mcp` wakes its Claude Code session through the session's own messaging socket, every call it makes sends `X-Tincan-Features: ping,socket-wake`; it goes back to `ping` alone when that loop stops. Only a poll or peek that names a session (`X-Tincan-Session`) counts. The relay keeps, in memory only, when each session last polled with `socket-wake`, forgets a session at its first poll without it, and lets the record lapse after 10 minutes like other session activity. A live record makes the send response's `wake_via` read `socket` (see Recipient facts on send); the roster's `wake` stays the configured method. Older relays ignore the extra value.
 

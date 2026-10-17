@@ -120,7 +120,10 @@ A5. Join this machine's own agent (you), if you are one of the team:
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
     history, council, pass, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
-    copilot-web, dot-web, scheduled, generic.
+    copilot-web, dot-web, phone, scheduled, generic.
+    (phone is your owner's phone: it joins itself from the relay's phone
+    page at /phone/ and never answers, so never ask or notify it, and never
+    invite it yourself.)
     (gemini-cli, grok-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>. dot-web is the exception: web serve

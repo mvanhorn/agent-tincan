@@ -42,6 +42,9 @@ var (
 	// check whether the agent's old node is still online. It is a transient
 	// failure, not a refusal.
 	ErrRebindCheckFailed = errors.New("could not check the agent's old node; try again")
+	// ErrNameTaken means a new-only invite named an agent that is bound to
+	// another machine.
+	ErrNameTaken = errors.New("the name belongs to an agent on another machine")
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -347,6 +350,34 @@ func (d *Directory) InviteKind(ctx context.Context, remoteAddr, name, kind strin
 	return code, nil
 }
 
+// InviteNew is InviteKind for a name that must not move an agent: it refuses
+// with ErrNameTaken when name is bound to a machine other than the caller's.
+// The caller's own agent may be invited again. The local admin socket has no
+// machine, so any existing agent refuses it.
+func (d *Directory) InviteNew(ctx context.Context, remoteAddr, name, kind string) (string, error) {
+	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
+		return "", err
+	}
+	a, ok, err := d.store.AgentByName(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		mine := false
+		if remoteAddr != LocalAdmin {
+			n, err := d.who.WhoIs(ctx, remoteAddr)
+			if err != nil {
+				return "", err
+			}
+			mine = a.NodeID == n.ID
+		}
+		if !mine {
+			return "", fmt.Errorf("%s: %w", name, ErrNameTaken)
+		}
+	}
+	return d.InviteKind(ctx, remoteAddr, name, kind)
+}
+
 // Join binds the node behind remoteAddr to the invite's name. A node that
 // already carries agents gains another name alongside them. Re-inviting an
 // existing name moves it (and its kind, unless the invite names a new one) to
@@ -447,6 +478,15 @@ func (d *Directory) Agents(ctx context.Context) ([]Agent, error) {
 	return d.store.Agents(ctx)
 }
 
+// Node is the tailnet node behind remoteAddr, as WhoIs reports it. The
+// local admin socket is the node LocalAdmin.
+func (d *Directory) Node(ctx context.Context, remoteAddr string) (Node, error) {
+	if remoteAddr == LocalAdmin {
+		return Node{ID: LocalAdmin, Name: LocalAdmin}, nil
+	}
+	return d.who.WhoIs(ctx, remoteAddr)
+}
+
 // IsAdmin reports whether remoteAddr may run admin commands.
 func (d *Directory) IsAdmin(ctx context.Context, remoteAddr string) bool {
 	return d.requireAdmin(ctx, remoteAddr) == nil
@@ -460,6 +500,41 @@ func (d *Directory) requireAdmin(ctx context.Context, remoteAddr string) error {
 	if err != nil {
 		return err
 	}
+	return d.adminNode(n)
+}
+
+// NodeLookup is an optional Resolver extension that finds a tailnet node
+// by its stable id, as the tailnet sees it now.
+type NodeLookup interface {
+	LookupNode(ctx context.Context, stableID string) (n Node, found bool, err error)
+}
+
+// IsAdminNode reports whether the node with stable id, recorded under the
+// machine name name, is still an admin device: present on the tailnet and
+// passing the same checks as IsAdmin. A resolver that cannot look nodes up
+// leaves only the --admin name check. Code acting for a device after its
+// request has ended (a push alert) uses this.
+func (d *Directory) IsAdminNode(ctx context.Context, id, name string) (bool, error) {
+	if id == LocalAdmin {
+		return true, nil
+	}
+	who := d.who
+	if v, ok := who.(virtualResolver); ok {
+		who = v.Resolver
+	}
+	lk, ok := who.(NodeLookup)
+	if !ok {
+		return slices.Contains(d.cfg.Admins, name), nil
+	}
+	n, found, err := lk.LookupNode(ctx, id)
+	if err != nil || !found {
+		return false, err
+	}
+	return d.adminNode(n) == nil, nil
+}
+
+// adminNode reports why n is not an admin device, nil when it is.
+func (d *Directory) adminNode(n Node) error {
 	// Admin = named in --admin, untagged (tagged nodes are services, never
 	// people), and, when --admin-login is set, owned by a listed login.
 	if !slices.Contains(d.cfg.Admins, n.Name) {

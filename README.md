@@ -506,9 +506,13 @@ tincan approve <id>
 tincan deny <id> "reason"
 ```
 
-These commands also accept `--relay <url>`. Held requests are absent from inboxes and queued counts and do not wake their target. Senders see `held`, waiting for the owner's approval. Approval starts a fresh normal request TTL; denial returns `declined` with the reason, and the hold deadline expires to `expired`.
+These commands also accept `--relay <url>`. You can also approve and deny from [your phone](#your-phone). Held requests are absent from inboxes and queued counts and do not wake their target. Senders see `held`, waiting for the owner's approval. Approval starts a fresh normal request TTL; denial returns `declined` with the reason, and the hold deadline expires to `expired`.
 
 The optional operator receives a relay-authored `notify` naming the sender, target and request id, with the owner commands. It carries no request text, since the notified agent may itself be gated; the owner reads the request with `tincan held`. This notice bypasses the gate to avoid recursive notices, but grants no admin rights. The owner must approve from an admin device or local socket; a joined agent cannot approve its own request. See [the trust model](docs/trust-model.md).
+
+### Your phone
+
+The relay serves an installable page at `/phone/` for admin devices: the team with each agent's status, ordered as `tincan top` orders it, and the asks held for your approval, with Deny and Approve. Add the phone's machine name to the relay's `--admin` list, open the address the relay logs at startup (`phone page: ...`), and add it to the home screen. With HTTPS certificates on your tailnet the relay serves the page over HTTPS under its MagicDNS name, and the installed page can alert you when an ask is held; the alert says only that a request is waiting, never what it is. Without certificates the relay says why and serves the page over plain HTTP on its usual address, without alerts. Tap Join this phone on the Ask tab and the phone joins as its own agent (kind `phone`), so you can ask any teammate from it and read the answer on the page. Every other machine gets 403. See [Tincan on your phone](docs/phone.md).
 
 ### Attachments
 

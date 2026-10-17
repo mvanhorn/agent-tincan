@@ -28,6 +28,10 @@ import (
 // child process, so the shutdown tests can signal a real relay process.
 const relayHelperEnv = "TINCAN_TEST_RELAY_STATE"
 
+// relayHelperArgsEnv carries extra relay flags, one per line, to the relay
+// TestRelayProcessHelper runs.
+const relayHelperArgsEnv = "TINCAN_TEST_RELAY_ARGS"
+
 // loopbackTailnet stands in for tailscaled: every caller is the one admin
 // machine "host", which is always online.
 type loopbackTailnet struct{ url string }
@@ -41,6 +45,10 @@ func (loopbackTailnet) NodeOnline(context.Context, string) (bool, bool, error) {
 }
 
 func (l loopbackTailnet) SelfURLs(context.Context, int) []string { return []string{l.url} }
+
+// SelfNames is the loopback address the relay serves on: the only name a
+// browser-hardened test relay accepts in Host.
+func (loopbackTailnet) SelfNames(context.Context) []string { return []string{"127.0.0.1"} }
 
 // TestRelayProcessHelper is the relay process the shutdown tests start. It
 // runs only when the parent test sets relayHelperEnv. It serves the real
@@ -60,10 +68,17 @@ func TestRelayProcessHelper(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "url"), []byte(url), 0o600); err != nil {
 			return nil, nil, nil, err
 		}
+		if os.Getenv(relayHelperTLSEnv) != "" {
+			return ln, loopbackTLSTailnet{loopbackTailnet{url}, dir}, func() {}, nil
+		}
 		return ln, loopbackTailnet{url}, func() {}, nil
 	}
 	cmd := relayCmd()
-	cmd.SetArgs([]string{"--state-dir", dir, "--admin", "host"})
+	args := []string{"--state-dir", dir, "--admin", "host"}
+	if extra := os.Getenv(relayHelperArgsEnv); extra != "" {
+		args = append(args, strings.Split(extra, "\n")...)
+	}
+	cmd.SetArgs(args)
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, "relay:", err)
 		os.Exit(1)
@@ -116,14 +131,25 @@ func startRelayProcess(t *testing.T) *relayProcess {
 }
 
 // startRelayProcessIn starts a relay on the state dir dir, which may hold
-// the state of an earlier relay.
-func startRelayProcessIn(t *testing.T, dir string) *relayProcess {
+// the state of an earlier relay, with any extra relay flags.
+func startRelayProcessIn(t *testing.T, dir string, extra ...string) *relayProcess {
+	t.Helper()
+	p, err := tryRelayProcessIn(t, dir, extra...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// tryRelayProcessIn is startRelayProcessIn returning the failure, so a
+// caller can retry a relay that exited at startup.
+func tryRelayProcessIn(t *testing.T, dir string, extra ...string) (*relayProcess, error) {
 	t.Helper()
 	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	os.Remove(filepath.Join(dir, "url"))
 	p := &relayProcess{dir: dir, out: &lockedBuffer{}, done: make(chan error, 1)}
 	p.cmd = exec.Command(os.Args[0], "-test.run=^TestRelayProcessHelper$")
-	p.cmd.Env = append(os.Environ(), relayHelperEnv+"="+dir)
+	p.cmd.Env = append(os.Environ(), relayHelperEnv+"="+dir, relayHelperArgsEnv+"="+strings.Join(extra, "\n"))
 	p.cmd.Stdout = p.out
 	p.cmd.Stderr = p.out
 	if err := p.cmd.Start(); err != nil {
@@ -136,15 +162,21 @@ func startRelayProcessIn(t *testing.T, dir string) *relayProcess {
 	})
 	deadline := time.Now().Add(30 * time.Second)
 	for p.url == "" || p.get("/v1/hello") != nil {
+		select {
+		case err := <-p.done:
+			p.done <- err // for cleanup
+			return nil, fmt.Errorf("relay exited at startup (%v):\n%s", err, p.out)
+		default:
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("relay did not start:\n%s", p.out)
+			return nil, fmt.Errorf("relay did not start:\n%s", p.out)
 		}
 		time.Sleep(20 * time.Millisecond)
 		if raw, err := os.ReadFile(filepath.Join(dir, "url")); err == nil {
 			p.url = string(raw)
 		}
 	}
-	return p
+	return p, nil
 }
 
 func (p *relayProcess) get(path string) error {

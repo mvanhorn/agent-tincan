@@ -46,12 +46,15 @@ const (
 	KindPerplexityWeb = "perplexity-web"
 	KindCopilotWeb    = "copilot-web"
 	KindDotWeb        = "dot-web"
-	KindScheduled     = "scheduled"
-	KindGeneric       = "generic"
+	// KindPhone is the owner's phone, joined from the relay's phone page.
+	// It asks teammates and never answers, so nothing wakes it (wake none).
+	KindPhone     = "phone"
+	KindScheduled = "scheduled"
+	KindGeneric   = "generic"
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindPhone, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -117,6 +120,7 @@ var defaultWake = map[string]string{
 	KindPerplexityWeb: "wait",
 	KindCopilotWeb:    "wait",
 	KindDotWeb:        "wait",
+	KindPhone:         "none",
 	KindScheduled:     "schedule",
 	KindGeneric:       "none",
 }
@@ -142,6 +146,7 @@ var stockGoodAt = map[string]string{
 	KindGrokCLI:       "xAI's Grok Build CLI run unattended on the owner's machine: reads code, edits and runs it in its own work folder",
 	KindChatGPT:       "ChatGPT in the owner's ChatGPT app; acts only while the owner is chatting with it, so it cannot pick up asks later",
 	KindSesame:        "the owner's Sesame agent in Sesame's cloud; picks up asks when its Sesame schedule checks the inbox, not at once",
+	KindPhone:         "the owner's phone; asks only, never answers",
 }
 
 // RuntimeKind returns the kind a roster name implies when nothing else says,
@@ -395,8 +400,9 @@ func agentBlock(d agentData) (AgentBlock, error) {
 		return AgentBlock{}, err
 	}
 	instructions := strings.TrimSpace(common) + "\n" + strings.TrimSpace(specific)
-	if isService(d.Kind) {
-		// A Go service, not a model: there are no standing instructions.
+	if isService(d.Kind) || d.Kind == KindPhone {
+		// A Go service or the owner's phone, not a model: there are no
+		// standing instructions.
 		instructions = strings.TrimSpace(specific)
 	}
 	setup, err := lines("setup."+d.Kind, d)

@@ -217,9 +217,10 @@ func (s *Store) Trace(ctx context.Context, traceID string) ([]TraceStep, error) 
 // RecentTraces returns the newest chain ids with their first request. A
 // trace starts at hop 1, or with no parent: an ask a session files under a
 // trace of its own still carries the hop of the chain it is checked
-// against (see policy.Prepare).
-func (s *Store) RecentTraces(ctx context.Context, limit int, excludePings bool) ([]TraceStep, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE (hop = 1 OR parent_id = '') AND (? = 0 OR kind != 'ping') ORDER BY created_at DESC LIMIT ?`, excludePings, limit)
+// against (see policy.Prepare). from, when set, keeps only chains that
+// agent started, filtered before the limit.
+func (s *Store) RecentTraces(ctx context.Context, limit int, excludePings bool, from string) ([]TraceStep, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE (hop = 1 OR parent_id = '') AND (? = 0 OR kind != 'ping') AND (? = '' OR from_agent = ?) ORDER BY created_at DESC LIMIT ?`, excludePings, from, from, limit)
 	if err != nil {
 		return nil, err
 	}
