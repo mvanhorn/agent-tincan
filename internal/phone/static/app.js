@@ -302,11 +302,12 @@ function renderAsk() {
   }
   const disabled = state.offline || state.notAdmin;
   $("ask-send").disabled = disabled || targets.length === 0;
-  renderSent();
+  // A sent-list refresh in flight renders the list when it lands.
+  if (!sentPolling) renderSent();
 }
 
-const when = (e) => new Date(e.result.request.created_at || 0).getTime();
-const newestFirst = (a, b) => when(b) - when(a);
+const sentTime = (e) => new Date(e.result.request.created_at || 0).getTime();
+const newestFirst = (a, b) => sentTime(b) - sentTime(a);
 
 function sentLabel(res) {
   switch (res.status) {
@@ -474,7 +475,8 @@ async function sendAsk() {
 }
 
 // refreshSent rebuilds this phone's asks from the relay: its recent chains
-// name them, and each open one is read again for its status and reply.
+// name them, and each open one is read again for its status and reply. It
+// renders the sent list when done.
 let sentPolling = false;
 async function refreshSent() {
   if (!state.me || sentPolling) return;
@@ -501,8 +503,18 @@ async function refreshSent() {
     // The main poll reports the relay as offline.
   } finally {
     sentPolling = false;
-    renderAsk();
+    renderSent();
   }
+}
+
+// sentNeeded reports whether a poll should refresh the sent list: the Ask
+// tab is showing, or one of this phone's asks is still open.
+function sentNeeded() {
+  if (state.tab === "ask") return true;
+  for (const e of state.sent.values()) {
+    if (!DONE.has(e.result.status)) return true;
+  }
+  return false;
 }
 
 function render() {
@@ -537,7 +549,7 @@ async function refresh() {
     state.roster = (agents.data && agents.data.agents) || [];
     state.relayVersion = (agents.data && agents.data.relay_version) || "";
     if (!state.meChecked) await whoami();
-    refreshSent();
+    if (sentNeeded()) refreshSent();
   } catch (_) {
     state.offline = true;
   } finally {
@@ -738,7 +750,7 @@ window.addEventListener("hashchange", () => {
 });
 
 $("tab-team").addEventListener("click", () => { state.tab = "team"; render(); });
-$("tab-ask").addEventListener("click", () => { state.tab = "ask"; render(); });
+$("tab-ask").addEventListener("click", () => { state.tab = "ask"; refreshSent(); render(); });
 $("join-button").addEventListener("click", join);
 $("ask-send").addEventListener("click", sendAsk);
 

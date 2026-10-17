@@ -16,6 +16,9 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
+// phonePage serves the phone page's embedded files.
+var phonePage = phone.Handler()
+
 // handlePhone serves the phone page and its files, to admin devices only.
 // adminRoutes registers routes without checking anything, so the check is
 // here, static files included.
@@ -24,7 +27,7 @@ func (s *Server) handlePhone(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
 		return
 	}
-	phone.Handler().ServeHTTP(w, r)
+	phonePage.ServeHTTP(w, r)
 }
 
 // NonceTTL is how long a decision nonce from the held listing stays good.
@@ -40,6 +43,16 @@ const nonceKeep = 8
 // used, expired, or issued for another request, decision or device.
 var errStaleNonce = errors.New("this approval button has expired; reload the held list and try again")
 
+// nonceSweepEvery is how often issue drops expired nonces. take checks
+// expiry itself, so a nonce left in the book past its time is never good.
+const nonceSweepEvery = time.Second
+
+// The decisions a nonce is issued for.
+const (
+	decisionApprove = "approve"
+	decisionDeny    = "deny"
+)
+
 // nonceKey is what a decision nonce is bound to.
 type nonceKey struct{ id, decision, node string }
 
@@ -48,9 +61,10 @@ type nonceKey struct{ id, decision, node string }
 // restart voids them all and the page fetches new ones. Nonces are never
 // logged or audited.
 type nonceBook struct {
-	mu     sync.Mutex
-	grants map[string]nonceGrant // sha256 hex -> grant
-	byKey  map[nonceKey][]string // hashes per key, oldest first
+	mu        sync.Mutex
+	grants    map[string]nonceGrant            // sha256 hex -> grant
+	byID      map[string]map[nonceKey][]string // request id -> hashes per key, oldest first
+	lastSweep time.Time
 }
 
 type nonceGrant struct {
@@ -59,7 +73,7 @@ type nonceGrant struct {
 }
 
 func newNonceBook() *nonceBook {
-	return &nonceBook{grants: map[string]nonceGrant{}, byKey: map[nonceKey][]string{}}
+	return &nonceBook{grants: map[string]nonceGrant{}, byID: map[string]map[nonceKey][]string{}}
 }
 
 func nonceHash(raw string) string {
@@ -67,8 +81,9 @@ func nonceHash(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// issue mints a nonce for key, good until now+NonceTTL, and drops expired
-// ones and the oldest beyond nonceKeep for key.
+// issue mints a nonce for key, good until now+NonceTTL, and drops the
+// oldest beyond nonceKeep for key and, at most every nonceSweepEvery,
+// expired ones.
 func (b *nonceBook) issue(key nonceKey, now time.Time) (string, time.Time) {
 	var buf [32]byte
 	rand.Read(buf[:])
@@ -76,16 +91,24 @@ func (b *nonceBook) issue(key nonceKey, now time.Time) (string, time.Time) {
 	exp := now.Add(NonceTTL)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for h, g := range b.grants {
-		if !now.Before(g.expires) {
-			b.dropLocked(h)
+	if now.Sub(b.lastSweep) >= nonceSweepEvery || now.Before(b.lastSweep) {
+		b.lastSweep = now
+		for h, g := range b.grants {
+			if !now.Before(g.expires) {
+				b.dropLocked(h)
+			}
 		}
 	}
 	h := nonceHash(raw)
 	b.grants[h] = nonceGrant{key: key, expires: exp}
-	b.byKey[key] = append(b.byKey[key], h)
-	for len(b.byKey[key]) > nonceKeep {
-		b.dropLocked(b.byKey[key][0])
+	keys := b.byID[key.id]
+	if keys == nil {
+		keys = map[nonceKey][]string{}
+		b.byID[key.id] = keys
+	}
+	keys[key] = append(keys[key], h)
+	for len(keys[key]) > nonceKeep {
+		b.dropLocked(keys[key][0])
 	}
 	return raw, exp
 }
@@ -110,14 +133,12 @@ func (b *nonceBook) take(raw string, key nonceKey, now time.Time) bool {
 func (b *nonceBook) void(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for key, hs := range b.byKey {
-		if key.id == id {
-			for _, h := range hs {
-				delete(b.grants, h)
-			}
-			delete(b.byKey, key)
+	for _, hs := range b.byID[id] {
+		for _, h := range hs {
+			delete(b.grants, h)
 		}
 	}
+	delete(b.byID, id)
 }
 
 func (b *nonceBook) dropLocked(h string) {
@@ -126,17 +147,21 @@ func (b *nonceBook) dropLocked(h string) {
 		return
 	}
 	delete(b.grants, h)
-	hs := b.byKey[g.key]
+	keys := b.byID[g.key.id]
+	hs := keys[g.key]
 	for i, x := range hs {
 		if x == h {
 			hs = append(hs[:i], hs[i+1:]...)
 			break
 		}
 	}
-	if len(hs) == 0 {
-		delete(b.byKey, g.key)
-	} else {
-		b.byKey[g.key] = hs
+	switch {
+	case len(hs) > 0:
+		keys[g.key] = hs
+	case len(keys) > 1:
+		delete(keys, g.key)
+	default:
+		delete(b.byID, g.key.id)
 	}
 }
 
@@ -178,6 +203,17 @@ func (s *Server) takeDecisionNonce(r *http.Request, id, decision, nonce string) 
 		return false
 	}
 	return s.nonces.take(nonce, nonceKey{id: id, decision: decision, node: n.ID}, s.cfg.Now())
+}
+
+// writeDecisionErr answers an approve or deny on id that failed with err:
+// a browser whose hold had already ended gets the final state, as from
+// writeDecided; anything else gets the error.
+func (s *Server) writeDecisionErr(w http.ResponseWriter, r *http.Request, id string, page bool, err error) {
+	if page && errors.Is(err, store.ErrWrongState) {
+		s.writeDecided(w, r, id)
+		return
+	}
+	writeErr(w, statusFor(err), err)
 }
 
 // writeDecided answers a page decision on id that did not change it: the

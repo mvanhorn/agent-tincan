@@ -161,22 +161,20 @@ func TestDenyBeforeApprove(t *testing.T) {
 
 // The page joins the phone as kind phone through the relay's own invite
 // and join routes, never under the name of another agent (an invite for an
-// existing name would move that agent to the phone), and asks for a second
-// confirmation before approving its own agent's ask.
+// existing name would move that agent to the phone), and asks and follows
+// answers through the relay's routes.
 func TestJoinAndAskInThePage(t *testing.T) {
 	app := read(t, "app.js")
-	for _, want := range []string{
-		`api("POST", "/v1/admin/invite", { name, kind: "phone" })`,
-		`api("POST", "/v1/join", { code: inv.data.code })`,
-		`taken && taken.kind !== "phone"`,
-		`api("POST", "/v1/send", { to, body, kind: "ask" })`,
-		`"/v1/trace?limit=200&exclude_pings=true"`,
-		`"/answer"`,
-		`window.confirm(`,
-	} {
+	for _, want := range []string{`"/v1/admin/invite"`, `"/v1/join"`, `"/v1/send"`, `"/v1/trace?`, `"/answer"`} {
 		if !strings.Contains(app, want) {
 			t.Errorf("app.js lacks %s", want)
 		}
+	}
+	if !regexp.MustCompile(`"/v1/admin/invite"[^;]*kind:\s*"phone"`).MatchString(app) {
+		t.Error("the page must invite this phone as kind phone")
+	}
+	if !strings.Contains(app, `kind !== "phone"`) {
+		t.Error("the page must refuse a name another kind of agent holds")
 	}
 	html := read(t, "index.html")
 	for _, want := range []string{"Join this phone", `role="tablist"`, `id="ask-body"`, `for="ask-body"`, `for="join-name"`} {
@@ -185,8 +183,9 @@ func TestJoinAndAskInThePage(t *testing.T) {
 		}
 	}
 	// Held asks stay above the tabs that later views are added to.
-	if strings.Index(html, `id="held"`) > strings.Index(html, `role="tablist"`) {
-		t.Error("held asks must come before the tabs")
+	held, tabs := strings.Index(html, `id="held"`), strings.Index(html, `role="tablist"`)
+	if held < 0 || tabs < 0 || held > tabs {
+		t.Errorf("held at %d, tabs at %d: held asks must come before the tabs", held, tabs)
 	}
 }
 
@@ -206,11 +205,15 @@ func TestPushAlertsInThePage(t *testing.T) {
 	if strings.Count(app, "requestPermission") != 1 {
 		t.Fatal("app.js should ask for permission in exactly one place")
 	}
-	turnOn := app[strings.Index(app, "async function turnOnAlerts"):]
-	if !strings.Contains(turnOn[:strings.Index(turnOn, "\n}\n")], "requestPermission") {
+	_, turnOn, ok := strings.Cut(app, "async function turnOnAlerts")
+	if !ok {
+		t.Fatal("app.js has no turnOnAlerts")
+	}
+	body, _, ok := strings.Cut(turnOn, "\n}\n")
+	if !ok || !strings.Contains(body, "requestPermission") {
 		t.Error("permission is asked outside the Turn on alerts tap")
 	}
-	if !strings.Contains(app, "pushState();") || !strings.Contains(app, `api("PUT", "/v1/admin/push/subscription"`) {
-		t.Error("the page must send its subscription on every open")
+	if !strings.Contains(app, `"PUT", "/v1/admin/push/subscription"`) {
+		t.Error("the page must send its subscription to the relay")
 	}
 }

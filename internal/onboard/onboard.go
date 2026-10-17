@@ -46,8 +46,7 @@ const (
 	KindCopilotWeb    = "copilot-web"
 	KindDotWeb        = "dot-web"
 	// KindPhone is the owner's phone, joined from the relay's phone page.
-	// It asks teammates and never answers, so it is never a failover
-	// target or a room mention target, though it may be a room member.
+	// It asks teammates and never answers, so nothing wakes it (wake none).
 	KindPhone     = "phone"
 	KindScheduled = "scheduled"
 	KindGeneric   = "generic"

@@ -2119,8 +2119,8 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		req.Body = approvalPreview(req.Body)
 		out[i] = heldRequest{Request: req}
 		if node != "" {
-			out[i].ApproveNonce, out[i].NonceExpiresAt = s.nonces.issue(nonceKey{id: req.ID, decision: "approve", node: node}, now)
-			out[i].DenyNonce, _ = s.nonces.issue(nonceKey{id: req.ID, decision: "deny", node: node}, now)
+			out[i].ApproveNonce, out[i].NonceExpiresAt = s.nonces.issue(nonceKey{id: req.ID, decision: decisionApprove, node: node}, now)
+			out[i].DenyNonce, _ = s.nonces.issue(nonceKey{id: req.ID, decision: decisionDeny, node: node}, now)
 		}
 		kind, seen := kinds[req.To]
 		if !seen {
@@ -2179,7 +2179,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Sweep(r.Context())
 	id := r.PathValue("id")
-	if page && !s.takeDecisionNonce(r, id, "approve", in.Nonce) {
+	if page && !s.takeDecisionNonce(r, id, decisionApprove, in.Nonce) {
 		s.writeDecided(w, r, id)
 		return
 	}
@@ -2189,11 +2189,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := s.store.Release(r.Context(), id, ttl)
 	if err != nil {
-		if page && errors.Is(err, store.ErrWrongState) {
-			s.writeDecided(w, r, id)
-			return
-		}
-		writeErr(w, statusFor(err), err)
+		s.writeDecisionErr(w, r, id, page, err)
 		return
 	}
 	s.nonces.void(req.ID)
@@ -2224,17 +2220,13 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	page := browserMarked(r)
 	s.Sweep(r.Context())
 	id := r.PathValue("id")
-	if page && !s.takeDecisionNonce(r, id, "deny", in.Nonce) {
+	if page && !s.takeDecisionNonce(r, id, decisionDeny, in.Nonce) {
 		s.writeDecided(w, r, id)
 		return
 	}
 	req, err := s.store.DenyHeld(r.Context(), id, in.Reason)
 	if err != nil {
-		if page && errors.Is(err, store.ErrWrongState) {
-			s.writeDecided(w, r, id)
-			return
-		}
-		writeErr(w, statusFor(err), err)
+		s.writeDecisionErr(w, r, id, page, err)
 		return
 	}
 	s.nonces.void(req.ID)

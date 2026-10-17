@@ -1401,6 +1401,13 @@ func (s *Store) Held(ctx context.Context) ([]envelope.Request, error) {
 	return scanRequests(rows)
 }
 
+// CountHeld counts the held requests Held would list: held and unexpired.
+func (s *Store) CountHeld(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE status = ? AND expires_at > ?`, string(envelope.StatusHeld), s.now().UnixMilli()).Scan(&n)
+	return n, err
+}
+
 // Release queues a held request with a fresh delivery TTL and its original creation time.
 func (s *Store) Release(ctx context.Context, id string, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()

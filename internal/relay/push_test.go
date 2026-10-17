@@ -202,8 +202,8 @@ func waitAudit(t *testing.T, m *testrelay.Mesh, event string, n int) []store.Aud
 }
 
 // A held ask sends one push to each subscription. The decrypted payload
-// says only that a request is waiting, with a count, and the audit names
-// the subscription by id, never its endpoint or keys.
+// carries only the held count, and the audit names the subscription by id,
+// never its endpoint or keys.
 func TestPushOnHeldAsk(t *testing.T) {
 	m := pushMesh(t, 2*time.Second)
 	svc := newPushService(t, http.StatusCreated)
@@ -234,13 +234,9 @@ func TestPushOnHeldAsk(t *testing.T) {
 		if strings.Contains(payload, "bank") || strings.Contains(payload, "grokbot") || strings.Contains(payload, "muse") {
 			t.Fatalf("push payload carries request content: %s", payload)
 		}
-		var msg struct {
-			Body  string `json:"body"`
-			Count int    `json:"count"`
-			URL   string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(payload), &msg); err != nil || msg.Body != "A request is waiting for your approval" || msg.Count != 1 || msg.URL != "/phone/#held" {
-			t.Fatalf("push payload %s: %+v %v", payload, msg, err)
+		var msg map[string]any
+		if err := json.Unmarshal([]byte(payload), &msg); err != nil || len(msg) != 1 || msg["count"] != float64(1) {
+			t.Fatalf("push payload %s: %v %v, want only the held count", payload, msg, err)
 		}
 	}
 	for _, e := range waitAudit(t, m, "push_sent", 2) {

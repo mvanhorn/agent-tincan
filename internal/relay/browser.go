@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/mvanhorn/agent-tincan/internal/phone"
 )
 
 // Refusals from HardenForBrowsers. They name no header value, so a refused
@@ -16,11 +18,6 @@ var (
 	errCrossOrigin  = errors.New("tincan relay: cross-origin browser requests are refused")
 	errNotJSONState = errors.New("tincan relay: browser requests that change state must be application/json")
 )
-
-// phonePath is the one page a browser may open from outside the relay's
-// own pages (Sec-Fetch-Site: none: a typed address, a bookmark or a
-// home-screen icon).
-const phonePath = "/phone/"
 
 // HardenForBrowsers wraps h, the relay API as served on a tailnet listener,
 // so that no web page an admin device has open can act on or read the relay
@@ -82,7 +79,10 @@ func sameOrigin(r *http.Request) bool {
 	switch site := r.Header.Get("Sec-Fetch-Site"); site {
 	case "", "same-origin":
 	case "none":
-		if r.Method != http.MethodGet || r.URL.Path != phonePath {
+		// The phone page is the one page a browser may open from outside
+		// the relay's own pages: a typed address, a bookmark or a
+		// home-screen icon.
+		if r.Method != http.MethodGet || r.URL.Path != phone.Prefix {
 			return false
 		}
 	default:

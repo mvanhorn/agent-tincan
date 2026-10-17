@@ -50,8 +50,9 @@ func scanPush(sc scanner) (PushSubscription, error) {
 }
 
 // UpsertPushSubscription stores sub under its endpoint: a new row, or new
-// keys and device for the endpoint's existing row, which keeps its id. It
-// reports whether the row is new.
+// keys and device for the endpoint's existing row, which keeps its id. An
+// existing row that already matches is returned as is, unwritten: the page
+// sends its subscription on every open. It reports whether the row is new.
 func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription) (PushSubscription, bool, error) {
 	now := s.now().UnixMilli()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -59,6 +60,13 @@ func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription
 		return PushSubscription{}, false, err
 	}
 	defer tx.Rollback()
+	cur, err := scanPush(tx.QueryRowContext(ctx, `SELECT `+pushCols+` FROM push_subscriptions WHERE endpoint = ?`, sub.Endpoint))
+	switch {
+	case err == nil && cur.P256dh == sub.P256dh && cur.Auth == sub.Auth && cur.Device == sub.Device && cur.Node == sub.Node:
+		return cur, false, nil
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return PushSubscription{}, false, err
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE push_subscriptions SET p256dh = ?, auth = ?, device = ?, node = ?, updated_at = ? WHERE endpoint = ?`,
 		sub.P256dh, sub.Auth, sub.Device, sub.Node, now, sub.Endpoint)
 	if err != nil {

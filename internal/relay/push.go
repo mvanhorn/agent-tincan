@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/store"
@@ -36,8 +38,8 @@ const pushTimeout = 10 * time.Second
 // pushTTL is how long a push service keeps an undelivered alert.
 const pushTTL = 3600
 
-// pushBody is the only text an alert carries; held asks are never named.
-const pushBody = "A request is waiting for your approval"
+// pushParallel bounds how many subscriptions one round sends to at once.
+const pushParallel = 4
 
 // pushHosts are the push services the relay sends to: Apple, Google,
 // Mozilla, and (by suffix) Microsoft.
@@ -94,12 +96,16 @@ func pushEndpointAllowed(u *url.URL) bool {
 // tailnetRange is Tailscale's CGNAT range, never a push service.
 var tailnetRange = netip.MustParsePrefix("100.64.0.0/10")
 
+// errPushAddr wraps every refusal from refusePushAddr, so a failed send
+// can be audited as one without reading the error's text.
+var errPushAddr = errors.New("push: refusing to connect to a non-public address")
+
 // refusePushAddr refuses any address that is not a public unicast one:
 // private, loopback, link-local, tailnet, unspecified or multicast.
 func refusePushAddr(ip netip.Addr) error {
 	ip = ip.Unmap()
 	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || tailnetRange.Contains(ip) {
-		return fmt.Errorf("push: refusing to connect to non-public address %s", ip)
+		return fmt.Errorf("%w %s", errPushAddr, ip)
 	}
 	return nil
 }
@@ -146,8 +152,10 @@ func (s *Server) pushLoop(p *Pusher) {
 	}
 }
 
-// pushRound alerts every subscription once. Nothing it does changes a
-// held request: failures are audited and the next held ask tries again.
+// pushRound alerts every subscription once, a few at a time. Nothing it
+// does changes a held request: failures are audited and the next held ask
+// tries again. The alert carries only the held count, the one field sw.js
+// reads; it never names a held ask.
 func (s *Server) pushRound(p *Pusher) {
 	ctx := context.Background()
 	subs, err := s.store.PushSubscriptions(ctx)
@@ -158,14 +166,21 @@ func (s *Server) pushRound(p *Pusher) {
 	if len(subs) == 0 {
 		return
 	}
-	held, err := s.store.Held(ctx)
+	held, err := s.store.CountHeld(ctx)
 	if err != nil {
 		log.Printf("push: count held requests: %v", err)
 	}
-	payload, _ := json.Marshal(map[string]any{"title": "Agent Tincan", "body": pushBody, "count": max(len(held), 1), "url": "/phone/#held"})
+	payload, _ := json.Marshal(map[string]int{"count": max(held, 1)})
+	var g errgroup.Group
+	g.SetLimit(pushParallel)
 	for _, sub := range subs {
-		s.pushOne(ctx, p, sub, payload)
+		g.Go(func() error {
+			// webpush pads the payload in place, so each send gets its own.
+			s.pushOne(ctx, p, sub, bytes.Clone(payload))
+			return nil
+		})
 	}
+	_ = g.Wait() // pushOne audits its own failures and returns none
 }
 
 func (s *Server) pushOne(ctx context.Context, p *Pusher, sub store.PushSubscription, payload []byte) {
@@ -186,7 +201,7 @@ func (s *Server) pushOne(ctx context.Context, p *Pusher, sub store.PushSubscript
 		switch {
 		case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
 			kind = "timeout"
-		case strings.Contains(err.Error(), "non-public address"):
+		case errors.Is(err, errPushAddr):
 			kind = "address refused"
 		}
 		s.record(ctx, "push_sent", "", "", "relay", store.DetailJSON(map[string]any{"subscription": sub.ID, "error": kind}))
