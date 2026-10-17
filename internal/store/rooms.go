@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
@@ -54,6 +56,21 @@ CREATE TABLE IF NOT EXISTS room_posts (
 );
 CREATE INDEX IF NOT EXISTS room_posts_room ON room_posts(room_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS room_posts_reply ON room_posts(reply_to, reply_generation) WHERE reply_to != '';`)
+	if err != nil {
+		return err
+	}
+	// room_post_id marks an ask built from a mention: the post it came
+	// from, NULL for every other request.
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'room_post_id')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN room_post_id INTEGER`); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_room_post ON requests(room_post_id) WHERE room_post_id IS NOT NULL`)
 	return err
 }
 
@@ -195,8 +212,74 @@ func (s *Store) AddRoomPost(ctx context.Context, room, author, body string) (env
 	return envelope.RoomPost{ID: postID, Room: room, Author: author, Body: body, CreatedAt: now.UTC().Truncate(time.Millisecond)}, nil
 }
 
+// mirrorReplyTx posts rep, the reply just written in tx, into the room of
+// the mention its request came from, as the replier's post: with the
+// reply's status, and under the request id and reply generation, which
+// may post once. It does nothing for a request that is not a mention, or
+// when the replier is no longer a member of the room. Running inside the
+// reply's own transaction, the reply and its room post commit together.
+func (s *Store) mirrorReplyTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO room_posts (room_id, author, body, created_at, status, reply_to, reply_generation)
+		SELECT p.room_id, ?, ?, ?, ?, q.id, ? FROM requests q
+		JOIN room_posts p ON p.id = q.room_post_id
+		JOIN room_members m ON m.room_id = p.room_id AND m.agent = ?
+		WHERE q.id = ? AND q.room_post_id IS NOT NULL
+		ON CONFLICT DO NOTHING`,
+		rep.From, mirroredBody(rep), s.now().UnixMilli(), string(rep.Status), rep.Generation, rep.From, rep.RequestID)
+	return err
+}
+
+// mirroredBody is the room text of a mirrored reply: its body, cut to
+// MaxRoomPost with a pointer to the request, which keeps the whole reply
+// and any files.
+func mirroredBody(rep envelope.Reply) string {
+	body := rep.Body
+	note := ""
+	if len(rep.Attachments) > 0 {
+		note = fmt.Sprintf("\n[%d attachment(s) on request %s]", len(rep.Attachments), rep.RequestID)
+	}
+	if len(body)+len(note) > envelope.MaxRoomPost {
+		note = fmt.Sprintf("\n[cut; the whole reply is on request %s]", rep.RequestID) + note
+		cut := max(envelope.MaxRoomPost-len(note), 0)
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut]
+	}
+	return body + note
+}
+
+// MirroredPost returns the room post that mirrors generation gen of the
+// reply to request id, and false when there is none (the request is not a
+// mention, or its replier had left the room).
+func (s *Store) MirroredPost(ctx context.Context, id string, gen int64) (envelope.RoomPost, bool, error) {
+	var p envelope.RoomPost
+	var created int64
+	var status string
+	err := s.db.QueryRowContext(ctx, `SELECT p.id, r.name, p.author, p.body, p.created_at, p.status, p.reply_to FROM room_posts p JOIN rooms r ON r.id = p.room_id
+		WHERE p.reply_to = ? AND p.reply_generation = ?`, id, gen).Scan(&p.ID, &p.Room, &p.Author, &p.Body, &created, &status, &p.ReplyTo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return envelope.RoomPost{}, false, nil
+	}
+	if err != nil {
+		return envelope.RoomPost{}, false, err
+	}
+	p.CreatedAt, p.Status = time.UnixMilli(created).UTC(), envelope.Status(status)
+	return p, true, nil
+}
+
+// RecentRoomPosts returns up to limit of room's posts before the post with
+// id before, newest first.
+func (s *Store) RecentRoomPosts(ctx context.Context, room string, before int64, limit int) ([]envelope.RoomPost, error) {
+	id, err := roomID(ctx, s.db, room)
+	if err != nil {
+		return nil, err
+	}
+	return s.roomPosts(ctx, room, `SELECT id, author, body, created_at, status, reply_to FROM room_posts WHERE room_id = ? AND id < ? ORDER BY id DESC LIMIT ?`, id, before, limit)
+}
+
 // RoomPosts returns up to limit of room's posts after the post with id
-// after, oldest first.
+// after, oldest first, each with the asks its mentions became.
 func (s *Store) RoomPosts(ctx context.Context, room string, after int64, limit int) ([]envelope.RoomPost, error) {
 	id, err := roomID(ctx, s.db, room)
 	if err != nil {
@@ -225,5 +308,39 @@ func (s *Store) roomPosts(ctx context.Context, room, query string, args ...any) 
 		p.CreatedAt, p.Status = time.UnixMilli(created).UTC(), envelope.Status(status)
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, s.addMentions(ctx, out)
+}
+
+// addMentions fills in each post's mentions: the asks built from it, in
+// the order they were sent, with their current status.
+func (s *Store) addMentions(ctx context.Context, posts []envelope.RoomPost) error {
+	if len(posts) == 0 {
+		return nil
+	}
+	at := make(map[int64]int, len(posts))
+	args := make([]any, 0, len(posts))
+	for i, p := range posts {
+		at[p.ID] = i
+		args = append(args, p.ID)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT room_post_id, id, to_agent, status FROM requests WHERE room_post_id IN (?`+strings.Repeat(", ?", len(args)-1)+`) ORDER BY created_at, rowid`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var post int64
+		var m envelope.RoomMention
+		var status string
+		if err := rows.Scan(&post, &m.RequestID, &m.Agent, &status); err != nil {
+			return err
+		}
+		m.Status = envelope.Status(status)
+		i := at[post]
+		posts[i].Mentions = append(posts[i].Mentions, m)
+	}
+	return rows.Err()
 }

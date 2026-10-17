@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// WebSendBudget is the budget a web member's mention ask is packed to.
+const WebSendBudget = webSendBudget
+
 // KeyForTest exposes the relay key to tests.
 func KeyForTest(s *Server) string { return s.key }
 

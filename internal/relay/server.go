@@ -717,37 +717,47 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	prep := s.preparer()
-	if err := prep.Prepare(r.Context(), &req); err != nil {
-		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
+	if req, err = s.submit(r.Context(), req); err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
+	writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
+}
+
+// submit takes a new request from req.From through every step a send
+// takes: Prepare (chain, loop, hop and rate checks, the owner's holds),
+// Enqueue, then either the hold's audit row and approval notice, or the
+// target's held poll, the audit row and the wake. A send and a room
+// mention both go through it, so a mention is exactly an ask. Its errors
+// carry their HTTP status (statusFor).
+func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Request, error) {
+	prep := s.preparer()
+	if err := prep.Prepare(ctx, &req); err != nil {
+		s.record(ctx, "rejected", "", req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
+		return envelope.Request{}, err
+	}
 	prepared := req
-	req, err = s.store.Enqueue(r.Context(), req, s.requestTTL(r.Context(), req.To))
+	req, err := s.store.Enqueue(ctx, req, s.requestTTL(ctx, req.To))
 	if err != nil {
 		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
 		}
 		if errors.Is(err, store.ErrGroupFull) {
-			writeErr(w, http.StatusBadRequest, err)
-			return
+			return envelope.Request{}, &StatusError{Code: http.StatusBadRequest, Err: err}
 		}
-		writeErr(w, attachmentStatus(err, http.StatusInternalServerError), err)
-		return
+		return envelope.Request{}, &StatusError{Code: attachmentStatus(err, http.StatusInternalServerError), Err: err}
 	}
 	if req.Status == envelope.StatusHeld {
-		s.record(r.Context(), "held", req.ID, req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
-		s.notifyApproval(r.Context(), req)
-		writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
-		return
+		s.record(ctx, "held", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
+		s.notifyApproval(ctx, req)
+		return req, nil
 	}
 	s.hub.notify(inboxKey(req.To))
-	s.record(r.Context(), "queued", req.ID, req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
+	s.record(ctx, "queued", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
 	if s.events != nil {
-		s.events.Queued(r.Context(), req)
+		s.events.Queued(ctx, req)
 	}
-	writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
+	return req, nil
 }
 
 // recipientTarget is the schedule facts for agent on wake method schedule,
@@ -1301,6 +1311,9 @@ func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope
 		s.hub.notify(inboxKey(req.From))
 		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
 			rp.Replied(ctx, req)
+		}
+		if req.RoomPostID != 0 {
+			s.auditMirror(ctx, rep)
 		}
 	} else {
 		log.Printf("reply %s: look up asker: %v", id, err)

@@ -101,6 +101,10 @@ type Request struct {
 	// advertises support.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// RoomPostID marks an ask the relay built from an @mention in a room
+	// post: the id of that post. Only the relay sets it (a send cannot);
+	// older clients ignore it and see an ordinary ask.
+	RoomPostID int64 `json:"room_post_id,omitempty"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
 
