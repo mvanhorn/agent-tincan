@@ -101,6 +101,10 @@ type Request struct {
 	// advertises support.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// RoomPostID marks an ask the relay built from an @mention in a room
+	// post: the id of that post. Only the relay sets it (a send cannot);
+	// older clients ignore it and see an ordinary ask.
+	RoomPostID int64 `json:"room_post_id,omitempty"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
 
@@ -122,6 +126,23 @@ func (r *Request) RedactFor(agent string) {
 	if r.WasHeld && !r.Approved && r.From != agent {
 		r.Body = "waiting for the owner's approval"
 		r.Attachments = nil
+	}
+}
+
+// RoomRedacted stands in for a mention's text, and its reply's, for a
+// reader who is not a member of the mention's room.
+const RoomRedacted = "room mention; read it in the room"
+
+// RedactRoom hides what a mention carries from the room (RoomPostID set):
+// the request and reply text, their files, clarification rounds and the
+// progress note. Ids, statuses, chain and hop stay.
+func (r *Result) RedactRoom() {
+	r.Request.Body, r.Request.Attachments, r.Request.Exchanges, r.Request.Progress = RoomRedacted, nil, nil, nil
+	r.Exchanges, r.Progress = nil, nil
+	if r.Reply != nil {
+		rep := *r.Reply
+		rep.Body, rep.Attachments = RoomRedacted, nil
+		r.Reply = &rep
 	}
 }
 
@@ -163,6 +184,9 @@ type Reply struct {
 	Body        string       `json:"body"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// NoMirror keeps a reply to a mention out of the room: the relay sets
+	// it when the replier is no longer allowed in rooms. Relay-only.
+	NoMirror bool `json:"-"`
 }
 
 // Progress is the latest note from the agent handling a request.
@@ -441,4 +465,59 @@ type WebStatus struct {
 	Site       string    `json:"site"`
 	State      string    `json:"state"`
 	ObservedAt time.Time `json:"observed_at"`
+}
+
+// MaxRoomPost caps a room post's body in bytes.
+const MaxRoomPost = 16 << 10
+
+// Room is a named shared thread and the agents in it. Only admins change
+// who is in a room; members read and post.
+type Room struct {
+	Name      string    `json:"name"`
+	Members   []string  `json:"members"`
+	CreatedAt time.Time `json:"created_at"`
+	// LastPost is the id of the room's newest post, 0 for none.
+	LastPost int64 `json:"last_post,omitempty"`
+}
+
+// RoomPost is one post in a room's thread. A post made through the post
+// route has no Status. A reply to a mention is mirrored into the room as
+// the replier's post: ReplyTo names the mention's request, and Status is
+// the reply's status (answered, failed, declined, or needs_input for a
+// question).
+type RoomPost struct {
+	ID        int64     `json:"id"`
+	Room      string    `json:"room"`
+	Author    string    `json:"author"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	Status    Status    `json:"status,omitempty"`
+	ReplyTo   string    `json:"reply_to,omitempty"`
+	// Mentions are the asks this post's @mentions became, with each
+	// one's current status.
+	Mentions []RoomMention `json:"mentions,omitempty"`
+}
+
+// RoomMention is the ask an @mention became.
+type RoomMention struct {
+	Agent     string `json:"agent"`
+	RequestID string `json:"request_id"`
+	Status    Status `json:"status,omitempty"`
+}
+
+// RoomThread is a page of a room's posts, oldest first, after a cursor.
+// Next is the cursor for the following page: the last post's id, or the
+// cursor asked with when there are no newer posts.
+type RoomThread struct {
+	Room    string     `json:"room"`
+	Members []string   `json:"members"`
+	Posts   []RoomPost `json:"posts"`
+	Next    int64      `json:"next"`
+}
+
+// RoomPostResponse is the relay's answer to a post: the stored post, with
+// the asks its mentions became, and a notice for each mention not sent.
+type RoomPostResponse struct {
+	Post    RoomPost `json:"post"`
+	Notices []string `json:"notices,omitempty"`
 }

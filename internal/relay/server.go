@@ -372,6 +372,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("PUT /v1/agents/self/status", s.handleHostStatus)
 	mux.HandleFunc("POST /v1/watches", s.handleWatch)
+	mux.HandleFunc("GET /v1/rooms", s.handleRooms)
+	mux.HandleFunc("GET /v1/rooms/{room}/posts", s.handleRoomRead)
+	mux.HandleFunc("POST /v1/rooms/{room}/posts", s.handleRoomPost)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
@@ -406,6 +409,10 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/push/key", s.handlePushKey)
 	mux.HandleFunc("PUT /v1/admin/push/subscription", s.handlePushSubscribe)
 	mux.HandleFunc("DELETE /v1/admin/push/subscription", s.handlePushUnsubscribe)
+	mux.HandleFunc("GET /v1/admin/rooms", s.handleAdminRooms)
+	mux.HandleFunc("POST /v1/admin/rooms", s.handleCreateRoom)
+	mux.HandleFunc("POST /v1/admin/rooms/{room}/members", s.handleRoomMember)
+	mux.HandleFunc("DELETE /v1/admin/rooms/{room}/members", s.handleRoomMember)
 }
 
 // AdminHandler serves only admin routes and treats every caller as the local
@@ -710,37 +717,47 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	prep := s.preparer()
-	if err := prep.Prepare(r.Context(), &req); err != nil {
-		s.record(r.Context(), "rejected", "", req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
+	if req, err = s.submit(r.Context(), req); err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
+	writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
+}
+
+// submit takes a new request from req.From through every step a send
+// takes: Prepare (chain, loop, hop and rate checks, the owner's holds),
+// Enqueue, then either the hold's audit row and approval notice, or the
+// target's held poll, the audit row and the wake. A send and a room
+// mention both go through it, so a mention is exactly an ask. Its errors
+// carry their HTTP status (statusFor).
+func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Request, error) {
+	prep := s.preparer()
+	if err := prep.Prepare(ctx, &req); err != nil {
+		s.record(ctx, "rejected", "", req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "reason": err.Error()}))
+		return envelope.Request{}, err
+	}
 	prepared := req
-	req, err = s.store.Enqueue(r.Context(), req, s.requestTTL(r.Context(), req.To))
+	req, err := s.store.Enqueue(ctx, req, s.requestTTL(ctx, req.To))
 	if err != nil {
 		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
 		}
 		if errors.Is(err, store.ErrGroupFull) {
-			writeErr(w, http.StatusBadRequest, err)
-			return
+			return envelope.Request{}, &StatusError{Code: http.StatusBadRequest, Err: err}
 		}
-		writeErr(w, attachmentStatus(err, http.StatusInternalServerError), err)
-		return
+		return envelope.Request{}, &StatusError{Code: attachmentStatus(err, http.StatusInternalServerError), Err: err}
 	}
 	if req.Status == envelope.StatusHeld {
-		s.record(r.Context(), "held", req.ID, req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
-		s.notifyApproval(r.Context(), req)
-		writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
-		return
+		s.record(ctx, "held", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
+		s.notifyApproval(ctx, req)
+		return req, nil
 	}
 	s.hub.notify(inboxKey(req.To))
-	s.record(r.Context(), "queued", req.ID, req.TraceID, from, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
+	s.record(ctx, "queued", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
 	if s.events != nil {
-		s.events.Queued(r.Context(), req)
+		s.events.Queued(ctx, req)
 	}
-	writeJSON(w, http.StatusCreated, envelope.SendResponse{Request: req, Target: s.recipientTarget(r.Context(), req.To)})
+	return req, nil
 }
 
 // recipientTarget is the schedule facts for agent on wake method schedule,
@@ -1007,6 +1024,9 @@ func (s *Server) unseenReplies(ctx context.Context, agent string, scope store.Re
 	if err != nil {
 		return nil, 0, err
 	}
+	if err := s.redactRooms(ctx, reps, agent); err != nil {
+		return nil, 0, err
+	}
 	cut := len(reps) == store.MaxUnseenReplies // the store may hold more
 	size := 0
 	for i, rep := range reps {
@@ -1268,6 +1288,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 // (store.ReplyByEmail) and audited with via "email"; its tag, sender and
 // text never reach the audit log.
 func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope.Reply, emailMessageID string, round int) (envelope.Reply, error) {
+	rep.NoMirror = !s.mayMirror(ctx, id, agent)
 	var err error
 	if emailMessageID == "" {
 		rep, err = s.store.Reply(ctx, id, agent, rep)
@@ -1295,6 +1316,9 @@ func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope
 		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
 			rp.Replied(ctx, req)
 		}
+		if req.RoomPostID != 0 {
+			s.auditMirror(ctx, rep)
+		}
 	} else {
 		log.Printf("reply %s: look up asker: %v", id, err)
 	}
@@ -1314,7 +1338,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	defer deadline.Stop()
 	for {
 		wake := s.hub.wait(requestKey(id))
-		res, err := s.store.Get(r.Context(), id, name)
+		res, err := s.getAs(r.Context(), id, name)
 		if err != nil {
 			writeErr(w, statusFor(err), err)
 			return
@@ -1331,7 +1355,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
-		res, err = s.store.Get(r.Context(), id, name)
+		res, err = s.getAs(r.Context(), id, name)
 		if err != nil {
 			writeErr(w, statusFor(err), err)
 			return
@@ -1339,6 +1363,18 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, res)
 		return
 	}
+}
+
+// getAs is the store's Get with a mention's room text hidden from a reader
+// that may not read the room now (redactRooms).
+func (s *Server) getAs(ctx context.Context, id, reader string) (envelope.Result, error) {
+	res, err := s.store.Get(ctx, id, reader)
+	if err != nil {
+		return res, err
+	}
+	one := []envelope.Result{res}
+	err = s.redactRooms(ctx, one, reader)
+	return one[0], err
 }
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
@@ -1932,12 +1968,12 @@ func statusFor(err error) int {
 		return se.Code
 	case errors.Is(err, identity.ErrRebindCheckFailed):
 		return http.StatusServiceUnavailable
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent), errors.Is(err, store.ErrNoRoom):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined),
-		errors.Is(err, identity.ErrAgentAmbiguous):
+		errors.Is(err, identity.ErrAgentAmbiguous), errors.Is(err, store.ErrNotRoomMember):
 		return http.StatusForbidden
-	case errors.Is(err, store.ErrWrongState):
+	case errors.Is(err, store.ErrWrongState), errors.Is(err, store.ErrRoomExists):
 		return http.StatusConflict
 	case errors.Is(err, identity.ErrBadInvite):
 		return http.StatusBadRequest
@@ -1997,6 +2033,10 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 		}
 		if !slices.Contains(store.Participants(steps), name) {
 			writeErr(w, http.StatusNotFound, errors.New("no such trace"))
+			return
+		}
+		if err := s.redactRooms(r.Context(), steps, name); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 	}

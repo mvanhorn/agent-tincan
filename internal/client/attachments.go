@@ -44,7 +44,9 @@ type Capabilities struct {
 	HostStatus bool `json:"host_status,omitempty"`
 	// Watches is set by a relay that takes idle watches (POST
 	// /v1/watches).
-	Watches            bool  `json:"watches,omitempty"`
+	Watches bool `json:"watches,omitempty"`
+	// Rooms is set by a relay that serves rooms (/v1/rooms).
+	Rooms              bool  `json:"rooms,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`
@@ -79,8 +81,13 @@ var MaxAttachmentBytes int64 = 10 << 20
 // Capabilities asks the relay what it supports. A relay that predates the
 // endpoint answers 404, which reports no capabilities and no error.
 func (r *Relay) Capabilities(ctx context.Context) (Capabilities, error) {
+	return capabilities(ctx, r)
+}
+
+// capabilities is Capabilities for any Rawer.
+func capabilities(ctx context.Context, c Rawer) (Capabilities, error) {
 	var out Capabilities
-	err := r.call(ctx, r.api, "GET", "/v1/capabilities", nil, &out)
+	err := c.Raw(ctx, "GET", "/v1/capabilities", nil, &out)
 	if IsStatus(err, http.StatusNotFound) {
 		return Capabilities{}, nil
 	}

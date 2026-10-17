@@ -213,6 +213,19 @@ func (p *Policy) Refund(req envelope.Request) {
 	}
 }
 
+// Charge takes one slot of sender's per-minute send rate for something that
+// is not a request, such as a room post, and fails with ErrRateLimited (429)
+// when none is left.
+func (p *Policy) Charge(sender string) error {
+	_, err := p.rate(sender, false)
+	return err
+}
+
+// Gated reports whether asks to target can be held by approval.json, which
+// keeps it out of rooms. The default holds by kind (council, dot-web) are
+// the relay's to check.
+func (p *Policy) Gated(target string) (bool, error) { return p.cfg.Approval.Gated(target) }
+
 func (p *Policy) rate(sender string, urgent bool) (time.Time, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

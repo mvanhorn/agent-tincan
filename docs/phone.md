@@ -38,6 +38,12 @@ Before approving a held ask that this phone's own agent sent, or that came throu
 
 If the phone's Tailscale node is replaced, the page says it is not joined; tap Join this phone again with the same name. The page remembers its agent's name on the phone for this. If the phone's site data was cleared, the page no longer knows the name and refuses it; run `tincan remove <name>` on an admin machine first, or pick a new name.
 
+## Rooms from the phone
+
+The Rooms tab lists every room and lets you create one, add members and remove them, as `tincan room` does from an admin device. A room you create from the phone gets the phone's agent as a member, so you can take part. Before adding a web chat agent or ChatGPT or Sesame, the page asks you to confirm, since everything that member reads then goes to its vendor; when the relay refuses a member (council, dot-web, an `approval.json` target, or the history, notes and pass services) the page shows why.
+
+Pick a room to read it. The page reads and posts as the phone's agent, so the phone must be a member; it checks for new posts every 5 seconds while the tab is open. Each post shows its author, time and whether it is a question, a failure or a decline, and a mention shows who it is still waiting on. An `@name` of a member in your post asks that member, and its reply shows in the room; the page lists any mention that was not sent and why. Posts are teammates' text and are shown as text only.
+
 ## Alerts
 
 With HTTPS, the page can alert you when an ask is held. The row under the team says which state applies:

@@ -326,3 +326,52 @@ func TestApproveConfirmsWhileIdentityUnknown(t *testing.T) {
 		t.Error("decide must confirm an approval while this phone's agent is unknown")
 	}
 }
+
+// The rooms tab manages members through the admin routes, reads after a
+// cursor and posts as the phone's agent, draws post bodies as text, and asks
+// before adding a member that sends the thread to an outside vendor.
+func TestRoomsInThePage(t *testing.T) {
+	app := read(t, "app.js")
+	for _, want := range []string{
+		`"/v1/admin/rooms"`,
+		`"/v1/admin/rooms/"`,
+		`"/members"`,
+		`"/v1/rooms/"`,
+		`"/posts?after="`,
+		`"/posts"`,
+		`" agent: the posts it reads or is sent go to that vendor, under your account there. Add it to "`,
+		`el("p", "body", p.body)`,
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js lacks %s", want)
+		}
+	}
+	html := read(t, "index.html")
+	for _, want := range []string{`id="tab-rooms"`, `aria-controls="rooms"`, `for="room-body"`, `for="room-new"`, `for="room-add-agent"`, `for="room-pick"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html lacks %s", want)
+		}
+	}
+}
+
+// The rooms tab shows an error with no room open (the first room's create
+// fails before any room-view exists), lets a post answered after a room
+// switch touch only its own draft and room, and rechecks every open
+// mention in turn rather than only the newest.
+func TestRoomsTabEdgeCases(t *testing.T) {
+	html := read(t, "index.html")
+	errAt, viewAt := strings.Index(html, `id="room-error"`), strings.Index(html, `id="room-view"`)
+	if errAt < 0 || viewAt < 0 || errAt > viewAt {
+		t.Error("room-error must sit outside room-view, which is hidden until a room is open")
+	}
+	app := read(t, "app.js")
+	post := funcBody(t, app, "postToRoom")
+	for _, want := range []string{"stillOpen()", `$("room-body").value === draft`} {
+		if !strings.Contains(post, want) {
+			t.Errorf("postToRoom lacks %s", want)
+		}
+	}
+	if !strings.Contains(funcBody(t, app, "recheckMentions"), "state.roomRecheckAt") {
+		t.Error("recheckMentions must rotate through the open mentions")
+	}
+}

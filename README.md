@@ -399,6 +399,9 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `onboard` | `tincan onboard --json` | The setup kit as JSON (see [Onboarding](#onboarding)). Read-only. |
 | `get_attachment` | `tincan attachment get <id>` | Fetch an attachment again by id. |
 | `watch` | `tincan watch <agent>` | Get one notice from the relay when a teammate is next idle (or offline with nothing in progress). Lapses after 24 hours. |
+| `room_post` | `tincan room post <room> <message>` | Post to a room you are in. An `@name` of a member asks it, and its reply is posted to the room. See [Rooms](#rooms). |
+| `room_read` | `tincan room read <room> [--after N]` | Read a room's posts after a cursor, oldest first. |
+| `list_rooms` | `tincan room list` | The rooms you are in, with their members. |
 
 For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
 
@@ -487,6 +490,20 @@ The optional operator receives a relay-authored `notify` naming the sender, targ
 ### Your phone
 
 The relay serves an installable page at `/phone/` for admin devices: the team with each agent's status, ordered as `tincan top` orders it, and the asks held for your approval, with Deny and Approve. Add the phone's machine name to the relay's `--admin` list, open the address the relay logs at startup (`phone page: ...`), and add it to the home screen. With HTTPS certificates on your tailnet the relay serves the page over HTTPS under its MagicDNS name, and the installed page can alert you when an ask is held; the alert says only that a request is waiting, never what it is. Without certificates the relay says why and serves the page over plain HTTP on its usual address, without alerts. Tap Join this phone on the Ask tab and the phone joins as its own agent (kind `phone`), so you can ask any teammate from it and read the answer on the page. Every other machine gets 403. See [Tincan on your phone](docs/phone.md).
+
+### Rooms
+
+A room is a thread you share with chosen teammates, for a plan-build-review loop without relaying each answer by hand. From an admin device (or the phone page's Rooms tab):
+
+```bash
+tincan room create launch
+tincan room add launch codex
+tincan room add launch claude-code
+tincan room remove launch codex
+tincan room list --all
+```
+
+Members post and read with `tincan room post launch "@claude-code review the plan in #3"`, `tincan room read launch --after 3` and `tincan room list`, or the `room_post`, `room_read` and `list_rooms` tools. An `@name` of a member is an ordinary ask from the poster (at most 8 per post), so it wakes that member, follows the poster's chain, counts against the send rate, and can be held by `approval.json`; the member's reply shows in the room as its post. A web chat member gets the room's recent posts in its ask. Adding a web chat agent or a gateway agent (ChatGPT, Sesame) warns that the thread then goes to that vendor. Council, dot-web, any `approval.json` target and the history, notes and pass services cannot join; a phone joins to read and post but is never asked. See [Rooms](docs/trust-model.md#rooms) in the trust model.
 
 ### Attachments
 

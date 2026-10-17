@@ -31,7 +31,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	hits, err := s.store.Search(r.Context(), query, participant, limit)
+	// An agent rooms exclude now finds no mention's text, as room_read
+	// refuses it (redactRooms); the store checks membership itself.
+	rooms := participant == "" || s.mayReadRooms(r.Context(), participant)
+	hits, err := s.store.SearchAs(r.Context(), query, participant, rooms, limit)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, errors.New("search failed"))
 		return

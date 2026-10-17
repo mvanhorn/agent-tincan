@@ -236,6 +236,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate push subscriptions: %w", err)
 	}
+	if err := s.migrateRooms(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate rooms: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -497,8 +501,9 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 }
 
 // DeleteAgent removes name and, in the same transaction, the last wake the
-// relay sent it and every idle watch it set or that watches it, so an agent
-// joined again under the name starts with none.
+// relay sent it, every idle watch it set or that watches it, and its room
+// memberships, so an agent joined again under the name starts with none and
+// in no rooms. Its room posts stay, shown under its name.
 func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -517,6 +522,9 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM watches WHERE watcher = ? OR target = ?`, name, name); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE agent = ?`, name); err != nil {
 		return false, err
 	}
 	return n > 0, tx.Commit()
@@ -748,15 +756,28 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, ErrGroupFull
 		}
 	}
+	if req.RoomPostID != 0 {
+		// A mention's poster and target must both be members of the post's
+		// room as the ask is written, so a removal that lands after the
+		// relay's own check still leaves nothing for a former member.
+		var members int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT m.agent) FROM room_posts p JOIN room_members m ON m.room_id = p.room_id
+			WHERE p.id = ? AND m.agent IN (?, ?)`, req.RoomPostID, req.From, req.To).Scan(&members); err != nil {
+			return envelope.Request{}, err
+		}
+		if members != 2 {
+			return envelope.Request{}, ErrNotRoomMember
+		}
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0})
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -863,11 +884,13 @@ func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error
 // exchanges, urgent first and then oldest, each with its current status in
 // Status. Open means queued, delivered or claimed and not expired. It is the
 // only query a request email reads, so it never returns a held request (or
-// one that was held and never approved), a ping, a notify, or a request
-// paused for input or already finished: none of those may reach an email.
+// one that was held and never approved), a ping, a notify, an ask built
+// from a room mention (its text is the room's, so its wake carries counts
+// only), or a request paused for input or already finished: none of those
+// may reach an email.
 func (s *Store) OpenAsks(ctx context.Context, agent string) ([]envelope.Request, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
-		WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?) AND expires_at > ? AND NOT (was_held = 1 AND approved = 0)
+		WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?) AND expires_at > ? AND NOT (was_held = 1 AND approved = 0) AND room_post_id IS NULL
 		ORDER BY urgent DESC, created_at, rowid`,
 		agent, string(envelope.KindAsk), string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), s.now().UnixMilli())
 	if err != nil {
@@ -1106,6 +1129,9 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 		id, agent, string(rep.Status), rep.Body, now.UnixMilli(), atts); err != nil {
 		return envelope.Reply{}, err
 	}
+	if err := s.mirrorReplyTx(ctx, tx, rep); err != nil {
+		return envelope.Reply{}, err
+	}
 	return rep, nil
 }
 
@@ -1321,7 +1347,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, room_post_id`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1330,9 +1356,11 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var chain, kind, status, atts, exchanges string
 	var created, progressAt int64
 	var note string
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt); err != nil {
+	var roomPost sql.NullInt64
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &roomPost); err != nil {
 		return envelope.Request{}, "", err
 	}
+	r.RoomPostID = roomPost.Int64
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
 		return envelope.Request{}, "", err
 	}
