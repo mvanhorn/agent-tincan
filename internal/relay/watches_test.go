@@ -145,3 +145,68 @@ func TestWatchRoute(t *testing.T) {
 		t.Fatalf("capabilities = %+v", caps)
 	}
 }
+
+// An offline agent the relay wakes on demand is not free while it has
+// work queued or claimed: the watch waits until its queue drains, then
+// sends one notice.
+func TestWatchOfflineTargetWithWork(t *testing.T) {
+	for _, method := range []string{"webhook", "email", "schedule"} {
+		t.Run(method, func(t *testing.T) {
+			h, _, fw := statusHarness(t)
+			fw.methods["grokbot"] = method
+			sent := h.send(museAddr, "grokbot", "fresh ask")
+			watch(h, instinctAddr, "grokbot", http.StatusCreated)
+			h.srv.Sweep(t.Context())
+			if n := relayNotices(h, "instinct"); len(n) != 0 {
+				t.Fatalf("fired with work queued: %+v", n)
+			}
+			h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
+			h.srv.Sweep(t.Context())
+			if n := relayNotices(h, "instinct"); len(n) != 0 {
+				t.Fatalf("fired with work claimed: %+v", n)
+			}
+			h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/reply", `{"body":"done"}`, http.StatusOK, nil)
+			h.srv.Sweep(t.Context())
+			if n := relayNotices(h, "instinct"); len(n) != 1 {
+				t.Fatalf("after the queue drained: %+v", n)
+			}
+		})
+	}
+}
+
+// Inside the quiet window after a relay start, an offline agent with work
+// queued gets no offline notice, since stuck is not reported yet either.
+func TestWatchOfflineQueuedInQuietWindow(t *testing.T) {
+	h, _, _ := wakeHarness(t)
+	h.send(museAddr, "grokbot", "fresh ask")
+	watch(h, instinctAddr, "grokbot", http.StatusCreated)
+	h.srv.Sweep(t.Context())
+	if n := relayNotices(h, "instinct"); len(n) != 0 {
+		t.Fatalf("notices = %+v", n)
+	}
+}
+
+// Host-busy reports and polls live in memory, so right after a relay
+// start a busy agent looks offline until its client reports again. No
+// watch fires until every client has had a keepalive to re-report.
+func TestWatchWaitsForReportsAfterStart(t *testing.T) {
+	h, clk, _ := wakeHarness(t)
+	watch(h, instinctAddr, "muse", http.StatusCreated)
+	h.srv.Sweep(t.Context())
+	clk.advance(time.Minute)
+	h.srv.Sweep(t.Context())
+	if n := relayNotices(h, "instinct"); len(n) != 0 {
+		t.Fatalf("fired before muse could re-report: %+v", n)
+	}
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	clk.advance(3 * time.Minute)
+	h.srv.Sweep(t.Context())
+	if n := relayNotices(h, "instinct"); len(n) != 0 {
+		t.Fatalf("fired while host-busy: %+v", n)
+	}
+	hostStatus(h, museAddr, "s1", `{"busy":false}`, http.StatusNoContent)
+	h.srv.Sweep(t.Context())
+	if n := relayNotices(h, "instinct"); len(n) != 1 {
+		t.Fatalf("after muse went idle: %+v", n)
+	}
+}

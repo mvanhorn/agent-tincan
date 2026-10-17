@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1183,9 +1184,12 @@ func TestListAgentsShowsUnanswered(t *testing.T) {
 }
 
 // End to end over MCP: grokbot watches muse, and once muse is idle its
-// inbox gets exactly one notice, however many sweeps run.
+// inbox gets exactly one notice, however many sweeps run. The relay's
+// clock is moved past the window after a start in which no watch fires.
 func TestWatchToolNoticeArrivesOnce(t *testing.T) {
-	m := testrelay.New(t, relay.Config{})
+	var skew atomic.Int64
+	m := testrelay.New(t, relay.Config{Now: func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }})
+	skew.Store(int64(10 * time.Minute))
 	if _, err := m.Client(t, "muse").Poll(t.Context(), 0); err != nil {
 		t.Fatal(err)
 	}

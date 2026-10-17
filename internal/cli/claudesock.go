@@ -177,7 +177,26 @@ type hostStatusForwarder struct {
 	sent bool
 	// off is set once the relay turns out to predate host status.
 	off bool
+	// failures counts reports in a row the relay did not take, and retry
+	// is when the next may go; see hostStatusBackoff.
+	failures int
+	retry    time.Time
 }
+
+// hostStatusBackoff is how long the forwarder waits after its nth report
+// in a row fails: hostStatusCheck doubled each time, at most
+// sessionKeepalive, so an unreachable relay is not called every check.
+func hostStatusBackoff(n int) time.Duration {
+	d := hostStatusCheck
+	for i := 0; i < n && d < sessionKeepalive; i++ {
+		d *= 2
+	}
+	return min(d, sessionKeepalive)
+}
+
+// hostStatusStopTimeout bounds the not-busy report sent as the server
+// stops.
+const hostStatusStopTimeout = 2 * time.Second
 
 // newClaudeHostStatus reads the state from the registry file of ppid, the
 // Claude Code process that started this server, the same file the socket
@@ -196,9 +215,10 @@ func newClaudeHostStatus(r hostStatusReporter, getenv func(string) string, ppid 
 
 // check reports the session's state when it changed since the last report
 // or a keepalive has passed, so a long turn or a relay restart (which
-// forgets every report) does not lapse to idle.
+// forgets every report) does not lapse to idle. After a failed report it
+// waits out hostStatusBackoff, and logs only the first failure in a row.
 func (f *hostStatusForwarder) check(ctx context.Context, now time.Time) {
-	if f.off {
+	if f.off || now.Before(f.retry) {
 		return
 	}
 	busy, ok := f.busy()
@@ -214,13 +234,33 @@ func (f *hostStatusForwarder) check(ctx context.Context, now time.Time) {
 		return
 	}
 	if err != nil {
-		log.Printf("tincan mcp: host status: %v", err)
+		if f.failures == 0 {
+			log.Printf("tincan mcp: host status: %v", err)
+		}
+		f.failures++
+		f.retry = now.Add(hostStatusBackoff(f.failures))
 		return
 	}
 	f.last, f.at, f.sent = busy, now, true
+	f.failures, f.retry = 0, time.Time{}
 }
 
-// startHostStatus checks f now and every hostStatusCheck until ctx ends.
+// stop reports not busy, best effort, when the last report said busy, so
+// a closed window does not show busy on the roster until its report
+// lapses.
+func (f *hostStatusForwarder) stop(ctx context.Context) {
+	if f.off || !f.sent || !f.last {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hostStatusStopTimeout)
+	defer cancel()
+	if err := f.r.ReportHostStatus(ctx, false); err == nil {
+		f.last = false
+	}
+}
+
+// startHostStatus checks f now and every hostStatusCheck until ctx ends,
+// then clears a busy report on the way out.
 func startHostStatus(ctx context.Context, f *hostStatusForwarder) {
 	t := time.NewTicker(hostStatusCheck)
 	defer t.Stop()
@@ -228,6 +268,7 @@ func startHostStatus(ctx context.Context, f *hostStatusForwarder) {
 		f.check(ctx, time.Now())
 		select {
 		case <-ctx.Done():
+			f.stop(ctx)
 			return
 		case <-t.C:
 		}

@@ -79,7 +79,18 @@ default.`,
 			// busy state shows on the roster. Elsewhere the parent has no
 			// registry file, so no goroutine is started to poll for one.
 			if _, err := os.Stat(claudeRegistryPath(os.Getenv, os.Getppid())); err == nil {
-				go startHostStatus(runCtx, newClaudeHostStatus(r, os.Getenv, os.Getppid()))
+				// Wait for it on the way out, so its not-busy report is sent
+				// before the process exits.
+				ctx, cancel := context.WithCancel(runCtx)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					startHostStatus(ctx, newClaudeHostStatus(r, os.Getenv, os.Getppid()))
+				}()
+				defer func() {
+					cancel()
+					<-done
+				}()
 			}
 			if shareTitle {
 				stop := startTitleSharing(runCtx, newClaudeTitleSharer(r, os.Getenv, os.Getppid()), sessionKeepalive)

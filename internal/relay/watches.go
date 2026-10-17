@@ -17,6 +17,13 @@ import (
 // it lapses unsent.
 const WatchTTL = 24 * time.Hour
 
+// clientReportEvery is how often a tincan mcp session re-sends its host
+// status and calls the relay without a channel (the CLI's
+// sessionKeepalive). Host-busy reports and polls live in memory, so for
+// this long plus one held poll after the relay starts an agent may look
+// free only because it has not reported to this process yet.
+const clientReportEvery = 2 * time.Minute
+
 // handleWatch records that the calling agent wants one relay notice when
 // the named agent is next idle. The watcher is the authenticated caller.
 // Asking again for the same agent while a watch is pending answers 200
@@ -56,8 +63,12 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 // to check every watch; a reply calls it with the replying agent, since
 // only that agent's status can have changed, and skips the roster when no
 // watch is on it. The store's fire is conditional, so the two racing send
-// one notice.
+// one notice. Nothing fires until every client has had a keepalive and a
+// held poll to report to a newly started relay (see clientReportEvery).
 func (s *Server) checkWatches(ctx context.Context, target string) {
+	if s.cfg.Now().Before(s.started.Add(clientReportEvery + s.cfg.PollHold)) {
+		return
+	}
 	pending, err := s.store.PendingWatches(ctx)
 	if err != nil {
 		log.Printf("watches: %v", err)
@@ -74,16 +85,16 @@ func (s *Server) checkWatches(ctx context.Context, target string) {
 		log.Printf("watches: roster: %v", err)
 		return
 	}
-	status := make(map[string]string, len(roster))
+	info := make(map[string]client.AgentInfo, len(roster))
 	for _, a := range roster {
-		status[a.Name] = a.Status
+		info[a.Name] = a
 	}
 	for _, wt := range pending {
 		body := ""
-		switch status[wt.Target] {
-		case client.StatusIdle:
+		switch a := info[wt.Target]; {
+		case a.Status == client.StatusIdle:
 			body = wt.Target + " is idle now. No reply needed."
-		case client.StatusOffline:
+		case a.Status == client.StatusOffline && a.Queued == 0 && a.Claimed == 0:
 			body = wt.Target + " is not busy now (offline). No reply needed."
 		default:
 			continue

@@ -834,6 +834,15 @@ func TestInstructionsNameMCPReloadPerKind(t *testing.T) {
 	}
 }
 
+// Every agent learns to wait for a busy teammate with a watch rather than
+// by asking it again.
+func TestInstructionsNameWatch(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Roster: []Member{{Name: "a", Wake: "none", Kind: KindClaudeCode}}})
+	if got := block(t, k, "a").Instructions; !strings.Contains(got, "watch tool (or tincan watch <name>)") || !strings.Contains(got, "next idle") {
+		t.Errorf("instructions lack the watch tool: %s", got)
+	}
+}
+
 // A scheduled agent cannot be woken; a platform cron starts a fresh session
 // on its own interval. Its instructions must stand alone in that cron job,
 // and its setup names the wake.json schedule entry, the matching cron and
