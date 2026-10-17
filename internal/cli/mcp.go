@@ -46,6 +46,10 @@ starts a turn. Each teammate request starts one turn on the machine,
 however many windows are open, and a reply to an ask goes to the window
 that asked. --wake-socket=false turns this off.
 
+Inside a Claude Code session it also tells the relay whether the session
+is busy or idle (Claude Code's own session state, not its conversation),
+so the roster shows the agent busy while you are chatting with it.
+
 With --share-title, inside a Claude Code session it also shows the
 session's title (its custom title, else the title Claude Code wrote for
 it) as a working_on field on the roster, refreshed every few minutes and
@@ -71,6 +75,10 @@ default.`,
 				// asks. One-shot CLI commands name no session and see all.
 				r.SetSession(newSession())
 			}
+			// Inside a Claude Code session, the session's own idle or
+			// busy state shows on the roster; elsewhere the registry is
+			// missing and nothing is sent.
+			go startHostStatus(runCtx, newClaudeHostStatus(r, os.Getenv, os.Getppid()))
 			if shareTitle {
 				stop := startTitleSharing(runCtx, newClaudeTitleSharer(r, os.Getenv, os.Getppid()), sessionKeepalive)
 				defer stop()

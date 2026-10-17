@@ -207,3 +207,83 @@ func TestRosterStatusCarriesNoRequestText(t *testing.T) {
 		t.Fatalf("roster lacks the status: %s", body)
 	}
 }
+
+// hostStatus reports busy from the agent at addr's session.
+func hostStatus(h *harness, addr, session, body string, want int) {
+	h.t.Helper()
+	req := httptest.NewRequest("PUT", "/v1/agents/self/status", strings.NewReader(body))
+	req.RemoteAddr = addr
+	if session != "" {
+		req.Header.Set(client.SessionHeader, session)
+	}
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		h.t.Fatalf("host status from %s session %q: status %d, want %d: %s", addr, session, rec.Code, want, rec.Body.String())
+	}
+}
+
+// A session whose host reports it busy shows the agent busy with no asker
+// named; with two sessions, one busy is enough.
+func TestRosterHostBusy(t *testing.T) {
+	h, _, _ := statusHarness(t)
+	h.do(museAddr, "GET", "/v1/poll?hold=0", "", http.StatusNoContent, nil)
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusBusy || a.BusyFor != "" {
+		t.Fatalf("one busy session: %+v", a)
+	}
+	hostStatus(h, museAddr, "s2", `{"busy":false}`, http.StatusNoContent)
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusBusy {
+		t.Fatalf("one busy, one idle: %+v", a)
+	}
+	hostStatus(h, museAddr, "s1", `{"busy":false}`, http.StatusNoContent)
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusIdle {
+		t.Fatalf("both idle: %+v", a)
+	}
+}
+
+// A busy report nobody refreshes lapses after SessionGrace, while one
+// refreshed every keepalive stays busy through a 30-minute turn.
+func TestRosterHostBusyLapses(t *testing.T) {
+	h, clk, _ := statusHarness(t)
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	hostStatus(h, grokAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	for range 15 {
+		clk.advance(2 * time.Minute)
+		hostStatus(h, grokAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	}
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status == client.StatusBusy {
+		t.Fatalf("muse's report is 30m old: %+v", a)
+	}
+	if a := agentInfo(t, h, macAddr, "grokbot"); a.Status != client.StatusBusy {
+		t.Fatalf("grokbot refreshed every 2m: %+v", a)
+	}
+}
+
+// A report is one known object from a named session, the writer is always
+// the caller, and removing the agent forgets its reports.
+func TestHostStatusRejectsAndForgets(t *testing.T) {
+	h, _, _ := statusHarness(t)
+	for _, bad := range []string{`{"busy":"yes"}`, `{"busy":true,"agent":"grokbot"}`, `{"busy":true} {}`, `not json`} {
+		hostStatus(h, museAddr, "s1", bad, http.StatusBadRequest)
+	}
+	hostStatus(h, museAddr, "", `{"busy":true}`, http.StatusBadRequest)
+	hostStatus(h, strangerAddr, "s1", `{"busy":true}`, http.StatusForbidden)
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	h.do(macAddr, "POST", "/v1/admin/remove", `{"name":"muse"}`, http.StatusOK, nil)
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if len(h.srv.hostStatus["muse"]) != 0 {
+		t.Fatalf("after remove: %v", h.srv.hostStatus["muse"])
+	}
+}
+
+// The relay advertises host status so a client can tell before it reports.
+func TestCapabilitiesHostStatus(t *testing.T) {
+	h := newHarness(t, Config{})
+	var caps client.Capabilities
+	h.do(museAddr, "GET", "/v1/capabilities", "", http.StatusOK, &caps)
+	if !caps.HostStatus {
+		t.Fatalf("capabilities = %+v", caps)
+	}
+}

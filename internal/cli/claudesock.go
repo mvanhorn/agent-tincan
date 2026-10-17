@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
@@ -139,4 +141,87 @@ func (p *claudeSocketPusher) Push(ctx context.Context, content string, meta map[
 		return fmt.Errorf("claude session socket %s: write: %w", p.socket, err)
 	}
 	return nil
+}
+
+// hostStatusCheck is how often the forwarder re-reads the session registry
+// to catch a change between keepalives.
+const hostStatusCheck = 5 * time.Second
+
+// hostStatusReporter is the part of the relay client a hostStatusForwarder
+// uses.
+type hostStatusReporter interface {
+	ReportHostStatus(ctx context.Context, busy bool) error
+}
+
+// hostStatusForwarder forwards the Claude Code session's own idle or busy
+// state to the relay, so the roster shows the agent busy while the owner
+// is chatting with it. It is structured state the host writes, never a
+// read of the screen or the conversation.
+type hostStatusForwarder struct {
+	r hostStatusReporter
+	// busy reads the session's current state; ok is false when it cannot
+	// be read, and nothing is sent then.
+	busy func() (busy, ok bool)
+	// last is the state last reported and at when; sent is set once one
+	// report has gone out.
+	last bool
+	at   time.Time
+	sent bool
+	// off is set once the relay turns out to predate host status.
+	off bool
+}
+
+// newClaudeHostStatus reads the state from the registry file of ppid, the
+// Claude Code process that started this server, the same file the socket
+// wake and title sharing read. A file that does not name ppid reads as
+// unknown.
+func newClaudeHostStatus(r hostStatusReporter, getenv func(string) string, ppid int) *hostStatusForwarder {
+	registry := filepath.Join(history.ClaudeConfigDir(getenv), "sessions", strconv.Itoa(ppid)+".json")
+	return &hostStatusForwarder{r: r, busy: func() (bool, bool) {
+		s, err := readClaudeSession(registry)
+		if err != nil || s.PID != ppid {
+			return false, false
+		}
+		return s.Status == "busy", true
+	}}
+}
+
+// check reports the session's state when it changed since the last report
+// or a keepalive has passed, so a long turn or a relay restart (which
+// forgets every report) does not lapse to idle.
+func (f *hostStatusForwarder) check(ctx context.Context, now time.Time) {
+	if f.off {
+		return
+	}
+	busy, ok := f.busy()
+	if !ok || (f.sent && busy == f.last && now.Sub(f.at) < sessionKeepalive) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	err := f.r.ReportHostStatus(ctx, busy)
+	if errors.Is(err, client.ErrHostStatusUnsupported) {
+		// An older relay is not the agent's problem, so it is not logged.
+		f.off = true
+		return
+	}
+	if err != nil {
+		log.Printf("tincan mcp: host status: %v", err)
+		return
+	}
+	f.last, f.at, f.sent = busy, now, true
+}
+
+// startHostStatus checks f now and every hostStatusCheck until ctx ends.
+func startHostStatus(ctx context.Context, f *hostStatusForwarder) {
+	t := time.NewTicker(hostStatusCheck)
+	defer t.Stop()
+	for {
+		f.check(ctx, time.Now())
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

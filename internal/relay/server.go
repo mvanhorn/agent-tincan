@@ -202,6 +202,10 @@ type Server struct {
 	// --share-title), by session, lapsing after SessionGrace without a
 	// refresh. In memory only; see handleWorkingOn.
 	workingOn map[string]map[string]workingOnEntry
+	// hostStatus is whether each agent's sessions' hosts say they are
+	// working, by session, lapsing after SessionGrace without a refresh.
+	// In memory only; see handleHostStatus.
+	hostStatus map[string]map[string]hostStatusEntry
 	// started is when this relay process started. lastPoll is not
 	// persisted, so a schedule agent that has not polled since then is
 	// measured from here rather than flagged overdue by a restart.
@@ -256,7 +260,7 @@ func New(dir *identity.Directory, st *store.Store, cfg Config) *Server {
 	cfg.defaults()
 	s := &Server{cfg: cfg, dir: dir, store: st, hub: newHub(), prep: newChain{}, lastPoll: map[string]time.Time{}, polling: map[string]int{},
 		lastSeen: map[string]time.Time{}, persisted: map[string]time.Time{}, versions: loadVersions(st), blobs: defaultAttachmentDir(st), key: loadRelayKey(st),
-		versionWritten: map[string]time.Time{}, sessions: map[string]map[string]time.Time{}, socketWake: map[string]map[string]time.Time{}, workingOn: map[string]map[string]workingOnEntry{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
+		versionWritten: map[string]time.Time{}, sessions: map[string]map[string]time.Time{}, socketWake: map[string]map[string]time.Time{}, workingOn: map[string]map[string]workingOnEntry{}, hostStatus: map[string]map[string]hostStatusEntry{}, silent: map[string]silentEpisode{}, stopping: make(chan struct{}), started: cfg.Now(), emailCursor: map[string]time.Time{}, emailRetry: map[string]map[string]wake.MailMessage{}}
 	s.lookupAgent = dir.Agent
 	s.storedVersion = maps.Clone(s.versions)
 	s.pollFeatures = map[string]pollFeatures{}
@@ -359,6 +363,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/agents/self/web-status", s.handleWebStatus)
 	mux.HandleFunc("PUT /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("DELETE /v1/agents/self/working-on", s.handleWorkingOn)
+	mux.HandleFunc("PUT /v1/agents/self/status", s.handleHostStatus)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
@@ -399,6 +404,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("PUT /v1/agents/self/web-status", s.handleWebStatus)
 	mux.HandleFunc("PUT /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("DELETE /v1/agents/self/working-on", s.handleWorkingOn)
+	mux.HandleFunc("PUT /v1/agents/self/status", s.handleHostStatus)
 	s.adminRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), localAdminKey, true)))
@@ -1524,7 +1530,7 @@ func (s *Server) roster(ctx context.Context, admin bool) ([]client.AgentInfo, er
 		}
 		webFacts[a.Name].Apply(a, &info.Target)
 		info.WorkingOn, info.WorkingOnOthers = s.currentWorkingOn(a.Name, now)
-		applyStatus(&info, computeStatus(statusFacts{online: info.Online, wake: info.Wake, stat: stat, target: info.Target}, now, quietUntil))
+		applyStatus(&info, computeStatus(statusFacts{online: info.Online, wake: info.Wake, stat: stat, target: info.Target, hostBusy: s.hostBusy(a.Name, now)}, now, quietUntil))
 		out = append(out, info)
 	}
 	s.mu.Unlock()
@@ -1710,6 +1716,7 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.sessions, in.Name)
 	delete(s.socketWake, in.Name)
 	delete(s.workingOn, in.Name)
+	delete(s.hostStatus, in.Name)
 	s.mu.Unlock()
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	writeJSON(w, http.StatusOK, map[string]any{"removed": in.Name, "cancelled": len(ids)})

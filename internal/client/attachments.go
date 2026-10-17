@@ -34,11 +34,14 @@ var ErrAttachmentsUnsupported = errors.New("this relay does not support attachme
 // Capabilities is what a relay says it supports, from GET /v1/capabilities.
 // A relay that predates that endpoint supports none of it.
 type Capabilities struct {
-	WebStatus          bool  `json:"web_status,omitempty"`
-	Groups             bool  `json:"groups,omitempty"`
-	Progress           bool  `json:"progress,omitempty"`
-	Search             bool  `json:"search,omitempty"`
-	NeedsInput         bool  `json:"needs_input,omitempty"`
+	WebStatus  bool `json:"web_status,omitempty"`
+	Groups     bool `json:"groups,omitempty"`
+	Progress   bool `json:"progress,omitempty"`
+	Search     bool `json:"search,omitempty"`
+	NeedsInput bool `json:"needs_input,omitempty"`
+	// HostStatus is set by a relay that takes a session's host-reported
+	// busy state (PUT /v1/agents/self/status).
+	HostStatus         bool  `json:"host_status,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`
