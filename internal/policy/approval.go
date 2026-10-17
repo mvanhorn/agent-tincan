@@ -143,25 +143,37 @@ func (a *Approval) reload() error {
 	return nil
 }
 
-// Held evaluates the relay-recorded chain and sender. On reload failure it
-// holds all last-known gated targets; without a valid copy callers must reject.
-// HoldTTL and ApprovalNotify are internal metadata, never accepted from clients.
-func (a *Approval) Held(req *envelope.Request) (bool, error) {
+// load reloads the policy and returns the copy to judge by with its hold
+// TTL: the file's, or on reload failure the last good copy alongside the
+// error. It returns no copy when there is no file, and when nothing valid
+// was ever read. Nil-safe.
+func (a *Approval) load() (*approvalConfig, time.Duration, error) {
 	if a == nil {
-		return false, nil
+		return nil, 0, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	err := a.reload()
 	if a.good == nil || (err == nil && a.missing) {
+		return nil, 0, err
+	}
+	return a.good, a.ttl, err
+}
+
+// Held evaluates the relay-recorded chain and sender. On reload failure it
+// holds all last-known gated targets; without a valid copy callers must reject.
+// HoldTTL and ApprovalNotify are internal metadata, never accepted from clients.
+func (a *Approval) Held(req *envelope.Request) (bool, error) {
+	good, ttl, err := a.load()
+	if good == nil {
 		return false, err
 	}
-	rule, ok := a.good.Gate[req.To]
+	rule, ok := good.Gate[req.To]
 	if !ok {
 		return false, nil
 	}
-	req.HoldTTL = a.ttl
-	req.ApprovalNotify = a.good.Notify
+	req.HoldTTL = ttl
+	req.ApprovalNotify = good.Notify
 	if err != nil {
 		return true, err
 	}
@@ -186,19 +198,11 @@ func (a *Approval) Held(req *envelope.Request) (bool, error) {
 // targets, as Held does; with no good copy it fails closed and reports
 // every target gated with the error. Nil-safe.
 func (a *Approval) Gated(target string) (bool, error) {
-	if a == nil {
-		return false, nil
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	err := a.reload()
-	if a.good == nil {
+	good, _, err := a.load()
+	if good == nil {
 		return err != nil, err
 	}
-	if err == nil && a.missing {
-		return false, nil
-	}
-	_, entry := a.good.Gate[target]
+	_, entry := good.Gate[target]
 	return entry, nil
 }
 

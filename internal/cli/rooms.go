@@ -16,7 +16,7 @@ func roomCmd() *cobra.Command {
 		Use:   "room",
 		Short: "Shared threads: the owner picks the members, and an @mention asks a member",
 	}
-	cmd.AddCommand(roomCreateCmd(), roomMemberCmd("add"), roomMemberCmd("remove"), roomPostCmd(), roomReadCmd(), roomListCmd())
+	cmd.AddCommand(roomCreateCmd(), roomAddCmd(), roomRemoveCmd(), roomPostCmd(), roomReadCmd(), roomListCmd())
 	return cmd
 }
 
@@ -49,18 +49,13 @@ func roomCreateCmd() *cobra.Command {
 	return cmd
 }
 
-// roomMemberCmd is tincan room add or tincan room remove. Adding a member
-// that sends what it reads to an outside vendor prints the relay's
-// warning.
-func roomMemberCmd(verb string) *cobra.Command {
+// roomAddCmd is tincan room add. Adding a member that sends what it reads
+// to an outside vendor prints the relay's warning.
+func roomAddCmd() *cobra.Command {
 	var relayURL, socket string
-	short := "Add an agent to a room (admin devices only)"
-	if verb == "remove" {
-		short = "Take an agent out of a room (admin devices only)"
-	}
 	cmd := &cobra.Command{
-		Use:   verb + " <room> <agent>",
-		Short: short,
+		Use:   "add <room> <agent>",
+		Short: "Add an agent to a room (admin devices only)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, err := adminRelay(socket, relayURL)
@@ -68,18 +63,6 @@ func roomMemberCmd(verb string) *cobra.Command {
 				return err
 			}
 			room, agent := args[0], args[1]
-			if verb == "remove" {
-				res, err := client.RemoveRoomMember(cmd.Context(), r, room, agent)
-				if err != nil {
-					return err
-				}
-				if !res.Changed {
-					cmd.Printf("%s was not in %s.\n", agent, room)
-					return nil
-				}
-				cmd.Printf("Removed %s from %s.\n", agent, room)
-				return nil
-			}
 			res, err := client.AddRoomMember(cmd.Context(), r, room, agent)
 			if err != nil {
 				return err
@@ -91,6 +74,35 @@ func roomMemberCmd(verb string) *cobra.Command {
 			}
 			if res.Warning != "" {
 				cmd.Printf("Warning: %s. Remove it with `tincan room remove %s %s` if that is not what you want.\n", res.Warning, room, agent)
+			}
+			return nil
+		},
+	}
+	adminFlags(cmd, &relayURL, &socket)
+	return cmd
+}
+
+// roomRemoveCmd is tincan room remove.
+func roomRemoveCmd() *cobra.Command {
+	var relayURL, socket string
+	cmd := &cobra.Command{
+		Use:   "remove <room> <agent>",
+		Short: "Take an agent out of a room (admin devices only)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			room, agent := args[0], args[1]
+			res, err := client.RemoveRoomMember(cmd.Context(), r, room, agent)
+			if err != nil {
+				return err
+			}
+			if res.Changed {
+				cmd.Printf("Removed %s from %s.\n", agent, room)
+			} else {
+				cmd.Printf("%s was not in %s.\n", agent, room)
 			}
 			return nil
 		},

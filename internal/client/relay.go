@@ -244,6 +244,8 @@ type Relay struct {
 	// socketWake adds SocketWakeFeature to FeaturesHeader. It is atomic
 	// because the socket-wake loop flips it while other calls are in flight.
 	socketWake atomic.Bool
+	// roomsOK is set once the relay has advertised rooms (see roomCall).
+	roomsOK atomic.Bool
 
 	heldMu  sync.Mutex
 	held    []envelope.Held // from the last response's HeldHeader

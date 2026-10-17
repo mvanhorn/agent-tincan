@@ -26,10 +26,10 @@ const state = {
   heldFresh: false, // the held list was read since the page last came to the foreground
   rooms: [], // every room, from the admin listing
   room: "", // the open room
-  roomPosts: [], // the open room's posts read so far, oldest first
+  roomPosts: [], // the open room's posts read so far, oldest first, at most MAX_ROOM_POSTS
   roomCursor: 0, // id of the last post read
-  roomMembers: [],
-  roomMember: false, // this phone's agent is a member of the open room
+  roomMentions: new Map(), // request id -> mention, for the posts in roomPosts
+  roomRebuild: true, // the post list must be drawn again, not just added to
 };
 
 // sending is true while an ask is on its way, so a render from a poll in
@@ -39,6 +39,22 @@ let sending = false;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DONE = new Set(["answered", "failed", "declined", "cancelled", "expired"]);
 const SENT_SHOWN = 20;
+const MAX_ROOM_POSTS = 300;
+
+// fillSelect rebuilds sel's options from names, labelled by label, when the
+// names changed since the last fill. It reports whether it rebuilt them.
+function fillSelect(sel, names, label = (name) => name) {
+  const key = names.join(",");
+  if (sel.dataset.names === key) return false;
+  sel.replaceChildren();
+  names.forEach((name, i) => {
+    const opt = el("option", "", label(name, i));
+    opt.value = name;
+    sel.append(opt);
+  });
+  sel.dataset.names = key;
+  return true;
+}
 
 // The phone's agent name is remembered on the device so the page can name
 // itself on a machine that runs other agents too. Storage may be off.
@@ -322,17 +338,8 @@ function renderAsk() {
   const select = $("ask-to");
   const current = select.value;
   const targets = state.roster.filter((a) => a.name !== state.me && a.kind !== "phone").sort((a, b) => (a.name < b.name ? -1 : 1));
-  const names = targets.map((a) => a.name).join(",");
-  if (select.dataset.names !== names) {
-    select.replaceChildren();
-    for (const a of targets) {
-      const opt = el("option", "", a.name + " (" + (a.status || (a.online ? "online" : "offline")) + ")");
-      opt.value = a.name;
-      select.append(opt);
-    }
-    select.dataset.names = names;
-    if (targets.some((a) => a.name === current)) select.value = current;
-  }
+  const label = (name, i) => name + " (" + (targets[i].status || (targets[i].online ? "online" : "offline")) + ")";
+  if (fillSelect(select, targets.map((a) => a.name), label) && targets.some((a) => a.name === current)) select.value = current;
   const disabled = state.offline || state.notAdmin;
   $("ask-send").disabled = sending || disabled || targets.length === 0;
   // A sent-list refresh in flight renders the list when it lands.
@@ -606,27 +613,25 @@ function postCard(p) {
   return li;
 }
 
+// openRoom is the open room's entry in the admin listing, if any.
+const openRoom = () => state.rooms.find((r) => r.name === state.room);
+
 function renderRooms() {
+  if (state.tab !== "rooms") return;
   const pick = $("room-pick");
-  const names = state.rooms.map((r) => r.name).join(",");
-  if (pick.dataset.names !== names) {
-    pick.replaceChildren();
-    for (const r of state.rooms) {
-      const opt = el("option", "", r.name);
-      opt.value = r.name;
-      pick.append(opt);
-    }
-    pick.dataset.names = names;
-  }
+  fillSelect(pick, state.rooms.map((r) => r.name));
   if (state.room) pick.value = state.room;
   $("rooms-empty").hidden = state.rooms.length > 0 || !state.loaded;
   $("rooms-me").textContent = state.me ? "Reading and posting as " + state.me + "." : "Join this phone on the Ask tab to read and post in rooms.";
   $("room-view").hidden = !state.room;
   if (!state.room) return;
+  const room = openRoom();
+  const roomMembers = (room && room.members) || [];
+  const roomMember = !!state.me && roomMembers.includes(state.me);
   $("room-title").textContent = state.room;
   const members = $("room-members");
   members.replaceChildren();
-  for (const name of state.roomMembers) {
+  for (const name of roomMembers) {
     const li = el("li", "", name + " ");
     const remove = el("button", "", "Remove");
     remove.type = "button";
@@ -635,25 +640,26 @@ function renderRooms() {
     li.append(remove);
     members.append(li);
   }
-  const add = $("room-add-agent");
-  const candidates = state.roster.filter((a) => !state.roomMembers.includes(a.name)).map((a) => a.name).sort();
-  if (add.dataset.names !== candidates.join(",")) {
-    add.replaceChildren();
-    for (const name of candidates) {
-      const opt = el("option", "", name);
-      opt.value = name;
-      add.append(opt);
-    }
-    add.dataset.names = candidates.join(",");
-  }
+  const candidates = state.roster.filter((a) => !roomMembers.includes(a.name)).map((a) => a.name).sort();
+  fillSelect($("room-add-agent"), candidates);
   $("room-add").disabled = candidates.length === 0 || state.offline;
   const join = $("room-join");
-  join.hidden = !state.me || state.roomMember;
+  join.hidden = !state.me || roomMember;
   join.textContent = state.me ? "This phone (" + state.me + ") is not in this room. Add it to read and post." : "";
-  $("room-form").hidden = !state.roomMember;
+  $("room-form").hidden = !roomMember;
+  // New posts are added to the list; it is drawn again only for another
+  // room, a settled mention, or posts let go past MAX_ROOM_POSTS.
   const list = $("room-posts");
-  list.replaceChildren();
-  for (const p of state.roomPosts) list.append(postCard(p));
+  if (state.roomRebuild) {
+    list.replaceChildren();
+    list.dataset.shown = "0";
+    state.roomRebuild = false;
+  }
+  const shown = Number(list.dataset.shown || 0);
+  for (const p of state.roomPosts) {
+    if (p.id > shown) list.append(postCard(p));
+  }
+  if (state.roomPosts.length) list.dataset.shown = String(state.roomPosts[state.roomPosts.length - 1].id);
 }
 
 // refreshRooms reads every room (an admin listing) and, for the open room,
@@ -665,17 +671,12 @@ async function refreshRooms() {
   try {
     const all = await api("GET", "/v1/admin/rooms");
     if (all.status === 200 && all.data) state.rooms = all.data.rooms || [];
-    const open = state.rooms.find((r) => r.name === state.room);
-    if (!open) {
+    if (!openRoom()) {
       state.room = state.rooms.length ? state.rooms[0].name : "";
       resetRoom();
     }
-    if (state.room) {
-      const room = state.rooms.find((r) => r.name === state.room);
-      state.roomMembers = room ? room.members : [];
-      state.roomMember = !!state.me && state.roomMembers.includes(state.me);
-      if (state.roomMember) await readRoom();
-    }
+    const room = openRoom();
+    if (room && state.me && (room.members || []).includes(state.me)) await readRoom();
   } catch (_) {
     // The main poll reports the relay as offline.
   } finally {
@@ -687,6 +688,8 @@ async function refreshRooms() {
 function resetRoom() {
   state.roomPosts = [];
   state.roomCursor = 0;
+  state.roomMentions.clear();
+  state.roomRebuild = true;
 }
 
 async function readRoom() {
@@ -694,17 +697,23 @@ async function readRoom() {
   if (res.status !== 200 || !res.data) return;
   for (const p of res.data.posts || []) {
     // A mirrored reply settles the mention it answers in the earlier post.
-    if (p.reply_to && p.status !== "needs_input") {
-      for (const q of state.roomPosts) {
-        for (const m of q.mentions || []) {
-          if (m.request_id === p.reply_to) m.status = p.status;
-        }
-      }
+    const m = p.reply_to && p.status !== "needs_input" ? state.roomMentions.get(p.reply_to) : null;
+    if (m && m.status !== p.status) {
+      m.status = p.status;
+      state.roomRebuild = true;
     }
+    for (const q of p.mentions || []) state.roomMentions.set(q.request_id, q);
     state.roomPosts.push(p);
   }
+  if (state.roomPosts.length > MAX_ROOM_POSTS) {
+    for (const p of state.roomPosts.splice(0, state.roomPosts.length - MAX_ROOM_POSTS)) {
+      for (const q of p.mentions || []) state.roomMentions.delete(q.request_id);
+    }
+    state.roomRebuild = true;
+  }
   state.roomCursor = res.data.next || state.roomCursor;
-  state.roomMembers = res.data.members || state.roomMembers;
+  const room = openRoom();
+  if (room && res.data.members) room.members = res.data.members;
 }
 
 async function createRoom() {

@@ -68,7 +68,7 @@ type Backend interface {
 	Reply(ctx context.Context, id, body string, status envelope.Status) (envelope.Reply, error)
 	Cancel(ctx context.Context, id string) error
 	Agents(ctx context.Context) ([]client.AgentInfo, error)
-	Raw(ctx context.Context, method, path string, in, out any) error
+	client.Rawer
 }
 
 // Attacher is the part of a Backend that moves attachments. *client.Relay

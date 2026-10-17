@@ -1265,9 +1265,22 @@ func TestRoomToolsOverMCP(t *testing.T) {
 	if out := call(t, session(t, m, "instinct"), "room_read", map[string]any{"room": "launch"}); !strings.HasPrefix(out, "ERROR:") {
 		t.Fatalf("non-member room_read = %q", out)
 	}
+	// Agents post and read; membership is the owner's, so no tool changes it.
+	var rooms []string
 	for _, n := range mcpserver.ToolNames {
-		if strings.HasPrefix(n, "room_") && n != "room_post" && n != "room_read" {
-			t.Errorf("unexpected room tool %q", n)
+		if strings.Contains(n, "room") {
+			rooms = append(rooms, n)
+		}
+		if membershipTool.MatchString(n) {
+			t.Errorf("tool %q looks like it changes room membership", n)
 		}
 	}
+	slices.Sort(rooms)
+	if want := []string{"list_rooms", "room_post", "room_read"}; !slices.Equal(rooms, want) {
+		t.Errorf("room tools = %q, want %q", rooms, want)
+	}
 }
+
+// membershipTool matches a tool name that suggests changing who is in a
+// room.
+var membershipTool = regexp.MustCompile(`member|add|remove|create|join|invite|kick|leave|delete`)

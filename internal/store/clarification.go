@@ -71,8 +71,10 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 	if _, err := tx.ExecContext(ctx, `INSERT INTO replies(request_id, from_agent, status, body, created_at) VALUES (?, ?, ?, ?, ?)`, id, agent, rep.Status, rep.Body, now.UnixMilli()); err != nil {
 		return envelope.Reply{}, err
 	}
-	if err := s.mirrorReplyTx(ctx, tx, rep); err != nil {
-		return envelope.Reply{}, err
+	if req.RoomPostID != 0 {
+		if err := s.mirrorReplyTx(ctx, tx, rep); err != nil {
+			return envelope.Reply{}, err
+		}
 	}
 	return rep, tx.Commit()
 }

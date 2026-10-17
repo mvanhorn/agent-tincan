@@ -328,19 +328,18 @@ func TestApproveConfirmsWhileIdentityUnknown(t *testing.T) {
 }
 
 // The rooms tab manages members through the admin routes, reads after a
-// cursor and posts as the phone's agent, and asks before adding a member
-// that sends the thread to an outside vendor.
+// cursor and posts as the phone's agent, draws post bodies as text, and asks
+// before adding a member that sends the thread to an outside vendor.
 func TestRoomsInThePage(t *testing.T) {
 	app := read(t, "app.js")
 	for _, want := range []string{
-		`api("GET", "/v1/admin/rooms")`,
-		`api("POST", "/v1/admin/rooms", { name })`,
-		`api("POST", memberPath(state.room), { agent })`,
-		`api("DELETE", memberPath(state.room), { agent })`,
-		`"/posts?after=" + state.roomCursor`,
-		`api("POST", roomPath(state.room) + "/posts", { body })`,
-		`VENDOR_KINDS.has(a.kind)`,
-		`window.confirm(agent + " is a "`,
+		`"/v1/admin/rooms"`,
+		`"/v1/admin/rooms/"`,
+		`"/members"`,
+		`"/v1/rooms/"`,
+		`"/posts?after="`,
+		`"/posts"`,
+		`" agent: the posts it reads or is sent go to that vendor, under your account there. Add it to "`,
 		`el("p", "body", p.body)`,
 	} {
 		if !strings.Contains(app, want) {

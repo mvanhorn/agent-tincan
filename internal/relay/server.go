@@ -1957,9 +1957,7 @@ func statusFor(err error) int {
 	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined),
 		errors.Is(err, identity.ErrAgentAmbiguous), errors.Is(err, store.ErrNotRoomMember):
 		return http.StatusForbidden
-	case errors.Is(err, store.ErrRoomExists):
-		return http.StatusConflict
-	case errors.Is(err, store.ErrWrongState):
+	case errors.Is(err, store.ErrWrongState), errors.Is(err, store.ErrRoomExists):
 		return http.StatusConflict
 	case errors.Is(err, identity.ErrBadInvite):
 		return http.StatusBadRequest

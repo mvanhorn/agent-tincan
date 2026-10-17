@@ -131,12 +131,11 @@ func (s *Store) RemoveRoomMember(ctx context.Context, room, agent string) (bool,
 
 // IsRoomMember reports whether agent is a member of room, or ErrNoRoom.
 func (s *Store) IsRoomMember(ctx context.Context, room, agent string) (bool, error) {
-	id, err := roomID(ctx, s.db, room)
-	if err != nil {
-		return false, err
-	}
 	var ok bool
-	err = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = ? AND agent = ?)`, id, agent).Scan(&ok)
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.agent = ?) FROM rooms r WHERE r.name = ?`, agent, room).Scan(&ok)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNoRoom
+	}
 	return ok, err
 }
 
@@ -178,10 +177,7 @@ func (s *Store) rooms(ctx context.Context, where string, args ...any) ([]envelop
 			return nil, err
 		}
 		rm.CreatedAt = time.UnixMilli(created).UTC()
-		rm.Members = strings.Fields(members)
-		if rm.Members == nil {
-			rm.Members = []string{}
-		}
+		rm.Members = strings.Fields(members) // never nil, so JSON shows []
 		out = append(out, rm)
 	}
 	return out, rows.Err()
@@ -216,7 +212,8 @@ func (s *Store) AddRoomPost(ctx context.Context, room, author, body string) (env
 // the mention its request came from, as the replier's post: with the
 // reply's status, and under the request id and reply generation, which
 // may post once. It does nothing for a request that is not a mention, or
-// when the replier is no longer a member of the room. Running inside the
+// when the replier is no longer a member of the room; a caller holding the
+// request can skip it when RoomPostID is 0. Running inside the
 // reply's own transaction, the reply and its room post commit together.
 func (s *Store) mirrorReplyTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO room_posts (room_id, author, body, created_at, status, reply_to, reply_generation)
@@ -269,7 +266,7 @@ func (s *Store) MirroredPost(ctx context.Context, id string, gen int64) (envelop
 }
 
 // RecentRoomPosts returns up to limit of room's posts before the post with
-// id before, newest first.
+// id before, newest first, without their mentions.
 func (s *Store) RecentRoomPosts(ctx context.Context, room string, before int64, limit int) ([]envelope.RoomPost, error) {
 	id, err := roomID(ctx, s.db, room)
 	if err != nil {
@@ -288,7 +285,11 @@ func (s *Store) RoomPosts(ctx context.Context, room string, after int64, limit i
 	if limit <= 0 || limit > MaxRoomPage {
 		limit = MaxRoomPage
 	}
-	return s.roomPosts(ctx, room, `SELECT id, author, body, created_at, status, reply_to FROM room_posts WHERE room_id = ? AND id > ? ORDER BY id LIMIT ?`, id, after, limit)
+	posts, err := s.roomPosts(ctx, room, `SELECT id, author, body, created_at, status, reply_to FROM room_posts WHERE room_id = ? AND id > ? ORDER BY id LIMIT ?`, id, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	return posts, s.addMentions(ctx, posts)
 }
 
 func (s *Store) roomPosts(ctx context.Context, room, query string, args ...any) ([]envelope.RoomPost, error) {
@@ -308,10 +309,7 @@ func (s *Store) roomPosts(ctx context.Context, room, query string, args ...any) 
 		p.CreatedAt, p.Status = time.UnixMilli(created).UTC(), envelope.Status(status)
 		out = append(out, p)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, s.addMentions(ctx, out)
+	return out, rows.Err()
 }
 
 // addMentions fills in each post's mentions: the asks built from it, in

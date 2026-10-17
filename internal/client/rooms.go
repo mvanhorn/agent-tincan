@@ -31,21 +31,31 @@ type RoomMemberResult struct {
 	Warning string `json:"warning,omitempty"`
 }
 
-// requireRooms fails with ErrRoomsUnsupported unless the relay advertises
-// rooms. An older relay answers 404 to the capabilities call.
-func requireRooms(ctx context.Context, c Rawer) error {
-	var caps Capabilities
-	err := c.Raw(ctx, "GET", "/v1/capabilities", nil, &caps)
-	if IsStatus(err, http.StatusNotFound) {
-		return ErrRoomsUnsupported
+// roomCall makes one room call. A relay that predates rooms answers it 404
+// or 405, so only such a failure asks the relay's capabilities, and a relay
+// that does not advertise rooms fails with ErrRoomsUnsupported. Any other
+// 404, such as the relay's ErrNoRoom, comes back unchanged. A *Relay
+// remembers that its relay serves rooms, so it asks at most once.
+func roomCall(ctx context.Context, c Rawer, method, path string, in, out any) error {
+	err := c.Raw(ctx, method, path, in, out)
+	if !IsStatus(err, http.StatusNotFound) && !IsStatus(err, http.StatusMethodNotAllowed) {
+		return err
 	}
-	if err != nil {
-		return fmt.Errorf("check relay capabilities: %w", err)
+	r, cached := c.(*Relay)
+	if cached && r.roomsOK.Load() {
+		return err
+	}
+	caps, cerr := capabilities(ctx, c)
+	if cerr != nil {
+		return fmt.Errorf("check relay capabilities: %w", cerr)
 	}
 	if !caps.Rooms {
 		return ErrRoomsUnsupported
 	}
-	return nil
+	if cached {
+		r.roomsOK.Store(true)
+	}
+	return err
 }
 
 func roomPath(room string) string { return "/v1/rooms/" + url.PathEscape(room) }
@@ -53,10 +63,7 @@ func roomPath(room string) string { return "/v1/rooms/" + url.PathEscape(room) }
 // CreateRoom creates an empty room (admin devices only).
 func CreateRoom(ctx context.Context, c Rawer, name string) (envelope.Room, error) {
 	var out envelope.Room
-	if err := requireRooms(ctx, c); err != nil {
-		return out, err
-	}
-	err := c.Raw(ctx, "POST", "/v1/admin/rooms", map[string]string{"name": name}, &out)
+	err := roomCall(ctx, c, "POST", "/v1/admin/rooms", map[string]string{"name": name}, &out)
 	return out, err
 }
 
@@ -72,19 +79,13 @@ func RemoveRoomMember(ctx context.Context, c Rawer, room, agent string) (RoomMem
 
 func roomMember(ctx context.Context, c Rawer, method, room, agent string) (RoomMemberResult, error) {
 	var out RoomMemberResult
-	if err := requireRooms(ctx, c); err != nil {
-		return out, err
-	}
-	err := c.Raw(ctx, method, "/v1/admin/rooms/"+url.PathEscape(room)+"/members", map[string]string{"agent": agent}, &out)
+	err := roomCall(ctx, c, method, "/v1/admin/rooms/"+url.PathEscape(room)+"/members", map[string]string{"agent": agent}, &out)
 	return out, err
 }
 
 // Rooms lists the rooms this agent is in, or with all every room (admin
 // devices only).
 func Rooms(ctx context.Context, c Rawer, all bool) ([]envelope.Room, error) {
-	if err := requireRooms(ctx, c); err != nil {
-		return nil, err
-	}
 	path := "/v1/rooms"
 	if all {
 		path = "/v1/admin/rooms"
@@ -92,17 +93,14 @@ func Rooms(ctx context.Context, c Rawer, all bool) ([]envelope.Room, error) {
 	var out struct {
 		Rooms []envelope.Room `json:"rooms"`
 	}
-	err := c.Raw(ctx, "GET", path, nil, &out)
+	err := roomCall(ctx, c, "GET", path, nil, &out)
 	return out.Rooms, err
 }
 
 // PostToRoom posts body to room as this agent.
 func PostToRoom(ctx context.Context, c Rawer, room, body string) (envelope.RoomPostResponse, error) {
 	var out envelope.RoomPostResponse
-	if err := requireRooms(ctx, c); err != nil {
-		return out, err
-	}
-	err := c.Raw(ctx, "POST", roomPath(room)+"/posts", map[string]string{"body": body}, &out)
+	err := roomCall(ctx, c, "POST", roomPath(room)+"/posts", map[string]string{"body": body}, &out)
 	return out, err
 }
 
@@ -110,9 +108,6 @@ func PostToRoom(ctx context.Context, c Rawer, room, body string) (envelope.RoomP
 // after, oldest first; limit 0 takes the relay's page size.
 func ReadRoom(ctx context.Context, c Rawer, room string, after int64, limit int) (envelope.RoomThread, error) {
 	var out envelope.RoomThread
-	if err := requireRooms(ctx, c); err != nil {
-		return out, err
-	}
 	q := url.Values{}
 	if after > 0 {
 		q.Set("after", fmt.Sprint(after))
@@ -124,6 +119,6 @@ func ReadRoom(ctx context.Context, c Rawer, room string, after int64, limit int)
 	if len(q) > 0 {
 		path += "?" + q.Encode()
 	}
-	err := c.Raw(ctx, "GET", path, nil, &out)
+	err := roomCall(ctx, c, "GET", path, nil, &out)
 	return out, err
 }
