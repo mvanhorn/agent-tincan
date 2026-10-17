@@ -31,6 +31,7 @@ const state = {
   roomMentions: new Map(), // request id -> mention, for the posts in roomPosts
   roomRebuild: true, // the post list must be drawn again, not just added to
   roomGen: 0, // bumped by resetRoom, so a read for an earlier room is dropped
+  roomRecheckAt: 0, // where the next recheckMentions starts among open mentions
 };
 
 // sending is true while an ask is on its way, so a render from a poll in
@@ -716,6 +717,7 @@ function resetRoom() {
   state.roomPosts = [];
   state.roomCursor = 0;
   state.roomMentions.clear();
+  state.roomRecheckAt = 0;
   state.roomRebuild = true;
   state.roomGen++;
 }
@@ -748,16 +750,25 @@ async function readRoom() {
   if (open && res.data.members) open.members = res.data.members;
 }
 
-// recheckMentions re-reads, by id, the newest loaded posts that still have
-// an open mention, so one cancelled, denied or expired, which leaves no
-// reply in the room, stops showing as waiting.
+// recheckMentions re-reads, by id, loaded posts that still have an open
+// mention, so one cancelled, denied or expired, which leaves no reply in
+// the room, stops showing as waiting. With more such posts than one read
+// takes, each read takes the next MAX_ROOM_IDS of them, newest first, and
+// wraps around, so every one is checked in turn.
 async function recheckMentions() {
-  const ids = [];
-  for (let i = state.roomPosts.length - 1; i >= 0 && ids.length < MAX_ROOM_IDS; i--) {
+  const open = [];
+  for (let i = state.roomPosts.length - 1; i >= 0; i--) {
     const p = state.roomPosts[i];
-    if ((p.mentions || []).some((m) => !DONE.has(m.status))) ids.push(p.id);
+    if ((p.mentions || []).some((m) => !DONE.has(m.status))) open.push(p.id);
   }
-  if (!ids.length) return;
+  if (!open.length) return;
+  let ids = open;
+  if (open.length > MAX_ROOM_IDS) {
+    const from = state.roomRecheckAt % open.length;
+    ids = open.slice(from, from + MAX_ROOM_IDS);
+    if (ids.length < MAX_ROOM_IDS) ids = ids.concat(open.slice(0, MAX_ROOM_IDS - ids.length));
+    state.roomRecheckAt = from + MAX_ROOM_IDS;
+  }
   const room = state.room;
   const gen = state.roomGen;
   const res = await api("GET", roomPath(room) + "/posts?ids=" + ids.join(","));
@@ -830,21 +841,30 @@ async function removeMember(agent) {
 }
 
 async function postToRoom() {
-  const body = $("room-body").value.trim();
-  if (!body || !state.room) return;
+  const draft = $("room-body").value;
+  const body = draft.trim();
+  const room = state.room;
+  const gen = state.roomGen;
+  if (!body || !room) return;
   roomError("");
   $("room-send").disabled = true;
   const notices = $("room-notices");
   notices.replaceChildren();
+  // The answer may come after the owner opened another room or typed a
+  // new draft: only the draft that was sent is cleared, and the notices
+  // are shown only while the room they are about is still open.
+  const stillOpen = () => room === state.room && gen === state.roomGen;
   try {
-    const res = await api("POST", roomPath(state.room) + "/posts", { body });
+    const res = await api("POST", roomPath(room) + "/posts", { body });
     if (res.status !== 201 || !res.data) throw new Error((res.data && res.data.error) || "error " + res.status);
-    $("room-body").value = "";
-    for (const m of res.data.post.mentions || []) notices.append(el("li", "", "Asked " + m.agent + "; the reply will be posted here."));
-    for (const n of res.data.notices || []) notices.append(el("li", "", n));
-    announce("Posted to " + state.room + ".");
+    if (stillOpen() && $("room-body").value === draft) $("room-body").value = "";
+    if (stillOpen()) {
+      for (const m of res.data.post.mentions || []) notices.append(el("li", "", "Asked " + m.agent + "; the reply will be posted here."));
+      for (const n of res.data.notices || []) notices.append(el("li", "", n));
+    }
+    announce("Posted to " + room + ".");
   } catch (e) {
-    roomError("Not posted: " + e.message);
+    roomError("Not posted to " + room + ": " + e.message);
   } finally {
     $("room-send").disabled = false;
     refreshRooms();

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -242,5 +243,73 @@ func TestMirrorSkipsFormerMember(t *testing.T) {
 	long := mirroredBody(envelope.Reply{RequestID: "r1", Body: strings.Repeat("界", envelope.MaxRoomPost)})
 	if len(long) > envelope.MaxRoomPost || !utf8.ValidString(long) || !strings.HasSuffix(long, "[cut; the whole reply is on request r1]") {
 		t.Fatalf("long mirror: %d bytes, valid %v", len(long), utf8.ValidString(long))
+	}
+}
+
+// An ask built from a mention is stored only while both its poster and
+// its target are members of the post's room, checked as it is written, so
+// a removal that lands between the relay's member check and the insert
+// leaves nothing queued for a former member.
+func TestMentionAskNeedsCurrentMembers(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	if _, err := s.CreateRoom(ctx, "launch"); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{"codex", "claude-code"} {
+		if _, err := s.AddRoomMember(ctx, "launch", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post, err := s.AddRoomPost(ctx, "launch", "codex", "@claude-code review this")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ask := envelope.Request{From: "codex", To: "claude-code", Kind: envelope.KindAsk, Body: "review this", Hop: 1, Chain: []string{"codex"}, RoomPostID: post.ID}
+	for _, gone := range []string{"claude-code", "codex"} {
+		if _, _, err := s.RemoveRoomMember(ctx, "launch", gone); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Enqueue(ctx, ask, time.Hour); !errors.Is(err, ErrNotRoomMember) {
+			t.Fatalf("%s removed: enqueue = %v", gone, err)
+		}
+		if _, err := s.AddRoomMember(ctx, "launch", gone); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Enqueue(ctx, ask, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A page of posts stays inside MaxRoomPageBytes once written as JSON, even
+// when every post is at the size limit and grows when escaped; the next
+// page picks up where it stopped.
+func TestRoomPostsPageFitsByteBudget(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	if _, err := s.CreateRoom(ctx, "launch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddRoomMember(ctx, "launch", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("<", envelope.MaxRoomPost)
+	for range MaxRoomPage {
+		if _, err := s.AddRoomPost(ctx, "launch", "codex", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	posts, err := s.RoomPosts(ctx, "launch", 0, 0)
+	if err != nil || len(posts) == 0 || len(posts) == MaxRoomPage {
+		t.Fatalf("page of %d posts, %v", len(posts), err)
+	}
+	b, err := json.Marshal(posts)
+	if err != nil || len(b) > MaxRoomPageBytes {
+		t.Fatalf("page is %d bytes, %v", len(b), err)
+	}
+	next, err := s.RoomPosts(ctx, "launch", posts[len(posts)-1].ID, 0)
+	if err != nil || len(next) == 0 || next[0].ID != posts[len(posts)-1].ID+1 {
+		t.Fatalf("next page = %d posts, %v", len(next), err)
 	}
 }

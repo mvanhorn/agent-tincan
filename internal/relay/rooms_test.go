@@ -805,3 +805,92 @@ func TestRoomPostValidation(t *testing.T) {
 		}
 	}
 }
+
+// A name may end in a dash: @dev- asks dev-, not dev, when both are
+// members. A trailing dash that is not part of a member's name is
+// punctuation: @codex- still asks codex.
+func TestRoomMentionNameEndingInDash(t *testing.T) {
+	m := mentionMesh(t)
+	admin := m.Client(t, "admin")
+	for _, name := range []string{"dev", "dev-"} {
+		m.JoinOnMachineOf(t, "grokbot", name)
+		if _, err := client.AddRoomMember(t.Context(), admin, "launch", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := post(t, m, "muse", "@dev- and @codex- please look")
+	if got := res.Post.Mentions; len(got) != 2 || got[0].Agent != "dev-" || got[1].Agent != "codex" {
+		t.Fatalf("mentions = %+v notices %v", got, res.Notices)
+	}
+	if in, err := m.Client(t, "dev").Poll(t.Context(), time.Millisecond); err != nil || len(in.Requests) != 0 {
+		t.Fatalf("dev inbox = %+v %v", in, err)
+	}
+	take(t, m, "dev-")
+}
+
+// A poster taken out of the room, or that approval.json starts holding,
+// no longer reads the room's text through its own mention asks: get,
+// unseen replies, trace and search all show the placeholder.
+func TestRoomFormerPosterReadsNoRoomText(t *testing.T) {
+	m := mentionMesh(t)
+	path := filepath.Join(t.TempDir(), "approval.json")
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	post(t, m, "codex", "@claude-code zebra secret roadmap")
+	req := take(t, m, "claude-code")
+	if _, err := client.RemoveRoomMember(t.Context(), m.Client(t, "admin"), "launch", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "claude-code").Reply(t.Context(), req.ID, "zebra okapi answer", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	codex := m.Client(t, "codex")
+	in, err := codex.Poll(t.Context(), time.Millisecond)
+	if err != nil || len(in.Replies) != 1 || in.Replies[0].Reply == nil {
+		t.Fatalf("codex inbox = %+v %v", in, err)
+	}
+	redacted := func(where string, got envelope.Result) {
+		t.Helper()
+		if got.Request.Body != envelope.RoomRedacted || got.Reply == nil || got.Reply.Body != envelope.RoomRedacted || got.Status != envelope.StatusAnswered {
+			t.Fatalf("%s = %+v reply %+v", where, got.Request, got.Reply)
+		}
+	}
+	redacted("unseen reply", in.Replies[0])
+	got, err := codex.Get(t.Context(), req.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted("get", got)
+	// muse, still a member, sees the text until approval.json holds it.
+	if hits := searchHits(t, m, "muse", "okapi"); len(hits) != 0 {
+		t.Fatalf("muse is not in the chain: %+v", hits)
+	}
+	if _, err := client.AddRoomMember(t.Context(), m.Client(t, "admin"), "launch", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := codex.Get(t.Context(), req.ID, 0); err != nil || got.Reply == nil || got.Reply.Body != "zebra okapi answer" {
+		t.Fatalf("member again get = %+v %v", got, err)
+	}
+	if hits := searchHits(t, m, "codex", "okapi"); len(hits) != 1 {
+		t.Fatalf("member again search = %+v", hits)
+	}
+	if err := os.WriteFile(path, []byte(`{"gate":{"codex":{"from":"*"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = codex.Get(t.Context(), req.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted("gated get", got)
+	for _, s := range traceSteps(t, m, "codex", req.TraceID) {
+		if s.Request.ID == req.ID {
+			redacted("gated trace", s)
+		}
+	}
+	if hits := searchHits(t, m, "codex", "okapi"); len(hits) != 0 {
+		t.Fatalf("gated search = %+v", hits)
+	}
+}

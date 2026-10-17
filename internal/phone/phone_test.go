@@ -353,3 +353,25 @@ func TestRoomsInThePage(t *testing.T) {
 		}
 	}
 }
+
+// The rooms tab shows an error with no room open (the first room's create
+// fails before any room-view exists), lets a post answered after a room
+// switch touch only its own draft and room, and rechecks every open
+// mention in turn rather than only the newest.
+func TestRoomsTabEdgeCases(t *testing.T) {
+	html := read(t, "index.html")
+	errAt, viewAt := strings.Index(html, `id="room-error"`), strings.Index(html, `id="room-view"`)
+	if errAt < 0 || viewAt < 0 || errAt > viewAt {
+		t.Error("room-error must sit outside room-view, which is hidden until a room is open")
+	}
+	app := read(t, "app.js")
+	post := funcBody(t, app, "postToRoom")
+	for _, want := range []string{"stillOpen()", `$("room-body").value === draft`} {
+		if !strings.Contains(post, want) {
+			t.Errorf("postToRoom lacks %s", want)
+		}
+	}
+	if !strings.Contains(funcBody(t, app, "recheckMentions"), "state.roomRecheckAt") {
+		t.Error("recheckMentions must rotate through the open mentions")
+	}
+}

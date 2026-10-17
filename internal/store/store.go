@@ -756,6 +756,19 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, ErrGroupFull
 		}
 	}
+	if req.RoomPostID != 0 {
+		// A mention's poster and target must both be members of the post's
+		// room as the ask is written, so a removal that lands after the
+		// relay's own check still leaves nothing for a former member.
+		var members int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT m.agent) FROM room_posts p JOIN room_members m ON m.room_id = p.room_id
+			WHERE p.id = ? AND m.agent IN (?, ?)`, req.RoomPostID, req.From, req.To).Scan(&members); err != nil {
+			return envelope.Request{}, err
+		}
+		if members != 2 {
+			return envelope.Request{}, ErrNotRoomMember
+		}
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err

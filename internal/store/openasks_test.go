@@ -102,8 +102,20 @@ func TestOpenAsksListsOnlyOpenAsks(t *testing.T) {
 func TestOpenAsksLeaveOutMentions(t *testing.T) {
 	s, _ := open(t, ":memory:")
 	ctx := context.Background()
+	if _, err := s.CreateRoom(ctx, "launch"); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{"codex", "instinct"} {
+		if _, err := s.AddRoomMember(ctx, "launch", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post, err := s.AddRoomPost(ctx, "launch", "codex", "@instinct ROOMTEXT")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, req := range []envelope.Request{
-		{From: "codex", To: "instinct", Kind: envelope.KindAsk, Body: "ROOMTEXT", RoomPostID: 7},
+		{From: "codex", To: "instinct", Kind: envelope.KindAsk, Body: "ROOMTEXT", RoomPostID: post.ID},
 		{From: "codex", To: "instinct", Kind: envelope.KindAsk, Body: "plain ask"},
 	} {
 		req.Hop, req.Chain = 1, []string{req.From}

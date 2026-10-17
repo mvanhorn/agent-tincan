@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,11 @@ var (
 
 // MaxRoomPage bounds how many posts one read of a room returns.
 const MaxRoomPage = 200
+
+// MaxRoomPageBytes bounds a page of posts as JSON, so a read stays well
+// under the client's 4 MiB response limit however much the posts' text
+// grows when escaped. A page always holds at least one post.
+const MaxRoomPageBytes = 1 << 20
 
 // migrateRooms creates the rooms, room_members and room_posts tables. Like
 // watches, members and posts name agents with no foreign key to agents,
@@ -340,7 +346,27 @@ func (s *Store) RoomPosts(ctx context.Context, room string, after int64, limit i
 	if err != nil {
 		return nil, err
 	}
-	return posts, s.addMentions(ctx, posts)
+	if err := s.addMentions(ctx, posts); err != nil {
+		return nil, err
+	}
+	return fitPage(posts, MaxRoomPageBytes)
+}
+
+// fitPage keeps the leading posts whose JSON fits in budget bytes, and
+// always the first.
+func fitPage(posts []envelope.RoomPost, budget int) ([]envelope.RoomPost, error) {
+	size := 0
+	for i, p := range posts {
+		b, err := json.Marshal(p)
+		if err != nil {
+			return nil, err
+		}
+		size += len(b) + 1 // the comma between posts
+		if i > 0 && size > budget {
+			return posts[:i], nil
+		}
+	}
+	return posts, nil
 }
 
 // MaxRoomIDs bounds how many posts one read by id returns.

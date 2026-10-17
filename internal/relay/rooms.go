@@ -118,25 +118,38 @@ func (s *Server) mayMirror(ctx context.Context, id, agent string) bool {
 	return s.roomRefusal(a) == nil
 }
 
-// redactRooms hides each mention step's room text (RedactRoom) from
-// reader unless it is now a member of the mention's room.
-func (s *Server) redactRooms(ctx context.Context, steps []store.TraceStep, reader string) error {
+// mayReadRooms reports whether agent may read rooms at all now: it is a
+// known agent that rooms do not exclude (roomRefusal). Any error refuses.
+func (s *Server) mayReadRooms(ctx context.Context, agent string) bool {
+	a, ok, err := s.dir.Agent(ctx, agent)
+	return err == nil && ok && s.roomRefusal(a) == nil
+}
+
+// redactRooms hides each mention's room text (RedactRoom) from reader
+// unless reader may read rooms now (mayReadRooms) and is now a member of
+// the mention's room: the same checks room_read makes, applied to every
+// other way a mention is read (trace, get, unseen replies).
+func (s *Server) redactRooms(ctx context.Context, results []envelope.Result, reader string) error {
 	member := map[int64]bool{}
-	for i := range steps {
-		post := steps[i].Request.RoomPostID
+	allowed, checked := false, false
+	for i := range results {
+		post := results[i].Request.RoomPostID
 		if post == 0 {
 			continue
 		}
+		if !checked {
+			allowed, checked = s.mayReadRooms(ctx, reader), true
+		}
 		ok, seen := member[post]
-		if !seen {
+		if allowed && !seen {
 			var err error
 			if ok, err = s.store.RoomPostMember(ctx, post, reader); err != nil {
 				return err
 			}
 			member[post] = ok
 		}
-		if !ok {
-			steps[i].RedactRoom()
+		if !allowed || !ok {
+			results[i].RedactRoom()
 		}
 	}
 	return nil
@@ -305,24 +318,42 @@ const maxMentionNames = 4 * maxMentions
 const roomContextPosts = 48
 
 // mentionRE finds @name mentions: an agent name after an @ that does not
-// follow a letter, digit or dot, so an email address mentions no one.
+// follow a letter, digit or dot, so an email address mentions no one. A
+// name may end in dashes, which \b cannot see; mentions adds them back.
 var mentionRE = regexp.MustCompile(`(?:^|[^A-Za-z0-9._@-])@([a-z0-9][a-z0-9-]{0,31})\b`)
 
 // mentions lists the distinct names body mentions, in order, up to
-// maxMentionNames. more reports names past that.
+// maxMentionNames. more reports names past that. A name followed by
+// dashes and then the end or a character that cannot be in a name (@dev-)
+// is listed with them; sendMentions falls back to the name without them
+// when no agent has it.
 func mentions(body string) (names []string, more bool) {
 	seen := map[string]bool{}
-	for _, m := range mentionRE.FindAllStringSubmatch(body, -1) {
-		if seen[m[1]] {
+	for _, m := range mentionRE.FindAllStringSubmatchIndex(body, -1) {
+		name := body[m[2]:m[3]]
+		end := m[3]
+		for end < len(body) && body[end] == '-' {
+			end++
+		}
+		if end > m[3] && len(name)+end-m[3] <= 32 && (end == len(body) || !isWordByte(body[end])) {
+			name = body[m[2]:end]
+		}
+		if seen[name] {
 			continue
 		}
 		if len(names) == maxMentionNames {
 			return names, true
 		}
-		seen[m[1]] = true
-		names = append(names, m[1])
+		seen[name] = true
+		names = append(names, name)
 	}
 	return names, false
+}
+
+// isWordByte reports whether c is an ASCII letter, digit or underscore:
+// what \b counts as part of a word.
+func isWordByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // sendMentions turns post's @mentions of current members into asks from
@@ -351,6 +382,14 @@ func (s *Server) sendMentions(ctx context.Context, post *envelope.RoomPost, sess
 			continue
 		}
 		a, ok, err := s.dir.Agent(ctx, name)
+		if err == nil && !ok && strings.HasSuffix(name, "-") {
+			// @codex- with no agent codex-: the dashes were punctuation.
+			name = strings.TrimRight(name, "-")
+			if name == post.Author || slices.Contains(names, name) {
+				continue
+			}
+			a, ok, err = s.dir.Agent(ctx, name)
+		}
 		if err != nil || !ok {
 			continue
 		}

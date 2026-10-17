@@ -91,6 +91,13 @@ func (s *Store) backfillSearchBatch() (bool, error) {
 // Search finds request and reply text, newest requests first. An empty
 // participant searches everything; otherwise only its chains are visible.
 func (s *Store) Search(ctx context.Context, query, participant string, limit int) ([]envelope.SearchResult, error) {
+	return s.SearchAs(ctx, query, participant, true, limit)
+}
+
+// SearchAs is Search for a participant that may (rooms) or may not read
+// rooms at all; one rooms exclude finds no ask built from a mention, in
+// any room.
+func (s *Store) SearchAs(ctx context.Context, query, participant string, rooms bool, limit int) ([]envelope.SearchResult, error) {
 	out := []envelope.SearchResult{}
 	terms := strings.FieldsFunc(query, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r)
@@ -113,7 +120,7 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 	}
 	// An agent searches only its own chains, never a request held for the
 	// owner and not approved unless it sent it (see RedactFor), and never
-	// an ask built from a room mention unless it is now a member of that
+	// an ask built from a room mention unless it may read rooms and is now a member of that
 	// room, whether it sent the ask, got it or only shares the chain (see
 	// RedactRoom). Walk them newest first in chunks of searchVisibleWindow
 	// requests, one short query per chunk, so matches it cannot see are
@@ -138,12 +145,12 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
  WHERE requests_fts MATCH ? AND rowid >= ? AND rowid < ? AND rowid IN (
    SELECT r.rowid FROM requests r WHERE r.rowid >= ? AND r.rowid < ?
      AND NOT (r.was_held = 1 AND r.approved = 0 AND r.from_agent != ?)
-     AND (r.room_post_id IS NULL OR EXISTS (SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ? WHERE p.id = r.room_post_id))
+     AND (r.room_post_id IS NULL OR ? AND EXISTS (SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ? WHERE p.id = r.room_post_id))
      AND r.trace_id IN (
      SELECT trace_id FROM requests WHERE from_agent = ?
      UNION SELECT trace_id FROM requests WHERE to_agent = ?
    ))
- ORDER BY rowid DESC LIMIT ?`, limit-len(out), match, chunkLow, below, chunkLow, below, participant, participant, participant, participant, limit-len(out))
+ ORDER BY rowid DESC LIMIT ?`, limit-len(out), match, chunkLow, below, chunkLow, below, participant, rooms, participant, participant, participant, limit-len(out))
 		if err != nil {
 			return nil, err
 		}
