@@ -33,6 +33,7 @@
   <div class="tabs" role="tablist" aria-label="Views">
     <button id="tab-team" class="tab" type="button" role="tab" aria-selected="true" aria-controls="team">Team</button>
     <button id="tab-ask" class="tab" type="button" role="tab" aria-selected="false" aria-controls="ask">Ask</button>
+    <button id="tab-rooms" class="tab" type="button" role="tab" aria-selected="false" aria-controls="rooms">Rooms</button>
   </div>
 
   <section id="team" role="tabpanel" aria-labelledby="tab-team">
@@ -62,6 +63,37 @@
     <h2>Your asks</h2>
     <p id="sent-empty" class="empty">No asks from this phone yet.</p>
     <ol id="sent-list" class="cards"></ol>
+  </section>
+
+  <section id="rooms" role="tabpanel" aria-labelledby="tab-rooms" hidden>
+    <h2>Rooms</h2>
+    <p id="rooms-me" class="meta"></p>
+    <label for="room-pick">Room</label>
+    <select id="room-pick" class="field"></select>
+    <p id="rooms-empty" class="empty" hidden>No rooms yet.</p>
+    <div class="panel">
+      <label for="room-new">New room</label>
+      <input id="room-new" class="field" type="text" maxlength="32" autocapitalize="none" autocomplete="off" spellcheck="false">
+      <button id="room-create" type="button">Create room</button>
+    </div>
+    <div id="room-view" hidden>
+      <h3 id="room-title"></h3>
+      <ul id="room-members" class="files"></ul>
+      <div class="panel">
+        <label for="room-add-agent">Add a member</label>
+        <select id="room-add-agent" class="field"></select>
+        <button id="room-add" type="button">Add</button>
+      </div>
+      <p id="room-error" class="error" role="alert" hidden></p>
+      <p id="room-join" class="meta" hidden></p>
+      <ol id="room-posts" class="cards"></ol>
+      <div id="room-form" class="panel" hidden>
+        <label for="room-body">Post as this phone</label>
+        <textarea id="room-body" class="field" rows="3"></textarea>
+        <button id="room-send" class="primary" type="button">Post</button>
+        <ul id="room-notices" class="files"></ul>
+      </div>
+    </div>
   </section>
 
   <section id="alerts" class="alerts" aria-label="Alerts">

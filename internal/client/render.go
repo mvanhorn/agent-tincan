@@ -492,6 +492,19 @@ func SignedOutHint(to string, t *envelope.Target) string {
 	return fmt.Sprintf("%s is known to be signed out of %s. %s This warning does not cancel work or prove nothing was sent.\n", to, t.SignedOutSite, action)
 }
 
+// FormatRooms lists rooms one per line with their members and newest
+// post id, for tincan room list and the list_rooms tool.
+func FormatRooms(rooms []envelope.Room) string {
+	if len(rooms) == 0 {
+		return "You are not in any room. The owner adds members with tincan room add.\n"
+	}
+	var b strings.Builder
+	for _, r := range rooms {
+		fmt.Fprintf(&b, "%s (members: %s), newest post #%d\n", r.Name, strings.Join(r.Members, ", "), r.LastPost)
+	}
+	return b.String()
+}
+
 // FormatRoomThread renders a page of a room for tincan room read and the
 // room_read tool: who is in the room, each post with its author, time and
 // status tag, who each mention still waits on, and the cursor for the next

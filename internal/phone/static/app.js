@@ -24,6 +24,12 @@ const state = {
   sent: new Map(), // request id -> {result, li, ...} for this phone's asks
   lastHeldCount: -1,
   heldFresh: false, // the held list was read since the page last came to the foreground
+  rooms: [], // every room, from the admin listing
+  room: "", // the open room
+  roomPosts: [], // the open room's posts read so far, oldest first
+  roomCursor: 0, // id of the last post read
+  roomMembers: [],
+  roomMember: false, // this phone's agent is a member of the open room
 };
 
 // sending is true while an ask is on its way, so a render from a poll in
@@ -299,7 +305,7 @@ function renderTeam() {
 // ---- Ask: join this phone, ask a teammate, follow the answers ----
 
 function renderTabs() {
-  for (const name of ["team", "ask"]) {
+  for (const name of ["team", "ask", "rooms"]) {
     const on = state.tab === name;
     $("tab-" + name).setAttribute("aria-selected", on ? "true" : "false");
     $(name).hidden = !on;
@@ -563,12 +569,229 @@ function sentNeeded() {
   return false;
 }
 
+// ---- Rooms: the owner picks members; the phone reads and posts as its agent ----
+
+// Members of these kinds send what they read to an outside vendor, so the
+// page asks before adding one. The relay also warns for any agent connected
+// through its gateway, whatever its kind.
+const VENDOR_KINDS = new Set(["chatgpt-web", "claude-web", "grok-web", "gemini-web", "perplexity-web", "copilot-web", "chatgpt", "sesame"]);
+const roomPath = (room) => "/v1/rooms/" + encodeURIComponent(room);
+const memberPath = (room) => "/v1/admin/rooms/" + encodeURIComponent(room) + "/members";
+
+function roomError(msg) {
+  const err = $("room-error");
+  err.textContent = msg || "";
+  err.hidden = !msg;
+}
+
+function postTag(status) {
+  switch (status) {
+    case "needs_input": return ", question";
+    case "failed":
+    case "declined": return ", " + status;
+    default: return "";
+  }
+}
+
+function postCard(p) {
+  const li = el("li", "card");
+  li.append(el("p", "route", "#" + p.id + " " + p.author));
+  li.append(el("p", "meta", hhmm(new Date(p.created_at)) + postTag(p.status)));
+  li.append(el("p", "body", p.body));
+  for (const m of p.mentions || []) {
+    if (["answered", "failed", "declined"].includes(m.status)) continue;
+    const gone = m.status === "expired" || m.status === "cancelled";
+    li.append(el("p", "meta", gone ? m.agent + " did not answer (" + m.status + ")" : "waiting on " + m.agent));
+  }
+  return li;
+}
+
+function renderRooms() {
+  const pick = $("room-pick");
+  const names = state.rooms.map((r) => r.name).join(",");
+  if (pick.dataset.names !== names) {
+    pick.replaceChildren();
+    for (const r of state.rooms) {
+      const opt = el("option", "", r.name);
+      opt.value = r.name;
+      pick.append(opt);
+    }
+    pick.dataset.names = names;
+  }
+  if (state.room) pick.value = state.room;
+  $("rooms-empty").hidden = state.rooms.length > 0 || !state.loaded;
+  $("rooms-me").textContent = state.me ? "Reading and posting as " + state.me + "." : "Join this phone on the Ask tab to read and post in rooms.";
+  $("room-view").hidden = !state.room;
+  if (!state.room) return;
+  $("room-title").textContent = state.room;
+  const members = $("room-members");
+  members.replaceChildren();
+  for (const name of state.roomMembers) {
+    const li = el("li", "", name + " ");
+    const remove = el("button", "", "Remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", "Remove " + name + " from " + state.room);
+    remove.addEventListener("click", () => removeMember(name));
+    li.append(remove);
+    members.append(li);
+  }
+  const add = $("room-add-agent");
+  const candidates = state.roster.filter((a) => !state.roomMembers.includes(a.name)).map((a) => a.name).sort();
+  if (add.dataset.names !== candidates.join(",")) {
+    add.replaceChildren();
+    for (const name of candidates) {
+      const opt = el("option", "", name);
+      opt.value = name;
+      add.append(opt);
+    }
+    add.dataset.names = candidates.join(",");
+  }
+  $("room-add").disabled = candidates.length === 0 || state.offline;
+  const join = $("room-join");
+  join.hidden = !state.me || state.roomMember;
+  join.textContent = state.me ? "This phone (" + state.me + ") is not in this room. Add it to read and post." : "";
+  $("room-form").hidden = !state.roomMember;
+  const list = $("room-posts");
+  list.replaceChildren();
+  for (const p of state.roomPosts) list.append(postCard(p));
+}
+
+// refreshRooms reads every room (an admin listing) and, for the open room,
+// the posts after the cursor as this phone's agent.
+let roomsPolling = false;
+async function refreshRooms() {
+  if (roomsPolling) return;
+  roomsPolling = true;
+  try {
+    const all = await api("GET", "/v1/admin/rooms");
+    if (all.status === 200 && all.data) state.rooms = all.data.rooms || [];
+    const open = state.rooms.find((r) => r.name === state.room);
+    if (!open) {
+      state.room = state.rooms.length ? state.rooms[0].name : "";
+      resetRoom();
+    }
+    if (state.room) {
+      const room = state.rooms.find((r) => r.name === state.room);
+      state.roomMembers = room ? room.members : [];
+      state.roomMember = !!state.me && state.roomMembers.includes(state.me);
+      if (state.roomMember) await readRoom();
+    }
+  } catch (_) {
+    // The main poll reports the relay as offline.
+  } finally {
+    roomsPolling = false;
+    renderRooms();
+  }
+}
+
+function resetRoom() {
+  state.roomPosts = [];
+  state.roomCursor = 0;
+}
+
+async function readRoom() {
+  const res = await api("GET", roomPath(state.room) + "/posts?after=" + state.roomCursor);
+  if (res.status !== 200 || !res.data) return;
+  for (const p of res.data.posts || []) {
+    // A mirrored reply settles the mention it answers in the earlier post.
+    if (p.reply_to && p.status !== "needs_input") {
+      for (const q of state.roomPosts) {
+        for (const m of q.mentions || []) {
+          if (m.request_id === p.reply_to) m.status = p.status;
+        }
+      }
+    }
+    state.roomPosts.push(p);
+  }
+  state.roomCursor = res.data.next || state.roomCursor;
+  state.roomMembers = res.data.members || state.roomMembers;
+}
+
+async function createRoom() {
+  const name = $("room-new").value.trim();
+  roomError("");
+  if (!NAME_RE.test(name)) {
+    roomError("Use 1 to 32 lowercase letters, digits or dashes.");
+    return;
+  }
+  $("room-create").disabled = true;
+  try {
+    const res = await api("POST", "/v1/admin/rooms", { name });
+    if (res.status !== 201) throw new Error((res.data && res.data.error) || "error " + res.status);
+    // The phone takes part in the room it made, as its own agent.
+    if (state.me) await api("POST", memberPath(name), { agent: state.me });
+    $("room-new").value = "";
+    state.room = name;
+    resetRoom();
+    announce("Created room " + name + ".");
+  } catch (e) {
+    roomError("Could not create the room: " + e.message);
+  } finally {
+    $("room-create").disabled = false;
+    refreshRooms();
+  }
+}
+
+async function addMember() {
+  const agent = $("room-add-agent").value;
+  if (!agent || !state.room) return;
+  roomError("");
+  const a = state.roster.find((x) => x.name === agent);
+  if (a && VENDOR_KINDS.has(a.kind) &&
+      !window.confirm(agent + " is a " + a.kind + " agent: the posts it reads or is sent go to that vendor, under your account there. Add it to " + state.room + "?")) {
+    return;
+  }
+  const res = await api("POST", memberPath(state.room), { agent }).catch(() => null);
+  if (!res || res.status !== 200) {
+    roomError("Not added: " + ((res && res.data && res.data.error) || "offline"));
+    return;
+  }
+  if (res.data && res.data.warning && !(a && VENDOR_KINDS.has(a.kind))) roomError("Added. Note: " + res.data.warning + ".");
+  announce("Added " + agent + " to " + state.room + ".");
+  refreshRooms();
+}
+
+async function removeMember(agent) {
+  if (!state.room || !window.confirm("Remove " + agent + " from " + state.room + "?")) return;
+  roomError("");
+  const res = await api("DELETE", memberPath(state.room), { agent }).catch(() => null);
+  if (!res || res.status !== 200) {
+    roomError("Not removed: " + ((res && res.data && res.data.error) || "offline"));
+    return;
+  }
+  announce("Removed " + agent + " from " + state.room + ".");
+  refreshRooms();
+}
+
+async function postToRoom() {
+  const body = $("room-body").value.trim();
+  if (!body || !state.room) return;
+  roomError("");
+  $("room-send").disabled = true;
+  const notices = $("room-notices");
+  notices.replaceChildren();
+  try {
+    const res = await api("POST", roomPath(state.room) + "/posts", { body });
+    if (res.status !== 201 || !res.data) throw new Error((res.data && res.data.error) || "error " + res.status);
+    $("room-body").value = "";
+    for (const m of res.data.post.mentions || []) notices.append(el("li", "", "Asked " + m.agent + "; the reply will be posted here."));
+    for (const n of res.data.notices || []) notices.append(el("li", "", n));
+    announce("Posted to " + state.room + ".");
+  } catch (e) {
+    roomError("Not posted: " + e.message);
+  } finally {
+    $("room-send").disabled = false;
+    refreshRooms();
+  }
+}
+
 function render() {
   renderConn();
   renderHeld();
   renderTabs();
   renderTeam();
   renderAsk();
+  renderRooms();
 }
 
 // ---- Polling ----
@@ -599,6 +822,7 @@ async function refresh() {
     state.relayVersion = (agents.data && agents.data.relay_version) || "";
     if (!state.meChecked) await whoami();
     if (sentNeeded()) refreshSent();
+    if (state.tab === "rooms") refreshRooms();
   } catch (_) {
     state.offline = true;
   } finally {
@@ -854,6 +1078,17 @@ window.addEventListener("hashchange", () => {
 
 $("tab-team").addEventListener("click", () => { state.tab = "team"; render(); });
 $("tab-ask").addEventListener("click", () => { state.tab = "ask"; refreshSent(); render(); });
+$("tab-rooms").addEventListener("click", () => { state.tab = "rooms"; render(); refreshRooms(); });
+$("room-pick").addEventListener("change", () => {
+  state.room = $("room-pick").value;
+  resetRoom();
+  $("room-notices").replaceChildren();
+  roomError("");
+  refreshRooms();
+});
+$("room-create").addEventListener("click", createRoom);
+$("room-add").addEventListener("click", addMember);
+$("room-send").addEventListener("click", postToRoom);
 $("join-button").addEventListener("click", join);
 $("ask-send").addEventListener("click", sendAsk);
 

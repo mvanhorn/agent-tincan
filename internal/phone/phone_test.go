@@ -326,3 +326,31 @@ func TestApproveConfirmsWhileIdentityUnknown(t *testing.T) {
 		t.Error("decide must confirm an approval while this phone's agent is unknown")
 	}
 }
+
+// The rooms tab manages members through the admin routes, reads after a
+// cursor and posts as the phone's agent, and asks before adding a member
+// that sends the thread to an outside vendor.
+func TestRoomsInThePage(t *testing.T) {
+	app := read(t, "app.js")
+	for _, want := range []string{
+		`api("GET", "/v1/admin/rooms")`,
+		`api("POST", "/v1/admin/rooms", { name })`,
+		`api("POST", memberPath(state.room), { agent })`,
+		`api("DELETE", memberPath(state.room), { agent })`,
+		`"/posts?after=" + state.roomCursor`,
+		`api("POST", roomPath(state.room) + "/posts", { body })`,
+		`VENDOR_KINDS.has(a.kind)`,
+		`window.confirm(agent + " is a "`,
+		`el("p", "body", p.body)`,
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js lacks %s", want)
+		}
+	}
+	html := read(t, "index.html")
+	for _, want := range []string{`id="tab-rooms"`, `aria-controls="rooms"`, `for="room-body"`, `for="room-new"`, `for="room-add-agent"`, `for="room-pick"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html lacks %s", want)
+		}
+	}
+}

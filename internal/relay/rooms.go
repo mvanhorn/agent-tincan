@@ -41,12 +41,13 @@ var (
 	roomServiceKinds = map[string]bool{onboard.KindHistory: true, onboard.KindNotes: true, "pass": true}
 )
 
-// roomVendorKinds are the members that send the thread on to an outside
-// vendor: the web chat agents type it into the owner's account, and the
-// gateway agents (ChatGPT, Sesame) read it through the vendor's own app.
-func roomVendorKind(kind string) bool {
-	_, web := webKindSites[kind]
-	return web || kind == onboard.KindChatGPT || kind == onboard.KindSesame
+// roomVendor reports whether member a sends the thread on to an outside
+// vendor: a web chat agent types it into the owner's account there, and an
+// agent connected through the MCP gateway (ChatGPT, Sesame, whatever its
+// kind) reads it in the vendor's own app.
+func roomVendor(a identity.Agent) bool {
+	_, web := webKindSites[a.Kind]
+	return web || a.Kind == onboard.KindChatGPT || a.Kind == onboard.KindSesame || a.NodeID == identity.VirtualAddr(a.Name)
 }
 
 // roomRefusal says why agent a may not be in a room, or "" when it may.
@@ -468,8 +469,8 @@ func (s *Server) handleRoomMember(w http.ResponseWriter, r *http.Request) {
 		s.record(r.Context(), "room_member_added", "", "", s.remote(r), store.DetailJSON(map[string]any{"room": room, "agent": in.Agent}))
 	}
 	out.Changed = added
-	if roomVendorKind(a.Kind) {
-		out.Warning = fmt.Sprintf("%s is a %s agent: the room's posts it reads or is sent go to that vendor, under the owner's account there", in.Agent, a.Kind)
+	if roomVendor(a) {
+		out.Warning = fmt.Sprintf("%s sends what it reads to an outside vendor: the room's posts it reads or is sent leave the tailnet for that vendor's service", in.Agent)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

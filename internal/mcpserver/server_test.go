@@ -1220,3 +1220,54 @@ func TestWatchToolNoticeArrivesOnce(t *testing.T) {
 		t.Fatalf("second notice: %q", inbox)
 	}
 }
+
+// Over MCP a member lists its rooms, posts, and reads the posts after a
+// cursor in order; a mention's reply shows in the thread. Room membership
+// stays an admin action: no tool adds or removes members.
+func TestRoomToolsOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	admin := m.Client(t, "admin")
+	if _, err := client.CreateRoom(t.Context(), admin, "launch"); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{"grokbot", "muse"} {
+		if _, err := client.AddRoomMember(t.Context(), admin, "launch", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs := session(t, m, "grokbot")
+	if out := call(t, cs, "list_rooms", nil); !strings.Contains(out, "launch (members: grokbot, muse)") {
+		t.Fatalf("list_rooms = %q", out)
+	}
+	if out := call(t, session(t, m, "instinct"), "list_rooms", nil); !strings.Contains(out, "not in any room") {
+		t.Fatalf("non-member list_rooms = %q", out)
+	}
+	if out := call(t, cs, "room_post", map[string]any{"room": "launch", "message": "first"}); !strings.Contains(out, "Posted #1 to launch.") {
+		t.Fatalf("room_post = %q", out)
+	}
+	if out := call(t, cs, "room_post", map[string]any{"room": "launch", "message": "@muse second?"}); !strings.Contains(out, "Asked muse") {
+		t.Fatalf("mention post = %q", out)
+	}
+	in, err := m.Client(t, "muse").Poll(t.Context(), 0)
+	if err != nil || len(in.Requests) != 1 {
+		t.Fatalf("muse inbox = %+v %v", in, err)
+	}
+	if _, err := m.Client(t, "muse").Claim(t.Context(), in.Requests[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "muse").Reply(t.Context(), in.Requests[0].ID, "third", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	out := call(t, cs, "room_read", map[string]any{"room": "launch", "after": 1})
+	if strings.Contains(out, "first") || !strings.Contains(out, "#2 grokbot") || !strings.Contains(out, "#3 muse") || strings.Index(out, "second?") > strings.Index(out, "third") || !strings.Contains(out, "--after 3") {
+		t.Fatalf("room_read = %q", out)
+	}
+	if out := call(t, session(t, m, "instinct"), "room_read", map[string]any{"room": "launch"}); !strings.HasPrefix(out, "ERROR:") {
+		t.Fatalf("non-member room_read = %q", out)
+	}
+	for _, n := range mcpserver.ToolNames {
+		if strings.HasPrefix(n, "room_") && n != "room_post" && n != "room_read" {
+			t.Errorf("unexpected room tool %q", n)
+		}
+	}
+}

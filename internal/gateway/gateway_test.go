@@ -16,6 +16,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/gateway"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
@@ -472,5 +473,52 @@ func TestTwoGatewayAgentsKeepSeparateTokens(t *testing.T) {
 	}
 	if res, err := e.mcpSession(t, gptFresh.AccessToken).CallTool(t.Context(), &mcp.CallToolParams{Name: "list_agents", Arguments: map[string]any{}}); err != nil || res.IsError {
 		t.Fatalf("chatgpt after removing sesame: %v %+v", err, res)
+	}
+}
+
+// A gateway agent uses the room tools only for rooms it is a member of.
+func TestGatewayRoomTools(t *testing.T) {
+	e := setup(t)
+	code, _, err := e.conn.Connect(context.Background(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := e.login(t, code)
+	cs := e.mcpSession(t, tok)
+	admin := e.m.Client(t, "admin")
+	for _, room := range []string{"launch", "private"} {
+		if _, err := client.CreateRoom(t.Context(), admin, room); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := client.AddRoomMember(t.Context(), admin, "launch", "chatgpt")
+	if err != nil || !strings.Contains(res.Warning, "vendor") {
+		t.Fatalf("add chatgpt = %+v %v", res, err)
+	}
+	callText := func(name string, args map[string]any) (string, bool) {
+		t.Helper()
+		r, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var b strings.Builder
+		for _, c := range r.Content {
+			if tc, ok := c.(*mcp.TextContent); ok {
+				b.WriteString(tc.Text)
+			}
+		}
+		return b.String(), r.IsError
+	}
+	if out, isErr := callText("list_rooms", nil); isErr || !strings.Contains(out, "launch") || strings.Contains(out, "private") {
+		t.Fatalf("list_rooms = %q", out)
+	}
+	if out, isErr := callText("room_post", map[string]any{"room": "launch", "message": "hello from chatgpt"}); isErr || !strings.Contains(out, "Posted #1") {
+		t.Fatalf("room_post = %q", out)
+	}
+	if _, isErr := callText("room_read", map[string]any{"room": "private"}); !isErr {
+		t.Fatal("read a room chatgpt is not in")
+	}
+	if _, isErr := callText("room_post", map[string]any{"room": "private", "message": "hi"}); !isErr {
+		t.Fatal("posted to a room chatgpt is not in")
 	}
 }
