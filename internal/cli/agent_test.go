@@ -300,6 +300,87 @@ func TestFormatAgentsShowsGoodAtLast(t *testing.T) {
 	}
 }
 
+// The relay's status sits right after the online state, before the wake,
+// and an entry from a relay without it renders as before.
+func TestFormatAgentsShowsStatusAfterState(t *testing.T) {
+	now := time.Now()
+	busy := client.AgentInfo{Name: "codex", Online: true, Wake: "channel", LastPoll: now, Status: client.StatusBusy, BusyFor: "claude-code", BusySince: now.Add(-12 * time.Minute)}
+	stuck := client.AgentInfo{Name: "muse", Wake: "command", Status: client.StatusStuck, StatusReason: "1 queued while offline"}
+	got := formatAgents([]client.AgentInfo{busy, stuck, {Name: "chatgpt", Wake: "none"}}, now)
+	want := "codex          online   status=busy (claude-code's request, 12m) wake=channel last seen just now\n" +
+		"muse           offline  status=stuck (1 queued while offline) wake=command never seen\n" +
+		"chatgpt        offline  wake=none never seen\n"
+	if got != want {
+		t.Fatalf("agents =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// For one roster, tincan agents, list_agents and tincan top show the same
+// status word and detail for every agent.
+func TestStatusParityAcrossSurfaces(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := context.Background()
+	codex := m.Client(t, "grokbot")
+	req, err := m.Client(t, "muse").Send(ctx, "grokbot", "draft it", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codex.Claim(ctx, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := m.Client(t, "admin").Agents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	cliOut, err := run(t, agentsCmd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	topOut, err := run(t, topCmd(), "--once", "--relay", m.URL("admin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvT, cliT := mcp.NewInMemoryTransports()
+	ss, err := mcpserver.New(m.Client(t, "instinct"), "test").Connect(ctx, srvT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, cliT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpOut := res.Content[0].(*mcp.TextContent).Text
+	sawBusy := false
+	for _, a := range agents {
+		if a.Status == "" {
+			t.Fatalf("relay sent no status for %s", a.Name)
+		}
+		field := a.StatusField(time.Now())
+		if !strings.Contains(cliOut, a.Name+strings.Repeat(" ", max(1, 15-len(a.Name)))) || !strings.Contains(cliOut, " "+field+" wake=") {
+			t.Errorf("tincan agents lacks %q for %s:\n%s", field, a.Name, cliOut)
+		}
+		if !strings.Contains(mcpOut, a.Name+": "+a.State()+", "+field+", wake=") {
+			t.Errorf("list_agents lacks %q for %s:\n%s", field, a.Name, mcpOut)
+		}
+		if a.Status == client.StatusBusy {
+			sawBusy = true
+			if a.BusyFor != "muse" || !strings.Contains(topOut, "  BUSY ("+a.StatusDetail(time.Now())+")") {
+				t.Errorf("top lacks the busy detail for %s:\n%s", a.Name, topOut)
+			}
+		}
+	}
+	if !sawBusy {
+		t.Fatalf("no busy agent in %+v", agents)
+	}
+}
+
 // For the same roster, tincan agents and list_agents show the same good-at
 // text for every agent, owner-set and stock lines alike, and list_agents
 // keeps one line per agent that splits on the first ":".

@@ -221,6 +221,36 @@ func (a AgentInfo) OverdueNote(now time.Time) string {
 	return "overdue: last check " + ageAgo(now.Sub(a.LastPoll))
 }
 
+// StatusDetail is what follows the agent's status word on every surface:
+// "claude-code's request, 12m" for an agent busy on a claim (the asker and
+// how long ago it claimed), the relay's reason for any other status that
+// has one ("claim lapsed"), and empty otherwise. Where space is short a
+// surface drops this before the word.
+func (a AgentInfo) StatusDetail(now time.Time) string {
+	if a.Status == StatusBusy && a.BusyFor != "" {
+		detail := a.BusyFor + "'s request"
+		if !a.BusySince.IsZero() {
+			detail += ", " + QueueAge(now.Sub(a.BusySince))
+		}
+		return detail
+	}
+	return a.StatusReason
+}
+
+// StatusField is the relay's status as a roster field, status=busy or
+// status=stuck (claim lapsed), with StatusDetail in parentheses. It is
+// empty from a relay that sends no status.
+func (a AgentInfo) StatusField(now time.Time) string {
+	if a.Status == "" {
+		return ""
+	}
+	field := "status=" + a.Status
+	if detail := a.StatusDetail(now); detail != "" {
+		field += " (" + detail + ")"
+	}
+	return field
+}
+
 // GoodAtField is the agent's good-at line as a roster field,
 // good_at="...", quoted so commas, semicolons and quotes in the owner's text
 // cannot read as more fields. It is empty for an agent with no line.

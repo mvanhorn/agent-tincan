@@ -34,7 +34,7 @@ func TestListAgentsSchedule(t *testing.T) {
 	if !strings.Contains(muse, ", wake=schedule (every 5m), ") || strings.Contains(muse, "overdue") {
 		t.Fatalf("list_agents muse = %q in %q", muse, out)
 	}
-	if !strings.Contains(out, "grokbot: offline, wake=webhook, ") {
+	if !strings.Contains(out, "grokbot: offline, status=offline, wake=webhook, ") {
 		t.Fatalf("list_agents = %q", out)
 	}
 }

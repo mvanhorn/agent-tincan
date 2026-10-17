@@ -149,7 +149,46 @@ func fetchFrame(ctx context.Context, r *client.Relay) (topFrame, error) {
 	return f, nil
 }
 
+// attention scores how much an agent needs the owner's eye, highest first,
+// with the flags that say why. A relay that reports status has already
+// decided whether the agent is stuck or busy, so top shows that; against an
+// older relay it falls back to working it out from the roster's facts.
 func attention(a client.AgentInfo, relayVersion string, now time.Time) (score int, flags []string) {
+	if a.Status == "" {
+		return legacyAttention(a, relayVersion, now)
+	}
+	if a.Status == client.StatusStuck {
+		score += 8
+		flags = append(flags, statusFlag(a, now))
+	}
+	if a.SignedOutSite != "" {
+		score += 6
+		flags = append(flags, "SIGNED-OUT")
+	}
+	if client.Ahead(relayVersion, a.Version) {
+		score++
+		flags = append(flags, "OLD BUILD")
+	}
+	if a.Status == client.StatusBusy {
+		flags = append(flags, statusFlag(a, now))
+	}
+	return
+}
+
+// statusFlag is the relay's status as a top flag: the word in capitals
+// with the same detail every other surface shows, "BUSY (muse's request,
+// 12m)".
+func statusFlag(a client.AgentInfo, now time.Time) string {
+	flag := strings.ToUpper(a.Status)
+	if detail := a.StatusDetail(now); detail != "" {
+		flag += " (" + detail + ")"
+	}
+	return flag
+}
+
+// legacyAttention is attention from the roster's facts alone, for a relay
+// that predates status.
+func legacyAttention(a client.AgentInfo, relayVersion string, now time.Time) (score int, flags []string) {
 	overdue := a.OverdueNote(now) != ""
 	// Only webhook and email wakes come from the relay. An offline agent on
 	// an agent-side method (command, channel, wait) has lost the process
@@ -273,7 +312,13 @@ func renderTopFrame(f topFrame, width, height int) string {
 		if a.Queued > 0 && !a.OldestQueued.IsZero() {
 			age = client.QueueAge(f.at.Sub(a.OldestQueued))
 		}
-		line(fmt.Sprintf("%s %-7s %s %6d %6s %6d %s", topPad(a.Name, 16), a.State(), topPad(a.Wake, 12), a.Queued, age, a.Claimed, a.Version))
+		// The relay's status word takes the state column when it sends
+		// one; its detail is on the flag line below.
+		state := a.State()
+		if a.Status != "" {
+			state = a.Status
+		}
+		line(fmt.Sprintf("%s %s %s %6d %6s %6d %s", topPad(a.Name, 16), topPad(state, 7), topPad(a.Wake, 12), a.Queued, age, a.Claimed, a.Version))
 		if len(flags) > 0 {
 			line("  " + strings.Join(flags, " | "))
 		}

@@ -525,6 +525,15 @@ for example "claude-code is listening now; a session will be prompted when it
 is idle." or "chatgpt checks only when its owner next prompts it." It states
 facts, never a reply time; an older relay gives no such note.
 
+Right after online or offline, each roster line shows the relay's status for
+that teammate: status=busy (codex's request, 12m) when it is working on a
+teammate's request (or status=busy alone while its owner is chatting with a
+Claude Code session), status=stuck (claim lapsed) when work waits on it and
+nothing is moving, with the reason, or status=idle / status=offline. Use it to
+choose: when several teammates fit, prefer an idle one, and do not wait on one
+that is stuck. It never shows what anyone asked. An older relay sends no
+status.
+
 An agent's line may end with good_at="..." (quoted): what that teammate is good
 at, in your owner's words, or a default line. History, notes, council, the
 web agents and the product tools (Claude Code, Codex, Gemini CLI, Grok CLI and

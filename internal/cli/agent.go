@@ -374,7 +374,11 @@ func formatRoster(ro client.Roster, now time.Time) string {
 func formatAgents(agents []client.AgentInfo, now time.Time) string {
 	var b strings.Builder
 	for _, a := range agents {
-		fmt.Fprintf(&b, "%-14s %-8s wake=%s %s", a.Name, a.State(), a.WakeLabel(), a.LastSeen(now))
+		fmt.Fprintf(&b, "%-14s %-8s", a.Name, a.State())
+		if status := a.StatusField(now); status != "" {
+			fmt.Fprintf(&b, " %s", status)
+		}
+		fmt.Fprintf(&b, " wake=%s %s", a.WakeLabel(), a.LastSeen(now))
 		if overdue := a.OverdueNote(now); overdue != "" {
 			fmt.Fprintf(&b, " %s", overdue)
 		}

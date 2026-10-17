@@ -248,6 +248,32 @@ func TestGoodAtField(t *testing.T) {
 	}
 }
 
+// Each status renders as its word, with the asker and claim age for a busy
+// agent and the reason for a stuck one; a relay that sends no status gives
+// no field.
+func TestStatusField(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		info client.AgentInfo
+		want string
+	}{
+		{"old relay", client.AgentInfo{}, ""},
+		{"idle", client.AgentInfo{Status: client.StatusIdle}, "status=idle"},
+		{"offline", client.AgentInfo{Status: client.StatusOffline}, "status=offline"},
+		{"busy on a claim", client.AgentInfo{Status: client.StatusBusy, BusyFor: "claude-code", BusySince: now.Add(-12 * time.Minute)}, "status=busy (claude-code's request, 12m)"},
+		{"busy from the host", client.AgentInfo{Status: client.StatusBusy}, "status=busy"},
+		{"stuck", client.AgentInfo{Status: client.StatusStuck, StatusReason: "claim lapsed"}, "status=stuck (claim lapsed)"},
+		{"a later status word", client.AgentInfo{Status: "limited", StatusReason: "until 14:00"}, "status=limited (until 14:00)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.info.StatusField(now); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // An unanswered relay-woken agent gets a quoted roster field naming its last
 // wake and that wake's result; any other agent gets none.
 func TestUnansweredField(t *testing.T) {

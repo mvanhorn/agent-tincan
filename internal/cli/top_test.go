@@ -368,6 +368,49 @@ func TestTopUnansweredOrder(t *testing.T) {
 	}
 }
 
+// With the relay's status, top flags what the relay says instead of
+// working it out: a stuck agent sorts above a busy one, the status word
+// fills the state column, and the detail goes on the flag line. The same
+// facts without a status (an older relay) keep the old client-side flags.
+func TestTopRelayStatus(t *testing.T) {
+	at := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	busy := client.AgentInfo{Name: "alpha", Online: true, Wake: "channel", Claimed: 1, Status: client.StatusBusy, BusyFor: "muse", BusySince: at.Add(-12 * time.Minute)}
+	stuck := client.AgentInfo{Name: "zeta", Online: true, Wake: "wait", Queued: 1, Status: client.StatusStuck, StatusReason: "claim lapsed"}
+	idle := client.AgentInfo{Name: "beta", Online: true, Wake: "wait", Status: client.StatusIdle}
+	f := topFrame{at: at, roster: client.Roster{Agents: []client.AgentInfo{busy, idle, stuck}}}
+	want := "tincan top | relay  | online 3/3 | queued 1 | held ? | 12:00:00\n" +
+		"AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS VERSION\n" +
+		"zeta             stuck   wait              1      -      0 \n" +
+		"  STUCK (claim lapsed)\n" +
+		"alpha            busy    channel           0      -      1 \n" +
+		"  BUSY (muse's request, 12m)\n" +
+		"beta             idle    wait              0      -      0 \n"
+	if got := renderFrame(f, 120); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	// Status flag lines count against the live frame's height.
+	for i := range 30 {
+		a := busy
+		a.Name = fmt.Sprintf("agent-%02d", i)
+		f.roster.Agents = append(f.roster.Agents, a)
+	}
+	for _, height := range []int{4, 10, 24} {
+		got := topLiveFrame(f, 40, height)
+		if len(strings.Split(got, "\n")) > height || (height >= 10 && !strings.Contains(got, "zeta")) {
+			t.Fatalf("height %d:\n%s", height, got)
+		}
+	}
+	// Facts the relay judged not stuck raise no client-side flag.
+	offline := client.AgentInfo{Queued: 1, Wake: "none", OldestQueued: at.Add(-2 * time.Hour)}
+	if score, flags := attention(offline, "", at); score != 12 || strings.Join(flags, "|") != "QUEUED-OFFLINE|STALE" {
+		t.Fatalf("older relay: %d %v", score, flags)
+	}
+	offline.Status = client.StatusOffline
+	if score, flags := attention(offline, "", at); score != 0 || len(flags) != 0 {
+		t.Fatalf("relay status: %d %v", score, flags)
+	}
+}
+
 func TestSignedOutOnlineAttention(t *testing.T) {
 	score, flags := attention(client.AgentInfo{Online: true, Target: envelope.Target{SignedOutSite: "chatgpt.com"}}, "", time.Now())
 	if score != 6 || len(flags) != 1 || flags[0] != "SIGNED-OUT" {

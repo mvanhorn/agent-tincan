@@ -16,10 +16,10 @@ func TestListAgentsShowsVersions(t *testing.T) {
 	client.Version = "0.5.2"
 	m := testrelay.New(t, relay.Config{Version: "0.6.0"})
 	out := call(t, session(t, m, "grokbot"), "list_agents", nil)
-	if !strings.Contains(out, "grokbot: offline, wake=none, last seen just now, version=0.5.2\n") {
+	if !strings.Contains(out, "grokbot: offline, status=offline, wake=none, last seen just now, version=0.5.2\n") {
 		t.Fatalf("list_agents lacks grokbot's version: %q", out)
 	}
-	if !strings.Contains(out, "muse: offline, wake=none, never seen\n") {
+	if !strings.Contains(out, "muse: offline, status=offline, wake=none, never seen\n") {
 		t.Fatalf("list_agents gave muse a version it never reported: %q", out)
 	}
 }
