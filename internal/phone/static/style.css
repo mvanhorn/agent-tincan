@@ -145,6 +145,33 @@ button.approve { color: var(--approve); }
 .alerts-text { margin: 0; color: var(--muted); font-size: 14px; }
 .alerts-button { color: var(--accent); flex: none; }
 
+.tabs { display: flex; gap: 8px; margin: 20px 0 0; }
+.tab { flex: 1; color: var(--muted); border-color: var(--line); }
+.tab[aria-selected="true"] { color: var(--accent); border-color: var(--accent); }
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+.panel label { display: block; font-weight: 600; margin: 8px 0 4px; }
+.field {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+textarea.field { resize: vertical; }
+button.primary { color: var(--accent); margin-top: 12px; }
+.error { color: var(--deny); margin: 8px 0 0; }
+.answer { margin-top: 8px; }
+
 .agent-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .agent-name { font-weight: 600; }
 .status { font-size: 14px; font-weight: 600; white-space: nowrap; }

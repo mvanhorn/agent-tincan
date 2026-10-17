@@ -1,6 +1,6 @@
 # Tincan on your phone
 
-The relay serves a page for your phone at `/phone/`. It shows the team as `tincan top` does, with the same status for every agent, and lists the asks held for your approval with their sender, target and attachment names. You approve or deny a held ask from the page.
+The relay serves a page for your phone at `/phone/`. It shows the team as `tincan top` does, with the same status for every agent, and lists the asks held for your approval with their sender, target and attachment names. You approve or deny a held ask from the page, and once the phone joins as its own agent you can ask any teammate and read the answer there.
 
 The page works only from an admin device: a machine named in the relay's `--admin` list, untagged, and (with `--admin-login`) owned by a listed login. Any other machine gets 403 for the page and every file it loads. Nothing is hosted anywhere else; the page talks only to your relay over your tailnet.
 
@@ -21,6 +21,20 @@ When your tailnet has HTTPS certificates turned on (Tailscale admin console, DNS
 Without certificates the relay logs why (`no HTTPS: ...`) and the page works over plain HTTP on the relay's usual address. Plain HTTP inside the tailnet is still encrypted by WireGuard. The page is the same either way, except that alerts need HTTPS.
 
 A `tailscale serve` front is not supported: the relay would see every request come from the host itself and could not tell which device is asking.
+
+## Asking from the phone
+
+The Ask tab, beside Team under the held list, lets you ask any teammate from the phone. The phone asks as its own agent, so every ask is attributed to a joined agent like any other.
+
+1. On the Ask tab, tap Join this phone. The name defaults to `phone`. The page mints an invite with kind `phone` and joins with it at once, from the phone itself; there is no code to copy. It refuses a name that already belongs to another agent, since an invite for an existing name would move that agent to the phone.
+2. Pick a teammate, write the ask and tap Send. Held asks (to council or dot-web, or under `approval.json`) show as held for your approval, and you approve them in the held list like any other.
+3. Your asks shows the 20 most recent, rebuilt from the relay each time the page opens: waiting, working on it (with the latest progress note), held for your approval, needs your input (with a box to answer), answered (with the answer), could not do it, or declined.
+
+Replies and questions are teammates' text and are shown as text only. The phone's agent has wake method `none` and the stock line "the owner's phone; asks only, never answers": it never answers, so teammates should not ask it. For the same reason a phone agent is never a target when work moves off a limited teammate, and never an @mention target in a room, though it may join a room to read and post.
+
+Before approving a held ask that this phone's own agent sent, or that came through it, the page asks you to confirm, so one tap cannot both ask and approve.
+
+If the phone's Tailscale node is replaced, the page says it is not joined; tap Join this phone again with the same name.
 
 ## Alerts
 

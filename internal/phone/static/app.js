@@ -15,8 +15,30 @@ const state = {
   notAdmin: false,
   loaded: false,
   me: "", // this phone's own agent, once it has joined
+  meChecked: false, // whoami has answered at least once
+  meNote: "", // why this phone has no agent, when it is not just unjoined
+  tab: "team",
+  sent: new Map(), // request id -> {result, li, ...} for this phone's asks
   lastHeldCount: -1,
 };
+
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const DONE = new Set(["answered", "failed", "declined", "cancelled", "expired"]);
+const SENT_SHOWN = 20;
+
+// The phone's agent name is remembered on the device so the page can name
+// itself on a machine that runs other agents too. Storage may be off.
+function remembered() {
+  try { return localStorage.getItem("tincan-phone-agent") || ""; } catch (_) { return ""; }
+}
+function remember(name) {
+  try {
+    if (name) localStorage.setItem("tincan-phone-agent", name);
+    else localStorage.removeItem("tincan-phone-agent");
+  } catch (_) {
+    // The page still works; it asks whoami again next time.
+  }
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -54,9 +76,10 @@ function plural(n, word) {
 
 // api calls the relay. A body is sent as JSON, which the relay requires of
 // every state-changing browser request.
-async function api(method, path, body) {
+async function api(method, path, body, agent) {
   const init = { method, credentials: "same-origin", cache: "no-store", headers: {} };
-  if (state.me) init.headers["X-Tincan-Agent"] = state.me;
+  const name = agent === undefined ? state.me : agent;
+  if (name) init.headers["X-Tincan-Agent"] = name;
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
@@ -246,10 +269,248 @@ function renderTeam() {
   $("team-empty").hidden = agents.length > 0 || !state.loaded || state.notAdmin;
 }
 
+// ---- Ask: join this phone, ask a teammate, follow the answers ----
+
+function renderTabs() {
+  for (const name of ["team", "ask"]) {
+    const on = state.tab === name;
+    $("tab-" + name).setAttribute("aria-selected", on ? "true" : "false");
+    $(name).hidden = !on;
+  }
+}
+
+function renderAsk() {
+  const joined = !!state.me;
+  $("join").hidden = joined || !state.meChecked || state.notAdmin;
+  $("ask-form").hidden = !joined;
+  if (state.meNote) $("join-text").textContent = state.meNote;
+  if (!joined) return;
+  $("ask-me").textContent = "Asking as " + state.me + ".";
+  const select = $("ask-to");
+  const current = select.value;
+  const targets = state.roster.filter((a) => a.name !== state.me && a.kind !== "phone").sort((a, b) => (a.name < b.name ? -1 : 1));
+  const names = targets.map((a) => a.name).join(",");
+  if (select.dataset.names !== names) {
+    select.replaceChildren();
+    for (const a of targets) {
+      const opt = el("option", "", a.name + " (" + (a.status || (a.online ? "online" : "offline")) + ")");
+      opt.value = a.name;
+      select.append(opt);
+    }
+    select.dataset.names = names;
+    if (targets.some((a) => a.name === current)) select.value = current;
+  }
+  const disabled = state.offline || state.notAdmin;
+  $("ask-send").disabled = disabled || targets.length === 0;
+  renderSent();
+}
+
+const when = (e) => new Date(e.result.request.created_at || 0).getTime();
+const newestFirst = (a, b) => when(b) - when(a);
+
+function sentLabel(res) {
+  switch (res.status) {
+    case "held": return "held for your approval";
+    case "queued":
+    case "delivered": return "waiting for " + res.request.to;
+    case "claimed": return res.request.to + " is working on it" + (res.progress && res.progress.note ? ": " + res.progress.note : "");
+    case "needs_input": return res.request.to + " needs your input";
+    case "answered": return "answered by " + res.request.to;
+    case "failed": return res.request.to + " could not do it";
+    case "declined": return "declined";
+    default: return res.status;
+  }
+}
+
+function sentCard(entry) {
+  const li = el("li", "card");
+  entry.route = el("p", "route");
+  entry.statusEl = el("p", "meta");
+  entry.askEl = el("p", "body");
+  entry.replyEl = el("p", "body");
+  entry.answerBox = el("div", "answer");
+  li.append(entry.route, entry.statusEl, entry.askEl, entry.replyEl, entry.answerBox);
+  entry.li = li;
+  return li;
+}
+
+function answerBox(entry, question) {
+  const box = entry.answerBox;
+  if (box.dataset.question === question) return;
+  box.replaceChildren();
+  box.dataset.question = question;
+  const id = "answer-" + entry.result.request.id;
+  box.append(el("p", "meta", "Question: " + question));
+  const label = el("label", "", "Your answer");
+  label.htmlFor = id;
+  const input = el("textarea", "field");
+  input.id = id;
+  input.rows = 2;
+  const send = el("button", "primary", "Send answer");
+  send.type = "button";
+  send.addEventListener("click", async () => {
+    const body = input.value.trim();
+    if (!body) return;
+    send.disabled = true;
+    const res = await api("POST", "/v1/requests/" + encodeURIComponent(entry.result.request.id) + "/answer", { body }).catch(() => null);
+    send.disabled = false;
+    if (res && res.status === 200) {
+      box.replaceChildren();
+      delete box.dataset.question;
+      announce("Answer sent to " + entry.result.request.to + ".");
+      refreshSent();
+    } else {
+      announce("Could not send the answer: " + ((res && res.data && res.data.error) || "offline"));
+    }
+  });
+  box.append(label, input, send);
+}
+
+function renderSent() {
+  const list = $("sent-list");
+  const entries = [...state.sent.values()].sort(newestFirst).slice(0, SENT_SHOWN);
+  list.replaceChildren();
+  for (const entry of entries) {
+    const res = entry.result;
+    if (!entry.li) sentCard(entry);
+    entry.route.textContent = "To " + res.request.to;
+    entry.statusEl.textContent = sentLabel(res) + (res.request.created_at ? ", asked " + age(res.request.created_at) + " ago" : "");
+    entry.askEl.textContent = res.request.body;
+    // A question arrives as the reply body too; the answer box shows it.
+    const reply = res.status !== "needs_input" && res.reply && res.reply.body;
+    entry.replyEl.hidden = !reply;
+    entry.replyEl.textContent = reply || "";
+    const open = (res.exchanges || []).filter((x) => !x.answer);
+    if (res.status === "needs_input" && open.length) {
+      answerBox(entry, open[open.length - 1].question);
+    } else if (entry.answerBox.dataset.question) {
+      entry.answerBox.replaceChildren();
+      delete entry.answerBox.dataset.question;
+    }
+    list.append(entry.li);
+  }
+  $("sent-empty").hidden = entries.length > 0;
+}
+
+// whoami finds this phone's agent: the name it joined as, else the one
+// agent on this device if that is a phone.
+async function whoami() {
+  const saved = remembered();
+  let res = await api("GET", "/v1/whoami", undefined, saved);
+  if (res.status === 403 && saved) res = await api("GET", "/v1/whoami", undefined, "");
+  state.meChecked = true;
+  state.meNote = "";
+  if (res.status === 200 && res.data && res.data.kind === "phone") {
+    state.me = res.data.name;
+    remember(state.me);
+  } else {
+    state.me = "";
+    remember("");
+    if (res.status === 200 && res.data) {
+      state.meNote = "This device already runs " + res.data.name + ". Join a phone agent beside it to ask from here.";
+    }
+  }
+}
+
+async function join() {
+  const name = $("join-name").value.trim();
+  const err = $("join-error");
+  err.hidden = true;
+  if (!NAME_RE.test(name)) {
+    err.textContent = "Use 1 to 32 lowercase letters, digits or dashes.";
+    err.hidden = false;
+    return;
+  }
+  // An invite for a name that exists moves that agent to this device, so
+  // only a free name or an earlier phone agent may be used.
+  const taken = state.roster.find((a) => a.name === name);
+  if (taken && taken.kind !== "phone") {
+    err.textContent = name + " is another agent on the team. Pick a different name.";
+    err.hidden = false;
+    return;
+  }
+  $("join-button").disabled = true;
+  try {
+    const inv = await api("POST", "/v1/admin/invite", { name, kind: "phone" });
+    if (inv.status !== 200 || !inv.data || !inv.data.code) throw new Error((inv.data && inv.data.error) || "invite failed");
+    const joined = await api("POST", "/v1/join", { code: inv.data.code });
+    if (joined.status !== 200 || !joined.data) throw new Error((joined.data && joined.data.error) || "join failed");
+    remember(joined.data.name);
+    await whoami();
+    announce("This phone joined as " + joined.data.name + ".");
+    refresh();
+  } catch (e) {
+    err.textContent = "Could not join: " + e.message;
+    err.hidden = false;
+  } finally {
+    $("join-button").disabled = false;
+  }
+}
+
+async function sendAsk() {
+  const to = $("ask-to").value;
+  const body = $("ask-body").value.trim();
+  const err = $("ask-error");
+  err.hidden = true;
+  if (!to || !body) return;
+  $("ask-send").disabled = true;
+  try {
+    const res = await api("POST", "/v1/send", { to, body, kind: "ask" });
+    if (res.status === 403) {
+      await whoami();
+      throw new Error((res.data && res.data.error) || "this phone is not joined");
+    }
+    if (res.status !== 201 || !res.data) throw new Error((res.data && res.data.error) || "error " + res.status);
+    const status = res.data.status === "held" ? "held" : "queued";
+    state.sent.set(res.data.id, { result: { request: res.data, status } });
+    $("ask-body").value = "";
+    announce(status === "held" ? "Sent to " + to + ", held for your approval." : "Sent to " + to + ".");
+  } catch (e) {
+    err.textContent = "Not sent: " + e.message;
+    err.hidden = false;
+  } finally {
+    render();
+  }
+}
+
+// refreshSent rebuilds this phone's asks from the relay: its recent chains
+// name them, and each open one is read again for its status and reply.
+let sentPolling = false;
+async function refreshSent() {
+  if (!state.me || sentPolling) return;
+  sentPolling = true;
+  try {
+    const recent = await api("GET", "/v1/trace?limit=200&exclude_pings=true");
+    if (recent.status === 200 && recent.data) {
+      for (const r of recent.data.traces || []) {
+        if (r.request.from !== state.me) continue;
+        const entry = state.sent.get(r.request.id);
+        if (!entry) state.sent.set(r.request.id, { result: r, fetched: false });
+        else if (!entry.fetched) entry.result = r;
+      }
+    }
+    const newest = [...state.sent.values()].sort(newestFirst).slice(0, SENT_SHOWN);
+    await Promise.all(newest.filter((e) => !e.fetched || !DONE.has(e.result.status)).map(async (e) => {
+      const res = await api("GET", "/v1/requests/" + encodeURIComponent(e.result.request.id));
+      if (res.status === 200 && res.data) {
+        e.result = res.data;
+        e.fetched = true;
+      }
+    }));
+  } catch (_) {
+    // The main poll reports the relay as offline.
+  } finally {
+    sentPolling = false;
+    renderAsk();
+  }
+}
+
 function render() {
   renderConn();
   renderHeld();
+  renderTabs();
   renderTeam();
+  renderAsk();
 }
 
 // ---- Polling ----
@@ -275,6 +536,8 @@ async function refresh() {
     mergeHeld(held.data || []);
     state.roster = (agents.data && agents.data.agents) || [];
     state.relayVersion = (agents.data && agents.data.relay_version) || "";
+    if (!state.meChecked) await whoami();
+    refreshSent();
   } catch (_) {
     state.offline = true;
   } finally {
@@ -473,6 +736,11 @@ document.addEventListener("visibilitychange", schedule);
 window.addEventListener("hashchange", () => {
   if (location.hash === "#held") $("held").scrollIntoView();
 });
+
+$("tab-team").addEventListener("click", () => { state.tab = "team"; render(); });
+$("tab-ask").addEventListener("click", () => { state.tab = "ask"; render(); });
+$("join-button").addEventListener("click", join);
+$("ask-send").addEventListener("click", sendAsk);
 
 function start() {
   if ("serviceWorker" in navigator) {

@@ -25,6 +25,13 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			}
 			continue
 		}
+		if kind == KindPhone {
+			// Not a machine with a shell: the owner joins it again from the page.
+			if setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n"); !strings.Contains(setup, "Join this phone") || strings.Contains(setup, "tincan rejoin") {
+				t.Errorf("phone setup should rejoin from the page:\n%s", setup)
+			}
+			continue
+		}
 		if kind == KindHistory {
 			// A service, not a model: the owner rejoins it from its setup steps.
 			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")

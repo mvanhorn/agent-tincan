@@ -30,10 +30,38 @@
     <ol id="held-list" class="cards"></ol>
   </section>
 
-  <section id="team" aria-labelledby="team-title">
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button id="tab-team" class="tab" type="button" role="tab" aria-selected="true" aria-controls="team">Team</button>
+    <button id="tab-ask" class="tab" type="button" role="tab" aria-selected="false" aria-controls="ask">Ask</button>
+  </div>
+
+  <section id="team" role="tabpanel" aria-labelledby="tab-team">
     <h2 id="team-title">Team</h2>
     <p id="team-empty" class="empty" hidden>No agents have joined yet.</p>
     <ol id="team-list" class="roster"></ol>
+  </section>
+
+  <section id="ask" role="tabpanel" aria-labelledby="tab-ask" hidden>
+    <h2>Ask a teammate</h2>
+    <div id="join" class="panel" hidden>
+      <p id="join-text">This phone has not joined the team. Join it as its own agent to ask teammates from here.</p>
+      <label for="join-name">Agent name for this phone</label>
+      <input id="join-name" class="field" type="text" value="phone" maxlength="32" autocapitalize="none" autocomplete="off" spellcheck="false">
+      <button id="join-button" class="primary" type="button">Join this phone</button>
+      <p id="join-error" class="error" role="alert" hidden></p>
+    </div>
+    <div id="ask-form" class="panel" hidden>
+      <p id="ask-me" class="meta"></p>
+      <label for="ask-to">To</label>
+      <select id="ask-to" class="field"></select>
+      <label for="ask-body">Your ask</label>
+      <textarea id="ask-body" class="field" rows="4"></textarea>
+      <button id="ask-send" class="primary" type="button">Send</button>
+      <p id="ask-error" class="error" role="alert" hidden></p>
+    </div>
+    <h2>Your asks</h2>
+    <p id="sent-empty" class="empty">No asks from this phone yet.</p>
+    <ol id="sent-list" class="cards"></ol>
   </section>
 
   <section id="alerts" class="alerts" aria-label="Alerts">

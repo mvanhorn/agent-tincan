@@ -20,6 +20,9 @@ On the Agent Notes Mac: TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <c
 {{- define "recipe.invite.chatgpt" -}}
 No tincan invite: ChatGPT cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
 {{- end -}}
+{{- define "recipe.invite.phone" -}}
+No tincan invite to carry: on the phone, an admin device, the relay's phone page makes the invite and joins with it when you tap Join this phone.
+{{- end -}}
 {{- define "recipe.invite.sesame" -}}
 No tincan invite: a Sesame agent runs in Sesame's cloud and cannot join the tailnet, so it connects through the relay's OAuth gateway instead.
 Connect it as sesame, or, for any other name, run tincan kind <name> sesame on an admin device after tincan connect <name>, so onboarding gives it the Sesame instructions.

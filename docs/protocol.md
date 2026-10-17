@@ -218,6 +218,17 @@ A 404 or 410 deletes the subscription. Audit events, with subscription ids
 only: `push_subscribed`, `push_unsubscribed`, `push_sent` (`status`, or
 `error` of `timeout`, `address refused` or `send failed`).
 
+Kind `phone` is the owner's phone, joined from the phone page as its own
+agent: the page mints an invite with `POST /v1/admin/invite`
+`{"name":"phone","kind":"phone"}` and redeems it with `POST /v1/join` from
+the same device, then asks through `POST /v1/send` and reads replies through
+`GET /v1/requests/{id}` and answers clarifying questions through
+`POST /v1/requests/{id}/answer`, naming itself with `X-Tincan-Agent` like any
+client on a machine with several agents. Its wake method is `none` and its
+stock good-at line is `the owner's phone; asks only, never answers`. A phone
+agent asks and never answers, so it is never a failover target or a room
+mention target; it may be a room member. The relay adds no route for it.
+
 `GET /phone/` and the files under it are the [phone page](phone.md), served
 to admin devices only (403 otherwise), on the relay's tailnet listeners and,
 when the tailnet issues the relay a certificate, on port 443 under its
@@ -311,7 +322,7 @@ An entry for an agent on wake method `schedule` (it checks its inbox on its own 
 
 An entry for an agent on wake method `webhook` or `email` that the relay has woken also includes `woken_at` (the last recorded wake: the first send of a silent episode; a later 2xx follow-up does not move it), `wake_result` (`ok`, or why the send and its retry failed: `<host> returned <status>` or `POST to <host> failed: <cause>`, never the URL's path, query or credentials; either one ends in ` (fallback N: <method>)` when the wake went out on fallback path N, for example `ok (fallback 1: email)`) and `unanswered` (true when the agent has not checked in since that wake: the send failed, or more than the relay's `--wake-grace`, default 10 minutes, has passed with no poll). Only a poll is a check-in; other calls, such as a send or a get, do not clear it. The relay keeps the last wake and each agent's last poll across restarts, and after a restart the grace runs from the later of the wake and the relay's start. The agent's next poll clears `unanswered`. Removing an agent drops its last wake. All three are omitted for other agents, for agents never woken, and by older relays.
 
-An entry may also include `good_at`: the owner's line saying what the agent is good at, or, when the owner has set none, a stock line for service kinds (`history`, `notes`, `council`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`) and product-tool kinds (`claude-code`, `codex`, `gemini-cli`, `grok-cli`, `chatgpt`). An agent with no stored kind whose name is one of those kind names gets that kind's line. It is omitted for hosting-shape kinds (`vm-webhook`, `e2b-email`, `proxy-sandbox`, `scheduled`, `generic`), `hermes` and `openclaw` until the owner sets one, and by older relays, and older clients ignore it. The relay resolves the stock line, so every client shows the same roster. Agents read it to choose whom to ask; the relay never routes on it.
+An entry may also include `good_at`: the owner's line saying what the agent is good at, or, when the owner has set none, a stock line for service kinds (`history`, `notes`, `council`, `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`) and product-tool kinds (`claude-code`, `codex`, `gemini-cli`, `grok-cli`, `chatgpt`, `phone`). An agent with no stored kind whose name is one of those kind names gets that kind's line. It is omitted for hosting-shape kinds (`vm-webhook`, `e2b-email`, `proxy-sandbox`, `scheduled`, `generic`), `hermes` and `openclaw` until the owner sets one, and by older relays, and older clients ignore it. The relay resolves the stock line, so every client shows the same roster. Agents read it to choose whom to ask; the relay never routes on it.
 
 An entry may also include `working_on` and `working_on_others`: the title of the agent's most recently refreshed session that shares one (`tincan mcp --share-title`), and how many of its other sessions share one too. Both are omitted for an agent with no shared title, and by older relays, and older clients ignore them. The title is the session's own description of itself, for agents to read; the relay never routes on it and it grants nothing.
 

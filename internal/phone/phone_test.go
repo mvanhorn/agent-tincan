@@ -159,6 +159,37 @@ func TestDenyBeforeApprove(t *testing.T) {
 	}
 }
 
+// The page joins the phone as kind phone through the relay's own invite
+// and join routes, never under the name of another agent (an invite for an
+// existing name would move that agent to the phone), and asks for a second
+// confirmation before approving its own agent's ask.
+func TestJoinAndAskInThePage(t *testing.T) {
+	app := read(t, "app.js")
+	for _, want := range []string{
+		`api("POST", "/v1/admin/invite", { name, kind: "phone" })`,
+		`api("POST", "/v1/join", { code: inv.data.code })`,
+		`taken && taken.kind !== "phone"`,
+		`api("POST", "/v1/send", { to, body, kind: "ask" })`,
+		`"/v1/trace?limit=200&exclude_pings=true"`,
+		`"/answer"`,
+		`window.confirm(`,
+	} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js lacks %s", want)
+		}
+	}
+	html := read(t, "index.html")
+	for _, want := range []string{"Join this phone", `role="tablist"`, `id="ask-body"`, `for="ask-body"`, `for="join-name"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html lacks %s", want)
+		}
+	}
+	// Held asks stay above the tabs that later views are added to.
+	if strings.Index(html, `id="held"`) > strings.Index(html, `role="tablist"`) {
+		t.Error("held asks must come before the tabs")
+	}
+}
+
 // Every push shows a notification with fixed text that opens the held
 // list, and the page asks for notification permission only from a tap.
 func TestPushAlertsInThePage(t *testing.T) {
