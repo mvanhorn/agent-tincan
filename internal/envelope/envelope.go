@@ -442,3 +442,58 @@ type WebStatus struct {
 	State      string    `json:"state"`
 	ObservedAt time.Time `json:"observed_at"`
 }
+
+// MaxRoomPost caps a room post's body in bytes.
+const MaxRoomPost = 16 << 10
+
+// Room is a named shared thread and the agents in it. Only admins change
+// who is in a room; members read and post.
+type Room struct {
+	Name      string    `json:"name"`
+	Members   []string  `json:"members"`
+	CreatedAt time.Time `json:"created_at"`
+	// LastPost is the id of the room's newest post, 0 for none.
+	LastPost int64 `json:"last_post,omitempty"`
+}
+
+// RoomPost is one post in a room's thread. A post made through the post
+// route has no Status. A reply to a mention is mirrored into the room as
+// the replier's post: ReplyTo names the mention's request, and Status is
+// the reply's status (answered, failed, declined, or needs_input for a
+// question).
+type RoomPost struct {
+	ID        int64     `json:"id"`
+	Room      string    `json:"room"`
+	Author    string    `json:"author"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	Status    Status    `json:"status,omitempty"`
+	ReplyTo   string    `json:"reply_to,omitempty"`
+	// Mentions are the asks this post's @mentions became, with each
+	// one's current status.
+	Mentions []RoomMention `json:"mentions,omitempty"`
+}
+
+// RoomMention is the ask an @mention became.
+type RoomMention struct {
+	Agent     string `json:"agent"`
+	RequestID string `json:"request_id"`
+	Status    Status `json:"status,omitempty"`
+}
+
+// RoomThread is a page of a room's posts, oldest first, after a cursor.
+// Next is the cursor for the following page: the last post's id, or the
+// cursor asked with when there are no newer posts.
+type RoomThread struct {
+	Room    string     `json:"room"`
+	Members []string   `json:"members"`
+	Posts   []RoomPost `json:"posts"`
+	Next    int64      `json:"next"`
+}
+
+// RoomPostResponse is the relay's answer to a post: the stored post, with
+// the asks its mentions became, and a notice for each mention not sent.
+type RoomPostResponse struct {
+	Post    RoomPost `json:"post"`
+	Notices []string `json:"notices,omitempty"`
+}

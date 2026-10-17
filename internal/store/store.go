@@ -236,6 +236,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate push subscriptions: %w", err)
 	}
+	if err := s.migrateRooms(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate rooms: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -497,8 +501,9 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 }
 
 // DeleteAgent removes name and, in the same transaction, the last wake the
-// relay sent it and every idle watch it set or that watches it, so an agent
-// joined again under the name starts with none.
+// relay sent it, every idle watch it set or that watches it, and its room
+// memberships, so an agent joined again under the name starts with none and
+// in no rooms. Its room posts stay, shown under its name.
 func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -517,6 +522,9 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM watches WHERE watcher = ? OR target = ?`, name, name); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE agent = ?`, name); err != nil {
 		return false, err
 	}
 	return n > 0, tx.Commit()

@@ -181,6 +181,27 @@ func (a *Approval) Held(req *envelope.Request) (bool, error) {
 	return false, nil
 }
 
+// Gated reports whether approval.json names target, whatever its rule, so
+// some asks to it may be held. A broken file keeps the last good copy's
+// targets, as Held does; with no good copy it fails closed and reports
+// every target gated with the error. Nil-safe.
+func (a *Approval) Gated(target string) (bool, error) {
+	if a == nil {
+		return false, nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	err := a.reload()
+	if a.good == nil {
+		return err != nil, err
+	}
+	if err == nil && a.missing {
+		return false, nil
+	}
+	_, entry := a.good.Gate[target]
+	return entry, nil
+}
+
 // holdDefaults reports whether the policy Held last read has an entry for
 // target, and the hold TTL and notify target a default hold should use: the
 // file's, or 2 hours and no notice when there is no file. Nil-safe.

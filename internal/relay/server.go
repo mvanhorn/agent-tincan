@@ -372,6 +372,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("PUT /v1/agents/self/status", s.handleHostStatus)
 	mux.HandleFunc("POST /v1/watches", s.handleWatch)
+	mux.HandleFunc("GET /v1/rooms", s.handleRooms)
+	mux.HandleFunc("GET /v1/rooms/{room}/posts", s.handleRoomRead)
+	mux.HandleFunc("POST /v1/rooms/{room}/posts", s.handleRoomPost)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
@@ -406,6 +409,10 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/push/key", s.handlePushKey)
 	mux.HandleFunc("PUT /v1/admin/push/subscription", s.handlePushSubscribe)
 	mux.HandleFunc("DELETE /v1/admin/push/subscription", s.handlePushUnsubscribe)
+	mux.HandleFunc("GET /v1/admin/rooms", s.handleAdminRooms)
+	mux.HandleFunc("POST /v1/admin/rooms", s.handleCreateRoom)
+	mux.HandleFunc("POST /v1/admin/rooms/{room}/members", s.handleRoomMember)
+	mux.HandleFunc("DELETE /v1/admin/rooms/{room}/members", s.handleRoomMember)
 }
 
 // AdminHandler serves only admin routes and treats every caller as the local
@@ -1932,11 +1939,13 @@ func statusFor(err error) int {
 		return se.Code
 	case errors.Is(err, identity.ErrRebindCheckFailed):
 		return http.StatusServiceUnavailable
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent), errors.Is(err, store.ErrNoRoom):
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined),
-		errors.Is(err, identity.ErrAgentAmbiguous):
+		errors.Is(err, identity.ErrAgentAmbiguous), errors.Is(err, store.ErrNotRoomMember):
 		return http.StatusForbidden
+	case errors.Is(err, store.ErrRoomExists):
+		return http.StatusConflict
 	case errors.Is(err, store.ErrWrongState):
 		return http.StatusConflict
 	case errors.Is(err, identity.ErrBadInvite):

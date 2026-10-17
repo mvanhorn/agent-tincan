@@ -44,7 +44,9 @@ type Capabilities struct {
 	HostStatus bool `json:"host_status,omitempty"`
 	// Watches is set by a relay that takes idle watches (POST
 	// /v1/watches).
-	Watches            bool  `json:"watches,omitempty"`
+	Watches bool `json:"watches,omitempty"`
+	// Rooms is set by a relay that serves rooms (/v1/rooms).
+	Rooms              bool  `json:"rooms,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`
