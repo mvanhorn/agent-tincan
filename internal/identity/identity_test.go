@@ -580,3 +580,37 @@ func TestGoodAtSurvivesMoveAndVirtualRebind(t *testing.T) {
 		t.Fatalf("after virtual rebind: %+v", a)
 	}
 }
+
+// IsAdminNode checks a stored device against the tailnet as it is now:
+// still named in --admin, untagged, and owned by an --admin-login. A node
+// that left the tailnet is no longer an admin.
+func TestIsAdminNode(t *testing.T) {
+	ctx := context.Background()
+	who := identitytest.New(map[string]identity.Node{"100.0.0.1:1": macNode, "100.0.0.2:1": grokNode})
+	dir := identity.NewDirectory(identity.NewMemoryStore(), identity.WithVirtual(who), identity.Config{Admins: []string{"macbook-pro-44"}, AdminLogins: []string{"mvanhorn@gmail.com"}})
+	check := func(id, name string, want bool) {
+		t.Helper()
+		if got, err := dir.IsAdminNode(ctx, id, name); err != nil || got != want {
+			t.Errorf("IsAdminNode(%s, %s) = %v, %v; want %v", id, name, got, err, want)
+		}
+	}
+	check("nMAC", "macbook-pro-44", true)
+	check(identity.LocalAdmin, identity.LocalAdmin, true)
+	check("nGROK", "grok-bot", false)
+	check("nGONE", "macbook-pro-44", false)
+
+	tagged := macNode
+	tagged.Tags = []string{"tag:server"}
+	who.Set("100.0.0.1:1", tagged)
+	check("nMAC", "macbook-pro-44", false)
+
+	other := macNode
+	other.User = "someone@example.com"
+	who.Set("100.0.0.1:1", other)
+	check("nMAC", "macbook-pro-44", false)
+
+	renamed := macNode
+	renamed.Name = "old-mac"
+	who.Set("100.0.0.1:1", renamed)
+	check("nMAC", "macbook-pro-44", false)
+}

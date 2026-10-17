@@ -23,6 +23,7 @@ const state = {
   tab: "team",
   sent: new Map(), // request id -> {result, li, ...} for this phone's asks
   lastHeldCount: -1,
+  heldFresh: false, // the held list was read since the page last came to the foreground
 };
 
 // sending is true while an ask is on its way, so a render from a poll in
@@ -199,7 +200,7 @@ function nonceLive(item) {
 }
 
 function buttonsEnabled(entry) {
-  return !state.offline && !state.notAdmin && !entry.deciding && !entry.note && nonceLive(entry.item);
+  return state.heldFresh && !state.offline && !state.notAdmin && !entry.deciding && !entry.note && nonceLive(entry.item);
 }
 
 function heldCard(entry) {
@@ -249,7 +250,7 @@ function updateCard(entry) {
   if (entry.note) {
     entry.noteEl.textContent = entry.note;
     entry.noteEl.hidden = false;
-  } else if (!nonceLive(entry.item) && !state.offline) {
+  } else if ((!state.heldFresh || !nonceLive(entry.item)) && !state.offline) {
     entry.noteEl.textContent = "Refreshing this ask before it can be decided.";
     entry.noteEl.hidden = false;
   } else {
@@ -525,7 +526,9 @@ async function refreshSent() {
   if (!state.me || sentPolling) return;
   sentPolling = true;
   try {
-    const recent = await api("GET", "/v1/trace?limit=200&exclude_pings=true");
+    // from filters before the limit, so newer team traffic cannot hide an
+    // open ask of this phone's.
+    const recent = await api("GET", "/v1/trace?limit=200&exclude_pings=true&from=" + encodeURIComponent(state.me));
     if (recent.status === 200 && recent.data) {
       for (const r of recent.data.traces || []) {
         if (r.request.from !== state.me) continue;
@@ -574,6 +577,7 @@ let polling = false;
 async function refresh() {
   if (polling) return;
   polling = true;
+  const gen = heldGen;
   try {
     const [held, agents] = await Promise.all([api("GET", "/v1/admin/held"), api("GET", "/v1/agents")]);
     if (held.status === 403) {
@@ -589,6 +593,8 @@ async function refresh() {
     state.loaded = true;
     state.updated = new Date();
     mergeHeld(held.data || []);
+    // A listing that started before the page last hid does not count.
+    state.heldFresh = gen === heldGen;
     state.roster = (agents.data && agents.data.agents) || [];
     state.relayVersion = (agents.data && agents.data.relay_version) || "";
     if (!state.meChecked) await whoami();
@@ -598,6 +604,7 @@ async function refresh() {
   } finally {
     polling = false;
     render();
+    if (gen !== heldGen && document.visibilityState === "visible") refresh();
   }
 }
 
@@ -633,10 +640,13 @@ async function decide(id, verb) {
   const entry = state.held.get(id);
   if (!entry || !buttonsEnabled(entry)) return;
   const item = entry.item;
-  if (verb === "approve" && state.me && (item.from === state.me || (item.chain || []).includes(state.me))) {
+  if (verb === "approve" && !state.meChecked) {
+    // whoami has not answered, so this ask may be this phone's own.
+    if (!window.confirm("This page has not yet confirmed which agent is this phone's, so this ask may be its own. Approve it anyway?")) return;
+  } else if (verb === "approve" && state.me && (item.from === state.me || (item.chain || []).includes(state.me))) {
     if (!window.confirm("This ask came from this phone's own agent (" + state.me + "). Approve it anyway?")) return;
   }
-  if (!nonceLive(item)) {
+  if (!buttonsEnabled(entry)) {
     refresh();
     return;
   }
@@ -723,17 +733,20 @@ function setAlerts(text, label, onClick) {
   b.onclick = onClick || null;
 }
 
-// subscribe makes this browser's push subscription with the relay's key,
-// replacing one made with an older key.
-async function subscribe(reg) {
-  const key = await api("GET", "/v1/admin/push/key");
-  if (key.status !== 200 || !key.data) return null;
-  const opts = { userVisibleOnly: true, applicationServerKey: b64urlBytes(key.data.public_key) };
+// subscribe returns this browser's push subscription for the relay's
+// current key: the existing one when it was made with that key (subscribe
+// hands it back), else a new one replacing a subscription made with an
+// older key, which the relay is told to forget.
+async function subscribe(reg, publicKey) {
+  const opts = { userVisibleOnly: true, applicationServerKey: b64urlBytes(publicKey) };
   try {
     return await reg.pushManager.subscribe(opts);
   } catch (_) {
     const old = await reg.pushManager.getSubscription();
-    if (old) await old.unsubscribe();
+    if (old) {
+      await api("DELETE", "/v1/admin/push/subscription", { endpoint: old.endpoint }).catch(() => {});
+      await old.unsubscribe();
+    }
     return reg.pushManager.subscribe(opts);
   }
 }
@@ -762,8 +775,15 @@ async function pushState() {
       return;
     }
     if (Notification.permission === "granted") {
+      const key = await api("GET", "/v1/admin/push/key");
+      if (key.status === 404) {
+        setAlerts("Push alerts are off on this relay.");
+        return;
+      }
       const reg = await navigator.serviceWorker.ready;
-      const sub = (await reg.pushManager.getSubscription()) || (await subscribe(reg));
+      // Even with a subscription already here, check it against the relay's
+      // current key: one made with a replaced key gets no alerts.
+      const sub = key.status === 200 && key.data ? await subscribe(reg, key.data.public_key) : null;
       if (sub) {
         const res = await api("PUT", "/v1/admin/push/subscription", sub.toJSON());
         if (res.status === 200) {
@@ -809,9 +829,17 @@ async function turnOffAlerts() {
 // ---- Start ----
 
 let timer = null;
+// heldGen counts hides and returns; a held listing read across one is not
+// fresh.
+let heldGen = 0;
 function schedule() {
   clearInterval(timer);
   timer = null;
+  // Decision codes outlive a background stay, so the cards stay off until
+  // a held listing read after this lands.
+  heldGen++;
+  state.heldFresh = false;
+  renderHeld();
   if (document.visibilityState === "visible") {
     refresh();
     timer = setInterval(refresh, POLL_MS);

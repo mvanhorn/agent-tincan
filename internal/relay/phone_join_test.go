@@ -139,3 +139,27 @@ func TestPhoneAnswersNeedsInput(t *testing.T) {
 		t.Fatalf("answer from the page: %d %s", code, body)
 	}
 }
+
+// The page asks for its own agent's chains with from, which filters before
+// the limit, so newer team traffic cannot push an open phone ask out.
+func TestRecentTracesFromFiltersBeforeLimit(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	mine, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "mine", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := m.Client(t, "instinct").Send(t.Context(), "muse", "theirs", envelope.KindAsk, "", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out struct {
+		Traces []envelope.Result `json:"traces"`
+	}
+	if err := m.Client(t, "admin").Raw(t.Context(), "GET", "/v1/trace?limit=1&exclude_pings=true&from=grokbot", nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Traces) != 1 || out.Traces[0].Request.ID != mine.ID {
+		t.Fatalf("traces from grokbot: %+v", out.Traces)
+	}
+}

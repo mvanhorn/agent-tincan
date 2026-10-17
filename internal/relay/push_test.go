@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/policy"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/store"
@@ -369,5 +370,50 @@ func TestPushRefusesRedirectsAndPrivateAddresses(t *testing.T) {
 	u, _ := url.Parse(target.srv.URL)
 	if err := relay.DialPushForTest(t.Context(), u.Host); err == nil {
 		t.Error("the real push dialer reached a loopback push service")
+	}
+}
+
+// A subscription whose device is no longer an admin (tagged, owned by
+// another login, renamed out of --admin, or gone from the tailnet) gets no
+// alert, and the relay drops it.
+func TestPushSkipsDevicesNoLongerAdmin(t *testing.T) {
+	m := pushMesh(t, 2*time.Second)
+	svc := newPushService(t, http.StatusCreated)
+	if code, body := subscribe(t, m, svc.srv.URL+"/push/mac", newBrowserKeys(t).json()); code != http.StatusOK {
+		t.Fatalf("subscribe: %d %s", code, body)
+	}
+	m.Who.Set(m.Addr("admin"), identity.Node{ID: "nMAC", Name: "macbook-pro-44", User: testrelay.Login, Tags: []string{"tag:server"}})
+	holdOne(t, m)
+	gone := waitAudit(t, m, "push_unsubscribed", 1)
+	if !strings.Contains(gone[0].Detail, "not admin") {
+		t.Fatalf("push_unsubscribed detail %q", gone[0].Detail)
+	}
+	if svc.count() != 0 {
+		t.Fatalf("a device that is no longer an admin got %d pushes", svc.count())
+	}
+	if subs, err := m.Store.PushSubscriptions(t.Context()); err != nil || len(subs) != 0 {
+		t.Fatalf("subscriptions: %+v %v", subs, err)
+	}
+}
+
+// Stopping the relay ends a push in flight, and WaitPush returns once the
+// worker is done, so the store can be closed after it.
+func TestPushStopsWithTheRelay(t *testing.T) {
+	m := pushMesh(t, time.Minute)
+	svc := newPushService(t, http.StatusCreated)
+	svc.hang = make(chan struct{})
+	t.Cleanup(func() { close(svc.hang) })
+	if code, body := subscribe(t, m, svc.srv.URL+"/push/slow", newBrowserKeys(t).json()); code != http.StatusOK {
+		t.Fatalf("subscribe: %d %s", code, body)
+	}
+	holdOne(t, m)
+	svc.waitFor(t, 1)
+	m.Server.Stop()
+	done := make(chan struct{})
+	go func() { m.Server.WaitPush(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitPush did not return after Stop with a push in flight")
 	}
 }

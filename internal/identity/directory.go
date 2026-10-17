@@ -469,6 +469,41 @@ func (d *Directory) requireAdmin(ctx context.Context, remoteAddr string) error {
 	if err != nil {
 		return err
 	}
+	return d.adminNode(n)
+}
+
+// NodeLookup is an optional Resolver extension that finds a tailnet node
+// by its stable id, as the tailnet sees it now.
+type NodeLookup interface {
+	LookupNode(ctx context.Context, stableID string) (n Node, found bool, err error)
+}
+
+// IsAdminNode reports whether the node with stable id, recorded under the
+// machine name name, is still an admin device: present on the tailnet and
+// passing the same checks as IsAdmin. A resolver that cannot look nodes up
+// leaves only the --admin name check. Code acting for a device after its
+// request has ended (a push alert) uses this.
+func (d *Directory) IsAdminNode(ctx context.Context, id, name string) (bool, error) {
+	if id == LocalAdmin {
+		return true, nil
+	}
+	who := d.who
+	if v, ok := who.(virtualResolver); ok {
+		who = v.Resolver
+	}
+	lk, ok := who.(NodeLookup)
+	if !ok {
+		return slices.Contains(d.cfg.Admins, name), nil
+	}
+	n, found, err := lk.LookupNode(ctx, id)
+	if err != nil || !found {
+		return false, err
+	}
+	return d.adminNode(n) == nil, nil
+}
+
+// adminNode reports why n is not an admin device, nil when it is.
+func (d *Directory) adminNode(n Node) error {
 	// Admin = named in --admin, untagged (tagged nodes are services, never
 	// people), and, when --admin-login is set, owned by a listed login.
 	if !slices.Contains(d.cfg.Admins, n.Name) {

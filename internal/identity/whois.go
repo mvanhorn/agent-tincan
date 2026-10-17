@@ -83,6 +83,32 @@ func (r *LocalResolver) NodeOnline(ctx context.Context, stableID string) (online
 	return false, false, nil
 }
 
+// LookupNode implements NodeLookup from the tailnet peer list.
+func (r *LocalResolver) LookupNode(ctx context.Context, stableID string) (Node, bool, error) {
+	st, err := r.lc.Status(ctx)
+	if err != nil {
+		return Node{}, false, fmt.Errorf("tailnet status: %w", err)
+	}
+	peers := []*ipnstate.PeerStatus{st.Self}
+	for _, p := range st.Peer {
+		peers = append(peers, p)
+	}
+	for _, p := range peers {
+		if p == nil || string(p.ID) != stableID {
+			continue
+		}
+		n := Node{ID: stableID, Name: shortName(p.DNSName)}
+		if p.Tags != nil {
+			n.Tags = p.Tags.AsSlice()
+		}
+		if u, ok := st.User[p.UserID]; ok {
+			n.User = u.LoginName
+		}
+		return n, true, nil
+	}
+	return Node{}, false, nil
+}
+
 // Probe fails when the LocalAPI is unreachable. --listen mode calls it at
 // startup and refuses to run rather than skip attribution.
 func (r *LocalResolver) Probe(ctx context.Context) error {
@@ -98,7 +124,10 @@ func shortName(fqdn string) string {
 	return name
 }
 
-var _ NodeStatus = (*LocalResolver)(nil)
+var (
+	_ NodeStatus = (*LocalResolver)(nil)
+	_ NodeLookup = (*LocalResolver)(nil)
+)
 
 // SelfURLs are the relay URLs this tailnet node answers on for port: its
 // MagicDNS name first (it outlives an IP change), then its IPv4 address.

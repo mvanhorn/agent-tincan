@@ -2021,7 +2021,7 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 200 {
 		limit = n
 	}
-	steps, err := s.store.RecentTraces(r.Context(), limit, r.URL.Query().Get("exclude_pings") == "true")
+	steps, err := s.store.RecentTraces(r.Context(), limit, r.URL.Query().Get("exclude_pings") == "true", r.URL.Query().Get("from"))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return

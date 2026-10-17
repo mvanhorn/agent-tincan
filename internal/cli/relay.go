@@ -590,6 +590,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		// poll in flight, Retry-After waits included.
 		{"stopping sweeps and email reply polls", func() { stopRun(); <-ran }},
 		{"stopping wakes", waker.Stop},
+		{"stopping push alerts", srv.WaitPush},
 		{"closing the gateway", closeGW},
 		{"closing the tailnet listener", closeNet},
 		{"closing the store", closeStore},

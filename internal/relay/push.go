@@ -58,6 +58,7 @@ type Pusher struct {
 	timeout   time.Duration
 	allow     func(*url.URL) bool
 	kick      chan struct{}
+	done      chan struct{} // closed when the worker has stopped
 }
 
 // NewPusher builds a pusher from the 32-byte VAPID private key.
@@ -73,14 +74,25 @@ func NewPusher(key []byte) (*Pusher, error) {
 		timeout: pushTimeout,
 		allow:   pushEndpointAllowed,
 		kick:    make(chan struct{}, 1),
+		done:    make(chan struct{}),
 	}, nil
 }
 
 // SetPusher turns on push alerts for held asks and starts the worker,
-// which stops when the relay does.
+// which stops when the relay does: Stop cancels a round in flight, and
+// WaitPush waits for the worker to finish.
 func (s *Server) SetPusher(p *Pusher) {
 	s.push = p
 	go s.pushLoop(p)
+}
+
+// WaitPush returns once the push worker has stopped, after Stop. The
+// relay calls it before closing the store, which a round still writes to.
+// It returns at once on a relay without push.
+func (s *Server) WaitPush() {
+	if s.push != nil {
+		<-s.push.done
+	}
 }
 
 // pushEndpointAllowed reports whether u is an https endpoint on one of
@@ -142,12 +154,22 @@ func (s *Server) queuePush() {
 }
 
 func (s *Server) pushLoop(p *Pusher) {
+	defer close(p.done)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stopping:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	for {
 		select {
 		case <-s.stopping:
 			return
 		case <-p.kick:
-			s.pushRound(p)
+			s.pushRound(ctx, p)
 		}
 	}
 }
@@ -155,14 +177,16 @@ func (s *Server) pushLoop(p *Pusher) {
 // pushRound alerts every subscription once, a few at a time. Nothing it
 // does changes a held request: failures are audited and the next held ask
 // tries again. The alert carries only the held count, the one field sw.js
-// reads; it never names a held ask.
-func (s *Server) pushRound(p *Pusher) {
-	ctx := context.Background()
+// reads; it never names a held ask. A subscription whose device is no
+// longer an admin gets nothing and is dropped. ctx ends when the relay
+// stops.
+func (s *Server) pushRound(ctx context.Context, p *Pusher) {
 	subs, err := s.store.PushSubscriptions(ctx)
 	if err != nil {
 		log.Printf("push: list subscriptions: %v", err)
 		return
 	}
+	subs = s.adminSubscriptions(ctx, subs)
 	if len(subs) == 0 {
 		return
 	}
@@ -183,6 +207,29 @@ func (s *Server) pushRound(p *Pusher) {
 	_ = g.Wait() // pushOne audits its own failures and returns none
 }
 
+// adminSubscriptions keeps the subscriptions whose device is still an
+// admin and deletes those that are not. One the relay cannot check now is
+// skipped this round and kept.
+func (s *Server) adminSubscriptions(ctx context.Context, subs []store.PushSubscription) []store.PushSubscription {
+	var out []store.PushSubscription
+	for _, sub := range subs {
+		ok, err := s.dir.IsAdminNode(ctx, sub.Node, sub.Device)
+		switch {
+		case err != nil:
+			log.Printf("push: check device of subscription %s: %v", sub.ID, err)
+		case ok:
+			out = append(out, sub)
+		default:
+			if _, err := s.store.DeletePushSubscriptionID(ctx, sub.ID); err != nil {
+				log.Printf("push: drop subscription %s: %v", sub.ID, err)
+				continue
+			}
+			s.record(ctx, "push_unsubscribed", "", "", "relay", store.DetailJSON(map[string]any{"subscription": sub.ID, "device": sub.Device, "reason": "not admin"}))
+		}
+	}
+	return out
+}
+
 func (s *Server) pushOne(ctx context.Context, p *Pusher, sub store.PushSubscription, payload []byte) {
 	u, err := url.Parse(sub.Endpoint)
 	if err != nil || !p.allow(u) {
@@ -195,6 +242,9 @@ func (s *Server) pushOne(ctx context.Context, p *Pusher, sub store.PushSubscript
 	resp, err := webpush.SendNotificationWithContext(sendCtx, payload, &webpush.Subscription{Endpoint: sub.Endpoint, Keys: webpush.Keys{Auth: sub.Auth, P256dh: sub.P256dh}},
 		&webpush.Options{HTTPClient: p.client, Subscriber: PushSubscriber, TTL: pushTTL, Urgency: webpush.UrgencyHigh, Topic: "tincan-held", VAPIDPublicKey: p.pub, VAPIDPrivateKey: p.priv})
 	if err != nil {
+		if ctx.Err() != nil {
+			return // the relay is stopping
+		}
 		// The error can name the endpoint, a secret; record only its kind.
 		kind := "send failed"
 		var ne net.Error

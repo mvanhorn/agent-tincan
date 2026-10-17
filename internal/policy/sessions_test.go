@@ -51,7 +51,7 @@ func TestSessionFilesAskButKeepsChecks(t *testing.T) {
 		t.Fatalf("session b's ask lost the chain checks: hop %d chain %v", other.Hop, other.Chain)
 	}
 	// Its trace starts at hop 2 with no parent; it is still a trace root.
-	traces, err := f.st.RecentTraces(context.Background(), 10, false)
+	traces, err := f.st.RecentTraces(context.Background(), 10, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

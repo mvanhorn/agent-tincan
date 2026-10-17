@@ -268,7 +268,7 @@ func TestAlertsOffIsRemembered(t *testing.T) {
 		t.Error("Turn on alerts must clear the remembered off")
 	}
 	push := funcBody(t, app, "pushState")
-	off, sub := strings.Index(push, "alertsOff()"), strings.Index(push, "subscribe(reg)")
+	off, sub := strings.Index(push, "alertsOff()"), strings.Index(push, "subscribe(reg")
 	if off < 0 || sub < 0 || off > sub {
 		t.Error("pushState must check the remembered off before it subscribes")
 	}
@@ -280,5 +280,49 @@ func TestJoinRefusesAnotherPhone(t *testing.T) {
 	body := funcBody(t, read(t, "app.js"), "join")
 	if !strings.Contains(body, "remembered()") || !strings.Contains(body, "another phone") {
 		t.Error("join must refuse a phone agent this device does not already have")
+	}
+}
+
+// The sent list asks the relay for this phone's own chains, filtered
+// before the limit, so newer team traffic cannot hide an open ask.
+func TestSentListAsksForItsOwnChains(t *testing.T) {
+	body := funcBody(t, read(t, "app.js"), "refreshSent")
+	if !strings.Contains(body, `&from=" + encodeURIComponent(state.me)`) {
+		t.Error("refreshSent must ask /v1/trace for this phone's own chains with from")
+	}
+}
+
+// Opening the page checks the relay's current push key even when a
+// subscription exists, so one made with a replaced key is renewed.
+func TestPushStateChecksTheKey(t *testing.T) {
+	app := read(t, "app.js")
+	if strings.Contains(funcBody(t, app, "pushState"), "getSubscription()) ||") {
+		t.Error("pushState must not reuse a subscription without checking the relay's key")
+	}
+	if !strings.Contains(funcBody(t, app, "subscribe"), "applicationServerKey") {
+		t.Error("subscribe must subscribe with the relay's current key")
+	}
+}
+
+// Back in the foreground, the held cards stay off until a fresh held
+// listing lands, so a stale card cannot be decided.
+func TestHeldStaleUntilRefreshed(t *testing.T) {
+	app := read(t, "app.js")
+	if !strings.Contains(funcBody(t, app, "buttonsEnabled"), "state.heldFresh") {
+		t.Error("buttonsEnabled must require a fresh held listing")
+	}
+	if !strings.Contains(funcBody(t, app, "schedule"), "state.heldFresh = false") {
+		t.Error("schedule must mark the held list stale when the page hides or returns")
+	}
+	if !strings.Contains(funcBody(t, app, "refresh"), "state.heldFresh = ") {
+		t.Error("refresh must mark the held list fresh after a good listing")
+	}
+}
+
+// Until whoami has answered, the page cannot tell whether an ask came from
+// this phone, so approving asks for confirmation.
+func TestApproveConfirmsWhileIdentityUnknown(t *testing.T) {
+	if !strings.Contains(funcBody(t, read(t, "app.js"), "decide"), "!state.meChecked") {
+		t.Error("decide must confirm an approval while this phone's agent is unknown")
 	}
 }
