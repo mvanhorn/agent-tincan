@@ -661,3 +661,29 @@ func TestProxy407ConcurrentCallsBothRetry(t *testing.T) {
 		t.Fatalf("proxy saw %v, want 2 stale then 2 fresh", seen)
 	}
 }
+
+// Watch asks the relay for one notice when an agent is next idle; a relay
+// that does not advertise watches is refused before anything is sent.
+func TestWatch(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	got, err := m.Client(t, "grokbot").Watch(t.Context(), "muse")
+	if err != nil || got.Agent != "muse" || got.ExpiresAt.IsZero() {
+		t.Fatalf("watch = %+v, %v", got, err)
+	}
+	posted := false
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/watches" {
+			posted = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"attachments":false}`))
+	}))
+	defer old.Close()
+	r, err := client.NewRelay(old.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Watch(t.Context(), "muse"); err != client.ErrWatchesUnsupported || posted {
+		t.Fatalf("older relay: %v, posted %v", err, posted)
+	}
+}

@@ -534,6 +534,11 @@ choose: when several teammates fit, prefer an idle one, and do not wait on one
 that is stuck. It never shows what anyone asked. An older relay sends no
 status.
 
+To wait for a busy teammate, call the watch tool with its name (or run
+`tincan watch <agent>`) instead of checking list_agents again and again. The
+relay sends you one notice in check_inbox when that teammate is next idle, or
+offline with nothing in progress. A watch lapses after 24 hours.
+
 An agent's line may end with good_at="..." (quoted): what that teammate is good
 at, in your owner's words, or a default line. History, notes, council, the
 web agents and the product tools (Claude Code, Codex, Gemini CLI, Grok CLI and

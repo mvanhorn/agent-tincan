@@ -1181,3 +1181,26 @@ func TestListAgentsShowsUnanswered(t *testing.T) {
 		t.Fatalf("list_agents = %q, want a line %q", out, want)
 	}
 }
+
+// End to end over MCP: grokbot watches muse, and once muse is idle its
+// inbox gets exactly one notice, however many sweeps run.
+func TestWatchToolNoticeArrivesOnce(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	if _, err := m.Client(t, "muse").Poll(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	cs := session(t, m, "grokbot")
+	if out := call(t, cs, "watch", map[string]any{"agent": "muse"}); !strings.Contains(out, "one relay notice when muse is next idle") {
+		t.Fatalf("watch = %q", out)
+	}
+	m.Server.Sweep(t.Context())
+	m.Server.Sweep(t.Context())
+	inbox := call(t, cs, "check_inbox", nil)
+	if strings.Count(inbox, "muse is idle now.") != 1 || !strings.Contains(inbox, "from the Agent Tincan relay") {
+		t.Fatalf("inbox = %q", inbox)
+	}
+	m.Server.Sweep(t.Context())
+	if inbox := call(t, cs, "check_inbox", nil); strings.Contains(inbox, "muse is idle now.") {
+		t.Fatalf("second notice: %q", inbox)
+	}
+}

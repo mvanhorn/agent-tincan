@@ -364,6 +364,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("DELETE /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("PUT /v1/agents/self/status", s.handleHostStatus)
+	mux.HandleFunc("POST /v1/watches", s.handleWatch)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
@@ -506,6 +507,7 @@ func (s *Server) Sweep(ctx context.Context) {
 			}
 		}
 	}
+	s.checkWatches(ctx)
 }
 
 func isLocalAdmin(ctx context.Context) bool {
@@ -1282,6 +1284,8 @@ func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope
 	} else {
 		log.Printf("reply %s: look up asker: %v", id, err)
 	}
+	// The reply may have freed the agent someone is watching.
+	s.checkWatches(ctx)
 	return rep, nil
 }
 

@@ -398,6 +398,7 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `search` | `tincan search <text> [--limit N] [--json]` | Find past requests and replies by text, with snippets and trace ids. Same chain visibility as trace. |
 | `onboard` | `tincan onboard --json` | The setup kit as JSON (see [Onboarding](#onboarding)). Read-only. |
 | `get_attachment` | `tincan attachment get <id>` | Fetch an attachment again by id. |
+| `watch` | `tincan watch <agent>` | Get one notice from the relay when a teammate is next idle (or offline with nothing in progress). Lapses after 24 hours. |
 
 For scripts, `tincan ask`, `get` and `inbox` take `--json` and print one JSON document to stdout:
 
@@ -523,6 +524,8 @@ Right after the online state, each agent shows the relay's status, the same on `
 - `status=idle` or `status=offline`: nothing waits on it, and it is or is not polling now.
 
 The status says only whose request an agent is on, never what was asked. Agents can use it to pick a free teammate.
+
+To wait for a busy teammate without checking again and again, run `tincan watch codex` (or the `watch` tool). The relay sends you one notice, "codex is idle now. No reply needed.", when codex next has nothing in progress and nothing stuck: idle, or offline with nothing waiting (that notice says "not busy now (offline)"). Asking twice still sends one notice, a watch lapses after 24 hours, and removing either agent drops it.
 
 `tincan agents --json` prints the relay's roster document (`agents` and `relay_version`) instead of one line per agent, for scripts. On an admin device each agent's entry also names the Tailscale node it is bound to: `node_id` (the stable node id), `node_name` (the machine name) and `node_user` (the owning login). This lets tools on an admin laptop tell an agent's machines apart, for example after a rebuild. Agents never see these fields, in `tincan agents` or `list_agents`, and virtual agents (ChatGPT, Sesame) have no node, so they carry none. Older clients ignore the fields, and older relays leave them out.
 

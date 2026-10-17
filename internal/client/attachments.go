@@ -41,7 +41,10 @@ type Capabilities struct {
 	NeedsInput bool `json:"needs_input,omitempty"`
 	// HostStatus is set by a relay that takes a session's host-reported
 	// busy state (PUT /v1/agents/self/status).
-	HostStatus         bool  `json:"host_status,omitempty"`
+	HostStatus bool `json:"host_status,omitempty"`
+	// Watches is set by a relay that takes idle watches (POST
+	// /v1/watches).
+	Watches            bool  `json:"watches,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`

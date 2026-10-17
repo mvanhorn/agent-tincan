@@ -381,6 +381,24 @@ func TestStatusParityAcrossSurfaces(t *testing.T) {
 	}
 }
 
+// tincan watch sets a watch as the configured agent and says what will
+// happen; an unknown agent is the relay's 404.
+func TestWatchCommand(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	out, err := run(t, watchCmd(), "muse")
+	if err != nil || !strings.Contains(out, "one relay notice when muse is next idle") {
+		t.Fatalf("watch = %q, %v", out, err)
+	}
+	pending, err := m.Store.PendingWatches(t.Context())
+	if err != nil || len(pending) != 1 || pending[0].Watcher != "grokbot" || pending[0].Target != "muse" {
+		t.Fatalf("pending = %+v, %v", pending, err)
+	}
+	if _, err := run(t, watchCmd(), "nobody"); err == nil {
+		t.Fatal("watched an unknown agent")
+	}
+}
+
 // For the same roster, tincan agents and list_agents show the same good-at
 // text for every agent, owner-set and stock lines alike, and list_agents
 // keeps one line per agent that splits on the first ":".

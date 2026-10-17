@@ -120,7 +120,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd()}
+	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd(), watchCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -800,6 +800,29 @@ func cancelCmd() *cobra.Command {
 				return err
 			}
 			cmd.Printf("Cancelled %s.\n", args[0])
+			return nil
+		},
+	}
+}
+
+// watchCmd asks the relay for one notice when a teammate is next idle,
+// delivered to this agent's inbox like any relay notice.
+func watchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "watch <agent>",
+		Short: "Get one notice in your inbox when a teammate is next idle (lapses after 24h)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, _, err := connect()
+			if err != nil {
+				return err
+			}
+			defer printHeld(cmd, r)
+			res, err := r.Watch(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			cmd.Println(res.Text(time.Now()))
 			return nil
 		},
 	}

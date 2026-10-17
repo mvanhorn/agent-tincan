@@ -646,6 +646,39 @@ func (r *Relay) SetGoodAt(ctx context.Context, name, line string) (string, error
 	return out.GoodAt, err
 }
 
+// ErrWatchesUnsupported identifies a relay that predates idle watches.
+var ErrWatchesUnsupported = errors.New("relay does not support idle watches; upgrade the relay")
+
+// WatchResult is the relay's answer to a watch: the agent watched and when
+// the watch lapses if that agent is not idle by then.
+type WatchResult struct {
+	Agent     string    `json:"agent"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Text is what tincan watch and the watch tool print for w, the same on
+// both: who is watched and when the watch lapses, on the local clock.
+func (w WatchResult) Text(now time.Time) string {
+	return fmt.Sprintf("You will get one relay notice when %s is next idle (or offline with nothing in progress). The watch lapses at %s if that has not happened.", w.Agent, clockTime(w.ExpiresAt, now))
+}
+
+// Watch asks the relay to send this agent one notice when agent is next
+// idle (or offline with nothing in progress). Asking again while a watch is
+// pending returns that watch. It checks the relay's capabilities first, so
+// an older relay is refused with ErrWatchesUnsupported.
+func (r *Relay) Watch(ctx context.Context, agent string) (WatchResult, error) {
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return WatchResult{}, fmt.Errorf("check relay capabilities: %w", err)
+	}
+	if !caps.Watches {
+		return WatchResult{}, ErrWatchesUnsupported
+	}
+	var out WatchResult
+	err = r.call(ctx, r.api, "POST", "/v1/watches", map[string]string{"agent": agent}, &out)
+	return out, err
+}
+
 // Remove unbinds an agent (admin devices only).
 func (r *Relay) Remove(ctx context.Context, name string) error {
 	return r.call(ctx, r.api, "POST", "/v1/admin/remove", map[string]string{"name": name}, nil)
