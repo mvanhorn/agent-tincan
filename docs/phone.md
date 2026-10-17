@@ -18,9 +18,21 @@ Open the address exactly as the relay logs it, ending in `/phone/`. The relay re
 
 When your tailnet has HTTPS certificates turned on (Tailscale admin console, DNS page, HTTPS Certificates), the relay also listens on port 443 under its MagicDNS name and logs `phone page: https://.../phone/`. With the default tsnet relay this is its own node; with `--listen` it binds port 443 on the `--listen` address and uses the host's certificate, so the relay user needs permission to bind that port.
 
-Without certificates the relay logs why (`no HTTPS: ...`) and the page works over plain HTTP on the relay's usual address. Plain HTTP inside the tailnet is still encrypted by WireGuard. The page itself is the same either way.
+Without certificates the relay logs why (`no HTTPS: ...`) and the page works over plain HTTP on the relay's usual address. Plain HTTP inside the tailnet is still encrypted by WireGuard. The page is the same either way, except that alerts need HTTPS.
 
 A `tailscale serve` front is not supported: the relay would see every request come from the host itself and could not tell which device is asking.
+
+## Alerts
+
+With HTTPS, the page can alert you when an ask is held. The row under the team says which state applies:
+
+- Alerts need HTTPS: the page was opened over plain HTTP. Turn on HTTPS certificates for the tailnet; until then the approval policy's `notify` teammate is the alert path.
+- Add to Home Screen first: on iPhone, Safari only allows alerts from a page opened from the Home Screen.
+- Turn on alerts: tap it and allow notifications. The page asks only when you tap.
+- Alerts are on: this phone gets an alert for every held ask. Turn off removes its subscription from the relay.
+- Alerts are blocked: notifications for Tincan are off in the phone's settings.
+
+An alert says only "A request is waiting for your approval" (or how many are). It never carries the request text, who asked or whom. Tapping it opens the page at the held list. The alert goes from the relay through your phone's push service (Apple, Google, Mozilla or Microsoft), encrypted to the phone; see [the trust model](trust-model.md). The page sends its subscription again every time it opens, so a phone that was offline or reinstalled picks alerts back up.
 
 ## What the page shows
 

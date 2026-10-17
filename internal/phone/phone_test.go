@@ -158,3 +158,28 @@ func TestDenyBeforeApprove(t *testing.T) {
 		t.Error("buttons must be at least 44px tall")
 	}
 }
+
+// Every push shows a notification with fixed text that opens the held
+// list, and the page asks for notification permission only from a tap.
+func TestPushAlertsInThePage(t *testing.T) {
+	sw := read(t, "sw.js")
+	for _, want := range []string{`addEventListener("push"`, "showNotification", `addEventListener("notificationclick"`, "#held", "A request is waiting for your approval"} {
+		if !strings.Contains(sw, want) {
+			t.Errorf("sw.js lacks %q", want)
+		}
+	}
+	if strings.Contains(sw, "msg.body") || strings.Contains(sw, "msg.title") {
+		t.Error("sw.js shows text from the push payload; it must show only its fixed text")
+	}
+	app := read(t, "app.js")
+	if strings.Count(app, "requestPermission") != 1 {
+		t.Fatal("app.js should ask for permission in exactly one place")
+	}
+	turnOn := app[strings.Index(app, "async function turnOnAlerts"):]
+	if !strings.Contains(turnOn[:strings.Index(turnOn, "\n}\n")], "requestPermission") {
+		t.Error("permission is asked outside the Turn on alerts tap")
+	}
+	if !strings.Contains(app, "pushState();") || !strings.Contains(app, `api("PUT", "/v1/admin/push/subscription"`) {
+		t.Error("the page must send its subscription on every open")
+	}
+}

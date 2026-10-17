@@ -486,7 +486,7 @@ The optional operator receives a relay-authored `notify` naming the sender, targ
 
 ### Your phone
 
-The relay serves an installable page at `/phone/` for admin devices: the team with each agent's status, ordered as `tincan top` orders it, and the asks held for your approval, with Deny and Approve. Add the phone's machine name to the relay's `--admin` list, open the address the relay logs at startup (`phone page: ...`), and add it to the home screen. With HTTPS certificates on your tailnet the relay serves the page over HTTPS under its MagicDNS name; without them it says why and serves it over plain HTTP on its usual address. Every other machine gets 403. See [Tincan on your phone](docs/phone.md).
+The relay serves an installable page at `/phone/` for admin devices: the team with each agent's status, ordered as `tincan top` orders it, and the asks held for your approval, with Deny and Approve. Add the phone's machine name to the relay's `--admin` list, open the address the relay logs at startup (`phone page: ...`), and add it to the home screen. With HTTPS certificates on your tailnet the relay serves the page over HTTPS under its MagicDNS name, and the installed page can alert you when an ask is held; the alert says only that a request is waiting, never what it is. Without certificates the relay says why and serves the page over plain HTTP on its usual address, without alerts. Every other machine gets 403. See [Tincan on your phone](docs/phone.md).
 
 ### Attachments
 

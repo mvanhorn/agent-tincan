@@ -356,6 +356,106 @@ async function decide(id, verb) {
   refresh();
 }
 
+// ---- Push alerts ----
+// The relay pushes a content-free alert for each held ask to every
+// subscribed admin phone. The page asks for permission only from a tap,
+// re-sends its subscription on every open, and says which state applies.
+
+function b64urlBytes(s) {
+  const b64 = (s + "=".repeat((4 - (s.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+function standalone() {
+  return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+function setAlerts(text, label, onClick) {
+  $("alerts-text").textContent = text;
+  const b = $("alerts-button");
+  b.hidden = !label;
+  b.disabled = false;
+  b.textContent = label || "";
+  b.onclick = onClick || null;
+}
+
+// subscribe makes this browser's push subscription with the relay's key,
+// replacing one made with an older key.
+async function subscribe(reg) {
+  const key = await api("GET", "/v1/admin/push/key");
+  if (key.status !== 200 || !key.data) return null;
+  const opts = { userVisibleOnly: true, applicationServerKey: b64urlBytes(key.data.public_key) };
+  try {
+    return await reg.pushManager.subscribe(opts);
+  } catch (_) {
+    const old = await reg.pushManager.getSubscription();
+    if (old) await old.unsubscribe();
+    return reg.pushManager.subscribe(opts);
+  }
+}
+
+async function pushState() {
+  try {
+    if (!window.isSecureContext || location.protocol !== "https:") {
+      setAlerts("Alerts need HTTPS on your tailnet. Until then, the approval notify teammate is the alert path.");
+      return;
+    }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+      setAlerts(standalone() ? "This browser cannot show alerts." : "For alerts, add this page to your Home Screen and open it from there.");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setAlerts("Alerts are blocked. Allow notifications for Tincan in Settings.");
+      return;
+    }
+    if (Notification.permission === "granted") {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = (await reg.pushManager.getSubscription()) || (await subscribe(reg));
+      if (sub) {
+        const res = await api("PUT", "/v1/admin/push/subscription", sub.toJSON());
+        if (res.status === 200) {
+          setAlerts("Alerts are on for held asks.", "Turn off", turnOffAlerts);
+          return;
+        }
+        if (res.status === 404) {
+          setAlerts("Push alerts are off on this relay.");
+          return;
+        }
+      }
+    }
+    setAlerts("Get an alert on this phone when an ask is held for you.", "Turn on alerts", turnOnAlerts);
+  } catch (_) {
+    setAlerts("Could not set up alerts. Reopen the page to try again.");
+  }
+}
+
+async function turnOnAlerts() {
+  $("alerts-button").disabled = true;
+  try {
+    await Notification.requestPermission();
+  } catch (_) {
+    // Older Safari takes a callback; the state check below covers it.
+  }
+  await pushState();
+  announce($("alerts-text").textContent);
+}
+
+async function turnOffAlerts() {
+  $("alerts-button").disabled = true;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      await api("DELETE", "/v1/admin/push/subscription", { endpoint: sub.endpoint });
+      await sub.unsubscribe();
+    }
+    setAlerts("Alerts are off on this phone.", "Turn on alerts", turnOnAlerts);
+  } catch (_) {
+    setAlerts("Could not turn alerts off. Try again.", "Turn off", turnOffAlerts);
+  }
+  announce($("alerts-text").textContent);
+}
+
 // ---- Start ----
 
 let timer = null;
@@ -369,6 +469,10 @@ function schedule() {
 }
 
 document.addEventListener("visibilitychange", schedule);
+// A tapped alert opens #held, in this window if it is already open.
+window.addEventListener("hashchange", () => {
+  if (location.hash === "#held") $("held").scrollIntoView();
+});
 
 function start() {
   if ("serviceWorker" in navigator) {
@@ -377,6 +481,7 @@ function start() {
   if (location.hash === "#held") $("held").scrollIntoView();
   render();
   schedule();
+  pushState();
 }
 
 start();

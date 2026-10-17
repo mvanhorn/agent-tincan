@@ -195,6 +195,29 @@ missing, expired or mismatched nonce on a request that is still held it answers
 `approved` and `denied` audit details name the deciding device
 (`{"device":"<machine name>"}`) for calls from the tailnet.
 
+Push alerts for held asks (admin devices and the local admin socket only;
+404 on a relay without push):
+
+- `GET /v1/admin/push/key`: `{"public_key":"<base64url VAPID key>"}`, the
+  `applicationServerKey` a browser subscribes with.
+- `PUT /v1/admin/push/subscription`: a browser `PushSubscription` as JSON,
+  `{"endpoint":"https://...","keys":{"p256dh":"...","auth":"..."}}`. The
+  endpoint must be https on `web.push.apple.com`, `fcm.googleapis.com`,
+  `updates.push.services.mozilla.com` or a `*.notify.windows.com` host, with
+  no port or user info (400 otherwise); `p256dh` is a 65-byte uncompressed
+  P-256 key and `auth` 16 bytes. The relay keeps one row per endpoint, so
+  the page sends it on every open. Returns `{"id":"<subscription id>"}`.
+- `DELETE /v1/admin/push/subscription`: `{"endpoint":"..."}`; returns
+  `{"removed":true|false}`.
+
+For each held send the relay queues an alert to every subscription in the
+background (a held send's response never waits for it): an aes128gcm Web Push
+message with `TTL: 3600`, `Urgency: high`, `Topic: tincan-held` and the JSON
+payload `{"title":"Agent Tincan","body":"A request is waiting for your approval","count":<held>,"url":"/phone/#held"}`.
+A 404 or 410 deletes the subscription. Audit events, with subscription ids
+only: `push_subscribed`, `push_unsubscribed`, `push_sent` (`status`, or
+`error` of `timeout`, `address refused` or `send failed`).
+
 `GET /phone/` and the files under it are the [phone page](phone.md), served
 to admin devices only (403 otherwise), on the relay's tailnet listeners and,
 when the tailnet issues the relay a certificate, on port 443 under its

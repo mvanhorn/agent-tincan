@@ -242,6 +242,18 @@ func loadOrCreateEmailTagKey(stateDir string) ([]byte, error) {
 	return b, err
 }
 
+// loadOrCreatePusher returns the relay's Web Push sender, signing with the
+// VAPID key in relay.PushKeyFile, which is created on first run exactly
+// like invite-pepper. A new key only means subscribed phones subscribe
+// again on their next open.
+func loadOrCreatePusher(stateDir string) (*relay.Pusher, error) {
+	b, _, err := loadOrCreateKeyFile(stateDir, relay.PushKeyFile, "push key")
+	if err != nil {
+		return nil, err
+	}
+	return relay.NewPusher(b)
+}
+
 // loadOrCreateKeyFile returns the 32-byte relay-local key in stateDir/name,
 // creating and persisting a fresh 256-bit one on first run, and whether it
 // did. A private temporary file is fully written, synced and closed before
@@ -409,6 +421,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	if err != nil {
 		return err
 	}
+	pusher, err := loadOrCreatePusher(f.stateDir)
+	if err != nil {
+		return err
+	}
 	st, err := store.Open(filepath.Join(f.stateDir, "relay.db"))
 	if err != nil {
 		return err
@@ -439,6 +455,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	dir := identity.NewDirectory(st, identity.WithVirtual(who), dirCfg)
 	srv := relay.New(dir, st, f.relayConfig())
 	srv.SetEmailTagKey(emailTagKey)
+	srv.SetPusher(pusher)
 	urls := who.SelfURLs(ctx, advertisePort(listenAt, f.port))
 	srv.SetURLs(urls)
 	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))

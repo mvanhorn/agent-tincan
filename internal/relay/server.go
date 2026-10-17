@@ -237,6 +237,8 @@ type Server struct {
 	// nonces are the decision nonces handed to the phone page with each
 	// held request (see phone.go).
 	nonces *nonceBook
+	// push sends held-ask alerts to subscribed admin phones; nil when off.
+	push *Pusher
 
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
@@ -401,6 +403,9 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
 	mux.HandleFunc("GET "+phone.Prefix, s.handlePhone)
+	mux.HandleFunc("GET /v1/admin/push/key", s.handlePushKey)
+	mux.HandleFunc("PUT /v1/admin/push/subscription", s.handlePushSubscribe)
+	mux.HandleFunc("DELETE /v1/admin/push/subscription", s.handlePushUnsubscribe)
 }
 
 // AdminHandler serves only admin routes and treats every caller as the local
@@ -2263,7 +2268,17 @@ func (s *Server) requestTTL(ctx context.Context, agent string) time.Duration {
 	return s.cfg.RequestTTL
 }
 
+// notifyApproval tells the owner a request is held: through the approval
+// policy's notify teammate, then by push to every subscribed admin phone.
+// Neither carries the request's text, and neither can change the hold.
 func (s *Server) notifyApproval(ctx context.Context, held envelope.Request) {
+	s.notifyOperator(ctx, held)
+	s.queuePush()
+}
+
+// notifyOperator sends the approval policy's notify teammate a relay
+// notice naming the held request.
+func (s *Server) notifyOperator(ctx context.Context, held envelope.Request) {
 	if held.ApprovalNotify == "" {
 		return
 	}
