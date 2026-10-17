@@ -2,6 +2,8 @@
 
 Agents talk to the relay over plain HTTP on the tailnet. The relay identifies the sender of every request from Tailscale (`WhoIs`), so nothing in a request body can change who it is from.
 
+The relay answers 403 to any request whose `Host` is not one of its own addresses (its MagicDNS short or full name, a tailnet IP, or its `--listen` address; `relay_urls` in `whoami` lists ones that work). It also refuses cross-origin browser requests: a request that sends `Origin` or `Sec-Fetch-Site` must be same-origin, and if it changes state it must be `Content-Type: application/json`. Clients that send no browser headers only need to use one of those addresses.
+
 ## Request
 
 | Field | Set by | Meaning |

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn/ipnstate"
 )
 
 // Node is the tailnet machine a connection came from.
@@ -120,6 +121,32 @@ func (r *LocalResolver) SelfURLs(ctx context.Context, port int) []string {
 			out = append(out, hostPort(ip.String()))
 			break
 		}
+	}
+	return out
+}
+
+// SelfNames are the names this tailnet node answers to, read from the same
+// status as SelfURLs: its MagicDNS full and short names and every tailnet
+// IP. The relay accepts only these (and its --listen address) in Host on
+// its tailnet listener (relay.HardenForBrowsers).
+func (r *LocalResolver) SelfNames(ctx context.Context) []string {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil {
+		return nil
+	}
+	return selfNames(st.Self)
+}
+
+func selfNames(self *ipnstate.PeerStatus) []string {
+	if self == nil {
+		return nil
+	}
+	var out []string
+	if name := strings.TrimSuffix(self.DNSName, "."); name != "" {
+		out = append(out, name, shortName(name))
+	}
+	for _, ip := range self.TailscaleIPs {
+		out = append(out, ip.String())
 	}
 	return out
 }

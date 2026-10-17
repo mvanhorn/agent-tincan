@@ -116,6 +116,10 @@ func (m *Mesh) Invite(t *testing.T, name string) string {
 // URL is the endpoint the relay sees as the machine agent name runs on.
 func (m *Mesh) URL(name string) string { return m.urls[name] }
 
+// Addr is the tailnet address the relay sees for the machine agent name runs
+// on, for tests that serve the relay through their own wrapper.
+func (m *Mesh) Addr(name string) string { return m.addrs[name] }
+
 // JoinOnMachineOf joins a new agent name on the machine host already runs
 // on and returns its client.
 func (m *Mesh) JoinOnMachineOf(t *testing.T, host, name string) *client.Relay {

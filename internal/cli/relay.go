@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -434,6 +435,11 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	urls := who.SelfURLs(ctx, advertisePort(listenAt, f.port))
 	srv.SetURLs(urls)
 	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))
+	hosts, err := relayHosts(who.SelfNames(ctx), urls, listenAt)
+	if err != nil {
+		return err
+	}
+	log.Printf("tincan relay accepts requests addressed to %s", strings.Join(hosts, ", "))
 	if f.listen != "" {
 		log.Printf("warning: with --listen the relay's address is this host's tailnet address, which changes if the host re-joins Tailscale. "+
 			"Agents with tailscale find it again by themselves; proxy-only agents may need tincan rejoin. "+
@@ -478,7 +484,9 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		srv.Run(runCtx)
 	}()
 
-	api := client.Configure(&http.Server{Handler: srv.Handler()}, client.RelayAPI)
+	// Only the tailnet listener is hardened against web pages: the gateway
+	// below calls srv.Handler() in process with Host tincan-relay.
+	api := client.Configure(&http.Server{Handler: relay.HardenForBrowsers(srv.Handler(), hosts)}, client.RelayAPI)
 	adminSock := filepath.Join(f.stateDir, "admin.sock")
 	os.Remove(adminSock)
 	aln, err := client.ListenUnix(adminSock)
@@ -560,6 +568,27 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	return up.restartErr()
 }
 
+// relayHosts are the names the tailnet API accepts in Host: the node's own
+// tailnet names, the host of every URL it advertises, and the --listen
+// address. An empty list would refuse every caller, so it is an error.
+func relayHosts(names, urls []string, listenAt string) ([]string, error) {
+	out := slices.Clone(names)
+	for _, raw := range urls {
+		if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+			out = append(out, u.Hostname())
+		}
+	}
+	if host, _, err := net.SplitHostPort(listenAt); err == nil {
+		out = append(out, host)
+	}
+	slices.Sort(out)
+	out = slices.Compact(out)
+	if len(out) == 0 {
+		return nil, errors.New("cannot read this relay's tailnet names from Tailscale; refusing to serve, since the API accepts only requests addressed to them")
+	}
+	return out, nil
+}
+
 // relayDrainTimeout bounds how long shutdown waits for calls in flight
 // before closing their connections. Held long polls do not count: they
 // answer as soon as shutdown starts.
@@ -586,11 +615,13 @@ func shutdown(servers []*http.Server) {
 }
 
 // relayResolver is what the relay needs from its tailnet: caller identity,
-// node liveness for rebinds, and the URLs it advertises.
+// node liveness for rebinds, the URLs it advertises, and the names it
+// accepts in Host.
 type relayResolver interface {
 	identity.Resolver
 	identity.NodeStatus
 	SelfURLs(ctx context.Context, port int) []string
+	SelfNames(ctx context.Context) []string
 }
 
 // openRelayNet opens the relay's agent API listener and identity resolver:
