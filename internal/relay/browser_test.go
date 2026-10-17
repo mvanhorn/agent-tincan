@@ -156,6 +156,7 @@ func TestBrowserOriginRules(t *testing.T) {
 	}{
 		{"no browser headers", "GET", "/v1/poll", "tincan-relay", nil, false, true},
 		{"phone opened from home screen", "GET", "/phone/", "tincan-relay", map[string]string{"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"}, false, true},
+		{"phone without the slash from home screen", "GET", "/phone", "tincan-relay", map[string]string{"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"}, false, true},
 		{"phone same-origin", "GET", "/phone/", "tincan-relay.example.ts.net", map[string]string{"Sec-Fetch-Site": "same-origin"}, false, true},
 		{"same-origin read", "GET", "/v1/admin/held", "tincan-relay", map[string]string{"Sec-Fetch-Site": "same-origin", "Origin": "http://tincan-relay"}, false, true},
 		{"same-origin over TLS", "POST", "/v1/send", "tincan-relay.example.ts.net", map[string]string{"Origin": "https://tincan-relay.example.ts.net", "Content-Type": "application/json"}, true, true},
@@ -163,6 +164,7 @@ func TestBrowserOriginRules(t *testing.T) {
 
 		{"none on another read", "GET", "/v1/admin/held", "tincan-relay", map[string]string{"Sec-Fetch-Site": "none"}, false, false},
 		{"none on a phone POST", "POST", "/phone/", "tincan-relay", map[string]string{"Sec-Fetch-Site": "none", "Content-Type": "application/json"}, false, false},
+		{"none on a phone POST without the slash", "POST", "/phone", "tincan-relay", map[string]string{"Sec-Fetch-Site": "none", "Content-Type": "application/json"}, false, false},
 		{"none on a deeper phone path", "GET", "/phone/x", "tincan-relay", map[string]string{"Sec-Fetch-Site": "none"}, false, false},
 		{"phone with a rebound Host", "GET", "/phone/", "evil.example", map[string]string{"Sec-Fetch-Site": "none"}, false, false},
 		{"cross-site read", "GET", "/v1/admin/held", "tincan-relay", map[string]string{"Sec-Fetch-Site": "cross-site"}, false, false},

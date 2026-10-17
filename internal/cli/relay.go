@@ -531,7 +531,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	// the tailnet it also gets its own TLS listener, hardened like the
 	// plain one with the certificate name added to the names it accepts;
 	// without it the page works over HTTP, minus push alerts.
-	if tln, certName, err := phoneTLS(ctx, who); err != nil {
+	if tln, certName, err := phoneTLS(ctx, who, advertisePort(listenAt, f.port)); err != nil {
 		log.Printf("phone page: %s (no HTTPS: %v; push alerts are off, so the approval notify teammate is the alert path)", phonePageURL(urls, ln), err)
 	} else {
 		defer tln.Close()
@@ -648,10 +648,19 @@ type tlsTailnet interface {
 // relay no certificate name.
 var errNoCertificates = errors.New("this tailnet has HTTPS certificates turned off (Tailscale admin console, DNS page, HTTPS Certificates)")
 
+// errAPIOn443 is why there is no HTTPS when the API listener already holds
+// port 443: the HTTPS listener would bind the same port. The API listener
+// there is plain HTTP, so the page is served over HTTP on port 443.
+var errAPIOn443 = errors.New("the API listener already uses port 443 (--port 443 or --listen ip:443) and serves plain HTTP there; pick another port for HTTPS")
+
 // phoneTLS opens the phone page's HTTPS listener (KTD15), or says why it
-// cannot. A tailscale serve front is not supported: the relay would see
-// every request come from 127.0.0.1 and could not tell devices apart.
-func phoneTLS(ctx context.Context, who relayResolver) (net.Listener, string, error) {
+// cannot. apiPort is the port the plain API listener bound. A tailscale
+// serve front is not supported: the relay would see every request come
+// from 127.0.0.1 and could not tell devices apart.
+func phoneTLS(ctx context.Context, who relayResolver, apiPort int) (net.Listener, string, error) {
+	if apiPort == 443 {
+		return nil, "", errAPIOn443
+	}
 	t, ok := who.(tlsTailnet)
 	if !ok {
 		return nil, "", errors.New("this relay's tailnet connection cannot serve HTTPS")

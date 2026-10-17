@@ -29,7 +29,8 @@ var (
 //   - must name one of hosts in Host (any port), which defeats DNS
 //     rebinding, whose requests carry the attacker's name and no Origin;
 //   - when it carries Origin or Sec-Fetch-Site, must be same-origin, except
-//     Sec-Fetch-Site: none on GET /phone/;
+//     Sec-Fetch-Site: none on GET /phone/ (and GET /phone, which redirects
+//     there);
 //   - when a browser marks it (Origin or any Sec-Fetch-* header) and its
 //     method changes state, must be Content-Type: application/json, which
 //     no form or no-preflight fetch can send.
@@ -81,8 +82,9 @@ func sameOrigin(r *http.Request) bool {
 	case "none":
 		// The phone page is the one page a browser may open from outside
 		// the relay's own pages: a typed address, a bookmark or a
-		// home-screen icon.
-		if r.Method != http.MethodGet || r.URL.Path != phone.Prefix {
+		// home-screen icon. /phone itself is let through too, so the mux
+		// can redirect it to /phone/.
+		if r.Method != http.MethodGet || (r.URL.Path != phone.Prefix && r.URL.Path != strings.TrimSuffix(phone.Prefix, "/")) {
 			return false
 		}
 	default:

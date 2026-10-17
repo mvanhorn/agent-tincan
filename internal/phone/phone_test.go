@@ -217,3 +217,68 @@ func TestPushAlertsInThePage(t *testing.T) {
 		t.Error("the page must send its subscription to the relay")
 	}
 }
+
+// funcBody is the source of the top-level function name in src, up to its
+// closing brace at the start of a line.
+func funcBody(t *testing.T, src, name string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(src, "function "+name+"(")
+	if !ok {
+		t.Fatalf("app.js has no function %s", name)
+	}
+	body, _, ok := strings.Cut(rest, "\n}\n")
+	if !ok {
+		t.Fatalf("function %s does not end", name)
+	}
+	return body
+}
+
+// Send stays off while an ask is on its way, so a poll that renders in
+// the meantime cannot turn it back on for a second tap.
+func TestAskSendOffWhileSending(t *testing.T) {
+	app := read(t, "app.js")
+	if !strings.Contains(funcBody(t, app, "renderAsk"), `$("ask-send").disabled = sending ||`) {
+		t.Error("renderAsk must keep Send off while an ask is being sent")
+	}
+	send := funcBody(t, app, "sendAsk")
+	if !strings.Contains(send, "sending = true") || !strings.Contains(send, "sending = false") {
+		t.Error("sendAsk must mark the send in flight and clear it when done")
+	}
+}
+
+// A stalled request ends after a timeout and counts as offline, so one
+// hung fetch cannot keep the poll from running again.
+func TestAPITimesOut(t *testing.T) {
+	body := funcBody(t, read(t, "app.js"), "api")
+	for _, want := range []string{"AbortController", "abort()", "signal"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("api lacks %s", want)
+		}
+	}
+}
+
+// Turn off is remembered on this device: opening the page again shows Turn
+// on alerts rather than making a new subscription, until the owner taps it.
+func TestAlertsOffIsRemembered(t *testing.T) {
+	app := read(t, "app.js")
+	if !strings.Contains(funcBody(t, app, "turnOffAlerts"), "alertsOff(true)") {
+		t.Error("Turn off must remember that alerts are off on this device")
+	}
+	if !strings.Contains(funcBody(t, app, "turnOnAlerts"), "alertsOff(false)") {
+		t.Error("Turn on alerts must clear the remembered off")
+	}
+	push := funcBody(t, app, "pushState")
+	off, sub := strings.Index(push, "alertsOff()"), strings.Index(push, "subscribe(reg)")
+	if off < 0 || sub < 0 || off > sub {
+		t.Error("pushState must check the remembered off before it subscribes")
+	}
+}
+
+// The page refuses a phone agent's name unless it is this device's own
+// phone agent, since an invite for it would move it to this device.
+func TestJoinRefusesAnotherPhone(t *testing.T) {
+	body := funcBody(t, read(t, "app.js"), "join")
+	if !strings.Contains(body, "remembered()") || !strings.Contains(body, "another phone") {
+		t.Error("join must refuse a phone agent this device does not already have")
+	}
+}

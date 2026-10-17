@@ -157,12 +157,14 @@ func TestPhoneApproveWithNonce(t *testing.T) {
 	req := holdOne(t, m)
 	admin := hardened(t, m, "admin")
 
+	// The CLI's listing over the tailnet carries nonces too (it cannot be
+	// told from a plain-http page), but the CLI decides without them.
 	var cli []heldEntry
 	if err := m.Client(t, "admin").Raw(t.Context(), "GET", "/v1/admin/held", nil, &cli); err != nil {
 		t.Fatal(err)
 	}
-	if len(cli) != 1 || cli[0].ApproveNonce != "" || cli[0].DenyNonce != "" {
-		t.Fatalf("the CLI's held listing carries nonces: %+v", cli)
+	if len(cli) != 1 || cli[0].ID != req.ID {
+		t.Fatalf("the CLI's held listing: %+v", cli)
 	}
 
 	items := listHeld(t, admin)
@@ -206,6 +208,44 @@ func TestPhoneApproveWithNonce(t *testing.T) {
 	}
 	if approved != 1 {
 		t.Fatalf("approved %d times, want once", approved)
+	}
+}
+
+// Over plain http to a tailnet name a browser sends no Sec-Fetch-* and no
+// Origin on a same-origin GET, so the held listing cannot tell it from the
+// CLI. It still carries nonces, and the page's approve, which does carry
+// Origin, succeeds with one. The local admin socket gets none.
+func TestPhoneApproveOverPlainHTTP(t *testing.T) {
+	m := gatedMesh(t, relay.Config{})
+	req := holdOne(t, m)
+	admin := hardened(t, m, "admin")
+	const host = "tincan-relay.example.ts.net"
+
+	code, body, _ := browserCall(t, "GET", admin, "/v1/admin/held", host, "", nil)
+	if code != http.StatusOK {
+		t.Fatalf("held: %d %s", code, body)
+	}
+	var items []heldEntry
+	if err := json.Unmarshal([]byte(body), &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ApproveNonce == "" || items[0].DenyNonce == "" {
+		t.Fatalf("held listing without browser headers: %+v, want nonces", items)
+	}
+	in, _ := json.Marshal(map[string]string{"nonce": items[0].ApproveNonce})
+	code, body, _ = browserCall(t, "POST", admin, "/v1/admin/requests/"+req.ID+"/approve", host, string(in), map[string]string{"Origin": "http://" + host, "Content-Type": "application/json"})
+	var out decision
+	json.Unmarshal([]byte(body), &out)
+	if code != http.StatusOK || out.Status != envelope.StatusQueued {
+		t.Fatalf("approve over plain http: %d %s", code, body)
+	}
+
+	holdOne(t, m)
+	local := httptest.NewServer(m.Server.AdminHandler())
+	t.Cleanup(local.Close)
+	code, body, _ = browserCall(t, "GET", local.URL, "/v1/admin/held", "127.0.0.1", "", nil)
+	if code != http.StatusOK || strings.Contains(body, "nonce") {
+		t.Fatalf("local admin held listing: %d %s, want no nonces", code, body)
 	}
 }
 

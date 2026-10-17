@@ -172,9 +172,11 @@ receive 403:
 
 - `GET /v1/admin/held`: array of request envelopes, with bodies truncated to
   200 Unicode characters, including sender, chain and target, and optional
-  `to_kind`. A browser caller (one that sends `Origin` or any `Sec-Fetch-*`
-  header, as the phone page does) also gets `approve_nonce`, `deny_nonce` and
-  `nonce_expires_at` on each entry.
+  `to_kind`. A tailnet caller also gets `approve_nonce`, `deny_nonce` and
+  `nonce_expires_at` on each entry, bound to its device. Every tailnet caller
+  gets them, because over plain http a browser's same-origin GET carries no
+  `Origin` and no `Sec-Fetch-*` and cannot be told from the CLI; the local
+  admin socket gets none. Clients that ignore them see no change.
 - `POST /v1/admin/requests/{id}/approve`: returns the queued request. A fresh
   normal TTL starts; the original `created_at` is kept. Normal wake follows.
 - `POST /v1/admin/requests/{id}/deny`: optional `{"reason":"..."}` body;
@@ -191,7 +193,9 @@ dies when the hold ends. A browser decision answers
 (the nonce was used, or another device or the CLI decided first) it answers 200
 `{"id":"...","status":"<final status>","already_decided":true}`, and with a
 missing, expired or mismatched nonce on a request that is still held it answers
-409. Clients that send no browser headers need no nonce and see no change. The
+409. A browser caller is one that sends `Origin` or any `Sec-Fetch-*` header,
+as every browser does on a POST. Clients that send no browser headers need no
+nonce and see no change. The
 `approved` and `denied` audit details name the deciding device
 (`{"device":"<machine name>"}`) for calls from the tailnet.
 
@@ -210,10 +214,14 @@ Push alerts for held asks (admin devices and the local admin socket only;
 - `DELETE /v1/admin/push/subscription`: `{"endpoint":"..."}`; returns
   `{"removed":true|false}`.
 
-For each held send the relay queues an alert to every subscription in the
-background (a held send's response never waits for it): an aes128gcm Web Push
-message with `TTL: 3600`, `Urgency: high`, `Topic: tincan-held` and the JSON
-payload `{"title":"Agent Tincan","body":"A request is waiting for your approval","count":<held>,"url":"/phone/#held"}`.
+For each held send the relay queues an alert round to every subscription in
+the background (a held send's response never waits for it): an aes128gcm Web
+Push message with `TTL: 3600`, `Urgency: high`, `Topic: tincan-held` and the
+JSON payload `{"count":<held>}`, the number of requests held when the round
+goes out, at least 1. The payload carries no text or link: the page's service
+worker supplies the notification text and opens `/phone/#held` when it is
+tapped. Held sends that arrive close together share one round: a send while a
+round is already waiting joins it, and that round's count covers them all.
 A 404 or 410 deletes the subscription. Audit events, with subscription ids
 only: `push_subscribed`, `push_unsubscribed`, `push_sent` (`status`, or
 `error` of `timeout`, `address refused` or `send failed`).
@@ -232,7 +240,8 @@ mention target; it may be a room member. The relay adds no route for it.
 `GET /phone/` and the files under it are the [phone page](phone.md), served
 to admin devices only (403 otherwise), on the relay's tailnet listeners and,
 when the tailnet issues the relay a certificate, on port 443 under its
-certificate name.
+certificate name (unless the API listener itself is on port 443). `GET /phone`
+redirects to `/phone/`.
 The sweep expires overdue holds and logs `hold_expired`. Holds survive restarts
 with their original deadline. Policy changes apply only to future sends.
 A `ping` is never held: it has no body and runs no model work. Search results

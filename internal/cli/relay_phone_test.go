@@ -129,18 +129,35 @@ func TestRelayProcessPhonePageOverHTTPS(t *testing.T) {
 
 // phoneTLS asks the tailnet for HTTPS and passes on why it has none.
 func TestPhoneTLSFromTheTailnet(t *testing.T) {
-	if _, _, err := phoneTLS(t.Context(), loopbackTailnet{}); err == nil {
+	if _, _, err := phoneTLS(t.Context(), loopbackTailnet{}, 8080); err == nil {
 		t.Fatal("a tailnet connection that cannot serve HTTPS gave a listener")
 	}
 	off := errors.New("HTTPS certificates are off")
-	if _, _, err := phoneTLS(t.Context(), failingTLS{err: off}); !errors.Is(err, off) {
+	if _, _, err := phoneTLS(t.Context(), failingTLS{err: off}, 8080); !errors.Is(err, off) {
 		t.Fatalf("phoneTLS = %v, want %v", err, off)
 	}
-	ln, name, err := phoneTLS(t.Context(), loopbackTLSTailnet{dir: t.TempDir()})
+	ln, name, err := phoneTLS(t.Context(), loopbackTLSTailnet{dir: t.TempDir()}, 8080)
 	if err != nil || name != testCertName {
 		t.Fatalf("phoneTLS = %q %v", name, err)
 	}
 	ln.Close()
+}
+
+// With the API itself on port 443 (--port 443, or --listen ip:443) the
+// HTTPS listener would collide with it, so phoneTLS opens none and says
+// why; the page is served over plain HTTP on the API listener.
+func TestPhoneTLSSkippedWhenTheAPIHas443(t *testing.T) {
+	dir := t.TempDir()
+	ln, _, err := phoneTLS(t.Context(), loopbackTLSTailnet{dir: dir}, 443)
+	if ln != nil {
+		ln.Close()
+	}
+	if !errors.Is(err, errAPIOn443) {
+		t.Fatalf("phoneTLS with the API on 443 = %v, want %v", err, errAPIOn443)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tlsurl")); err == nil {
+		t.Fatal("phoneTLS opened an HTTPS listener with the API on 443")
+	}
 }
 
 type failingTLS struct {

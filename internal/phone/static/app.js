@@ -5,6 +5,9 @@
 "use strict";
 
 const POLL_MS = 5000;
+// API_TIMEOUT_MS ends a request the relay has not answered, so one stalled
+// fetch cannot hold the poll; a timeout counts as offline.
+const API_TIMEOUT_MS = 15000;
 
 const state = {
   held: new Map(), // request id -> {item, li, deciding, note}
@@ -21,6 +24,10 @@ const state = {
   sent: new Map(), // request id -> {result, li, ...} for this phone's asks
   lastHeldCount: -1,
 };
+
+// sending is true while an ask is on its way, so a render from a poll in
+// the meantime keeps Send off.
+let sending = false;
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DONE = new Set(["answered", "failed", "declined", "cancelled", "expired"]);
@@ -75,19 +82,38 @@ function plural(n, word) {
 }
 
 // api calls the relay. A body is sent as JSON, which the relay requires of
-// every state-changing browser request.
+// every state-changing browser request. It throws, as when offline, if the
+// relay has not answered within API_TIMEOUT_MS; the error has timeout set.
 async function api(method, path, body, agent) {
-  const init = { method, credentials: "same-origin", cache: "no-store", headers: {} };
+  const ctl = new AbortController();
+  const stall = setTimeout(() => ctl.abort(), API_TIMEOUT_MS);
+  const init = { method, credentials: "same-origin", cache: "no-store", headers: {}, signal: ctl.signal };
   const name = agent === undefined ? state.me : agent;
   if (name) init.headers["X-Tincan-Agent"] = name;
   if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
-  const resp = await fetch(path, init);
-  let data = null;
-  try { data = await resp.json(); } catch (_) { data = null; }
-  return { status: resp.status, data };
+  const timedOut = () => Object.assign(new Error("the relay did not answer in time"), { timeout: true });
+  try {
+    let resp;
+    try {
+      resp = await fetch(path, init);
+    } catch (e) {
+      throw ctl.signal.aborted ? timedOut() : e;
+    }
+    let data = null;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      // A body cut off by the timeout is not an empty answer.
+      if (ctl.signal.aborted) throw timedOut();
+      data = null;
+    }
+    return { status: resp.status, data };
+  } finally {
+    clearTimeout(stall);
+  }
 }
 
 // ---- Attention order, the same score as tincan top ----
@@ -301,7 +327,7 @@ function renderAsk() {
     if (targets.some((a) => a.name === current)) select.value = current;
   }
   const disabled = state.offline || state.notAdmin;
-  $("ask-send").disabled = disabled || targets.length === 0;
+  $("ask-send").disabled = sending || disabled || targets.length === 0;
   // A sent-list refresh in flight renders the list when it lands.
   if (!sentPolling) renderSent();
 }
@@ -394,11 +420,20 @@ function renderSent() {
 }
 
 // whoami finds this phone's agent: the name it joined as, else the one
-// agent on this device if that is a phone.
+// agent on this device if that is a phone. Only a 200 or a 403 settles it;
+// an error or any other answer leaves it unchecked, so the next poll asks
+// again. The remembered name is kept when this device has no phone agent,
+// so the page can rejoin under it after the phone's node is replaced.
 async function whoami() {
   const saved = remembered();
-  let res = await api("GET", "/v1/whoami", undefined, saved);
-  if (res.status === 403 && saved) res = await api("GET", "/v1/whoami", undefined, "");
+  let res;
+  try {
+    res = await api("GET", "/v1/whoami", undefined, saved);
+    if (res.status === 403 && saved) res = await api("GET", "/v1/whoami", undefined, "");
+  } catch (_) {
+    return;
+  }
+  if (res.status !== 200 && res.status !== 403) return;
   state.meChecked = true;
   state.meNote = "";
   if (res.status === 200 && res.data && res.data.kind === "phone") {
@@ -406,7 +441,6 @@ async function whoami() {
     remember(state.me);
   } else {
     state.me = "";
-    remember("");
     if (res.status === 200 && res.data) {
       state.meNote = "This device already runs " + res.data.name + ". Join a phone agent beside it to ask from here.";
     }
@@ -423,10 +457,15 @@ async function join() {
     return;
   }
   // An invite for a name that exists moves that agent to this device, so
-  // only a free name or an earlier phone agent may be used.
+  // only a free name or this device's own earlier phone agent may be used.
   const taken = state.roster.find((a) => a.name === name);
   if (taken && taken.kind !== "phone") {
     err.textContent = name + " is another agent on the team. Pick a different name.";
+    err.hidden = false;
+    return;
+  }
+  if (taken && name !== state.me && name !== remembered()) {
+    err.textContent = name + " is another phone's agent. Pick a different name, or remove it first with tincan remove " + name + ".";
     err.hidden = false;
     return;
   }
@@ -453,7 +492,8 @@ async function sendAsk() {
   const body = $("ask-body").value.trim();
   const err = $("ask-error");
   err.hidden = true;
-  if (!to || !body) return;
+  if (!to || !body || sending) return;
+  sending = true;
   $("ask-send").disabled = true;
   try {
     const res = await api("POST", "/v1/send", { to, body, kind: "ask" });
@@ -467,9 +507,12 @@ async function sendAsk() {
     $("ask-body").value = "";
     announce(status === "held" ? "Sent to " + to + ", held for your approval." : "Sent to " + to + ".");
   } catch (e) {
-    err.textContent = "Not sent: " + e.message;
+    err.textContent = e.timeout
+      ? "No answer from the relay in time. It may have been sent; check Your asks before sending again."
+      : "Not sent: " + e.message;
     err.hidden = false;
   } finally {
+    sending = false;
     render();
   }
 }
@@ -607,7 +650,7 @@ async function decide(id, verb) {
     entry.deciding = false;
     state.offline = true;
     render();
-    announce("Offline. Nothing was decided.");
+    announce("Offline. This ask may not have been decided; the held list shows it once the relay answers.");
     return;
   }
   entry.deciding = false;
@@ -643,6 +686,32 @@ function b64urlBytes(s) {
 
 function standalone() {
   return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+}
+
+// alertsOff reads, or with on given sets, this device's choice to keep
+// alerts off, so opening the page again does not subscribe it anew.
+// Storage may be off; then the choice lasts only while the page is open.
+let alertsOffHere = false;
+function alertsOff(on) {
+  if (on !== undefined) alertsOffHere = on;
+  try {
+    if (on === true) localStorage.setItem("tincan-phone-alerts-off", "1");
+    else if (on === false) localStorage.removeItem("tincan-phone-alerts-off");
+    else return alertsOffHere || localStorage.getItem("tincan-phone-alerts-off") === "1";
+  } catch (_) {
+    // Keep the in-page choice.
+  }
+  return alertsOffHere;
+}
+
+// unsubscribe removes this browser's subscription from the relay and the
+// push service.
+async function unsubscribe(reg) {
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    await api("DELETE", "/v1/admin/push/subscription", { endpoint: sub.endpoint });
+    await sub.unsubscribe();
+  }
 }
 
 function setAlerts(text, label, onClick) {
@@ -683,6 +752,15 @@ async function pushState() {
       setAlerts("Alerts are blocked. Allow notifications for Tincan in Settings.");
       return;
     }
+    if (alertsOff()) {
+      // Turned off on this device: never subscribe again until Turn on
+      // alerts. A removal that failed earlier is tried again quietly.
+      if (Notification.permission === "granted") {
+        navigator.serviceWorker.ready.then(unsubscribe).catch(() => {});
+      }
+      setAlerts("Alerts are off on this phone.", "Turn on alerts", turnOnAlerts);
+      return;
+    }
     if (Notification.permission === "granted") {
       const reg = await navigator.serviceWorker.ready;
       const sub = (await reg.pushManager.getSubscription()) || (await subscribe(reg));
@@ -706,6 +784,7 @@ async function pushState() {
 
 async function turnOnAlerts() {
   $("alerts-button").disabled = true;
+  alertsOff(false);
   try {
     await Notification.requestPermission();
   } catch (_) {
@@ -717,13 +796,9 @@ async function turnOnAlerts() {
 
 async function turnOffAlerts() {
   $("alerts-button").disabled = true;
+  alertsOff(true);
   try {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
-    if (sub) {
-      await api("DELETE", "/v1/admin/push/subscription", { endpoint: sub.endpoint });
-      await sub.unsubscribe();
-    }
+    await unsubscribe(await navigator.serviceWorker.ready);
     setAlerts("Alerts are off on this phone.", "Turn on alerts", turnOnAlerts);
   } catch (_) {
     setAlerts("Could not turn alerts off. Try again.", "Turn off", turnOffAlerts);

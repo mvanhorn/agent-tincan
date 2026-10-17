@@ -2099,8 +2099,12 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 	// Each entry also names the target's kind, so the owner sees a council ask
 	// (which goes on to every model vendor) for what it is. The attachments'
 	// names and sizes already ride on the request. Old clients ignore to_kind.
-	// A browser (the phone page) also gets one approve and one deny nonce per
-	// entry, bound to this device; it must send the nonce back to decide.
+	// A tailnet caller also gets one approve and one deny nonce per entry,
+	// bound to its device; a browser (the phone page) must send the nonce
+	// back to decide. Every tailnet caller gets them, not only browser-marked
+	// ones: over plain http a browser's same-origin GET carries no Origin and
+	// no Sec-Fetch-*, so the listing cannot tell the page from the CLI. The
+	// local admin socket has no device and gets none; old clients ignore them.
 	type heldRequest struct {
 		envelope.Request
 		ToKind         string    `json:"to_kind,omitempty"`
@@ -2109,7 +2113,7 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		NonceExpiresAt time.Time `json:"nonce_expires_at,omitzero"`
 	}
 	var node string
-	if browserMarked(r) {
+	if !isLocalAdmin(r.Context()) {
 		node = s.callerNode(r).ID
 	}
 	now := s.cfg.Now()
