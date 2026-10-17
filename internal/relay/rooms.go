@@ -100,6 +100,48 @@ func (s *Server) roomAgent(w http.ResponseWriter, ctx context.Context, room, age
 	return true
 }
 
+// mayMirror reports whether agent's reply to request id may be posted to
+// the room of the mention it answers: agent is still allowed in rooms
+// (roomRefusal), checked again at reply time since approval.json or the
+// agent's kind may have changed since the mention. Any error refuses; the
+// reply is still recorded, as an ordinary reply to the poster. The store
+// checks membership itself, as the reply is written.
+func (s *Server) mayMirror(ctx context.Context, id, agent string) bool {
+	req, _, err := s.store.Request(ctx, id)
+	if err != nil || req.RoomPostID == 0 {
+		return err == nil
+	}
+	a, ok, err := s.dir.Agent(ctx, agent)
+	if err != nil || !ok {
+		return false
+	}
+	return s.roomRefusal(a) == nil
+}
+
+// redactRooms hides each mention step's room text (RedactRoom) from
+// reader unless it is now a member of the mention's room.
+func (s *Server) redactRooms(ctx context.Context, steps []store.TraceStep, reader string) error {
+	member := map[int64]bool{}
+	for i := range steps {
+		post := steps[i].Request.RoomPostID
+		if post == 0 {
+			continue
+		}
+		ok, seen := member[post]
+		if !seen {
+			var err error
+			if ok, err = s.store.RoomPostMember(ctx, post, reader); err != nil {
+				return err
+			}
+			member[post] = ok
+		}
+		if !ok {
+			steps[i].RedactRoom()
+		}
+	}
+	return nil
+}
+
 // handleRooms lists the rooms the calling agent is in.
 func (s *Server) handleRooms(w http.ResponseWriter, r *http.Request) {
 	name := s.agent(w, r)
@@ -115,11 +157,19 @@ func (s *Server) handleRooms(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRoomRead returns a page of a room's posts after the after cursor
-// (a post id), oldest first, to a member.
+// (a post id), oldest first, to a member. With ids (a comma-separated list
+// of at most store.MaxRoomIDs post ids) it returns those of the room's
+// posts instead, so a reader can see where their mentions stand now; next
+// is then the after cursor unchanged.
 func (s *Server) handleRoomRead(w http.ResponseWriter, r *http.Request) {
 	name := s.agent(w, r)
 	room := r.PathValue("room")
 	if name == "" || !s.roomAgent(w, r.Context(), room, name) {
+		return
+	}
+	ids, err := idsParam(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	after, err := nonNegIntParam(r, "after")
@@ -137,16 +187,42 @@ func (s *Server) handleRoomRead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	posts, err := s.store.RoomPosts(r.Context(), room, after, int(limit))
+	var posts []envelope.RoomPost
+	if ids != nil {
+		posts, err = s.store.RoomPostsByID(r.Context(), room, ids)
+	} else {
+		posts, err = s.store.RoomPosts(r.Context(), room, after, int(limit))
+	}
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
 	next := after
-	if len(posts) > 0 {
+	if ids == nil && len(posts) > 0 {
 		next = posts[len(posts)-1].ID
 	}
 	writeJSON(w, http.StatusOK, envelope.RoomThread{Room: room, Members: rm.Members, Posts: posts, Next: next})
+}
+
+// idsParam reads the ids query parameter: nil when absent, else at most
+// store.MaxRoomIDs positive post ids.
+func idsParam(r *http.Request) ([]int64, error) {
+	if !r.URL.Query().Has("ids") {
+		return nil, nil
+	}
+	parts := strings.Split(r.URL.Query().Get("ids"), ",")
+	if len(parts) > store.MaxRoomIDs {
+		return nil, fmt.Errorf("at most %d ids", store.MaxRoomIDs)
+	}
+	ids := make([]int64, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.ParseInt(p, 10, 64)
+		if err != nil || n <= 0 {
+			return nil, errors.New("bad ids")
+		}
+		ids = append(ids, n)
+	}
+	return ids, nil
 }
 
 // nonNegIntParam reads a non-negative integer query parameter, 0 when absent.
@@ -434,7 +510,8 @@ func (s *Server) handleAdminRooms(w http.ResponseWriter, r *http.Request) {
 
 // handleRoomMember adds (POST) or removes (DELETE) a room member (admin
 // only). An agent rooms exclude is refused with the reason; a member that
-// sends the thread to its vendor is added with a warning saying so.
+// sends the thread to its vendor is added with a warning saying so. A
+// removal cancels the member's open mentions from the room.
 func (s *Server) handleRoomMember(w http.ResponseWriter, r *http.Request) {
 	if !s.isAdmin(r) {
 		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
@@ -450,13 +527,17 @@ func (s *Server) handleRoomMember(w http.ResponseWriter, r *http.Request) {
 	room := r.PathValue("room")
 	out := client.RoomMemberResult{Room: room, Agent: in.Agent}
 	if r.Method == http.MethodDelete {
-		removed, err := s.store.RemoveRoomMember(r.Context(), room, in.Agent)
+		removed, cancelled, err := s.store.RemoveRoomMember(r.Context(), room, in.Agent)
 		if err != nil {
 			writeErr(w, statusFor(err), err)
 			return
 		}
+		for _, id := range cancelled {
+			s.hub.notify(requestKey(id))
+			s.record(r.Context(), "cancelled", id, "", "relay", store.DetailJSON(map[string]any{"reason": "room_member_removed", "room": room}))
+		}
 		if removed {
-			s.record(r.Context(), "room_member_removed", "", "", s.remote(r), store.DetailJSON(map[string]any{"room": room, "agent": in.Agent}))
+			s.record(r.Context(), "room_member_removed", "", "", s.remote(r), store.DetailJSON(map[string]any{"room": room, "agent": in.Agent, "cancelled": len(cancelled)}))
 		}
 		out.Changed = removed
 		writeJSON(w, http.StatusOK, out)

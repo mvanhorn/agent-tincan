@@ -115,18 +115,65 @@ func (s *Store) AddRoomMember(ctx context.Context, room, agent string) (bool, er
 }
 
 // RemoveRoomMember takes agent out of room. It reports false when agent
-// was not a member.
-func (s *Store) RemoveRoomMember(ctx context.Context, room, agent string) (bool, error) {
+// was not a member. In the same transaction it cancels agent's open asks
+// built from mentions in room, each with a relay note for the poster, and
+// returns their ids: a member the owner took out answers nothing more from
+// the room.
+func (s *Store) RemoveRoomMember(ctx context.Context, room, agent string) (bool, []string, error) {
 	id, err := roomID(ctx, s.db, room)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND agent = ?`, id, agent)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND agent = ?`, id, agent)
+	if err != nil {
+		return false, nil, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, nil, err
+	}
+	now := s.now().UnixMilli()
+	rows, err := tx.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+		WHERE to_agent = ? AND status IN (?, ?, ?, ?, ?) AND room_post_id IN (SELECT id FROM room_posts WHERE room_id = ?) RETURNING id`,
+		string(envelope.StatusCancelled), now, agent,
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusHeld), id)
+	if err != nil {
+		return false, nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var rid string
+		if err := rows.Scan(&rid); err != nil {
+			rows.Close()
+			return false, nil, err
+		}
+		ids = append(ids, rid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, nil, err
+	}
+	note := fmt.Sprintf("Cancelled: %s was removed from room %s.", agent, room)
+	for _, rid := range ids {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO relay_notes (request_id, kind, episode, note, at) VALUES (?, ?, 0, ?, ?)
+			ON CONFLICT(request_id, kind, episode) DO NOTHING`, rid, NoteRoomRemoved, note, now); err != nil {
+			return false, nil, err
+		}
+	}
+	return n > 0, ids, tx.Commit()
+}
+
+// RoomPostMember reports whether agent is now a member of the room post
+// postID is in; false when there is no such post.
+func (s *Store) RoomPostMember(ctx context.Context, postID int64, agent string) (bool, error) {
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ? WHERE p.id = ?)`, agent, postID).Scan(&ok)
+	return ok, err
 }
 
 // IsRoomMember reports whether agent is a member of room, or ErrNoRoom.
@@ -211,11 +258,15 @@ func (s *Store) AddRoomPost(ctx context.Context, room, author, body string) (env
 // mirrorReplyTx posts rep, the reply just written in tx, into the room of
 // the mention its request came from, as the replier's post: with the
 // reply's status, and under the request id and reply generation, which
-// may post once. It does nothing for a request that is not a mention, or
-// when the replier is no longer a member of the room; a caller holding the
-// request can skip it when RoomPostID is 0. Running inside the
+// may post once. It does nothing for a request that is not a mention, for
+// a reply marked NoMirror (the relay found the replier no longer allowed
+// in rooms), or when the replier is no longer a member of the room; a
+// caller holding the request can skip it when RoomPostID is 0. Running inside the
 // reply's own transaction, the reply and its room post commit together.
 func (s *Store) mirrorReplyTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
+	if rep.NoMirror {
+		return nil
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO room_posts (room_id, author, body, created_at, status, reply_to, reply_generation)
 		SELECT p.room_id, ?, ?, ?, ?, q.id, ? FROM requests q
 		JOIN room_posts p ON p.id = q.room_post_id
@@ -286,6 +337,32 @@ func (s *Store) RoomPosts(ctx context.Context, room string, after int64, limit i
 		limit = MaxRoomPage
 	}
 	posts, err := s.roomPosts(ctx, room, `SELECT id, author, body, created_at, status, reply_to FROM room_posts WHERE room_id = ? AND id > ? ORDER BY id LIMIT ?`, id, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	return posts, s.addMentions(ctx, posts)
+}
+
+// MaxRoomIDs bounds how many posts one read by id returns.
+const MaxRoomIDs = 50
+
+// RoomPostsByID returns the posts of room among ids, oldest first, each
+// with the asks its mentions became; ids of other rooms' posts, or of no
+// post, are left out. At most MaxRoomIDs ids are looked at.
+func (s *Store) RoomPostsByID(ctx context.Context, room string, ids []int64) ([]envelope.RoomPost, error) {
+	id, err := roomID(ctx, s.db, room)
+	if err != nil {
+		return nil, err
+	}
+	ids = ids[:min(len(ids), MaxRoomIDs)]
+	if len(ids) == 0 {
+		return []envelope.RoomPost{}, nil
+	}
+	args := []any{id}
+	for _, p := range ids {
+		args = append(args, p)
+	}
+	posts, err := s.roomPosts(ctx, room, `SELECT id, author, body, created_at, status, reply_to FROM room_posts WHERE room_id = ? AND id IN (?`+strings.Repeat(", ?", len(ids)-1)+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}

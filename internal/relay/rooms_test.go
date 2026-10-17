@@ -461,8 +461,9 @@ func TestRoomMentionToWebMember(t *testing.T) {
 	}
 }
 
-// A question posts as a question; a replier removed from the room meanwhile
-// has its answer recorded but not posted.
+// A question posts as a question; a replier removed from the room after
+// the question is answered has the resumed mention cancelled, so nothing
+// more is posted.
 func TestRoomMirrorQuestionAndFormerMember(t *testing.T) {
 	m := mentionMesh(t)
 	post(t, m, "codex", "@claude-code review this")
@@ -481,15 +482,14 @@ func TestRoomMirrorQuestionAndFormerMember(t *testing.T) {
 	if _, err := client.RemoveRoomMember(t.Context(), m.Client(t, "admin"), "launch", "claude-code"); err != nil {
 		t.Fatal(err)
 	}
-	take(t, m, "claude-code")
-	if _, err := cc.Reply(t.Context(), req.ID, "merged", envelope.StatusAnswered); err != nil {
-		t.Fatal(err)
+	if _, err := cc.Reply(t.Context(), req.ID, "merged", envelope.StatusAnswered); !client.IsStatus(err, 409) {
+		t.Fatalf("former member's reply: %v", err)
 	}
 	if got := thread(t, m, "muse"); len(got) != len(posts) {
 		t.Fatalf("former member's reply posted: %+v", got[len(got)-1])
 	}
-	if res, err := m.Client(t, "codex").Get(t.Context(), req.ID, 0); err != nil || res.Reply == nil || res.Reply.Body != "merged" {
-		t.Fatalf("reply not recorded: %+v %v", res, err)
+	if res, err := m.Client(t, "codex").Get(t.Context(), req.ID, 0); err != nil || res.Status != envelope.StatusCancelled {
+		t.Fatalf("resumed mention: %+v %v", res, err)
 	}
 }
 
@@ -587,5 +587,221 @@ func TestRoomThreeAgentExchange(t *testing.T) {
 	}
 	if mm := posts[0].Mentions; len(mm) != 2 || mm[0].Agent != "claude-code" || mm[1].Agent != "muse" {
 		t.Fatalf("mentions = %+v", mm)
+	}
+}
+
+// traceSteps is agent's view of chain trace.
+func traceSteps(t *testing.T, m *testrelay.Mesh, agent, trace string) []envelope.Result {
+	t.Helper()
+	var out struct {
+		Steps []envelope.Result `json:"steps"`
+	}
+	if err := m.Client(t, agent).Raw(t.Context(), "GET", "/v1/trace/"+trace, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Steps
+}
+
+// searchHits is agent's search results for q.
+func searchHits(t *testing.T, m *testrelay.Mesh, agent, q string) []envelope.SearchResult {
+	t.Helper()
+	var out struct {
+		Results []envelope.SearchResult `json:"results"`
+	}
+	if err := m.Client(t, agent).Raw(t.Context(), "GET", "/v1/search?q="+q, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Results
+}
+
+// A mention made while handling another agent's request joins that chain,
+// but its text stays in the room: the upstream asker, not a member, sees a
+// placeholder in its trace and finds nothing in search, while a member
+// and the admin see the mention and its reply.
+func TestRoomMentionTextStaysInRoom(t *testing.T) {
+	m := mentionMesh(t)
+	root, err := m.Client(t, "grokbot").Send(t.Context(), "codex", "plan the zebra launch", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	take(t, m, "codex")
+	post(t, m, "codex", "@claude-code zebra secret roadmap")
+	req := take(t, m, "claude-code")
+	if req.TraceID != root.TraceID {
+		t.Fatalf("mention trace %s, root %s", req.TraceID, root.TraceID)
+	}
+	if _, err := m.Client(t, "claude-code").Reply(t.Context(), req.ID, "zebra okapi answer", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	mention := func(steps []envelope.Result) envelope.Result {
+		t.Helper()
+		for _, s := range steps {
+			if s.Request.ID == req.ID {
+				return s
+			}
+		}
+		t.Fatalf("no mention step in %+v", steps)
+		return envelope.Result{}
+	}
+	got := mention(traceSteps(t, m, "grokbot", root.TraceID))
+	if strings.Contains(got.Request.Body, "secret") || got.Reply == nil || strings.Contains(got.Reply.Body, "okapi") ||
+		!strings.Contains(got.Request.Body, "room") || got.Request.To != "claude-code" || got.Status != envelope.StatusAnswered {
+		t.Fatalf("non-member trace step = %+v reply %+v", got.Request, got.Reply)
+	}
+	if hits := searchHits(t, m, "grokbot", "zebra"); len(hits) != 1 || hits[0].RequestID != root.ID {
+		t.Fatalf("non-member search = %+v", hits)
+	}
+	if hits := searchHits(t, m, "grokbot", "okapi"); len(hits) != 0 {
+		t.Fatalf("non-member reply search = %+v", hits)
+	}
+	for _, who := range []string{"codex", "admin"} {
+		got := mention(traceSteps(t, m, who, root.TraceID))
+		if !strings.Contains(got.Request.Body, "secret roadmap") || got.Reply == nil || got.Reply.Body != "zebra okapi answer" {
+			t.Fatalf("%s trace step = %+v reply %+v", who, got.Request, got.Reply)
+		}
+		if hits := searchHits(t, m, who, "okapi"); len(hits) != 1 || hits[0].RequestID != req.ID {
+			t.Fatalf("%s search = %+v", who, hits)
+		}
+	}
+	// A member taken out of the room loses the room's text too.
+	if _, err := client.RemoveRoomMember(t.Context(), m.Client(t, "admin"), "launch", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got := mention(traceSteps(t, m, "codex", root.TraceID)); strings.Contains(got.Request.Body, "secret") {
+		t.Fatalf("former member trace step = %+v", got.Request)
+	}
+	if hits := searchHits(t, m, "codex", "okapi"); len(hits) != 0 {
+		t.Fatalf("former member search = %+v", hits)
+	}
+}
+
+// Removing a member cancels its open mentions in that room, the claimed
+// one too, with a relay note for the poster; its other asks stay open.
+func TestRoomRemovalCancelsMentions(t *testing.T) {
+	m := mentionMesh(t)
+	post(t, m, "codex", "@claude-code review this")
+	claimed := take(t, m, "claude-code")
+	post(t, m, "codex", "@claude-code and this")
+	plain, err := m.Client(t, "muse").Send(t.Context(), "claude-code", "plain ask", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.RemoveRoomMember(t.Context(), m.Client(t, "admin"), "launch", "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "claude-code").Reply(t.Context(), claimed.ID, "lgtm", envelope.StatusAnswered); !client.IsStatus(err, 409) {
+		t.Fatalf("reply to cancelled mention: %v", err)
+	}
+	posts := thread(t, m, "muse")
+	if len(posts) != 2 {
+		t.Fatalf("thread = %+v", posts)
+	}
+	for _, p := range posts {
+		if len(p.Mentions) != 1 || p.Mentions[0].Status != envelope.StatusCancelled {
+			t.Fatalf("mention = %+v", p.Mentions)
+		}
+		got, err := m.Client(t, "codex").Get(t.Context(), p.Mentions[0].RequestID, 0)
+		if err != nil || got.Status != envelope.StatusCancelled || got.RelayNote == nil || !strings.Contains(got.RelayNote.Note, "removed from room launch") {
+			t.Fatalf("poster get = %+v %v", got, err)
+		}
+	}
+	in, err := m.Client(t, "claude-code").Poll(t.Context(), time.Millisecond)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].ID != plain.ID {
+		t.Fatalf("inbox after removal = %+v %v", in, err)
+	}
+}
+
+// A member that approval.json starts holding still answers the mention it
+// holds, but the answer is not posted to the room: the poster gets it as an
+// ordinary reply.
+func TestRoomGatedReplyNotMirrored(t *testing.T) {
+	m := mentionMesh(t)
+	path := filepath.Join(t.TempDir(), "approval.json")
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	post(t, m, "codex", "@claude-code review this")
+	cc := take(t, m, "claude-code")
+	if err := os.WriteFile(path, []byte(`{"gate":{"claude-code":{"from":"*"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "claude-code").Reply(t.Context(), cc.ID, "gated answer", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if posts := thread(t, m, "muse"); len(posts) != 1 || posts[0].Mentions[0].Status != envelope.StatusAnswered {
+		t.Fatalf("room posts = %+v", posts)
+	}
+	if got, err := m.Client(t, "codex").Get(t.Context(), cc.ID, 0); err != nil || got.Reply == nil || got.Reply.Body != "gated answer" {
+		t.Fatalf("poster get = %+v %v", got, err)
+	}
+}
+
+// A member re-reads given posts by id, to see where their mentions stand
+// now; only posts in that room come back, and the ids are checked and
+// capped.
+func TestRoomReadByIDs(t *testing.T) {
+	m := mentionMesh(t)
+	first := post(t, m, "codex", "@claude-code review this")
+	second := post(t, m, "muse", "later")
+	post(t, m, "muse", "not asked for")
+	if err := m.Client(t, "codex").Raw(t.Context(), "POST", "/v1/requests/"+first.Post.Mentions[0].RequestID+"/cancel", map[string]any{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	admin := m.Client(t, "admin")
+	if _, err := client.CreateRoom(t.Context(), admin, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AddRoomMember(t.Context(), admin, "other", "muse"); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere, err := client.PostToRoom(t.Context(), m.Client(t, "muse"), "other", "elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var th envelope.RoomThread
+	path := fmt.Sprintf("/v1/rooms/launch/posts?ids=%d,%d,%d", second.Post.ID, first.Post.ID, elsewhere.Post.ID)
+	if err := m.Client(t, "muse").Raw(t.Context(), "GET", path, nil, &th); err != nil {
+		t.Fatal(err)
+	}
+	if len(th.Posts) != 2 || th.Posts[0].ID != first.Post.ID || th.Posts[1].ID != second.Post.ID ||
+		len(th.Posts[0].Mentions) != 1 || th.Posts[0].Mentions[0].Status != envelope.StatusCancelled {
+		t.Fatalf("by ids = %+v", th.Posts)
+	}
+	ids := make([]string, 51)
+	for i := range ids {
+		ids[i] = fmt.Sprint(i + 1)
+	}
+	for _, bad := range []string{"x", "1,,2", "-1", strings.Join(ids, ",")} {
+		if err := m.Client(t, "muse").Raw(t.Context(), "GET", "/v1/rooms/launch/posts?ids="+bad, nil, nil); !client.IsStatus(err, 400) {
+			t.Errorf("ids=%.20s: %v", bad, err)
+		}
+	}
+	if err := m.Client(t, "grokbot").Raw(t.Context(), "GET", path, nil, nil); !client.IsStatus(err, 403) {
+		t.Fatalf("non-member: %v", err)
+	}
+}
+
+// A blank or oversized post is refused before anything is stored or a
+// slot of the poster's send rate is taken.
+func TestRoomPostValidation(t *testing.T) {
+	m := roomMesh(t)
+	muse := m.Client(t, "muse")
+	for range 30 {
+		if _, err := client.PostToRoom(t.Context(), muse, "launch", " \n\t "); !client.IsStatus(err, 400) {
+			t.Fatalf("blank post: %v", err)
+		}
+		if _, err := client.PostToRoom(t.Context(), muse, "launch", strings.Repeat("x", envelope.MaxRoomPost+1)); !client.IsStatus(err, 413) {
+			t.Fatalf("oversized post: %v", err)
+		}
+	}
+	if posts := thread(t, m, "grokbot"); len(posts) != 0 {
+		t.Fatalf("stored = %+v", posts)
+	}
+	for i := range 30 {
+		if _, err := client.PostToRoom(t.Context(), muse, "launch", "ok"); err != nil {
+			t.Fatalf("post %d after refused posts: %v", i+1, err)
+		}
 	}
 }

@@ -189,6 +189,9 @@ const (
 	NoteStaleClaim = "stale_claim"
 	// NoteExpired: the request expired with no reply.
 	NoteExpired = "expired"
+	// NoteRoomRemoved: the request was a mention, cancelled because its
+	// target was removed from the room.
+	NoteRoomRemoved = "room_removed"
 )
 
 // migrateRelayNotes creates the table of notes the relay added to requests

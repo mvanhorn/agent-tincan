@@ -111,12 +111,15 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 		return s.searchRows(ctx, `SELECT rowid,`+searchExcerpts+` FROM requests_fts
  WHERE requests_fts MATCH ? ORDER BY rowid DESC LIMIT ?`, limit, match, searchCandidateLimit)
 	}
-	// An agent searches only its own chains, and never a request held for
-	// the owner and not approved unless it sent it (see RedactFor). Walk them newest first in
-	// chunks of searchVisibleWindow requests, one short query per chunk, so
-	// matches it cannot see are never examined, the store's single
-	// connection is released between chunks, and older matches are still
-	// reached when the newer chunks do not fill the limit.
+	// An agent searches only its own chains, never a request held for the
+	// owner and not approved unless it sent it (see RedactFor), and never
+	// an ask built from a room mention unless it is now a member of that
+	// room, whether it sent the ask, got it or only shares the chain (see
+	// RedactRoom). Walk them newest first in chunks of searchVisibleWindow
+	// requests, one short query per chunk, so matches it cannot see are
+	// never examined, the store's single connection is released between
+	// chunks, and older matches are still reached when the newer chunks do
+	// not fill the limit.
 	below := int64(math.MaxInt64)
 	for {
 		var chunkLow int64
@@ -134,11 +137,13 @@ func (s *Store) Search(ctx context.Context, query, participant string, limit int
 		hits, err := s.searchRows(ctx, `SELECT rowid,`+searchExcerpts+` FROM requests_fts
  WHERE requests_fts MATCH ? AND rowid >= ? AND rowid < ? AND rowid IN (
    SELECT r.rowid FROM requests r WHERE r.rowid >= ? AND r.rowid < ?
-     AND NOT (r.was_held = 1 AND r.approved = 0 AND r.from_agent != ?) AND r.trace_id IN (
+     AND NOT (r.was_held = 1 AND r.approved = 0 AND r.from_agent != ?)
+     AND (r.room_post_id IS NULL OR EXISTS (SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ? WHERE p.id = r.room_post_id))
+     AND r.trace_id IN (
      SELECT trace_id FROM requests WHERE from_agent = ?
      UNION SELECT trace_id FROM requests WHERE to_agent = ?
    ))
- ORDER BY rowid DESC LIMIT ?`, limit-len(out), match, chunkLow, below, chunkLow, below, participant, participant, participant, limit-len(out))
+ ORDER BY rowid DESC LIMIT ?`, limit-len(out), match, chunkLow, below, chunkLow, below, participant, participant, participant, participant, limit-len(out))
 		if err != nil {
 			return nil, err
 		}

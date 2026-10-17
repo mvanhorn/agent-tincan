@@ -63,7 +63,7 @@ func TestRoomPostAndRead(t *testing.T) {
 	if rooms, err := s.Rooms(ctx, "grokbot"); err != nil || len(rooms) != 0 {
 		t.Fatalf("grokbot rooms = %+v %v", rooms, err)
 	}
-	if removed, err := s.RemoveRoomMember(ctx, "launch", "codex"); err != nil || !removed {
+	if removed, _, err := s.RemoveRoomMember(ctx, "launch", "codex"); err != nil || !removed {
 		t.Fatalf("remove: %v %v", removed, err)
 	}
 	if ok, err := s.IsRoomMember(ctx, "launch", "codex"); err != nil || ok {
@@ -223,13 +223,14 @@ func TestReplyAndMirrorCommitTogether(t *testing.T) {
 	}
 }
 
-// A replier removed from the room after the mention has its reply
-// recorded but not posted; a long reply is cut with a pointer.
+// A replier no longer a member when its reply is written (a removal
+// racing the reply; RemoveRoomMember itself cancels the mention) has its
+// reply recorded but not posted; a long reply is cut with a pointer.
 func TestMirrorSkipsFormerMember(t *testing.T) {
 	s, _ := open(t, ":memory:")
 	ctx := context.Background()
 	_, req := mention(t, s)
-	if _, err := s.RemoveRoomMember(ctx, "launch", "claude-code"); err != nil {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM room_members WHERE agent = ?`, "claude-code"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Reply(ctx, req.ID, "claude-code", envelope.Reply{Status: envelope.StatusAnswered, Body: "lgtm"}); err != nil {

@@ -129,6 +129,23 @@ func (r *Request) RedactFor(agent string) {
 	}
 }
 
+// RoomRedacted stands in for a mention's text, and its reply's, for a
+// reader who is not a member of the mention's room.
+const RoomRedacted = "room mention; read it in the room"
+
+// RedactRoom hides what a mention carries from the room (RoomPostID set):
+// the request and reply text, their files, clarification rounds and the
+// progress note. Ids, statuses, chain and hop stay.
+func (r *Result) RedactRoom() {
+	r.Request.Body, r.Request.Attachments, r.Request.Exchanges, r.Request.Progress = RoomRedacted, nil, nil, nil
+	r.Exchanges, r.Progress = nil, nil
+	if r.Reply != nil {
+		rep := *r.Reply
+		rep.Body, rep.Attachments = RoomRedacted, nil
+		r.Reply = &rep
+	}
+}
+
 // GroupMember identifies a request without fetching its result or marking replies seen.
 type GroupMember struct {
 	ID string `json:"id"`
@@ -167,6 +184,9 @@ type Reply struct {
 	Body        string       `json:"body"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// NoMirror keeps a reply to a mention out of the room: the relay sets
+	// it when the replier is no longer allowed in rooms. Relay-only.
+	NoMirror bool `json:"-"`
 }
 
 // Progress is the latest note from the agent handling a request.

@@ -96,3 +96,23 @@ func TestOpenAsksListsOnlyOpenAsks(t *testing.T) {
 		t.Fatalf("resumed exchanges = %+v", ex)
 	}
 }
+
+// An ask built from a room mention never reaches a request email: its text
+// is the room's, so the agent's email wake for it carries counts only.
+func TestOpenAsksLeaveOutMentions(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	for _, req := range []envelope.Request{
+		{From: "codex", To: "instinct", Kind: envelope.KindAsk, Body: "ROOMTEXT", RoomPostID: 7},
+		{From: "codex", To: "instinct", Kind: envelope.KindAsk, Body: "plain ask"},
+	} {
+		req.Hop, req.Chain = 1, []string{req.From}
+		if _, err := s.Enqueue(ctx, req, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.OpenAsks(ctx, "instinct")
+	if err != nil || len(got) != 1 || got[0].Body != "plain ask" {
+		t.Fatalf("open asks = %+v %v", got, err)
+	}
+}

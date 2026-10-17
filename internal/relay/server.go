@@ -1285,6 +1285,7 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 // (store.ReplyByEmail) and audited with via "email"; its tag, sender and
 // text never reach the audit log.
 func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope.Reply, emailMessageID string, round int) (envelope.Reply, error) {
+	rep.NoMirror = !s.mayMirror(ctx, id, agent)
 	var err error
 	if emailMessageID == "" {
 		rep, err = s.store.Reply(ctx, id, agent, rep)
@@ -2017,6 +2018,10 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 		}
 		if !slices.Contains(store.Participants(steps), name) {
 			writeErr(w, http.StatusNotFound, errors.New("no such trace"))
+			return
+		}
+		if err := s.redactRooms(r.Context(), steps, name); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
 	}
