@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -45,7 +44,7 @@ type titleSharer struct {
 // reads; without one it falls back to CLAUDE_CODE_SESSION_ID.
 func newClaudeTitleSharer(r workingOnReporter, getenv func(string) string, ppid int) *titleSharer {
 	dir := history.ClaudeConfigDir(getenv)
-	registry := filepath.Join(dir, "sessions", strconv.Itoa(ppid)+".json")
+	registry := claudeRegistryPath(getenv, ppid)
 	cc := &history.ClaudeCode{Root: filepath.Join(dir, "projects")}
 	return &titleSharer{
 		r: r,

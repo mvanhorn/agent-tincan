@@ -2,11 +2,10 @@ package relay
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -30,16 +29,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Agent string `json:"agent"`
 	}
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	err := d.Decode(&in)
-	if err == nil {
-		var extra any
-		if d.Decode(&extra) != io.EOF {
-			err = errors.New("expected one watch object")
-		}
-	}
-	if err != nil {
+	if err := decodeOne(r.Body, &in, "watch object"); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -62,13 +52,19 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 // checkWatches fires every pending watch whose target is free now: idle,
 // or offline with nothing in progress or waiting, which is as free as an
 // agent the relay wakes on demand gets. Busy, stuck and any later status
-// (a limited web agent) are not free. The sweep and every reply call it;
-// the store's fire is conditional, so the two racing send one notice.
-func (s *Server) checkWatches(ctx context.Context) {
+// (a limited web agent) are not free. The sweep calls it with target ""
+// to check every watch; a reply calls it with the replying agent, since
+// only that agent's status can have changed, and skips the roster when no
+// watch is on it. The store's fire is conditional, so the two racing send
+// one notice.
+func (s *Server) checkWatches(ctx context.Context, target string) {
 	pending, err := s.store.PendingWatches(ctx)
 	if err != nil {
 		log.Printf("watches: %v", err)
 		return
+	}
+	if target != "" {
+		pending = slices.DeleteFunc(pending, func(wt store.Watch) bool { return wt.Target != target })
 	}
 	if len(pending) == 0 {
 		return

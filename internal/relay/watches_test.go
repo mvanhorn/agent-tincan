@@ -97,7 +97,7 @@ func TestWatchConcurrentChecks(t *testing.T) {
 	watch(h, instinctAddr, "muse", http.StatusCreated)
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Go(func() { h.srv.checkWatches(t.Context()) })
+		wg.Go(func() { h.srv.checkWatches(t.Context(), "") })
 	}
 	wg.Wait()
 	if n := relayNotices(h, "instinct"); len(n) != 1 {

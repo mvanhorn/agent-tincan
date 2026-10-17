@@ -1,16 +1,15 @@
 package relay
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 // staleQueue is how long a request may wait in an agent's queue, untaken,
@@ -78,7 +77,7 @@ func stuckReason(f statusFacts, now time.Time) string {
 	// The relay wakes webhook and email agents, and a schedule agent that
 	// keeps its checks will find its queue, so only an agent-side wake
 	// that is offline has lost the process that would notice it.
-	relayWakes := f.wake == "webhook" || f.wake == "email" || f.wake == "schedule"
+	relayWakes := relayWoken(f.wake) || f.wake == wake.Schedule
 	if !f.online && f.stat.Queued > 0 && !relayWakes {
 		return fmt.Sprintf("%d queued while offline", f.stat.Queued)
 	}
@@ -115,14 +114,7 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		Busy bool `json:"busy"`
 	}
 	if err == nil {
-		d := json.NewDecoder(r.Body)
-		d.DisallowUnknownFields()
-		if err = d.Decode(&in); err == nil {
-			var extra any
-			if d.Decode(&extra) != io.EOF {
-				err = errors.New("expected one host status object")
-			}
-		}
+		err = decodeOne(r.Body, &in, "host status object")
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)

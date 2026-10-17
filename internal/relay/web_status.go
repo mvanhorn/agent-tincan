@@ -2,14 +2,12 @@ package relay
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/mvanhorn/agent-tincan/internal/client"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
@@ -23,15 +21,7 @@ func (s *Server) handleWebStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in envelope.WebStatus
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	err := d.Decode(&in)
-	if err == nil {
-		var extra any
-		if d.Decode(&extra) != io.EOF {
-			err = errors.New("expected one observation")
-		}
-	}
+	err := decodeOne(r.Body, &in, "observation")
 	validSite := false
 	for _, site := range webKindSites {
 		validSite = validSite || in.Site == site

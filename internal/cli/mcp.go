@@ -76,9 +76,11 @@ default.`,
 				r.SetSession(newSession())
 			}
 			// Inside a Claude Code session, the session's own idle or
-			// busy state shows on the roster; elsewhere the registry is
-			// missing and nothing is sent.
-			go startHostStatus(runCtx, newClaudeHostStatus(r, os.Getenv, os.Getppid()))
+			// busy state shows on the roster. Elsewhere the parent has no
+			// registry file, so no goroutine is started to poll for one.
+			if _, err := os.Stat(claudeRegistryPath(os.Getenv, os.Getppid())); err == nil {
+				go startHostStatus(runCtx, newClaudeHostStatus(r, os.Getenv, os.Getppid()))
+			}
 			if shareTitle {
 				stop := startTitleSharing(runCtx, newClaudeTitleSharer(r, os.Getenv, os.Getppid()), sessionKeepalive)
 				defer stop()

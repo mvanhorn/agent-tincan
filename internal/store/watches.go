@@ -66,13 +66,10 @@ func (s *Store) AddWatch(ctx context.Context, watcher, target string, ttl time.D
 }
 
 // PendingWatches lists the watches that have neither fired nor expired,
-// oldest first, and deletes every watch past its expiry, fired or not.
+// oldest first. It only reads, so the post-reply check can call it on every
+// reply; expired rows are left for ExpireWatches.
 func (s *Store) PendingWatches(ctx context.Context) ([]Watch, error) {
-	now := s.now().UnixMilli()
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM watches WHERE expires_at <= ?`, now); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, watcher, target, created_at, expires_at FROM watches WHERE fired = 0 AND expires_at > ? ORDER BY id`, now)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, watcher, target, created_at, expires_at FROM watches WHERE fired = 0 AND expires_at > ? ORDER BY id`, s.now().UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +83,14 @@ func (s *Store) PendingWatches(ctx context.Context) ([]Watch, error) {
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+// ExpireWatches deletes every watch past its expiry, fired or not. The
+// relay's sweep calls it, so fired rows (kept to stop a second fire) and
+// lapsed ones do not pile up, without a delete on every reply.
+func (s *Store) ExpireWatches(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM watches WHERE expires_at <= ?`, s.now().UnixMilli())
+	return err
 }
 
 // FireWatch marks w fired and queues notice for its watcher in one

@@ -1,9 +1,7 @@
 package relay
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
@@ -50,15 +48,7 @@ func (s *Server) handleWorkingOn(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Text string `json:"text"`
 	}
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	err = d.Decode(&in)
-	if err == nil {
-		var extra any
-		if d.Decode(&extra) != io.EOF {
-			err = errors.New("expected one working-on object")
-		}
-	}
+	err = decodeOne(r.Body, &in, "working-on object")
 	var text string
 	if err == nil {
 		text, err = identity.CheckRosterLine("the working-on line", in.Text)

@@ -507,7 +507,10 @@ func (s *Server) Sweep(ctx context.Context) {
 			}
 		}
 	}
-	s.checkWatches(ctx)
+	if err := s.store.ExpireWatches(ctx); err != nil {
+		log.Printf("watches: expire: %v", err)
+	}
+	s.checkWatches(ctx, "")
 }
 
 func isLocalAdmin(ctx context.Context) bool {
@@ -1284,8 +1287,8 @@ func (s *Server) recordReply(ctx context.Context, id, agent string, rep envelope
 	} else {
 		log.Printf("reply %s: look up asker: %v", id, err)
 	}
-	// The reply may have freed the agent someone is watching.
-	s.checkWatches(ctx)
+	// The reply may have freed the replying agent, if someone watches it.
+	s.checkWatches(ctx, agent)
 	return rep, nil
 }
 
@@ -1941,6 +1944,23 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+// decodeOne decodes exactly one JSON object from r into v, rejecting
+// unknown fields and anything after the object, so a small agent-facing
+// body cannot carry fields or values the relay would silently drop. The
+// trailing-data error reads "expected one <noun>".
+func decodeOne(r io.Reader, v any, noun string) error {
+	d := json.NewDecoder(r)
+	d.DisallowUnknownFields()
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return errors.New("expected one " + noun)
+	}
+	return nil
 }
 
 // isAdmin reports whether the caller is the local admin socket or an admin

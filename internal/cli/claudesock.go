@@ -32,6 +32,14 @@ type claudeSessionInfo struct {
 	MessagingSocketPath string `json:"messagingSocketPath"`
 }
 
+// claudeRegistryPath is the registry file Claude Code writes for the
+// session process ppid, under the config dir named by getenv. The socket
+// wake, host status and title sharing all read it to learn about the
+// session that started this process.
+func claudeRegistryPath(getenv func(string) string, ppid int) string {
+	return filepath.Join(history.ClaudeConfigDir(getenv), "sessions", strconv.Itoa(ppid)+".json")
+}
+
 // claudeSocketPusher announces waiting items to the Claude Code session that
 // started this process by writing a user message to the session's messaging
 // socket, which starts a turn even when the session is idle and was not
@@ -61,7 +69,7 @@ func newClaudeSocketPusher(getenv func(string) string, ppid int) (*claudeSocketP
 	p := &claudeSocketPusher{
 		socket:   getenv("CLAUDE_CODE_MESSAGING_SOCKET"),
 		token:    getenv("CLAUDE_CODE_MESSAGING_TOKEN"),
-		registry: filepath.Join(history.ClaudeConfigDir(getenv), "sessions", strconv.Itoa(ppid)+".json"),
+		registry: claudeRegistryPath(getenv, ppid),
 		ppid:     ppid,
 		ready:    make(chan struct{}),
 	}
@@ -176,7 +184,7 @@ type hostStatusForwarder struct {
 // wake and title sharing read. A file that does not name ppid reads as
 // unknown.
 func newClaudeHostStatus(r hostStatusReporter, getenv func(string) string, ppid int) *hostStatusForwarder {
-	registry := filepath.Join(history.ClaudeConfigDir(getenv), "sessions", strconv.Itoa(ppid)+".json")
+	registry := claudeRegistryPath(getenv, ppid)
 	return &hostStatusForwarder{r: r, busy: func() (bool, bool) {
 		s, err := readClaudeSession(registry)
 		if err != nil || s.PID != ppid {
