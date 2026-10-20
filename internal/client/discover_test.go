@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1061,5 +1062,128 @@ func TestFindRelayNetmapDoesNotWaitOnStaleAdvertised(t *testing.T) {
 	}
 	if d := time.Since(start); d > 3*time.Second {
 		t.Fatalf("took %v; want the netmap peer found without waiting on the stale address", d)
+	}
+}
+
+// fakeLocalAPI serves a tailscaled LocalAPI status on a unix socket at sock
+// and counts the connections it accepts. stop closes the listener and every
+// connection, as a tailscaled restart would.
+func fakeLocalAPI(t *testing.T, sock string) (conns *atomic.Int32, stop func()) {
+	t.Helper()
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns = new(atomic.Int32)
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/localapi/v0/status" {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(&ipnstate.Status{Self: &ipnstate.PeerStatus{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.1")}}})
+		}),
+		ConnState: func(_ net.Conn, s http.ConnState) {
+			if s == http.StateNew {
+				conns.Add(1)
+			}
+		},
+	}
+	go func() { _ = srv.Serve(ln) }()
+	stop = func() { _ = srv.Close() }
+	t.Cleanup(stop)
+	return conns, stop
+}
+
+// localAPISocket is a fresh socket path short enough for macOS's 104-byte
+// unix socket limit, which t.TempDir paths can exceed.
+func localAPISocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tsl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
+
+func wantLocalAPINetmap(t *testing.T) {
+	t.Helper()
+	ips, err := localAPINetmap(t.Context())
+	if err != nil || !slices.Equal(ips, []string{"100.64.0.1"}) {
+		t.Fatalf("localAPINetmap = %v, %v; want [100.64.0.1]", ips, err)
+	}
+}
+
+// Each relay search asks LocalAPI for the netmap. A client per call left its
+// keep-alive connection open in a pool nothing used again, so a process
+// searching for an unreachable relay leaked one connection every 30s until
+// the machine ran out of ephemeral ports. Searches must reuse one connection.
+func TestLocalAPINetmapReusesConnection(t *testing.T) {
+	sock := localAPISocket(t)
+	conns, _ := fakeLocalAPI(t, sock)
+	t.Setenv("TS_SOCKET", sock)
+	for range 50 {
+		wantLocalAPINetmap(t)
+	}
+	if n := conns.Load(); n != 1 {
+		t.Fatalf("50 netmap lookups opened %d LocalAPI connections, want 1", n)
+	}
+}
+
+// Each socket keeps its own client: lookups against one tailscaled never
+// reuse, or add to, another's connections.
+func TestLocalAPINetmapClientPerSocket(t *testing.T) {
+	a, b := localAPISocket(t), localAPISocket(t)
+	connsA, _ := fakeLocalAPI(t, a)
+	connsB, _ := fakeLocalAPI(t, b)
+	for range 3 {
+		t.Setenv("TS_SOCKET", a)
+		wantLocalAPINetmap(t)
+		t.Setenv("TS_SOCKET", b)
+		wantLocalAPINetmap(t)
+	}
+	if na, nb := connsA.Load(), connsB.Load(); na != 1 || nb != 1 {
+		t.Fatalf("connections a=%d b=%d, want 1 each", na, nb)
+	}
+}
+
+// A reused client must not stick to a dead connection: after tailscaled
+// restarts on the same socket, the next lookup dials it again.
+func TestLocalAPINetmapAfterTailscaledRestart(t *testing.T) {
+	sock := localAPISocket(t)
+	_, stop := fakeLocalAPI(t, sock)
+	t.Setenv("TS_SOCKET", sock)
+	wantLocalAPINetmap(t)
+	stop()
+	_ = os.Remove(sock)
+	conns, _ := fakeLocalAPI(t, sock)
+	wantLocalAPINetmap(t)
+	if n := conns.Load(); n != 1 {
+		t.Fatalf("restarted LocalAPI accepted %d connections, want 1", n)
+	}
+}
+
+// Concurrent lookups may each hold a connection while in flight, but once
+// they finish, later lookups reuse the pool instead of opening more.
+func TestLocalAPINetmapConcurrentLookups(t *testing.T) {
+	sock := localAPISocket(t)
+	conns, _ := fakeLocalAPI(t, sock)
+	t.Setenv("TS_SOCKET", sock)
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			if _, err := localAPINetmap(context.Background()); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	after := conns.Load()
+	for range 20 {
+		wantLocalAPINetmap(t)
+	}
+	if n := conns.Load(); n != after || n > 20 {
+		t.Fatalf("connections: %d after 20 concurrent lookups, %d after 20 more sequential; want no growth", after, n)
 	}
 }

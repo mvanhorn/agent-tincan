@@ -470,6 +470,33 @@ var localStatus = func(ctx context.Context, lc *local.Client) (*ipnstate.Status,
 	return lc.Status(ctx)
 }
 
+// localClients holds one LocalAPI client per tailscaled socket ("" is the
+// platform default). A local.Client keeps its own keep-alive connection pool
+// with no idle timeout, so a client built per call left one connection open
+// for the life of the process every time the relay was searched for.
+var (
+	localClientsMu sync.Mutex
+	localClients   = map[string]*local.Client{}
+)
+
+// localClientFor returns the shared LocalAPI client for sock. Reusing it is
+// safe across a tailscaled restart: the client finds the socket or the macOS
+// app's port again on every dial.
+func localClientFor(sock string) *local.Client {
+	localClientsMu.Lock()
+	defer localClientsMu.Unlock()
+	lc := localClients[sock]
+	if lc == nil {
+		lc = &local.Client{}
+		if sock != "" {
+			lc.Socket = sock
+			lc.UseSocketOnly = true
+		}
+		localClients[sock] = lc
+	}
+	return lc
+}
+
 func localAPINetmap(ctx context.Context) ([]string, error) {
 	socks, err := tailscaledSockets(ctx)
 	if err != nil {
@@ -490,12 +517,7 @@ func localAPINetmap(ctx context.Context) ([]string, error) {
 	var wg sync.WaitGroup
 	for i, sock := range socks {
 		wg.Go(func() {
-			lc := &local.Client{}
-			if sock != "" {
-				lc.Socket = sock
-				lc.UseSocketOnly = true
-			}
-			st, err := localStatus(ctx, lc)
+			st, err := localStatus(ctx, localClientFor(sock))
 			if err != nil {
 				results[i] = result{err: err}
 				return
