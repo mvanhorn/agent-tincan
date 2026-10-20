@@ -115,7 +115,7 @@ Want to manage the team from your laptop too? Start the relay with `--admin <lap
 
 ## New in v0.18.1 and v0.18.0
 
-**Latest: [v0.18.2](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.18.2)** fixes setup names/config paths, adds live admin webhook management, improves tool guidance and reply diagnostics, and publishes extension checksums.
+**Latest: [v0.18.3](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.18.3)** stops long-running tincan processes from leaking Tailscale LocalAPI connections while the relay is unreachable, which could exhaust the machine's network ports. Restart every long-running tincan process after upgrading. [v0.18.2](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.18.2) fixed setup names/config paths, added live admin webhook management, improved tool guidance and reply diagnostics, and published extension checksums.
 
 See who's working, keep going when a subscription runs out, pass a conversation between AI sites, and manage your team from your phone. [v0.18.0 release notes](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.18.0) describe the full release; [v0.18.1](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.18.1) includes the live-testing fixes.
 
@@ -129,7 +129,7 @@ See who's working, keep going when a subscription runs out, pass a conversation 
 Upgrade the relay first, from an admin device:
 
 ```bash
-tincan relay-upgrade --from-github v0.18.2
+tincan relay-upgrade --from-github v0.18.3
 ```
 
 Self-upgrade needs the relay started with `--dist <dir>` and `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`. Then run `tincan upgrade` on each machine and restart its MCP servers, listeners and web services (or reconnect through `/mcp`). Update the Chrome extension to **0.6.5** for usage-limit detection. Pass requires the destination web agent on 0.18.0 or later. Run `tincan onboard --section agents` again for saved standing instructions. Older clients remain compatible; status, failover, phone and rooms need the new relay.
