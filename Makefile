@@ -103,7 +103,7 @@ checksums:
 # launch. One-time notarytool setup:
 #   xcrun notarytool store-credentials <profile> --apple-id <id> --team-id <team>
 TINCAN_SIGN_IDENTITY ?= Developer ID Application: Matthew Charles Van Horn (NM8VT393AR)
-TINCAN_NOTARY_PROFILE ?= agentcookie-notary
+TINCAN_NOTARY_PROFILE ?= AgentNotesNotary
 
 sign-mac:
 	@set -e; ls dist/tincan_darwin_* >/dev/null 2>&1 || { echo "make sign-mac: no dist/tincan_darwin_* binaries; run make dist first" >&2; exit 1; }; \

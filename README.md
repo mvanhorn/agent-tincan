@@ -1514,7 +1514,7 @@ If a step fails before the push, the local tag is deleted, so a rerun starts cle
 The steps also work one at a time. `make dist` stamps the version from `git describe` (or `VERSION=`), so tag first. It needs no certificate; `make release-mac` adds the macOS signing on a Mac that has one:
 
 - `make sign-mac` signs each `dist/tincan_darwin_*` with `codesign --force --options runtime --timestamp` using `TINCAN_SIGN_IDENTITY` (default: the maintainer's Developer ID Application identity), then rewrites `checksums.txt`, since signing changes the bytes.
-- `make notarize-mac` zips each signed binary, submits it with `xcrun notarytool submit --keychain-profile "$TINCAN_NOTARY_PROFILE" --wait` (default profile `agentcookie-notary`), requires `Accepted`, and checks `spctl -a -vv -t install` reports `Notarized Developer ID`. A bare Mach-O binary cannot be stapled; Gatekeeper looks the ticket up online at first launch.
+- `make notarize-mac` zips each signed binary, submits it with `xcrun notarytool submit --keychain-profile "$TINCAN_NOTARY_PROFILE" --wait` (default profile `AgentNotesNotary`), requires `Accepted`, and checks `spctl -a -vv -t install` reports `Notarized Developer ID`. A bare Mach-O binary cannot be stapled; Gatekeeper looks the ticket up online at first launch.
 - One-time notary setup: `xcrun notarytool store-credentials <profile> --apple-id <apple-id> --team-id <team-id>` with an app-specific password. The credentials live in the login keychain, never in the repo.
 
 Always upload the `checksums.txt` written after signing; `make release` and `make release-mac` rewrite it last and check it.
