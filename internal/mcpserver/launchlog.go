@@ -32,7 +32,7 @@ type Launch struct {
 	Version     string    `json:"version"`
 	Channel     bool      `json:"channel,omitempty"`
 	Framing     string    `json:"framing,omitempty"` // newline or content-length, once the app has written
-	Client      string    `json:"client,omitempty"`  // clientInfo from initialize
+	Client      string    `json:"client,omitempty"`  // clientInfo from initialize or server/discover
 	Initialized time.Time `json:"initialized,omitzero"`
 	ToolsListed time.Time `json:"tools_listed,omitzero"`
 	ToolCalls   int       `json:"tool_calls,omitempty"`
@@ -83,7 +83,7 @@ func StartRecorder(dir, version string, channel bool) *Recorder {
 }
 
 // Write takes the newline-delimited JSON the server reads, so the record
-// notes initialize, tools/list and tool calls as they arrive.
+// notes the handshake, tools/list and tool calls as they arrive.
 func (r *Recorder) Write(p []byte) (int, error) {
 	if r == nil {
 		return len(p), nil
@@ -106,14 +106,22 @@ func (r *Recorder) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// clientInfo is the name and version an app sends about itself.
+type clientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+func (c clientInfo) String() string { return strings.TrimSpace(c.Name + " " + c.Version) }
+
 func (r *Recorder) saw(line []byte) bool {
 	var m struct {
 		Method string `json:"method"`
 		Params struct {
-			ClientInfo struct {
-				Name    string `json:"name"`
-				Version string `json:"version"`
-			} `json:"clientInfo"`
+			ClientInfo clientInfo `json:"clientInfo"`
+			Meta       struct {
+				ClientInfo clientInfo `json:"io.modelcontextprotocol/clientInfo"`
+			} `json:"_meta"`
 		} `json:"params"`
 	}
 	if json.Unmarshal(line, &m) != nil {
@@ -123,7 +131,13 @@ func (r *Recorder) saw(line []byte) bool {
 	switch m.Method {
 	case "initialize":
 		r.l.Initialized = now
-		r.l.Client = strings.TrimSpace(m.Params.ClientInfo.Name + " " + m.Params.ClientInfo.Version)
+		r.l.Client = m.Params.ClientInfo.String()
+	case "server/discover":
+		// MCP 2026-07-28 has no initialize: the app opens with
+		// server/discover and sends clientInfo in each request's _meta.
+		// Claude Code negotiates it whenever the server offers it.
+		r.l.Initialized = now
+		r.l.Client = m.Params.Meta.ClientInfo.String()
 	case "tools/list":
 		r.l.ToolsListed = now
 	case "tools/call":

@@ -35,6 +35,27 @@ func TestRecorderNotesTheHandshake(t *testing.T) {
 	}
 }
 
+// MCP 2026-07-28 has no initialize. These are the lines Claude Code 2.1.309
+// sent when it negotiated that revision, trimmed to the fields that matter.
+func TestRecorderNotesServerDiscover(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(ProbeEnv, "")
+	rec := StartRecorder(dir, "1.2.3", false)
+	if rec == nil {
+		t.Fatal("no recorder")
+	}
+	meta := `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"claude-code","title":"Claude Code","version":"2.1.309"}}`
+	rec.Write([]byte(`{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{` + meta + `}}` + "\n" +
+		`{"jsonrpc":"2.0","id":"listen:0","method":"subscriptions/listen","params":{` + meta + `,"notifications":{"toolsListChanged":true}}}` + "\n" +
+		`{"method":"server/discover","jsonrpc":"2.0","id":0,"params":{` + meta + `}}` + "\n" +
+		`{"method":"tools/list","jsonrpc":"2.0","id":1,"params":{` + meta + `}}` + "\n"))
+
+	l := ReadLaunches(dir)[0]
+	if l.Client != "claude-code 2.1.309" || l.Initialized.IsZero() || l.ToolsListed.IsZero() {
+		t.Fatalf("record %+v", l)
+	}
+}
+
 func TestRecorderOffForDoctorProbe(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(ProbeEnv, "1")
