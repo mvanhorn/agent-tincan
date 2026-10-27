@@ -1225,7 +1225,7 @@ func TestServeLiveReadOutOfTimeSaysTookTooLong(t *testing.T) {
 	var logs strings.Builder
 	rig.svc.Log = &logs
 	// The list answers; every conversation read then hangs until the
-	// request's own deadline ends it, as the 2026-10-27 search did.
+	// request's own deadline ends it.
 	listed := `{"items":[{"id":"c4a7c0de-0000-4000-8000-000000000002","title":"Cover art","update_time":"` + time.Now().UTC().Format(time.RFC3339) + `"}],"total":1}`
 	ch := channelFunc(func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
 		if req.Op == OpChatGPTList {

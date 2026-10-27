@@ -483,7 +483,6 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	readStart := time.Now()
 	page, err := r.Read(ctx, q, Options{Window: window})
 	if err != nil {
-		// The timings and progress say where a request's budget went.
 		progress := ""
 		if pe, ok := errors.AsType[*ReadProgressError](err); ok {
 			progress = fmt.Sprintf(", %d listed, %d read", pe.Listed, pe.Read)

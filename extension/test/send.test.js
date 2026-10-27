@@ -547,7 +547,7 @@ test('chatgpt conversation that failed to load: one reload, then the send goes a
 
 test('chatgpt load error that shows only late in the load window: the reload gets a fresh window', async () => {
   // Half-loaded (no composer, no error yet) for the whole 45s window,
-  // like the 2026-10-27 failure, then the error page; reloading fixes it.
+  // then the error page; reloading fixes it.
   let page;
   const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { loadError: true, loadErrorFromTick: 45, neverFinish: true })));
   const r = await sender(fc, { loadMs: 45000 }).send('chatgpt', { message: 'pong?', conversation_id: 'abc-123' });
