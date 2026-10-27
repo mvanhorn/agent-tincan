@@ -875,3 +875,25 @@ func TestPermissionMissingAndBlockedErrorCodes(t *testing.T) {
 		t.Fatalf("permission_missing reply: %s", msg)
 	}
 }
+
+// A request whose caller's own deadline runs out is the caller running out
+// of time, not Chrome failing to answer: only a call that hit the
+// client's own timeout while the caller still had time is ErrTimeout.
+func TestExchangeTellsCallerDeadlineFromChromeTimeout(t *testing.T) {
+	blocked := channelFunc(func(ctx context.Context, _ NativeRequest, _ func(NativeResponse) (bool, error)) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := (&Client{Channel: blocked}).Request(ctx, OpChatGPTList, OpArgs{Count: 5})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
+		t.Fatalf("caller deadline: got %v, want context.DeadlineExceeded and not ErrTimeout", err)
+	}
+
+	_, err = (&Client{Channel: blocked, Timeout: 20 * time.Millisecond}).Request(context.Background(), OpChatGPTList, OpArgs{Count: 5})
+	if !errors.Is(err, ErrTimeout) || !strings.Contains(err.Error(), "Chrome did not answer in time") {
+		t.Fatalf("client timeout: got %v, want ErrTimeout", err)
+	}
+}

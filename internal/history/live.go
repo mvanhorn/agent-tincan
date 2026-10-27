@@ -190,6 +190,7 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 	}
 	// prev is the time of the last candidate read, for an undated list.
 	var prev time.Time
+	read := 0
 	now := l.clock()
 	page, err := pick(q, w, now, len(cands), more,
 		func(i int) time.Time {
@@ -213,6 +214,7 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 			if err != nil {
 				return thread{}, false, err
 			}
+			read++
 			if th.conv.UpdatedAt.IsZero() {
 				th.conv.UpdatedAt = cands[i].UpdatedAt
 			}
@@ -236,11 +238,22 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 			return th, len(th.turns) > 0, nil
 		})
 	if err != nil {
-		return Page{}, err
+		return Page{}, &ReadProgressError{Listed: len(cands), Read: read, Err: err}
 	}
 	page.Conversations = l.resolve(ctx, page.Conversations)
 	return page, nil
 }
+
+// ReadProgressError is a live read that failed after its list: how many
+// conversations were listed and how many were read before err. Its text
+// is err's, so it only adds detail for the history service's log.
+type ReadProgressError struct {
+	Listed, Read int
+	Err          error
+}
+
+func (e *ReadProgressError) Error() string { return e.Err.Error() }
+func (e *ReadProgressError) Unwrap() error { return e.Err }
 
 // resolve fetches the bytes of every placeholder image in convs. An image
 // that cannot be fetched or is not an allowed image is dropped; the text

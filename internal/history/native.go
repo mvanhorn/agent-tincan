@@ -876,6 +876,7 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 			return cerr
 		}
 	}
+	caller := ctx
 	ctx, cancel := context.WithTimeout(ctx, c.timeout(op))
 	defer cancel()
 	req := NativeRequest{ID: requestSeq.Add(1), Op: op, Args: args}
@@ -903,6 +904,12 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 	case errors.Is(err, ErrExtensionNotConnected), errors.Is(err, errHostClosed), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return unavailable(src, ErrExtensionNotConnected, "")
 	case errors.Is(err, context.DeadlineExceeded), isTimeout(err):
+		// The caller's own deadline is the caller running out of time
+		// (a history request's whole budget), not Chrome failing to
+		// answer, so it stays a context error for the caller to report.
+		if cerr := caller.Err(); cerr != nil {
+			return fmt.Errorf("%s: %w", src, cerr)
+		}
 		return unavailable(src, ErrTimeout, "")
 	case errors.Is(err, context.Canceled):
 		return err
