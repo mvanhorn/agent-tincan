@@ -1688,6 +1688,67 @@ test('dots.close closes only the tab its send opened', async () => {
   assert.ok(fc.tabs.has(1) && fc.tabs.has(2), "the owner's tabs stay open");
 });
 
+// probeHTML runs pageProbe for site against html at href.
+function probeHTML(site, html, href) {
+  const saved = { document: globalThis.document, location: globalThis.location };
+  const u = new URL(href);
+  globalThis.document = parseHTML(html);
+  globalThis.location = { href: u.href, pathname: u.pathname, host: u.host };
+  try {
+    return pageProbe(SELECTORS[site]);
+  } finally {
+    globalThis.document = saved.document;
+    globalThis.location = saved.location;
+  }
+}
+
+// CHATGPT_PAGE is chatgpt.com's conversation markup as of 2026-10-27: a
+// ProseMirror textbox in the composer form (no #prompt-textarea) and
+// turns marked data-conversation-role.
+const chatgptPage = (draft = '') => `<html><body><main>
+<div data-turn-key="1"><h4 data-conversation-role="user"><span>You said:</span></h4><div>hi</div></div>
+<div data-turn-key="2"><h4 data-conversation-role="assistant"><span>ChatGPT said:</span></h4><div>hello</div></div>
+<div data-turn-key="3"><h4 data-conversation-role="user"><span>You said:</span></h4><div>again</div></div>
+<div data-turn-key="4"><h4 data-conversation-role="assistant"><span>ChatGPT said:</span></h4><div>hello again</div></div>
+<form><div data-composer-layout="1"><div data-rich-text-layout="1" role="presentation"><div contenteditable="true" role="textbox" aria-multiline="true" aria-label="Ask ChatGPT" class="ProseMirror">${draft ? `<p>${draft}</p>` : '<p></p>'}</div></div></div>
+<button type="button" aria-label="Add files and more"></button><button type="button" aria-label="Start Voice"></button></form>
+</main></body></html>`;
+const CHATGPT_CONV = 'https://chatgpt.com/c/c4a7c0de-0000-4000-8000-000000000001';
+
+test('the chatgpt selectors match the current conversation page', () => {
+  const p = probeHTML('chatgpt', chatgptPage(), CHATGPT_CONV);
+  assert.equal(p.composer, true);
+  assert.equal(p.composerEmpty, true);
+  assert.equal(p.userCount, 2);
+  assert.equal(p.assistantCount, 2);
+  assert.equal(p.generating, false);
+  assert.equal(p.loggedOut, false);
+
+  const draft = probeHTML('chatgpt', chatgptPage('half typed'), CHATGPT_CONV);
+  assert.equal(draft.composer, true);
+  assert.equal(draft.composerEmpty, false, 'a draft is never typed over');
+});
+
+test('the chatgpt send selectors find the submit button that appears with text, in any language', () => {
+  for (const label of ['Send', 'Enviar']) {
+    const doc = parseHTML(chatgptPage('x').replace('</form>', `<button type="submit" aria-label="${label}"></button></form>`));
+    const found = SELECTORS.chatgpt.send.map((s) => doc.querySelector(s)).find(Boolean);
+    assert.equal(found?.getAttribute('aria-label'), label, label);
+  }
+  // With an empty composer the page has no send button, and nothing else
+  // in the form matches.
+  const empty = parseHTML(chatgptPage());
+  assert.equal(SELECTORS.chatgpt.send.map((s) => empty.querySelector(s)).find(Boolean), undefined);
+});
+
+test('the chatgpt turn selectors still count the older data-message-author-role markup', () => {
+  const html = `<html><body><main><div data-message-author-role="user">q</div><div data-message-author-role="assistant">a</div><form><div contenteditable="true" id="prompt-textarea"></div></form></main></body></html>`;
+  const p = probeHTML('chatgpt', html, CHATGPT_CONV);
+  assert.equal(p.composer, true);
+  assert.equal(p.userCount, 1);
+  assert.equal(p.assistantCount, 1);
+});
+
 test('the dots selectors match the DM page markup', () => {
   const html = `<html><body><main><div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Message"><p>draft</p></div><button aria-label="Send">Send</button></main></body></html>`;
   const saved = { document: globalThis.document, location: globalThis.location };

@@ -96,12 +96,18 @@ const NOTICE = Object.freeze(['[role="alert"]', '[role="status"]']);
 
 export const SELECTORS = Object.freeze({
   chatgpt: Object.freeze({
-    composer: ['#prompt-textarea', 'div[contenteditable="true"][id="prompt-textarea"]', 'textarea[data-id="root"]', 'form div[contenteditable="true"]'],
-    send: ['[data-testid="send-button"]', '#composer-submit-button', 'button[aria-label*="Send"]'],
+    // The composer is a ProseMirror textbox in the page's composer form;
+    // its label is localized and the old #prompt-textarea id is gone, so
+    // structure comes first and the ids are late fallbacks.
+    composer: ['form div[contenteditable="true"][role="textbox"]', 'form div[contenteditable="true"]', '#prompt-textarea', 'textarea[data-id="root"]'],
+    // The send button appears only once the composer has text, as a
+    // submit button in the composer form with no testid or id; the form's
+    // submit button covers a localized label.
+    send: ['[data-testid="send-button"]', '#composer-submit-button', 'button[aria-label*="Send"]', 'form button[type="submit"]'],
     stop: ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'],
     streaming: ['.result-streaming'],
-    assistant: ['[data-message-author-role="assistant"]'],
-    user: ['[data-message-author-role="user"]'],
+    assistant: ['[data-conversation-role="assistant"]', '[data-message-author-role="assistant"]'],
+    user: ['[data-conversation-role="user"]', '[data-message-author-role="user"]'],
     notice: NOTICE,
     login: ['[data-testid="login-button"]', 'a[href*="/auth/login"]'],
     loginPaths: ['/auth/login', '/log-in'],
