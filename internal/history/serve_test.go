@@ -1240,7 +1240,7 @@ func TestServeLiveReadOutOfTimeSaysTookTooLong(t *testing.T) {
 	if res.Status != envelope.StatusFailed || res.Reply.Body != "Reading ChatGPT history took too long." {
 		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
 	}
-	if got := logs.String(); strings.Contains(got, "Chrome did not answer") || !strings.Contains(got, "1 listed, 0 read") || !strings.Contains(got, "extract ") {
+	if got := logs.String(); strings.Contains(got, "Chrome did not answer") || !strings.Contains(got, "1 listed, 0 read in ") || !strings.Contains(got, "extract ") || !strings.Contains(got, ": list ") {
 		t.Fatalf("log %q", got)
 	}
 }

@@ -485,7 +485,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	if err != nil {
 		progress := ""
 		if pe, ok := errors.AsType[*ReadProgressError](err); ok {
-			progress = fmt.Sprintf(", %d listed, %d read", pe.Listed, pe.Read)
+			progress = fmt.Sprintf(": list %s, %d listed, %d read in %s", pe.ListTook.Round(time.Millisecond), pe.Listed, pe.Read, pe.DetailTook.Round(time.Millisecond))
 		}
 		s.logf("request %s: read %s: %v (extract %s, read %s%s)", req.ID, q.Source, err, extractTook.Round(time.Millisecond), time.Since(readStart).Round(time.Millisecond), progress)
 		s.reply(ctx, req, ReadFailure(q, err), envelope.StatusFailed, nil)
