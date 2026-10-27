@@ -407,11 +407,23 @@ export function pageDismiss(sel) {
   return { clicked };
 }
 
-// Candidate ChatGPT file flow. These fixed selectors and readiness signals
-// require live acceptance before IMAGE_INPUT_SITES may include chatgpt.
-// The returned state never contains page URLs, tokens or user draft text.
-export function pageInputImages(files, attach = false) {
-  const composer = document.querySelector('#prompt-textarea');
+// Candidate ChatGPT file flow. The composer and send button come from sel,
+// the same lists a text send uses; these readiness signals require live
+// acceptance before IMAGE_INPUT_SITES may include chatgpt. The returned
+// state never contains page URLs, tokens or user draft text.
+export function pageInputImages(files, attach, sel) {
+  const first = (root, list) => {
+    for (const s of list) {
+      try {
+        const el = root.querySelector(s);
+        if (el) return el;
+      } catch {
+        // Skipped.
+      }
+    }
+    return null;
+  };
+  const composer = first(document, sel.composer);
   const form = composer && composer.closest('form');
   const input = form && form.querySelector('input[type="file"]');
   if (!form || !input) return { ok: false, error: 'image file control not found' };
@@ -430,7 +442,7 @@ export function pageInputImages(files, attach = false) {
   if (form.querySelector('[role="alert"]')) return { ok: false, error: 'the composer reported an upload error' };
   // FileList assignment alone is never readiness. Require a loaded preview
   // for every filename, no upload progress and an enabled send button.
-  const button = form.querySelector('button[data-testid="send-button"]');
+  const button = first(form, sel.send);
   const ready = previews.length === files.length && files.every((f, i) => {
     const img = previews[i];
     return img.complete && img.naturalWidth > 0 && (img.alt === f.name || img.closest('[title]')?.getAttribute('title') === f.name);
@@ -519,11 +531,22 @@ export function pageFill(sel, message) {
 // that matches first. A disabled button is reported so the caller can
 // retry.
 export function pageSubmit(sel, inputNames = null, message = null) {
+  const first = (root, list) => {
+    for (const s of list) {
+      try {
+        const el = root.querySelector(s);
+        if (el) return el;
+      } catch {
+        // Skipped.
+      }
+    }
+    return null;
+  };
   if (inputNames) {
-    const composer = document.querySelector('#prompt-textarea');
+    const composer = first(document, sel.composer);
     const form = composer?.closest('form');
     const previews = form ? [...form.querySelectorAll('img')] : [];
-    const button = form?.querySelector('button[data-testid="send-button"]');
+    const button = form && first(form, sel.send);
     const ready = previews.length === inputNames.length && inputNames.every((name, i) => {
       const img = previews[i];
       return img.complete && img.naturalWidth > 0 && (img.alt === name || img.closest('[title]')?.getAttribute('title') === name);
@@ -532,17 +555,6 @@ export function pageSubmit(sel, inputNames = null, message = null) {
     button.click();
     return { ok: true, how: 'button' };
   }
-  const q = (list) => {
-    for (const s of list) {
-      try {
-        const el = document.querySelector(s);
-        if (el) return el;
-      } catch {
-        // Skipped.
-      }
-    }
-    return null;
-  };
   const shown = (el) => {
     if (typeof el.checkVisibility === 'function') return el.checkVisibility() !== false;
     if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
@@ -571,7 +583,7 @@ export function pageSubmit(sel, inputNames = null, message = null) {
     btn.click();
     return { ok: true, how: 'button' };
   }
-  const composer = q(sel.composer);
+  const composer = first(document, sel.composer);
   if (!composer) return { ok: false, code: 'composer_not_found' };
   composer.focus();
   composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
@@ -992,7 +1004,7 @@ export function createSender({
         // Mark possible exposure before injection, since a lost injection
         // response cannot establish that change was never dispatched.
         uploaded = true;
-        const attached = await inject(tab.id, pageInputImages, [images, true]);
+        const attached = await inject(tab.id, pageInputImages, [images, true, sel]);
         if (!attached?.ok) throw new OpError('send_failed', attached?.error || 'image upload failed');
         for (;;) {
           await onSite(tab.id, cfg);
@@ -1000,7 +1012,7 @@ export function createSender({
           if (p.loggedOut) throw new OpError('not_logged_in', 'logged out during image upload');
           if (p.blocked) throw blockedErr();
           inputActive();
-          const state = await inject(tab.id, pageInputImages, [images, false]);
+          const state = await inject(tab.id, pageInputImages, [images, false, sel]);
           if (!state?.ok) throw new OpError('send_failed', state?.error || 'image upload failed');
           if (state.ready) break;
           if (late()) throw new OpError('timeout', 'image upload readiness was not confirmed');
@@ -1042,7 +1054,7 @@ export function createSender({
         }
         if (images) {
           inputActive();
-          const state = await inject(tab.id, pageInputImages, [images, false]);
+          const state = await inject(tab.id, pageInputImages, [images, false, sel]);
           if (!state?.ok || !state.ready) throw new OpError('send_failed', 'image readiness was lost before submission');
         }
         submittedAt = now();
