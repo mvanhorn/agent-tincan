@@ -515,6 +515,7 @@ func TestSendErrorCodes(t *testing.T) {
 		"not_logged_in":      ErrNotLoggedIn,
 		"composer_not_found": ErrComposerNotFound,
 		"send_failed":        ErrSendFailed,
+		"page_error":         ErrSendFailed,
 		"timeout":            ErrTimeout,
 		"not_found":          ErrNotFound,
 		"unsupported":        ErrRejected,

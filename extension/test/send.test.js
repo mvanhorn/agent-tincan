@@ -77,7 +77,7 @@ class FakeSite {
     this.site = site;
     this.sel = SELECTORS[site];
     this.opts = { execWorks: true, pasteWorks: false, streamTicks: 3, loadTicks: 1, ...opts };
-    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, blocked: 0, signedIn: 0, dialog: 0, notice: 0, ...(opts.match || {}) };
+    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, blocked: 0, signedIn: 0, dialog: 0, notice: 0, loadError: 0, ...(opts.match || {}) };
     this.home = url;
     this.href = this.opts.redirectTo || url;
     this.loadLeft = this.opts.loadTicks;
@@ -126,6 +126,13 @@ class FakeSite {
   trapped() {
     return Boolean(this.dialogs) && this.dialogs.some((d) => d.open);
   }
+  broken() {
+    return Boolean(this.opts.loadError) && (this.opts.loadErrorAlways || !this.reloads);
+  }
+  reload() {
+    this.reloads = (this.reloads || 0) + 1;
+    this.loadLeft = this.opts.loadTicks;
+  }
   get location() {
     const u = new URL(this.href);
     return { href: u.href, pathname: u.pathname, host: u.host };
@@ -138,7 +145,13 @@ class FakeSite {
     const els = [];
     switch (r) {
       case 'composer':
-        if (!this.opts.noComposer) els.push(this.composer);
+        if (!this.opts.noComposer && !this.broken()) els.push(this.composer);
+        break;
+      case 'loadError':
+        // loadError: the conversation failed to load, so there is no
+        // composer; from loadErrorFromTick the page shows the site's error
+        // text. A reload fixes it unless loadErrorAlways.
+        if (this.broken() && this.ticks >= (this.opts.loadErrorFromTick || 0)) els.push(new El(this, 'MAIN', 'Could not load this ChatGPT conversation\nTry again'));
         break;
       case 'send':
         // sendReadyTick: the button stays disabled until that tick.
@@ -189,7 +202,7 @@ class FakeSite {
   lookup(sel) {
     const open = this.dialogs.filter((d) => d.open && d.within === sel).map((d) => d.el);
     if (open.length) return open;
-    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked', 'signedIn', 'dialog', 'notice']) {
+    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked', 'signedIn', 'dialog', 'notice', 'loadError']) {
       if (this.sel[r] && this.sel[r][this.match[r]] === sel) return this.role(r);
     }
     return [];
@@ -198,6 +211,9 @@ class FakeSite {
     const page = this;
     return {
       activeElement: null,
+      get title() {
+        return page.opts.title || '';
+      },
       querySelector: (s) => page.lookup(s)[0] || null,
       querySelectorAll: (s) => page.lookup(s),
       execCommand(cmd, _ui, val) {
@@ -265,7 +281,7 @@ function fakeChrome(makeSite) {
   const userTab = new FakeSite('chatgpt', 'https://chatgpt.com/c/users-own-chat');
   tabs.set(1, userTab);
   let next = 100;
-  const log = { created: [], removed: [], scripts: [], live: 0, maxLive: 0 };
+  const log = { created: [], removed: [], reloaded: [], scripts: [], live: 0, maxLive: 0 };
   const install = (page) => {
     const saved = { document: globalThis.document, location: globalThis.location };
     globalThis.document = page.doc;
@@ -299,6 +315,12 @@ function fakeChrome(makeSite) {
       async remove(id) {
         log.removed.push(id);
         if (tabs.delete(id)) log.live--;
+      },
+      async reload(id) {
+        log.reloaded.push(id);
+        const p = tabs.get(id);
+        if (!p) throw new Error('No tab with id: ' + id);
+        p.reload();
       },
     },
     scripting: {
@@ -512,6 +534,54 @@ test('no composer on the page: composer_not_found, tab closed', async () => {
   const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { noComposer: true }));
   await assert.rejects(sender(fc, { loadMs: 10000 }).send('chatgpt', { message: 'x' }), (e) => e.code === 'composer_not_found');
   assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('chatgpt conversation that failed to load: one reload, then the send goes ahead', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { loadError: true, neverFinish: true })));
+  const r = await sender(fc).send('chatgpt', { message: 'pong?', conversation_id: 'abc-123' });
+  assert.equal(r.conversation_id, 'abc-123');
+  assert.deepEqual(fc.log.reloaded, [100], 'reloaded its own tab once');
+  assert.deepEqual(page.submitted, ['pong?']);
+});
+
+test('chatgpt load error that shows only late in the load window: the reload gets a fresh window', async () => {
+  // Half-loaded (no composer, no error yet) for the whole 45s window,
+  // like the 2026-10-27 failure, then the error page; reloading fixes it.
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { loadError: true, loadErrorFromTick: 45, neverFinish: true })));
+  const r = await sender(fc, { loadMs: 45000 }).send('chatgpt', { message: 'pong?', conversation_id: 'abc-123' });
+  assert.equal(r.conversation_id, 'abc-123');
+  assert.deepEqual(fc.log.reloaded, [100]);
+  assert.deepEqual(page.submitted, ['pong?']);
+});
+
+test('chatgpt conversation that will not load: page_error soon after the error shows, nothing typed, tab closed', async () => {
+  const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { loadError: true, loadErrorAlways: true, title: 'New chat' }));
+  await assert.rejects(sender(fc, { loadMs: 45000 }).send('chatgpt', { message: 'x', conversation_id: 'abc-123' }), (e) => e.code === 'page_error' && /could not load the conversation/.test(e.message));
+  assert.ok(fc.now() <= 10000, `failed at ${fc.now()}ms`);
+  assert.deepEqual(fc.log.reloaded, [100], 'one reload only');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill || x.func === pageSubmit).length, 0, 'nothing typed or clicked');
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('no composer: the error says what the tab showed, never any composer text', async () => {
+  const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { noComposer: true, title: 'New chat' }));
+  await assert.rejects(sender(fc, { loadMs: 10000 }).send('chatgpt', { message: 'secret words', conversation_id: 'abc-123' }), (e) => {
+    assert.equal(e.code, 'composer_not_found');
+    assert.match(e.message, /^no message box on the page; the tab showed \/c\/abc-123, titled "New chat", with 1 user and 1 assistant turns$/);
+    return true;
+  });
+  assert.deepEqual(fc.log.reloaded, [], 'no load error, no reload');
+});
+
+test('the chatgpt load-error signal needs the error text and no composer', () => {
+  const errorPage = '<html><body><main><button>Share</button><p>Could not load this ChatGPT conversation</p><button>Try again</button></main></body></html>';
+  assert.equal(probeHTML('chatgpt', errorPage, CHATGPT_CONV).loadError, true);
+  assert.equal(probeHTML('chatgpt', chatgptPage(), CHATGPT_CONV).loadError, false);
+  // A conversation that merely quotes the text still has its composer.
+  const quoted = chatgptPage().replace('<div>hi</div>', '<div>Could not load this ChatGPT conversation</div>');
+  assert.equal(probeHTML('chatgpt', quoted, CHATGPT_CONV).loadError, false);
 });
 
 test('logged out page: not_logged_in, nothing typed', async () => {

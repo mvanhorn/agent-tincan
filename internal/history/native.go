@@ -675,7 +675,9 @@ func nativeErrorKind(s Source, ne *NativeError) error {
 		return unavailable(s, ErrTimeout, detail)
 	case "composer_not_found":
 		return unavailable(s, ErrComposerNotFound, detail)
-	case "send_failed":
+	case "send_failed", "page_error":
+		// page_error: the site could not load the conversation, so
+		// nothing was typed; the detail says what the tab showed.
 		return unavailable(s, ErrSendFailed, detail)
 	case "unsupported":
 		return unavailable(s, ErrRejected, "the extension needs an update: "+detail)
