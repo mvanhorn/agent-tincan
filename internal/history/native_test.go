@@ -897,3 +897,22 @@ func TestExchangeTellsCallerDeadlineFromChromeTimeout(t *testing.T) {
 		t.Fatalf("client timeout: got %v, want ErrTimeout", err)
 	}
 }
+
+// pastDeadline is a context whose deadline has passed but whose timer has
+// not fired yet: the moment a socket deadline at the same instant times
+// out first.
+type pastDeadline struct{ context.Context }
+
+func (pastDeadline) Deadline() (time.Time, bool) { return time.Now().Add(-time.Millisecond), true }
+
+// A socket that times out at the caller's deadline, just before the
+// caller's context reports it, is still the caller running out of time.
+func TestExchangeSocketTimeoutAtCallerDeadline(t *testing.T) {
+	ch := channelFunc(func(context.Context, NativeRequest, func(NativeResponse) (bool, error)) error {
+		return os.ErrDeadlineExceeded
+	})
+	_, err := (&Client{Channel: ch}).Request(pastDeadline{context.Background()}, OpChatGPTList, OpArgs{Count: 5})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
+		t.Fatalf("got %v, want context.DeadlineExceeded and not ErrTimeout", err)
+	}
+}

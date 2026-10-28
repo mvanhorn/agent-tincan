@@ -907,8 +907,13 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 		// The caller's own deadline is the caller running out of time
 		// (a history request's whole budget), not Chrome failing to
 		// answer, so it stays a context error for the caller to report.
+		// The socket shares that deadline and can time out just before
+		// the context's timer fires, so a passed deadline counts too.
 		if cerr := caller.Err(); cerr != nil {
 			return fmt.Errorf("%s: %w", src, cerr)
+		}
+		if d, ok := caller.Deadline(); ok && !time.Now().Before(d) {
+			return fmt.Errorf("%s: %w", src, context.DeadlineExceeded)
 		}
 		return unavailable(src, ErrTimeout, "")
 	case errors.Is(err, context.Canceled):
