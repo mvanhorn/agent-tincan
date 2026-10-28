@@ -398,7 +398,9 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	case in.To == "":
 		return Request{}, errors.New("send: to is required")
 	case in.To == sender:
-		return Request{}, errors.New("send: an agent cannot send to itself")
+		// Every session running as an agent shares its name, so this is
+		// usually an attempt to reach another session on the same machine.
+		return Request{}, errors.New("send: an agent cannot send to itself; other sessions running as this agent share its name, so reach them through their runtime's own session messaging")
 	case in.Kind != KindPing && in.Body == "" && len(in.Attachments) == 0:
 		return Request{}, errors.New("send: body is required")
 	case len(in.Body) > maxBody:

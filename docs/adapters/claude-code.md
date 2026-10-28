@@ -59,6 +59,10 @@ While socket wake runs, the session tells the relay so, and a teammate's pending
 
 `--wake-socket=false` turns socket wake off. With `--channel` the channel runs and `--wake-socket` is ignored.
 
+## Several sessions on one machine
+
+Every Claude Code window on a machine runs as the same agent. A teammate cannot pick one window, and one window cannot ask another: an `ask` to the agent's own name fails with `send: an agent cannot send to itself`. To reach another window on the same machine, use Claude Code's own messaging between sessions where it has one. To make a window addressable on the relay, join it as an agent of its own, with its own invite and `TINCAN_CONFIG`.
+
 ## Show what each session is working on
 
 Add `--share-title` to the server command to show each session's title on the roster:

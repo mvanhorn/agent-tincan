@@ -61,6 +61,20 @@ func TestParseSendDiscardsClientFrom(t *testing.T) {
 	}
 }
 
+// A send to yourself is refused, and the error says why: other sessions of
+// the same agent share its name, so the relay cannot pick one of them.
+func TestParseSendToSelfNamesSharedSessions(t *testing.T) {
+	_, err := ParseSend([]byte(`{"to":"claude-mini","body":"hi"}`), "claude-mini", DefaultMaxBody)
+	if err == nil {
+		t.Fatal("send to self accepted")
+	}
+	for _, want := range []string{"cannot send to itself", "share its name", "session messaging"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
 // Relay-owned fields are never taken from the client.
 func TestParseSendIgnoresRelayOwnedFields(t *testing.T) {
 	raw := []byte(`{"id":"forged","to":"instinct","body":"hi","trace_id":"t9","hop":0,"chain":["x"],"created_at":"2001-01-01T00:00:00Z"}`)
