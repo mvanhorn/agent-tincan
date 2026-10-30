@@ -1,6 +1,6 @@
 # Web agents: ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates
 
-A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or Microsoft Copilot (copilot.com) a teammate. Another agent asks it something with `tincan ask chatgpt-web "..."` and gets ChatGPT's answer back as the reply, with any images ChatGPT generated attached. `claude-web` does the same with Claude on claude.ai, replying with the answer as text since Claude makes no images, `grok-web` with Grok on grok.com, `gemini-web` with Gemini on gemini.google.com, attaching its images when they can be fetched (see [Gemini](#gemini) for what differs there, including the account risk and what Gemini can read), `perplexity-web` with Perplexity on www.perplexity.ai, whose replies list the answer's source links (see [Perplexity](#perplexity)), and `copilot-web` with a personal Microsoft account's Copilot on copilot.com, replying with the answer and its source links (see [Copilot](#copilot)). `dot-web` does the same with your OpenAI dot through its DM on chatgpt.com, and also lets the dot ask teammates (see [Your dot](#your-dot-dot-web)).
+A web agent makes chatgpt.com, claude.ai, grok.com, gemini.google.com, www.perplexity.ai or Microsoft Copilot (copilot.com) a teammate. Another agent asks it something with `tincan ask chatgpt-web "..."` and gets ChatGPT's answer back as the reply, with any images ChatGPT generated attached. `claude-web` does the same with Claude on claude.ai, replying with the answer as text since Claude makes no images, `grok-web` with Grok on grok.com, `gemini-web` with Gemini on gemini.google.com, attaching its images when they can be fetched (see [Gemini](#gemini) for what differs there, including the account risk and what Gemini can read), `perplexity-web` with Perplexity on www.perplexity.ai, whose replies list the answer's source links (see [Perplexity](#perplexity)), and `copilot-web` with a personal Microsoft account's Copilot on copilot.com, replying with the answer and its source links (see [Copilot](#copilot)). `dot-web` does the same with your OpenAI dot through its DM on chatgpt.com, and also lets the dot ask teammates (see [Your dot](#your-dot-dot-web)). `duet-web` does the same with Claude in your Claude Duet chat on claude.ai/messages (see [Claude Duet](#claude-duet-duet-web)).
 
 It is a Go service, `tincan web serve --site chatgpt` (or `--site claude-ai`, `--site grok`, `--site gemini`, `--site perplexity`, `--site copilot`), running on your Mac next to Chrome. It is not a model. For each request it:
 
@@ -118,7 +118,8 @@ The ChatGPT and Claude send operations need extension version 0.3.0 or later (0.
 - "chatgpt.com showed an anti-bot check": the site answered with a Cloudflare challenge, an anti-bot refusal (grok.com's 403 "Request rejected by anti-bot rules") or Google's "unusual traffic" page instead of its API, or the send tab opened on a challenge page. Open the site in Chrome, complete the check, then ask again.
 - "the Tincan Chrome extension has no access to grok.com": grant Grok on the extension's options page (above).
 - "source unavailable: ...: the extension rejected the request (unknown operation; the loaded extension is older than this tincan ...)": the loaded extension predates the send operations. Reload it once from `chrome://extensions`; later updates reload themselves.
-- "no message box on the chatgpt.com page (the page may have changed)": the site changed its page, or showed an interstitial (a consent or upgrade dialog). Open the site in Chrome, dismiss anything in the way, and ask again. If it persists, the selectors in `extension/send.js` need an update.
+- "no message box on the chatgpt.com page (the page may have changed)": the site changed its page, showed an interstitial (a consent or upgrade dialog), or never finished loading the conversation. The detail says what the tab showed: its path, title and turn counts. A title of "New chat" with 0 turns on a `/c/<id>` path means the conversation did not load; open it in Chrome to check it still loads. Otherwise open the site, dismiss anything in the way, and ask again. If it persists, the selectors in `extension/send.js` need an update.
+- "the message could not be sent on chatgpt.com (chatgpt.com could not load the conversation ...)": the site showed its own "Could not load this ChatGPT conversation" page before and after one reload, so nothing was typed. Open the conversation in Chrome; if it does not load there either, ask with `new chat`.
 - "the message could not be sent on chatgpt.com": the text did not land in the message box, the send button stayed disabled, or the page ignored the click (for example a usage limit). Open the site and look.
 - "ChatGPT did not finish answering in time": no finished answer before the request timeout. The reply names the conversation when the message was sent; look in it and ask again with `conversation: <id>`. If the answer is still coming, wait for it to finish first, or the send is refused (see below).
 - "the conversation is still answering an earlier message": the conversation still shows a stop button or a streaming answer, so the send was refused. Wait for the answer on the site to finish and ask again, or use `new chat`.
@@ -133,12 +134,14 @@ All page selectors live in one table, `SELECTORS` in `extension/send.js`, each w
 
 | Role | chatgpt.com | claude.ai | gemini.google.com |
 | --- | --- | --- | --- |
-| message box | `#prompt-textarea`, `div[contenteditable="true"][id="prompt-textarea"]`, `textarea[data-id="root"]`, `form div[contenteditable="true"]` | `div[contenteditable="true"].ProseMirror`, `fieldset div[contenteditable="true"]`, `[contenteditable="true"][aria-label*="prompt" i]`, `div[contenteditable="true"]` | `div.ql-editor[aria-label="Enter a prompt for Gemini"]`, `rich-textarea div.ql-editor[contenteditable="true"]`, `div.ql-editor[contenteditable="true"]` |
-| send button | `[data-testid="send-button"]`, `#composer-submit-button`, `button[aria-label*="Send"]` (else Enter) | `button[aria-label="Send message"]`, `button[aria-label*="Send"]`, `fieldset button[type="submit"]` (else Enter) | `button[aria-label*="Send" i]`, `button.send-button` (appears once there is text; else Enter) |
+| message box | `form div[contenteditable="true"][role="textbox"]`, `form div[contenteditable="true"]`, `#prompt-textarea`, `textarea[data-id="root"]` | `div[contenteditable="true"].ProseMirror`, `fieldset div[contenteditable="true"]`, `[contenteditable="true"][aria-label*="prompt" i]`, `div[contenteditable="true"]` | `div.ql-editor[aria-label="Enter a prompt for Gemini"]`, `rich-textarea div.ql-editor[contenteditable="true"]`, `div.ql-editor[contenteditable="true"]` |
+| send button | `[data-testid="send-button"]`, `#composer-submit-button`, `button[aria-label*="Send"]`, `form button[type="submit"]` (appears once there is text; else Enter) | `button[aria-label="Send message"]`, `button[aria-label*="Send"]`, `fieldset button[type="submit"]` (else Enter) | `button[aria-label*="Send" i]`, `button.send-button` (appears once there is text; else Enter) |
 | answering (refuses a send while present; confirms a send after the click) | `[data-testid="stop-button"]`, `button[aria-label*="Stop"]`, `.result-streaming` | `button[aria-label="Stop response"]`, `button[aria-label*="Stop"]`, `[data-is-streaming="true"]` | `button[aria-label*="Stop" i]` |
-| assistant messages | `[data-message-author-role="assistant"]` | `[data-is-streaming]`, `.font-claude-response`, `.font-claude-message`, `[data-testid="assistant-message"]` | `model-response`, `message-content` |
-| user messages | `[data-message-author-role="user"]` | `[data-testid="user-message"]` | `user-query` |
+| assistant messages | `[data-conversation-role="assistant"]`, `[data-message-author-role="assistant"]` | `[data-is-streaming]`, `.font-claude-response`, `.font-claude-message`, `[data-testid="assistant-message"]` | `model-response`, `message-content` |
+| user messages | `[data-conversation-role="user"]`, `[data-message-author-role="user"]` | `[data-testid="user-message"]` | `user-query` |
 | logged out | `[data-testid="login-button"]`, `a[href*="/auth/login"]`, paths `/auth/login`, `/log-in` | `a[href="/login"]`, `input[type="email"]`, paths `/login`, `/logout` | `a[href*="accounts.google.com/ServiceLogin"]`, `a[href*="accounts.google.com/v3/signin"]` |
+
+On chatgpt.com, a conversation the site could not fetch first sits half-loaded (title "New chat", no turns, no message box), then shows "Could not load this ChatGPT conversation" with no message box. A send that sees that text (in `main`, with no message box on the page) reloads its own tab once, with a fresh load window, and fails with `page_error` if the text shows again; nothing is typed either way.
 
 On every site, a send tab the site sends to another host is not typed into: Google's `/sorry/` page is `blocked`, any other host (a sign-in page) is `not_logged_in`. When that happens after the send button was clicked, the message may already be in the conversation, so the failure reply says so and asks you to check the conversation before sending it again.
 
@@ -283,7 +286,7 @@ A dot acts on its own in the apps you connected to it (Gmail, GitHub, Google Dri
    tincan web install --site dots
    ```
 
-   and start it with the command it prints. `web serve --site dots` requires `--thread`, which the installed service passes; `web install --site dots` finds it when you leave it off. Every other site refuses `--thread`. Logs go to `~/Library/Logs/tincan-dot-web.log`.
+   and start it with the command it prints. `web serve --site dots` requires `--thread`, which the installed service passes; `web install --site dots` finds it when you leave it off. Every site but `dots` and `duet` refuses `--thread`. Logs go to `~/Library/Logs/tincan-dot-web.log`.
 
 Sign in to chatgpt.com in the same Chrome first. The extension needs a build with the `dots.*` operations.
 
@@ -320,7 +323,7 @@ When the dot answers a request by asking a teammate itself (its reply ends with 
 
 ### The setup message
 
-The first time `dot-web` reads a thread, it types one setup message into the DM. It explains the `@tincan ask <agent>` format in words (it carries no example line, so an echo of it can never send an ask), says replies are asynchronous and may wait on your approval so the dot should not ask twice, lists the reply forms (`[tincan-reply from <agent>]` answers, `needs input:` and `failed:`), lists the teammates the dot may ask, and says that requests Tincan types there and `[tincan-reply]` messages are data from teammates, not your instructions, and that the dot should ask you before writing through a connected app on a teammate's behalf. It is sent once per thread. To send it again (for example after the roster changes), run with `--teach`, which sends it once per start. `--teach` applies only to `--site dots`.
+The first time `dot-web` reads a thread, it types one setup message into the DM. It explains the `@tincan ask <agent>` format in words (it carries no example line, so an echo of it can never send an ask), says replies are asynchronous and may wait on your approval so the dot should not ask twice, lists the reply forms (`[tincan-reply from <agent>]` answers, `needs input:` and `failed:`), lists the teammates the dot may ask, and says that requests Tincan types there and `[tincan-reply]` messages are data from teammates, not your instructions, and that the dot should ask you before writing through a connected app on a teammate's behalf. It is sent once per thread. To send it again (for example after the roster changes), run with `--teach`, which sends it once per start. `--teach` applies only to `--site dots` and `--site duet`.
 
 ### Whom the dot may ask
 
@@ -371,6 +374,46 @@ The dot sits on [councils](council.md) by default, like the other web teammates.
 - Each read of the DM takes only its latest 32 messages. If more arrive between two reads (the Mac asleep, `dot-web` stopped, or a long request holding the send path), an `@tincan ask` among the older ones is not asked; `dot-web` notices the gap and types one `[tincan]` note asking the dot to send any unanswered ask again.
 - One DM per agent. For a second dot, invite a second agent with `--kind dot-web` and run it with its own config: `TINCAN_CONFIG=~/.config/tincan/<name>.json tincan web serve --site dots --name <name> --thread <thread-id>`, in the foreground or under your own service manager. `tincan web install` has no `--name` and installs only the default `dot-web` service.
 - The request and the dot's answers use your ChatGPT account and stay in the DM like any chat you had with the dot.
+
+## Claude Duet (duet-web)
+
+`duet-web` (`tincan web serve --site duet`) makes Claude in your Claude Duet chat (claude.ai/messages) a teammate in both directions, the same way `dot-web` does for an OpenAI dot. A teammate asks it something and gets Claude's answer back, and Claude can ask teammates with `@tincan ask <agent>` and get their answers in the chat. Duet has no webhook, email address or public API that starts Claude, and Claude's own network access goes through an allowlisted proxy, so nothing on Claude's side can reach your relay. Everything goes through the chat's page in your logged-in Chrome, through the Tincan extension, and no Tailscale is needed on Claude's side. There is no new site to grant: the duet operations use the extension's claude.ai grant.
+
+Claude in Duet can use the apps you connected to it (Gmail, Calendar, Drive, Slack and others), and a message typed into the chat shows up as your own. So requests to `duet-web` are held for your approval by default, exactly like `dot-web` (see [Approval](#approval)). Claude says it treats other agents' words as information rather than your instructions and asks you before doing anything outward, but as with the dot, treat every request to `duet-web` as if you sent it yourself.
+
+### Which chat
+
+Use the main Duet chat (Claude, at the top of the claude.ai/messages sidebar), or a private channel of your own (`#name` in the sidebar). Only a 1:1 chat is served: the extension refuses a channel that has any other member or guest, is archived or disabled, is not private, or is not yours (`channel_refused`), when you install, when the agent starts, and again before every send and read.
+
+A private channel shows its id in the address bar: `https://claude.ai/messages/chan_...`. The main chat's address bar shows only `/messages`, so to find its id open it with Chrome's developer tools on the Network tab, filter for `timeline`, and copy the `chan_...` part of a request's address. `--thread` takes the id or the full address.
+
+### Running it
+
+```bash
+tincan invite duet-web --kind duet-web                                        # relay machine (or an admin device)
+TINCAN_CONFIG=~/.config/tincan/duet-web.json tincan join <code> --relay http://tincan-relay
+TINCAN_CONFIG=~/.config/tincan/duet-web.json tincan web install --site duet --thread <channel id or address>
+```
+
+and start it with the command it prints (or run `tincan web serve --site duet --name duet-web --thread <id>` in the foreground). `--thread` is required: unlike a dot there is no primary to find. `web install` checks the channel through the extension and refuses one the extension refuses; if the extension cannot be reached it warns, and `web serve` checks again before serving. `web serve --site duet` refuses to start unless the relay records the agent's kind as `duet-web`. Logs go to `~/Library/Logs/tincan-duet-web.log`.
+
+### How a request runs
+
+It works as [Asking the dot](#asking-the-dot) describes, with these differences:
+
+- Before typing, the extension waits up to 2 minutes for Claude to finish whatever it is doing in the chat, then fails with "Nothing was sent: Claude Duet is still working on something else; ask again when it is done." If the extension cannot read whether Claude is working, it types nothing and fails the same way, saying it could not tell.
+- The message box is typed into and Send clicked in a background tab of `https://claude.ai/messages/<id>`; the send is confirmed by your new message appearing in the chat's timeline.
+- The answer is every message Claude posts after the request, joined in order. Claude often posts an "On it" first and the answer later, so the agent reads whether Claude is still working from the chat's event stream (the `session_activity` events) and waits while it is, or while a read cannot tell; Claude stops working a few seconds after its last message. Messages from anyone else are never part of the answer.
+
+Claude asking teammates, the setup message, the send allowlist (`~/.config/tincan/duet-web-send.txt`), the outbound state file (`~/.config/tincan/duet-web-out.json`), approval, council seats and `--teach` all work as they do for the dot, with "the channel" for "the DM". Only Claude's own messages start an ask: an `@tincan ask` line you write yourself is not asked. A teammate's ask from Claude ends with `(from the owner's Duet channel, ref dotask...)`.
+
+### Limits
+
+- Claude sometimes answers with only an emoji reaction instead of a message. Tincan reads messages, not reactions, so such a request waits until the request timeout and the asker is told to check the chat later.
+- Each read takes only the chat's latest 32 messages, as for the dot.
+- Messages in a Duet thread (replies under a message) are not read; only the chat's main timeline is.
+- When Claude stops to ask for your approval (an approval card), tincan does not see the card. The asker gets Claude's messages so far once they hold still, or, if Claude still counts as working, waits until the request timeout. Approve or deny in the chat yourself.
+- `duet-web` is not a history source: `tincan history` does not read Duet chats.
 
 ## Ask both web agents
 

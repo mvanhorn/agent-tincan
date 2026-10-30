@@ -398,7 +398,11 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	if site.oneThread {
 		thread, ok := site.canonical(w.Thread)
 		if !ok {
-			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the %s agent has no valid thread; reinstall it with tincan web install --site dots, which finds the dot's thread, or run it with --thread <id>.", label, w.Name), envelope.StatusFailed, nil)
+			how := "reinstall it with tincan web install --site " + string(w.Site) + " --thread <id>, or run it with --thread <id>."
+			if site.primary {
+				how = "reinstall it with tincan web install --site " + string(w.Site) + ", which finds the dot's thread, or run it with --thread <id>."
+			}
+			w.reply(ctx, req, fmt.Sprintf("Nothing was sent to %s: the %s agent has no valid thread; %s", label, w.Name, how), envelope.StatusFailed, nil)
 			return
 		}
 		wr = webRequest{mode: threadConversation, convID: thread, message: dropNewChatLine(req.Body)}
@@ -859,6 +863,10 @@ func (w *WebAgent) sendFailure(err error, convID string) string {
 	switch {
 	case errors.Is(err, ErrPaused):
 		return "Nothing was sent: " + label + " is paused; unpause it in ChatGPT and ask again."
+	case errors.Is(err, ErrRefused), errors.Is(err, ErrBusy):
+		// The reason is the whole story: the channel was refused, or Claude
+		// was busy, before anything was typed.
+		return "Nothing was sent: " + strings.TrimPrefix(err.Error(), "source unavailable: "+string(w.Site)+": ") + "."
 	case w.oneThread() && errors.Is(err, ErrNotFound):
 		return fmt.Sprintf("Nothing was sent: %s's thread %s was not found; check the --thread the %s agent runs with.", label, convID, w.Name)
 	case w.oneThread() && errors.Is(err, ErrTimeout) && clickedNote(err, w.Site) != "":
@@ -1039,6 +1047,9 @@ type webNode struct {
 	// limited: the answer ended on the account's rate or plan limit
 	// (grok.com's stream errors).
 	limited bool
+	// busy: the site says the assistant is still working, so the reply
+	// may grow however long its text holds still (a Duet channel).
+	busy bool
 }
 
 // replyProgress is what one detail read says about the reply.
@@ -1059,6 +1070,9 @@ type replyProgress struct {
 	limited bool
 	// sig fingerprints the reply, for the stability check.
 	sig string
+	// busy: the site says the assistant is still working on this turn, so
+	// the stability check waits.
+	busy bool
 }
 
 func (w *WebAgent) nodes(raw json.RawMessage) ([]webNode, error) { return w.site().nodes(raw) }
@@ -1119,6 +1133,7 @@ func progressOf(nodes []webNode, a replyAnchor) replyProgress {
 		n := &nodes[i]
 		ended = ended || n.endTurn
 		limited = limited || n.limited
+		p.busy = p.busy || n.busy
 		if n.hidden {
 			continue
 		}

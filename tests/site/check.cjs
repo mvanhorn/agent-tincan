@@ -8,7 +8,7 @@ const read = (f) => fs.readFileSync(path.join(root, "site", f), "utf8");
 const baseline = new JSDOM(
   cp.execFileSync(
     "git",
-    ["show", "cce368f6377e02dbd71ba540e2e62c53fa3d6325:site/index.html"],
+    ["show", "35d9cefd8f63bef5c8f01a8439f669c5bce5362f:site/index.html"],
     { cwd: root, encoding: "utf8" },
   ),
 ).window.document;
@@ -54,7 +54,7 @@ for (const f of [
     read(f),
     cp.execFileSync(
       "git",
-      ["show", "cce368f6377e02dbd71ba540e2e62c53fa3d6325:site/" + f],
+      ["show", "35d9cefd8f63bef5c8f01a8439f669c5bce5362f:site/" + f],
       { cwd: root, encoding: "utf8" },
     ),
     f,

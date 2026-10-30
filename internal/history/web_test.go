@@ -607,6 +607,7 @@ func TestWebSourceUnavailableAndPageErrors(t *testing.T) {
 		"not_logged_in":      "source unavailable: chatgpt: not logged in to chatgpt.com in Chrome",
 		"composer_not_found": "source unavailable: chatgpt: no message box on the chatgpt.com page",
 		"send_failed":        "source unavailable: chatgpt: the message could not be sent on chatgpt.com",
+		"page_error":         "source unavailable: chatgpt: the message could not be sent on chatgpt.com",
 	} {
 		rig := newWebRig(t)
 		rig.browser.sendErr = code

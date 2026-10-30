@@ -52,6 +52,18 @@
 // refuses a paused dot before any tab opens, and confirms its message by
 // polling the feed for it (dotHooks), since the DM page's address never
 // changes.
+//
+// Claude Duet (claude.ai/messages, under claude.ai's grant): a channel is
+// read from claude.ai's channels API with the owner's cookies, the
+// organization header claudeOrgId reads and the API version header the
+// page sends: the channel record (the owner, and whether it is a 1:1
+// channel still the owner's) and its timeline (duetFeed). A channel that
+// is shared with anyone else, archived or not the owner's is refused on
+// every read and send (channel_refused). Whether Claude is still working
+// comes from one bounded read of the channel's event stream (duetWorking),
+// which is aborted as soon as its first activity snapshot is in. duet.send waits a bounded
+// time for Claude to finish before typing (busy), and confirms its message
+// by polling the timeline, like a dot.
 
 export const NATIVE_HOST = 'com.agenttincan.history';
 export const MAX_COUNT = 100;
@@ -99,10 +111,11 @@ export const SITE_ACCESS = Object.freeze({
 });
 
 // SITE_ALIASES are op prefixes that run on another site's pages and so
-// share its grant: an OpenAI dot's DM lives on chatgpt.com. The options
-// page and the hello list only SITE_ACCESS keys, so the host checks an
-// alias's grant under its site's key (dots under chatgpt).
-export const SITE_ALIASES = Object.freeze({ dots: 'chatgpt' });
+// share its grant: an OpenAI dot's DM lives on chatgpt.com, a Duet channel
+// on claude.ai. The options page and the hello list only SITE_ACCESS keys,
+// so the host checks an alias's grant under its site's key (dots under
+// chatgpt, duet under claudeai).
+export const SITE_ALIASES = Object.freeze({ dots: 'chatgpt', duet: 'claudeai' });
 
 // siteGranted reports whether permissions (chrome.permissions) holds
 // site's page origins, what its operations need, or with all set every
@@ -191,6 +204,21 @@ const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const DOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}~[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 // DOT_THREAD_RE is a dot thread id as tincan takes it (hex and hyphens).
 const DOT_THREAD_RE = /^[0-9A-Fa-f-]{8,64}$/;
+// DUET_CHANNEL_RE is a Duet channel id, as claude.ai/messages/<id> shows it.
+const DUET_CHANNEL_RE = /^chan_[A-Za-z0-9]{8,64}$/;
+// DUET_API_VERSION is the anthropic-version header the channels API wants;
+// without it the API answers 400.
+const DUET_API_VERSION = '2023-06-01';
+// DUET_FEED_LIMIT is how many of the latest timeline messages duet.detail
+// reads, DUET_CONFIRM_LIMIT how many a send's confirmation polls read.
+export const DUET_FEED_LIMIT = 32;
+const DUET_CONFIRM_LIMIT = 20;
+// DUET_STREAM_MS caps the one read of the event stream duetWorking makes.
+export const DUET_STREAM_MS = 4000;
+// DUET_BUSY_WAIT_MS is how long a send waits for Claude to stop working
+// before it fails busy, checking every DUET_BUSY_POLL_MS.
+export const DUET_BUSY_WAIT_MS = 2 * 60 * 1000;
+export const DUET_BUSY_POLL_MS = 5000;
 
 // Argument kinds: 'count' is a required integer 1..MAX_COUNT, 'id' a
 // required id, 'id?' an optional id, 'bool?' an optional boolean and
@@ -198,7 +226,7 @@ const DOT_THREAD_RE = /^[0-9A-Fa-f-]{8,64}$/;
 const SEND_SPEC = Object.freeze({ message: 'message', conversation_id: 'id?', new_chat: 'bool?' });
 const CLOSE_SPEC = Object.freeze({ conversation_id: 'id' });
 const SPEC = Object.freeze({
-  ...Object.fromEntries(['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => [site + '.session', Object.freeze({})])),
+  ...Object.fromEntries(['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots', 'duet'].map(site => [site + '.session', Object.freeze({})])),
   'chatgpt.list': Object.freeze({ count: 'count' }),
   'chatgpt.detail': Object.freeze({ id: 'id' }),
   'chatgpt.file': Object.freeze({ file_id: 'id', conversation_id: 'id?' }),
@@ -230,6 +258,9 @@ const SPEC = Object.freeze({
   'dots.primary': Object.freeze({}),
   'dots.send': SEND_SPEC,
   'dots.close': CLOSE_SPEC,
+  'duet.detail': Object.freeze({ id: 'id' }),
+  'duet.send': SEND_SPEC,
+  'duet.close': CLOSE_SPEC,
   'extension.reload': Object.freeze({}),
 });
 
@@ -673,6 +704,53 @@ function sameText(a, b) {
   return norm(a) === norm(b);
 }
 
+// duetItems keeps what the Go side reads of a Duet channel's timeline, in
+// the dot feed's shape and oldest first: id, time, author, role (owner for
+// owner's messages, claude for the channel's agent, other for anyone
+// else), text and how many attachments. Server notices and messages not in
+// the timeline (thread replies) are left out, as are messages with no
+// author. A message's thread_status is not read: it stays idle while
+// Claude works and an old thread can sit at needs_input for good, so only
+// the stream says whether Claude is working (duetWorking). A message
+// without its id or time is endpoint_changed.
+export function duetItems(r, owner, agent) {
+  if (!isPlainObject(r) || !Array.isArray(r.data)) throw new OpError('endpoint_changed', 'unexpected channel timeline');
+  const out = [];
+  for (const m of r.data) {
+    if (!isPlainObject(m) || typeof m.id !== 'string' || m.id === '' || typeof m.created_at !== 'string') {
+      throw new OpError('endpoint_changed', 'unexpected channel message');
+    }
+    if (m.server_notice === true || m.in_timeline === false) continue;
+    const human = typeof m.author_account_id === 'string' && m.author_account_id !== '' ? m.author_account_id : '';
+    const bot = typeof m.author_agent_id === 'string' && m.author_agent_id !== '' ? m.author_agent_id : '';
+    const from = human || bot;
+    if (from === '') continue;
+    const role = human ? (human === owner ? 'owner' : 'other') : bot === agent ? 'claude' : 'other';
+    out.push({
+      id: m.id.slice(0, 128),
+      at: m.created_at.slice(0, 64),
+      from: from.slice(0, 128),
+      role,
+      text: typeof m.body === 'string' ? m.body.slice(0, 512 * 1024) : '',
+      attachments: Array.isArray(m.attachments) ? m.attachments.length : 0,
+    });
+  }
+  out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return { items: out };
+}
+
+// duetBusy says whether Claude is working on anything a request or its
+// answer could touch, from duetWorking's sessions and the timeline items
+// read with them: the channel's own session, or a session on a thread of a
+// message in that timeline. A session on an older thread (Claude runs
+// each thread on its own, and a long task there can run for hours) does
+// not count. It is null when the stream said nothing.
+export function duetBusy(acts, items) {
+  if (!Array.isArray(acts)) return null;
+  const ids = new Set(items.map((m) => m.id));
+  return acts.some((s) => s.working && (s.root === '' || ids.has(s.root)));
+}
+
 // geminiId checks a Gemini conversation id (the URL's hex).
 function geminiId(id) {
   if (typeof id !== 'string' || !GEMINI_ID_RE.test(id)) throw bad('invalid Gemini conversation id');
@@ -797,7 +875,7 @@ function b64(bytes) {
 // its site is granted; without it every site counts as granted. sniffMs
 // bounds how long an error or non-JSON body is read for anti-bot markers
 // (BODY_TEXT_MS unless a test shortens it).
-export function createRunner({ fetch, sender = null, reload = null, permissions = null, sniffMs = BODY_TEXT_MS }) {
+export function createRunner({ fetch, sender = null, reload = null, permissions = null, sniffMs = BODY_TEXT_MS, duetStreamMs = DUET_STREAM_MS, duetBusyWaitMs = DUET_BUSY_WAIT_MS, duetBusyPollMs = DUET_BUSY_POLL_MS }) {
   const transfers = createInputTransfers();
   let inputEpoch = 0;
   let claudeOrg = null;
@@ -1079,6 +1157,163 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     return claudeOrg;
   }
 
+  // duetAuth is the init every channels API request carries: the
+  // organization and API version headers (the cookies come with
+  // credentials: 'include').
+  async function duetAuth() {
+    return { headers: { 'x-organization-uuid': await claudeOrgId(), 'anthropic-version': DUET_API_VERSION } };
+  }
+
+  function duetChannelId(id) {
+    if (typeof id !== 'string' || !DUET_CHANNEL_RE.test(id)) throw bad('invalid Duet channel id');
+    return id;
+  }
+
+  const duetRefused = (name, why) => new OpError('channel_refused', `${name ? `the Duet channel #${name}` : 'this Duet channel'} ${why}; tincan only talks to Claude in your own 1:1 channel`);
+
+  // duetChannel reads the channel record: the owner (the caller's own
+  // account, which must hold the owner role) and the channel's agent. A
+  // channel with any member or guest besides the owner, one not private,
+  // and one archived or disabled is refused (channel_refused); a member
+  // list that cannot be read counts as shared.
+  async function duetChannel(auth, chan) {
+    const r = await getJSON(`${CLAUDE}/v1/code/channels/${chan}`, auth, true);
+    const c = isPlainObject(r) ? r.channel : null;
+    if (!isPlainObject(c) || c.id !== chan || !isPlainObject(c.membership) || typeof c.membership.account_id !== 'string' || c.membership.account_id === '') {
+      throw new OpError('endpoint_changed', 'unexpected channel record');
+    }
+    const name = typeof c.name === 'string' ? c.name.slice(0, 80) : '';
+    if (c.archived_at || c.disabled_at) throw duetRefused(name, 'is archived or disabled');
+    if (c.membership.role !== 'owner') throw duetRefused(name, 'is not yours');
+    const others = (Array.isArray(c.members) ? c.members.length : Infinity) + (Array.isArray(c.guests) ? c.guests.length : Infinity);
+    if (c.visibility !== 'private' || c.members_truncated === true || others > 0) throw duetRefused(name, 'is shared with other people');
+    return { owner: c.membership.account_id.slice(0, 128), agent: typeof c.agent_id === 'string' ? c.agent_id : '' };
+  }
+
+  // duetFeed reads the latest limit timeline messages of chan, oldest
+  // first.
+  async function duetFeed(auth, chan, ch, limit) {
+    return duetItems(await getJSON(`${CLAUDE}/v1/code/channels/${chan}/timeline?limit=${limit}`, auth, true), ch.owner, ch.agent);
+  }
+
+  // duetWorking reads the channel's event stream once, for at most
+  // duetStreamMs: the stream starts with an activity snapshot of each of
+  // the channel's sessions, so the read takes those and aborts at the
+  // first other event. It returns each session's { root, working }, root
+  // being the message its thread hangs off ('' for the channel's own
+  // session), or null when none arrived (the stream could not be read or
+  // said nothing in time). duetBusy decides from them.
+  async function duetWorking(auth, chan) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), duetStreamMs);
+    let seen = false;
+    const working = [];
+    try {
+      const res = await fetch(`${CLAUDE}/v1/code/channels/${chan}/messages/stream?from=tail`, {
+        method: 'GET', cache: 'no-store', credentials: 'include', signal: ac.signal,
+        headers: { ...auth.headers, accept: 'text/event-stream' },
+      });
+      if (!res.ok || !res.body || !contentType(res).includes('event-stream')) return null;
+      const reader = res.body.getReader();
+      // The time limit ends a read that is waiting on a quiet stream.
+      if (ac.signal.aborted) return null;
+      ac.signal.addEventListener('abort', () => reader.cancel().catch(() => {}), { once: true });
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let k;
+        while ((k = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, k);
+          buf = buf.slice(k + 2);
+          const event = (block.match(/^event: ?(.*)$/m) || [])[1];
+          if (event === undefined) continue;
+          if (event !== 'session_activity') return seen ? working : null;
+          try {
+            const d = JSON.parse((block.match(/^data: ?(.*)$/m) || [])[1]);
+            if (isPlainObject(d) && typeof d.working === 'boolean') {
+              seen = true;
+              working.push({ root: typeof d.thread_root_id === 'string' ? d.thread_root_id : '', working: d.working });
+            }
+          } catch {
+            // A snapshot that does not parse says nothing.
+          }
+        }
+      }
+      return seen ? working : null;
+    } catch {
+      return seen ? working : null;
+    } finally {
+      clearTimeout(timer);
+      ac.abort();
+    }
+  }
+
+  // duetHooks are the sender's feed hooks for one send of message into
+  // chan: page, the channel the sender opens and checks the tab's address
+  // against; ready(deadline), called in the queued send right before the
+  // fill, reads the channel record again once (refusing a channel shared
+  // since) and waits, up to duetBusyWaitMs and never past the send's
+  // deadline, until a read confirms Claude is not working: while Claude is
+  // working it fails busy, and while no read can tell it fails busy with
+  // the detail "working state unknown", nothing typed either way; before, right before each click, reads the record again
+  // and notes the timeline's message ids; confirm returns the id of the
+  // first owner message not among them whose text is the message and
+  // whose time is not before the click (less DOT_SKEW_MS), or null.
+  function duetHooks(auth, chan, message) {
+    let seen = null;
+    let from = 0;
+    let ch = null;
+    return {
+      page: chan,
+      async ready(deadline) {
+        const end = Math.min(Date.now() + duetBusyWaitMs, Number.isFinite(deadline) ? deadline : Infinity);
+        const c = await duetChannel(auth, chan);
+        for (;;) {
+          const acts = await duetWorking(auth, chan);
+          // The timeline matters only when a thread's session is working;
+          // its read is bounded by what is left of the wait, so a stalled
+          // read cannot hold the send past its deadline.
+          let items = [];
+          if (Array.isArray(acts) && acts.some((s) => s.working && s.root !== '')) {
+            const ac = new AbortController();
+            const t = setTimeout(() => ac.abort(), Math.max(end - Date.now(), 0));
+            try {
+              items = (await duetFeed({ ...auth, signal: ac.signal }, chan, c, DUET_FEED_LIMIT)).items;
+            } catch (e) {
+              if (!ac.signal.aborted) throw e;
+              throw new OpError('busy', 'working state unknown');
+            } finally {
+              clearTimeout(t);
+            }
+          }
+          const working = duetBusy(acts, items);
+          if (working === false) return;
+          if (Date.now() + duetBusyPollMs > end) {
+            throw new OpError('busy', working === true ? 'Claude is still working in the Duet channel; nothing was sent' : 'working state unknown');
+          }
+          await new Promise((resolve) => setTimeout(resolve, duetBusyPollMs));
+        }
+      },
+      async before() {
+        ch = await duetChannel(auth, chan);
+        seen = new Set((await duetFeed(auth, chan, ch, DUET_CONFIRM_LIMIT)).items.map((m) => m.id));
+        from = Date.now() - DOT_SKEW_MS;
+      },
+      async confirm() {
+        for (const m of (await duetFeed(auth, chan, ch, DUET_CONFIRM_LIMIT)).items) {
+          if (m.role !== 'owner' || (seen && seen.has(m.id)) || !sameText(m.text, message)) continue;
+          const at = Date.parse(m.at);
+          if (Number.isNaN(at) || at < from) continue;
+          return m.id;
+        }
+        return null;
+      },
+    };
+  }
+
   // geminiAuth returns the app page's session values: the at token, the
   // build label and the session id. They stay in this closure, are never
   // returned, and are fetched again after GEMINI_SESSION_MS or when
@@ -1204,6 +1439,7 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
   const handlers = {
     async 'chatgpt.session'() { await chatgptAuth(); return {}; },
     async 'dots.session'() { await chatgptAuth(); return {}; },
+    async 'duet.session'() { claudeOrg = null; await claudeOrgId(); return {}; },
     async 'claudeai.session'() { claudeOrg = null; await claudeOrgId(); return {}; },
     async 'grok.session'() { await grokSession(true); return {}; },
     async 'gemini.session'() { await geminiAuth(true); return {}; },
@@ -1460,6 +1696,33 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
       if (d.paused) throw dotPausedErr();
       return sender.send('dots', a, dotHooks(auth, a.conversation_id, d, a.message));
     },
+    // Every read checks the channel record, so a channel shared since the
+    // last read is refused at once. Whether Claude is working is read before
+    // the timeline: a "not working" answer then never comes with a timeline
+    // older than it, which would miss a message Claude posted in between.
+    async 'duet.detail'(a) {
+      const chan = duetChannelId(a.id);
+      const auth = await duetAuth();
+      const ch = await duetChannel(auth, chan);
+      const acts = await duetWorking(auth, chan);
+      const f = await duetFeed(auth, chan, ch, DUET_FEED_LIMIT);
+      const working = duetBusy(acts, f.items);
+      return { thread: chan, room: chan, owner: ch.owner, paused: false, working, items: f.items };
+    },
+    // A Duet channel has no new chat either, so the send needs its channel.
+    // The channel is checked before any tab opens, and again in the queued
+    // send before anything is typed or clicked (duetHooks). The read
+    // operations keep the organization id cached, so the send asks
+    // claude.ai again, as claudeai.send does.
+    async 'duet.send'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      if (a.conversation_id === undefined || a.new_chat === true) throw bad('a Duet send needs its channel id as conversation_id');
+      const chan = duetChannelId(a.conversation_id);
+      claudeOrg = null;
+      const auth = await duetAuth();
+      await duetChannel(auth, chan);
+      return sender.send('duet', a, duetHooks(auth, chan, a.message));
+    },
     // close touches only tabs a send opened and left open.
     async 'chatgpt.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
@@ -1488,6 +1751,10 @@ export function createRunner({ fetch, sender = null, reload = null, permissions 
     async 'dots.close'(a) {
       if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
       return sender.close('dots', a.conversation_id);
+    },
+    async 'duet.close'(a) {
+      if (!sender) throw new OpError('unsupported', 'this extension build cannot send');
+      return sender.close('duet', a.conversation_id);
     },
     // The answer goes out first; the reload follows a moment later, or
     // once no send has a tab open (see RELOAD_MAX_WAIT_MS).

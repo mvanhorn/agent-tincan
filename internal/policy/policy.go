@@ -172,10 +172,10 @@ func (p *Policy) CheckMove(ctx context.Context, req envelope.Request, to string)
 // owner's approval even with no approval.json entry. A council sends the ask
 // on to every model vendor on the team. dot-web types each request into the
 // owner's dot DM as the owner, and a dot acts through the owner's connected
-// apps. A pass sends one of the owner's chats to another vendor. Replies
+// apps; duet-web does the same in the owner's Duet channel with Claude. A pass sends one of the owner's chats to another vendor. Replies
 // and answers never pass through Prepare, so replies to a dot's own asks
 // are not held.
-var holdByDefault = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWeb: true, onboard.KindPass: true}
+var holdByDefault = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWeb: true, onboard.KindDuetWeb: true, onboard.KindPass: true}
 
 // holdByKind holds a request to an agent whose kind is in holdByDefault and
 // that approval.json does not name, even with no approval.json at all. An
@@ -194,9 +194,10 @@ func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request, parent e
 	}
 	if hasParent && parent.Approved {
 		if kind, err := p.kindOf(ctx, parent.To); err == nil && kind == onboard.KindCouncil {
-			// Only a dot's hold is lifted: an approved council asking
-			// another council must not start it without its own approval.
-			if target, err := p.kindOf(ctx, req.To); err == nil && target == onboard.KindDotWeb {
+			// Only a dot's or a Duet channel's hold is lifted: an approved
+			// council asking another council must not start it without
+			// its own approval.
+			if target, err := p.kindOf(ctx, req.To); err == nil && onboard.IsHeldWebKind(target) {
 				return
 			}
 		}

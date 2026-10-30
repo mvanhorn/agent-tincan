@@ -49,6 +49,7 @@ const (
 	KindPerplexityWeb = "perplexity-web"
 	KindCopilotWeb    = "copilot-web"
 	KindDotWeb        = "dot-web"
+	KindDuetWeb       = "duet-web"
 	// KindPhone is the owner's phone, joined from the relay's phone page.
 	// It asks teammates and never answers, so nothing wakes it (wake none).
 	KindPhone     = "phone"
@@ -57,7 +58,7 @@ const (
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindPhone, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindDuetWeb, KindPhone, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -98,6 +99,7 @@ var runtimeNames = map[string]string{
 	"perplexity-web": KindPerplexityWeb,
 	"copilot-web":    KindCopilotWeb,
 	"dot-web":        KindDotWeb,
+	"duet-web":       KindDuetWeb,
 	"hark":           KindScheduled,
 }
 
@@ -127,6 +129,7 @@ var defaultWake = map[string]string{
 	KindPerplexityWeb: "wait",
 	KindCopilotWeb:    "wait",
 	KindDotWeb:        "wait",
+	KindDuetWeb:       "wait",
 	KindPhone:         "none",
 	KindScheduled:     "schedule",
 	KindGeneric:       "none",
@@ -147,6 +150,7 @@ var stockGoodAt = map[string]string{
 	KindPerplexityWeb: "asks Perplexity (www.perplexity.ai) in the owner's browser and replies with the answer and its source links",
 	KindCopilotWeb:    "asks Microsoft Copilot (copilot.com) in the owner's browser and replies with the answer and its source links",
 	KindDotWeb:        "asks the owner's OpenAI dot (chatgpt.com/dots), which acts in their connected apps; held for approval by default",
+	KindDuetWeb:       "asks Claude in the owner's Duet channel (claude.ai/messages), which uses their apps; held for approval by default",
 	KindClaudeCode:    "Claude Code in a terminal on the owner's machine: reads, edits and runs code; answers only while a session is open",
 	KindCodex:         "OpenAI Codex run unattended on the owner's machine: reads code anywhere, edits and runs it in its own work folder",
 	KindGeminiCLI:     "a Gemini coding agent run unattended on the owner's machine: reads, edits and runs code",
@@ -385,17 +389,26 @@ func isService(kind string) bool {
 }
 
 // WebChatKinds are the six web chat teammates the relay moves an unsent
-// ask between when one's site is out of messages (failover). dot-web is a
-// web agent too, but it acts in the owner's connected apps, so it is not
-// one of them and isWebKind is not this list.
+// ask between when one's site is out of messages (failover). dot-web and
+// duet-web are web agents too, but they act in the owner's connected apps,
+// so they are not among them and isWebKind is not this list.
 var WebChatKinds = []string{KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb}
 
 // IsWebChatKind reports whether kind is in WebChatKinds.
 func IsWebChatKind(kind string) bool { return slices.Contains(WebChatKinds, kind) }
 
+// HeldWebKinds are the web agents that act in the owner's connected apps
+// (an OpenAI dot, Claude in a Duet channel): the relay holds requests to
+// them for the owner's approval by default, keeps them out of rooms and
+// failover, and lets an approved council's asks through.
+var HeldWebKinds = []string{KindDotWeb, KindDuetWeb}
+
+// IsHeldWebKind reports whether kind is in HeldWebKinds.
+func IsHeldWebKind(kind string) bool { return slices.Contains(HeldWebKinds, kind) }
+
 // isWebKind reports whether kind is one of the web agents: a web chat
-// kind or dot-web.
-func isWebKind(kind string) bool { return IsWebChatKind(kind) || kind == KindDotWeb }
+// kind, dot-web or duet-web.
+func isWebKind(kind string) bool { return IsWebChatKind(kind) || IsHeldWebKind(kind) }
 
 func agentBlock(d agentData) (AgentBlock, error) {
 	join, err := execute(templateFor("join."+d.Kind, "join.default"), d)

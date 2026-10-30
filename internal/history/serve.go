@@ -424,6 +424,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	// model; anything else is question text, and only that goes to the
 	// extractor.
 	var q Query
+	var extractTook time.Duration
 	if raw, ok := structuredBody(req.Body); ok {
 		if len(req.Body) > MaxQuestionBytes {
 			s.logf("request %s from %s: structured query too long (%d bytes)", req.ID, req.From, len(req.Body))
@@ -437,7 +438,9 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		}
 		s.logf("request %s from %s: structured query, no model step", req.ID, req.From)
 	} else {
+		extractStart := time.Now()
 		q, err = s.Extractor.Extract(ctx, req.Body)
+		extractTook = time.Since(extractStart)
 		if err == nil {
 			err = ValidateServiceQuery(q)
 		}
@@ -477,9 +480,14 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 			s.onImageDir(dir)
 		}
 	}
+	readStart := time.Now()
 	page, err := r.Read(ctx, q, Options{Window: window})
 	if err != nil {
-		s.logf("request %s: read %s: %v", req.ID, q.Source, err)
+		progress := ""
+		if pe, ok := errors.AsType[*ReadProgressError](err); ok {
+			progress = fmt.Sprintf(": list %s, %d listed, %d read in %s", pe.ListTook.Round(time.Millisecond), pe.Listed, pe.Read, pe.DetailTook.Round(time.Millisecond))
+		}
+		s.logf("request %s: read %s: %v (extract %s, read %s%s)", req.ID, q.Source, err, extractTook.Round(time.Millisecond), time.Since(readStart).Round(time.Millisecond), progress)
 		s.reply(ctx, req, ReadFailure(q, err), envelope.StatusFailed, nil)
 		return
 	}

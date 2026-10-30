@@ -515,6 +515,7 @@ func TestSendErrorCodes(t *testing.T) {
 		"not_logged_in":      ErrNotLoggedIn,
 		"composer_not_found": ErrComposerNotFound,
 		"send_failed":        ErrSendFailed,
+		"page_error":         ErrSendFailed,
 		"timeout":            ErrTimeout,
 		"not_found":          ErrNotFound,
 		"unsupported":        ErrRejected,
@@ -872,5 +873,46 @@ func TestPermissionMissingAndBlockedErrorCodes(t *testing.T) {
 	msg := fromNativeError(SourceClaudeAI, &NativeError{Code: "permission_missing", Message: "detail"}).Error()
 	if !strings.Contains(msg, "claude.ai") || !strings.Contains(msg, "chrome://extensions > Agent Tincan History > Details > Extension options") {
 		t.Fatalf("permission_missing reply: %s", msg)
+	}
+}
+
+// A request whose caller's own deadline runs out is the caller running out
+// of time, not Chrome failing to answer: only a call that hit the
+// client's own timeout while the caller still had time is ErrTimeout.
+func TestExchangeTellsCallerDeadlineFromChromeTimeout(t *testing.T) {
+	blocked := channelFunc(func(ctx context.Context, _ NativeRequest, _ func(NativeResponse) (bool, error)) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := (&Client{Channel: blocked}).Request(ctx, OpChatGPTList, OpArgs{Count: 5})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
+		t.Fatalf("caller deadline: got %v, want context.DeadlineExceeded and not ErrTimeout", err)
+	}
+
+	_, err = (&Client{Channel: blocked, Timeout: 20 * time.Millisecond}).Request(context.Background(), OpChatGPTList, OpArgs{Count: 5})
+	if !errors.Is(err, ErrTimeout) || !strings.Contains(err.Error(), "Chrome did not answer in time") {
+		t.Fatalf("client timeout: got %v, want ErrTimeout", err)
+	}
+}
+
+// pastDeadline is a context whose deadline has passed but whose timer has
+// not fired yet: the moment a socket deadline at the same instant times
+// out first.
+type pastDeadline struct{ context.Context }
+
+func (pastDeadline) Deadline() (time.Time, bool) { return time.Now().Add(-time.Millisecond), true }
+
+// A socket that times out at the caller's deadline, just before the
+// caller's context reports it, is still the caller running out of time.
+func TestExchangeSocketTimeoutAtCallerDeadline(t *testing.T) {
+	ch := channelFunc(func(context.Context, NativeRequest, func(NativeResponse) (bool, error)) error {
+		return os.ErrDeadlineExceeded
+	})
+	_, err := (&Client{Channel: ch}).Request(pastDeadline{context.Background()}, OpChatGPTList, OpArgs{Count: 5})
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
+		t.Fatalf("got %v, want context.DeadlineExceeded and not ErrTimeout", err)
 	}
 }

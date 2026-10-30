@@ -36,7 +36,7 @@ const SESSION = 'https://chatgpt.com/api/auth/session';
 const TOKEN = 'secret-access-token-never-returned';
 
 test('validate accepts only the fixed operation set with exact args', () => {
-  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.primary', 'dots.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.send_images', ...['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots'].map(site => site + '.session')].sort());
+  assert.deepEqual([...OPS].sort(), ['chatgpt.close', 'chatgpt.detail', 'chatgpt.file', 'chatgpt.list', 'chatgpt.send', 'claudeai.close', 'claudeai.detail', 'claudeai.file', 'claudeai.list', 'claudeai.send', 'copilot.close', 'copilot.detail', 'copilot.list', 'copilot.send', 'dots.close', 'dots.detail', 'dots.primary', 'dots.send', 'duet.close', 'duet.detail', 'duet.send', 'extension.reload', 'gemini.close', 'gemini.detail', 'gemini.file', 'gemini.list', 'gemini.send', 'grok.close', 'grok.detail', 'grok.file', 'grok.list', 'grok.send', 'perplexity.close', 'perplexity.detail', 'perplexity.send', 'chatgpt.input_abort', 'chatgpt.input_begin', 'chatgpt.input_chunk', 'chatgpt.send_images', ...['chatgpt', 'claudeai', 'grok', 'gemini', 'perplexity', 'copilot', 'dots', 'duet'].map(site => site + '.session')].sort());
   assert.deepEqual(validate({ id: 8, op: 'grok.file', args: { file_id: 'r1_0', conversation_id: 'c1' } }).args, { file_id: 'r1_0', conversation_id: 'c1' });
   assert.deepEqual(validate({ id: 9, op: 'grok.send', args: { message: 'hi', conversation_id: '0e1d0000-0000-4000-8000-000000000001' } }).args.conversation_id, '0e1d0000-0000-4000-8000-000000000001');
   assert.deepEqual(validate({ id: 1, op: 'chatgpt.list', args: { count: 5 } }), { id: 1, op: 'chatgpt.list', args: { count: 5 } });
@@ -1460,4 +1460,229 @@ for (const [site, url, signedIn, signedOut] of [
 test('grok.session treats an empty successful list as indeterminate', async () => {
   const fetch = fakeFetch({ 'https://grok.com/rest/app-chat/conversations?pageSize=1': jsonResponse({ conversations: [] }) });
   await assert.rejects(run(createRunner({ fetch }), 'grok.session', {}), e => e.code === 'indeterminate');
+});
+
+// ---- Claude Duet: the owner's 1:1 channel with Claude on claude.ai/messages.
+
+const DUET_CHAN = 'chan_0000000000000000chan01';
+const DUET_ORG = '11111111-2222-4333-8444-555555555555';
+const DUET_OWNER = 'user_0000000000000000owner1';
+const DUET_AGENT = 'cagt_0000000000000000agent01';
+const DUET_ORGS = 'https://claude.ai/api/organizations';
+const DUET_CHANNEL = `https://claude.ai/v1/code/channels/${DUET_CHAN}`;
+const DUET_TIMELINE = `${DUET_CHANNEL}/timeline?limit=32`;
+const DUET_CONFIRM = `${DUET_CHANNEL}/timeline?limit=20`;
+const DUET_STREAM = `${DUET_CHANNEL}/messages/stream?from=tail`;
+
+function streamResponse(text) {
+  return new Response(text, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+}
+
+function duetChannelWith(over) {
+  const c = fixture('duet/channel.json');
+  Object.assign(c.channel, over);
+  return jsonResponse(c);
+}
+
+function duetRoutes(over = {}) {
+  return {
+    [DUET_ORGS]: jsonResponse([{ uuid: DUET_ORG, capabilities: ['chat'] }]),
+    [DUET_CHANNEL]: jsonResponse(fixture('duet/channel.json')),
+    [DUET_TIMELINE]: jsonResponse(fixture('duet/timeline.json')),
+    [DUET_CONFIRM]: jsonResponse(fixture('duet/timeline.json')),
+    [DUET_STREAM]: streamResponse(readFileSync(new URL('../../internal/history/testdata/duet/stream.txt', import.meta.url), 'utf8')),
+    ...over,
+  };
+}
+
+test('duet.detail reads the channel and its timeline oldest first, with each author role and the working flag', async () => {
+  const f = fakeFetch(duetRoutes());
+  const frames = await run(createRunner({ fetch: f }), 'duet.detail', { id: DUET_CHAN });
+  assert.deepEqual(frames, [
+    {
+      ok: true,
+      result: {
+        thread: DUET_CHAN,
+        room: DUET_CHAN,
+        owner: DUET_OWNER,
+        paused: false,
+        working: false,
+        items: [
+          { id: 'cmsg_0000000000000000000002', at: '2026-10-21T05:41:00.000000Z', from: DUET_OWNER, role: 'owner', text: 'What changed in the release notes this week?', attachments: 0 },
+          { id: 'cmsg_0000000000000000000003', at: '2026-10-21T05:41:04.000000Z', from: DUET_AGENT, role: 'claude', text: 'On it', attachments: 0 },
+          { id: 'cmsg_0000000000000000000004', at: '2026-10-21T05:41:40.000000Z', from: DUET_AGENT, role: 'claude', text: 'Three things changed: the parser, the docs and the CLI flags.', attachments: 0 },
+        ],
+      },
+    },
+  ]);
+  // Only the organizations list and paths under the channel are fetched,
+  // each channel request with the organization and API version headers.
+  assert.deepEqual(f.calls.map((c) => c.url), [DUET_ORGS, DUET_CHANNEL, DUET_STREAM, DUET_TIMELINE]);
+  for (const c of f.calls.slice(1)) {
+    assert.ok(c.url.startsWith(DUET_CHANNEL));
+    assert.equal(c.init.headers['x-organization-uuid'], DUET_ORG);
+    assert.equal(c.init.headers['anthropic-version'], '2023-06-01');
+    assert.equal(c.init.credentials, 'include');
+  }
+});
+
+test('duet.detail: only the stream says Claude is working, never a thread_status (an old thread can sit at needs_input); no snapshot is unknown', async () => {
+  const tl = fixture('duet/timeline.json');
+  tl.data[0].thread_status = 'needs_input';
+  let f = fakeFetch(duetRoutes({ [DUET_TIMELINE]: jsonResponse(tl) }));
+  assert.equal((await run(createRunner({ fetch: f }), 'duet.detail', { id: DUET_CHAN }))[0].result.working, false);
+  const busy = 'event: session_activity\ndata: {"session_id":"a","working":false}\n\nevent: session_activity\ndata: {"session_id":"b","working":true}\n\nevent: session_model\ndata: {}\n\n';
+  f = fakeFetch(duetRoutes({ [DUET_STREAM]: streamResponse(busy) }));
+  assert.equal((await run(createRunner({ fetch: f }), 'duet.detail', { id: DUET_CHAN }))[0].result.working, true);
+  f = fakeFetch(duetRoutes({ [DUET_STREAM]: jsonResponse({}, 500) }));
+  assert.equal((await run(createRunner({ fetch: f }), 'duet.detail', { id: DUET_CHAN }))[0].result.working, null);
+});
+
+test('duet.detail gives up on a stream that sends nothing within its time limit', async () => {
+  const silent = () => new Response(new ReadableStream({ start() {} }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const f = fakeFetch(duetRoutes({ [DUET_STREAM]: silent }));
+  const started = Date.now();
+  const frames = await run(createRunner({ fetch: f, duetStreamMs: 50 }), 'duet.detail', { id: DUET_CHAN });
+  assert.equal(frames[0].result.working, null);
+  assert.ok(Date.now() - started < 2000);
+});
+
+test('duet.detail refuses a shared, archived, disabled or foreign channel with channel_refused', async () => {
+  const refused = [
+    { members: [{ account_id: 'user_someoneelse' }] },
+    { guests: [{ account_id: 'user_guest' }] },
+    { visibility: 'org' },
+    { members_truncated: true },
+    { members: undefined },
+    { archived_at: '2026-10-21T06:00:00Z' },
+    { disabled_at: '2026-10-21T06:00:00Z' },
+    { membership: { account_id: DUET_OWNER, role: 'member' } },
+  ];
+  for (const over of refused) {
+    let caught;
+    await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes({ [DUET_CHANNEL]: duetChannelWith(over) })) }), 'duet.detail', { id: DUET_CHAN }), (e) => ((caught = e), e.code === 'channel_refused'), JSON.stringify(over));
+    assert.match(errorFrame(caught).error.message, /#research/);
+  }
+});
+
+test('duet.detail checks the channel on every read, so a channel shared since the last read is refused at once', async () => {
+  const routes = duetRoutes();
+  const f = fakeFetch(routes);
+  const runner = createRunner({ fetch: f });
+  await run(runner, 'duet.detail', { id: DUET_CHAN });
+  routes[DUET_CHANNEL] = duetChannelWith({ members: [{ account_id: 'user_someoneelse' }] });
+  await assert.rejects(run(runner, 'duet.detail', { id: DUET_CHAN }), (e) => e.code === 'channel_refused');
+  assert.equal(f.calls.filter((c) => c.url === DUET_CHANNEL).length, 2);
+  assert.equal(f.calls.filter((c) => c.url === DUET_TIMELINE).length, 1);
+});
+
+test('duet.detail: a malformed channel id is bad_request; missing fields are endpoint_changed; an unknown channel is not_found', async () => {
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes()) }), 'duet.detail', { id: 'conv-1' }), (e) => e.code === 'bad_request');
+  for (const over of [
+    { [DUET_CHANNEL]: jsonResponse({ id: DUET_CHAN }) },
+    { [DUET_CHANNEL]: duetChannelWith({ membership: null }) },
+    { [DUET_TIMELINE]: jsonResponse({ items: [] }) },
+    { [DUET_TIMELINE]: jsonResponse({ data: [{ id: 'cmsg_1', body: 'no time' }] }) },
+  ]) {
+    await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes(over)) }), 'duet.detail', { id: DUET_CHAN }), (e) => e.code === 'endpoint_changed', JSON.stringify(Object.keys(over)));
+  }
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes({ [DUET_CHANNEL]: jsonResponse({}, 404) })) }), 'duet.detail', { id: DUET_CHAN }), (e) => e.code === 'not_found');
+});
+
+test('duet.detail marks a message from anyone but the owner or the channel agent as other', async () => {
+  const tl = fixture('duet/timeline.json');
+  const base = tl.data.find((m) => m.in_timeline && !m.server_notice);
+  tl.data.unshift({ ...base, id: 'cmsg_x1', created_at: '2026-10-21T05:50:00Z', author_agent_id: 'cagt_another', author_account_id: undefined });
+  tl.data.unshift({ ...base, id: 'cmsg_x2', created_at: '2026-10-21T05:51:00Z', author_account_id: 'user_someoneelse', author_agent_id: undefined });
+  const items = (await run(createRunner({ fetch: fakeFetch(duetRoutes({ [DUET_TIMELINE]: jsonResponse(tl) })) }), 'duet.detail', { id: DUET_CHAN }))[0].result.items;
+  assert.deepEqual(items.slice(-2).map((m) => [m.id, m.role]), [['cmsg_x1', 'other'], ['cmsg_x2', 'other']]);
+});
+
+test('duet.send checks the channel before handing the sender the channel as its page, and refuses a send with no channel', async () => {
+  let got;
+  const sender = { send: async (site, a, hooks) => ((got = { site, a, hooks }), { conversation_id: DUET_CHAN, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  await run(createRunner({ fetch: fakeFetch(duetRoutes()), sender }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN });
+  assert.equal(got.site, 'duet');
+  assert.equal(got.hooks.page, DUET_CHAN);
+  got = undefined;
+  const shared = fakeFetch(duetRoutes({ [DUET_CHANNEL]: duetChannelWith({ members: [{ account_id: 'user_x' }] }) }));
+  await assert.rejects(run(createRunner({ fetch: shared, sender }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN }), (e) => e.code === 'channel_refused');
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes()), sender }), 'duet.send', { message: 'hi' }), (e) => e.code === 'bad_request');
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes()), sender }), 'duet.send', { message: 'hi', new_chat: true }), (e) => e.code === 'bad_request');
+  assert.equal(got, undefined, 'no refused send reached the sender');
+  await assert.rejects(run(createRunner({ fetch: fakeFetch(duetRoutes()) }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN }), (e) => e.code === 'unsupported');
+});
+
+test('duet.send hooks: ready waits while Claude works and then fails busy; before refuses a channel shared since; confirm names the new owner message', async () => {
+  let hooks;
+  const sender = { send: async (_site, _a, h) => ((hooks = h), { conversation_id: DUET_CHAN, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  const routes = duetRoutes();
+  routes[DUET_STREAM] = () => streamResponse('event: session_activity\ndata: {"session_id":"a","working":true}\n\nevent: session_model\ndata: {}\n\n');
+  await run(createRunner({ fetch: fakeFetch(routes), sender, duetBusyWaitMs: 30, duetBusyPollMs: 10 }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN });
+  let caught;
+  await assert.rejects(hooks.ready(), (e) => ((caught = e), e.code === 'busy'));
+  assert.match(errorFrame(caught).error.message, /nothing was sent/);
+  // Claude finished: ready passes.
+  routes[DUET_STREAM] = () => streamResponse('event: session_activity\ndata: {"session_id":"a","working":false}\n\nevent: session_model\ndata: {}\n\n');
+  await hooks.ready();
+  await hooks.before();
+  assert.equal(await hooks.confirm(), null, 'nothing new yet');
+  const now = new Date().toISOString();
+  const sent = fixture('duet/timeline.json');
+  sent.data.unshift({ ...sent.data.find((m) => m.author_account_id), id: 'cmsg_new', created_at: now, body: 'hi' });
+  routes[DUET_CONFIRM] = jsonResponse(sent);
+  assert.equal(await hooks.confirm(), 'cmsg_new');
+  routes[DUET_CHANNEL] = duetChannelWith({ guests: [{ account_id: 'user_g' }] });
+  await assert.rejects(hooks.before(), (e) => e.code === 'channel_refused');
+  await assert.rejects(hooks.ready(), (e) => e.code === 'channel_refused');
+});
+
+test('duet.detail counts only the channel session and threads of timeline messages as working, not an older thread', async () => {
+  const stream = (root) => () => streamResponse(`event: session_activity\ndata: {"session_id":"a","thread_root_id":"","working":false}\n\nevent: session_activity\ndata: {"session_id":"b","thread_root_id":"${root}","working":true}\n\nevent: session_model\ndata: {}\n\n`);
+  const working = async (root) => (await run(createRunner({ fetch: fakeFetch(duetRoutes({ [DUET_STREAM]: stream(root) })) }), 'duet.detail', { id: DUET_CHAN }))[0].result.working;
+  assert.equal(await working('cmsg_0000000000000000older1'), false, 'a thread off the timeline is not Claude being busy here');
+  assert.equal(await working('cmsg_0000000000000000000002'), true, 'a thread on a timeline message is');
+  assert.equal(await working(''), true, 'the channel session is');
+});
+
+test('duet.send hooks: ready types only once a read confirms Claude is not working, and never waits past the send deadline', async () => {
+  let hooks;
+  const sender = { send: async (_site, _a, h) => ((hooks = h), { conversation_id: DUET_CHAN, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  const routes = duetRoutes();
+  // A stream that is not an event stream says nothing about working.
+  routes[DUET_STREAM] = () => jsonResponse({});
+  await run(createRunner({ fetch: fakeFetch(routes), sender, duetBusyWaitMs: 30, duetBusyPollMs: 10 }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN });
+  await assert.rejects(hooks.ready(), (e) => e.code === 'busy' && e.message === 'working state unknown');
+  // Claude working, with the send's deadline already near: ready fails at
+  // once rather than waiting out duetBusyWaitMs.
+  routes[DUET_STREAM] = () => streamResponse('event: session_activity\ndata: {"session_id":"a","working":true}\n\n');
+  await run(createRunner({ fetch: fakeFetch(routes), sender, duetBusyWaitMs: 60 * 1000, duetBusyPollMs: 10 }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN });
+  const t0 = Date.now();
+  await assert.rejects(hooks.ready(Date.now() + 5), (e) => e.code === 'busy');
+  assert.ok(Date.now() - t0 < 1000, 'ready waited past the deadline');
+});
+
+test('duet.send hooks: a stalled timeline read in ready ends at the send deadline with nothing typed', async () => {
+  let hooks;
+  const sender = { send: async (_site, _a, h) => ((hooks = h), { conversation_id: DUET_CHAN, url: '', submitted_at: 1 }), close: async () => ({ closed: 0 }) };
+  const routes = duetRoutes();
+  routes[DUET_STREAM] = () => streamResponse('event: session_activity\ndata: {"session_id":"b","thread_root_id":"cmsg_0000000000000000000002","working":true}\n\nevent: session_model\ndata: {}\n\n');
+  await run(createRunner({ fetch: fakeFetch(routes), sender, duetBusyWaitMs: 60 * 1000, duetBusyPollMs: 10 }), 'duet.send', { message: 'hi', conversation_id: DUET_CHAN });
+  routes[DUET_TIMELINE] = (_u, init) => new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+  const t0 = Date.now();
+  await assert.rejects(hooks.ready(Date.now() + 50), (e) => e.code === 'busy' && e.message === 'working state unknown');
+  assert.ok(Date.now() - t0 < 1000, 'ready waited past the deadline');
+});
+
+test('duet ops need the claude.ai grant; duet.close goes to the sender for its own site', async () => {
+  const closed = [];
+  const sender = { send: async () => ({}), close: async (site, id) => (closed.push([site, id]), { closed: 1 }) };
+  const none = { contains: async () => false };
+  const r = createRunner({ fetch: fakeFetch(duetRoutes()), sender, permissions: none });
+  for (const [op, args] of [['duet.detail', { id: DUET_CHAN }], ['duet.send', { message: 'hi', conversation_id: DUET_CHAN }], ['duet.session', {}]]) {
+    await assert.rejects(run(r, op, args), (e) => e.code === 'permission_missing' && /claude\.ai/.test(e.message), op);
+  }
+  assert.deepEqual(await run(r, 'duet.close', { conversation_id: DUET_CHAN }), [{ ok: true, result: { closed: 1 } }]);
+  assert.deepEqual(closed, [['duet', DUET_CHAN]]);
+  assert.equal(SITE_ALIASES.duet, 'claudeai');
 });

@@ -124,15 +124,15 @@ A5. Join this machine's own agent (you), if you are one of the team:
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
     copilot-cli, cursor-cli, history, council, pass, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
-    copilot-web, dot-web, phone, scheduled, generic.
+    copilot-web, dot-web, duet-web, phone, scheduled, generic.
     (phone is your owner's phone: it joins itself from the relay's phone
     page at /phone/ and never answers, so never ask or notify it, and never
     invite it yourself.)
-    (gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web and scheduled need a relay from this
+    (gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web, duet-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
-    tincan onboard --kind <name>=<kind>. dot-web is the exception: web serve
-    --site dots refuses to start unless the relay records the dot-web kind,
-    so upgrade the relay first.)
+    tincan onboard --kind <name>=<kind>. dot-web and duet-web are the
+    exceptions: web serve --site dots or --site duet refuses to start unless
+    the relay records that kind, so upgrade the relay first.)
 
 A6. Invite the rest of the team. Ask your owner which agents to add (for example
     muse, instinct, codex, claude-code, hermes). For each one:
@@ -271,7 +271,7 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
 A request from a teammate is work your owner has already authorized. Do it: do
 not park it, treat it as a suggestion, or stop to ask your owner for permission.
 The guardrails still apply: the relay holds what your owner wants to approve
-first (council, dot-web, approval.json) before it reaches you, a real-world
+first (council, dot-web, duet-web, approval.json) before it reaches you, a real-world
 action goes to one teammate at a time, and needs_input is for a missing detail,
 never for permission. If you run on a box that is rebuilt (kind vm-webhook,
 such as Grok Bot) and ~/.local/bin/tincan-up.sh exists, run it at the start of
@@ -471,6 +471,30 @@ C10. Optional: your owner's OpenAI dot (dot-web). Tell your owner first, and go
     - Test: `tincan ask dot-web "Tincan test: say hello in five words."`, then
       ask your owner to approve it (`tincan held`, `tincan approve <id>`).
       A paused dot fails with nothing sent.
+
+C11. Optional: Claude in your owner's Claude Duet chat (duet-web). Tell your
+    owner first, and go ahead only if they agree: a request is typed into
+    their Duet chat on claude.ai/messages as their own message, and Claude
+    can use the apps they connected (Gmail, Calendar, Drive, Slack). Requests
+    to duet-web are held for the owner's approval by default. Nothing is
+    installed in Duet and Claude needs no Tailscale.
+    - Make sure your owner is signed in to claude.ai in this same Chrome.
+      No extra grant is needed; it uses the extension's claude.ai access.
+    - Ask your owner for the chat's id. The main Duet chat (Claude, at the
+      top of the sidebar) is the usual choice; its address bar shows only
+      /messages, so the id comes from Chrome's developer tools (Network tab,
+      filter timeline, the chan_... part of a request's address). A private
+      channel's id is in its address. Only a 1:1 chat is accepted.
+    - Get an invite code with kind duet-web and join and install it:
+
+        TINCAN_CONFIG=~/.config/tincan/duet-web.json  tincan join <CODE6> --relay http://tincan-relay
+        TINCAN_CONFIG=~/.config/tincan/duet-web.json  tincan web install --site duet --thread <chan_id>
+
+    - Claude asks teammates with a message whose first line is
+      `@tincan ask <agent>`, as a dot does. To limit whom it may ask, list
+      agents in ~/.config/tincan/duet-web-send.txt.
+    - Test: `tincan ask duet-web "Tincan test: say hello in five words."`,
+      then ask your owner to approve it.
 
 
 The history agent also reads the owner's Grok CLI (Grok Build) sessions on that

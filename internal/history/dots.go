@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -71,19 +72,24 @@ func dotsNotLoggedIn(string) string {
 	return "not signed in to ChatGPT in Chrome; sign in to chatgpt.com in Chrome, then ask again"
 }
 
-// DotFeed is a dot DM read by dots.detail: the thread, its room, the
-// owner's account user id, whether the dot is paused, and the latest
-// messages, oldest first.
+// DotFeed is a dot DM read by dots.detail, or a Duet channel read by
+// duet.detail in the same shape: the thread, its room, the owner's account
+// user id, whether the dot is paused, whether the assistant is working
+// (nil when the site does not say, as a dot's feed never does), and the
+// latest messages, oldest first.
 type DotFeed struct {
 	Thread   string
 	Room     string
 	Owner    string
 	Paused   bool
+	Working  *bool
 	Messages []DotMessage
 }
 
-// DotMessage is one message of a dot's DM. Owner is set when the owner
-// wrote it; otherwise the dot did.
+// DotMessage is one message of a dot's DM or a Duet channel. Owner is set
+// when the owner wrote it, Other when someone who is neither the owner nor
+// the assistant did (a Duet member or another agent); otherwise the dot or
+// Claude did.
 type DotMessage struct {
 	ID          string
 	At          time.Time
@@ -91,19 +97,23 @@ type DotMessage struct {
 	Text        string
 	Attachments int
 	Owner       bool
+	Other       bool
 }
 
 type dotsDetail struct {
-	Thread string `json:"thread"`
-	Room   string `json:"room"`
-	Owner  string `json:"owner"`
-	Paused bool   `json:"paused"`
-	Items  []struct {
-		ID          string      `json:"id"`
-		At          copilotTime `json:"at"`
-		From        string      `json:"from"`
-		Text        string      `json:"text"`
-		Attachments int         `json:"attachments"`
+	Thread  string `json:"thread"`
+	Room    string `json:"room"`
+	Owner   string `json:"owner"`
+	Paused  bool   `json:"paused"`
+	Working *bool  `json:"working"`
+	Items   []struct {
+		ID   string      `json:"id"`
+		At   copilotTime `json:"at"`
+		From string      `json:"from"`
+		// Role, sent by duet.detail only: owner, claude or other.
+		Role        string `json:"role"`
+		Text        string `json:"text"`
+		Attachments int    `json:"attachments"`
 	} `json:"items"`
 }
 
@@ -120,7 +130,7 @@ func ParseDotFeed(raw json.RawMessage) (DotFeed, error) {
 	if d.Items == nil {
 		return DotFeed{}, errors.New("no items")
 	}
-	f := DotFeed{Thread: d.Thread, Room: d.Room, Owner: d.Owner, Paused: d.Paused}
+	f := DotFeed{Thread: d.Thread, Room: d.Room, Owner: d.Owner, Paused: d.Paused, Working: d.Working}
 	for _, m := range d.Items {
 		if m.ID == "" || m.From == "" {
 			return DotFeed{}, errors.New("a message without an id or author")
@@ -128,6 +138,7 @@ func ParseDotFeed(raw json.RawMessage) (DotFeed, error) {
 		f.Messages = append(f.Messages, DotMessage{
 			ID: m.ID, At: m.At.Time, From: m.From, Text: m.Text,
 			Attachments: max(m.Attachments, 0), Owner: m.From == d.Owner,
+			Other: m.From != d.Owner && m.Role == "other",
 		})
 	}
 	return f, nil
@@ -138,13 +149,25 @@ func ParseDotFeed(raw json.RawMessage) (DotFeed, error) {
 // (dotRun). The feed marks nothing finished, so a reply is finished by the
 // site's text-stability rule (DefaultDotStablePolls, DefaultDotStableFor),
 // which lets a dot that answers in several messages finish them all.
-func dotsNodes(raw json.RawMessage) ([]webNode, error) {
+func dotsNodes(raw json.RawMessage) ([]webNode, error) { return feedNodes(dotsWords, raw) }
+
+// dotsWords name a dot and its DM.
+var dotsWords = &feedWords{who: "your dot", them: "the dot", theirs: "the dot's", where: "the DM", place: "its DM", url: "https://chatgpt.com/dots/", from: "the owner's dot"}
+
+// feedNodes reads a one-thread site's feed as dotsNodes describes. A
+// message from anyone but the owner and the assistant is neither a turn
+// nor part of an answer. When the feed says whether the assistant is
+// working, a run is busy while it is (or, for a site that always says,
+// while a read cannot tell), so text that holds still mid-run is not
+// taken as finished; once it is not, the text-stability rule finishes the
+// run, so a message posted just after the read still counts.
+func feedNodes(w *feedWords, raw json.RawMessage) ([]webNode, error) {
 	f, err := ParseDotFeed(raw)
 	if err != nil {
 		return nil, err
 	}
 	var out []webNode
-	msgs := f.Messages
+	msgs := slices.DeleteFunc(slices.Clone(f.Messages), func(m DotMessage) bool { return m.Other })
 	for i := 0; i < len(msgs); {
 		if msgs[i].Owner {
 			out = append(out, webNode{id: msgs[i].ID, user: true, text: msgs[i].Text, at: msgs[i].At})
@@ -155,7 +178,13 @@ func dotsNodes(raw json.RawMessage) ([]webNode, error) {
 		for j < len(msgs) && !msgs[j].Owner {
 			j++
 		}
-		out = append(out, dotRun(f.Thread, msgs[i:j]))
+		n := dotRun(w, f.Thread, msgs[i:j])
+		if w.working {
+			n.busy = f.Working == nil || *f.Working
+		} else if f.Working != nil {
+			n.busy = *f.Working
+		}
+		out = append(out, n)
 		i = j
 	}
 	return out, nil
@@ -169,7 +198,7 @@ func dotsNodes(raw json.RawMessage) ([]webNode, error) {
 // on a teammate: the watcher cannot send that ask while this request holds
 // the send path, so the run would end there. The reply keeps the ask line
 // and notes where the dot's final answer will be.
-func dotRun(thread string, run []DotMessage) webNode {
+func dotRun(w *feedWords, thread string, run []DotMessage) webNode {
 	var texts []string
 	files := 0
 	for _, m := range run {
@@ -183,14 +212,14 @@ func dotRun(thread string, run []DotMessage) webNode {
 		if files > 1 {
 			what = fmt.Sprintf("%d attachments", files)
 		}
-		texts = append(texts, fmt.Sprintf("(your dot also sent %s; open the DM to see them)", what))
+		texts = append(texts, fmt.Sprintf("(%s also sent %s; open %s to see them)", w.who, what, w.where))
 	}
 	if ask, ok := parseDotAsk(run[len(run)-1].Text); ok && ask.bad == "" {
-		dm := "its DM"
+		dm := w.place
 		if thread != "" {
-			dm = "its DM: https://chatgpt.com/dots/" + thread
+			dm = w.place + ": " + w.url + thread
 		}
-		texts = append(texts, fmt.Sprintf("(your dot asked %s for help; tincan will pass %s's answer to the dot, and the dot's final answer will be in %s)", ask.target, ask.target, dm))
+		texts = append(texts, fmt.Sprintf("(%s asked %s for help; tincan will pass %s's answer to %s, and %s final answer will be in %s)", w.who, ask.target, ask.target, w.them, w.theirs, dm))
 	}
 	return webNode{id: run[0].ID, reply: true, text: strings.Join(texts, "\n\n"), at: run[len(run)-1].At}
 }
@@ -198,11 +227,17 @@ func dotRun(thread string, run []DotMessage) webNode {
 // parseDotsDetail turns the DM into turns: each owner message and the dot
 // messages after it, as dotsNodes joins them.
 func parseDotsDetail(id string, raw json.RawMessage) (thread, error) {
-	nodes, err := dotsNodes(raw)
+	return parseFeedDetail(SourceDots, dotsWords, id, raw)
+}
+
+// parseFeedDetail is parseDotsDetail for the one-thread site src, worded
+// by w.
+func parseFeedDetail(src Source, w *feedWords, id string, raw json.RawMessage) (thread, error) {
+	nodes, err := feedNodes(w, raw)
 	if err != nil {
 		return thread{}, err
 	}
-	th := thread{conv: Conversation{Source: SourceDots, ID: id}}
+	th := thread{conv: Conversation{Source: src, ID: id}}
 	var cur *turn
 	for _, n := range nodes {
 		if n.user {

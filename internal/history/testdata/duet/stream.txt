@@ -1,0 +1,11 @@
+: connected
+
+event: session_activity
+data: {"session_id":"cse_0000000000000000sess01","thread_root_id":"","working":false,"at":"2026-10-21T05:51:58Z"}
+
+event: session_activity
+data: {"session_id":"cse_0000000000000000sess02","thread_root_id":"","working":false,"at":"2026-10-21T05:51:58Z"}
+
+event: session_model
+data: {"session_id":"cse_0000000000000000sess01","thread_root_id":"","model":"m","served_model":"m","at":"2026-10-21T05:51:58Z"}
+

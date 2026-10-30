@@ -354,6 +354,8 @@ Copilot on the web (copilot-web). The same for the Microsoft Copilot of a person
 
 Your OpenAI dot (dot-web). Makes your dot a teammate in both directions, with nothing installed on the dot's computer. A teammate's request is typed into the dot's DM and the dot's answer comes back as the reply; the dot can ask teammates by writing a message that starts with `@tincan ask <agent>`, and the answer is typed back into its DM. It uses the extension's ChatGPT grant. The request shows in the DM as your own message and the dot can act in your connected apps, so requests to dot-web are held for your approval by default ([details](docs/adapters/web-agents.md#your-dot-dot-web)).
 
+Claude Duet (duet-web). The same for Claude in your [Claude Duet](https://claude.ai/messages) chat. Duet has no webhook or API that reaches Claude and needs no Tailscale on Claude's side: a teammate's request is typed into your main Duet chat (or a private channel of your own) in your browser, and Claude's answer comes back once it stops working. Claude can ask teammates with `@tincan ask <agent>` too. It uses the extension's claude.ai grant, serves only a 1:1 chat (a channel shared with anyone else is refused), and since Claude can use your connected apps, requests to duet-web are held for your approval by default ([details](docs/adapters/web-agents.md#claude-duet-duet-web)).
+
 Who can use history and the web agents: by default, any agent you have joined to your relay. To narrow that, list the allowed agents in an allowlist file; then every agent in a request's chain must be on it.
 
 In one table:
@@ -383,6 +385,7 @@ In one table:
 | perplexity-web | Your own Perplexity account, as a teammate, with source links | Same as chatgpt-web, on www.perplexity.ai; replies list the answer's sources (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
 | copilot-web | Your own Microsoft Copilot (personal account), as a teammate, with source links | Same as chatgpt-web, on copilot.com (optional grant; see the account risk note) | Always listening (a Tincan service on your Mac) |
 | dot-web | Your OpenAI dot, as a teammate that can also ask teammates | The extension types the request into the dot's DM on chatgpt.com and reads the dot's answer from the DM; the dot's `@tincan ask` messages go out as asks from dot-web. Held for your approval by default | Always listening (a Tincan service on your Mac) |
+| duet-web | Claude in your Claude Duet chat, as a teammate that can also ask teammates | The extension types the request into your 1:1 Duet chat on claude.ai/messages and reads Claude's answer once it stops working; Claude's `@tincan ask` messages go out as asks from duet-web. Held for your approval by default | Always listening (a Tincan service on your Mac) |
 
 The plumbing, in plain words:
 
@@ -811,6 +814,7 @@ A wake can be delivered and still start nothing, for example when the receiving 
 | History agent | `history` | wait | [history.md](docs/adapters/history.md) |
 | ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot web agents | `chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web` | wait | [web-agents.md](docs/adapters/web-agents.md) |
 | Your OpenAI dot | `dot-web` | wait | [web-agents.md](docs/adapters/web-agents.md#your-dot-dot-web) |
+| Claude in your Claude Duet chat | `duet-web` | wait | [web-agents.md](docs/adapters/web-agents.md#claude-duet-duet-web) |
 
 Any other agent can use kind `generic` with whichever wake fits.
 

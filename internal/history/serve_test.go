@@ -3,6 +3,7 @@ package history
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1211,5 +1212,35 @@ func TestPollAndHandlePingFailurePreservesWork(t *testing.T) {
 				t.Fatalf("handled %v (%d): %v", handled, n, err)
 			}
 		})
+	}
+}
+
+// A live ChatGPT read that runs past the request's budget is reported as
+// taking too long, not as Chrome failing to answer, and the log says how
+// far the read got.
+func TestServeLiveReadOutOfTimeSaysTookTooLong(t *testing.T) {
+	rig := newServeRig(t, true)
+	rig.svc.RequestTimeout = 300 * time.Millisecond
+	rig.ext.q = Query{Source: SourceChatGPT, Mode: ModeSearch, Terms: []string{"cover"}, Count: 1}
+	var logs strings.Builder
+	rig.svc.Log = &logs
+	// The list answers; every conversation read then hangs until the
+	// request's own deadline ends it.
+	listed := `{"items":[{"id":"c4a7c0de-0000-4000-8000-000000000002","title":"Cover art","update_time":"` + time.Now().UTC().Format(time.RFC3339) + `"}],"total":1}`
+	ch := channelFunc(func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		if req.Op == OpChatGPTList {
+			_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: json.RawMessage(listed)})
+			return err
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	rig.svc.Readers[SourceChatGPT] = NewChatGPT(&Client{Channel: ch})
+	res := rig.ask(t, "grokbot", "find my cover art")
+	if res.Status != envelope.StatusFailed || res.Reply.Body != "Reading ChatGPT history took too long." {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	if got := logs.String(); strings.Contains(got, "Chrome did not answer") || !strings.Contains(got, "1 listed, 0 read in ") || !strings.Contains(got, "extract ") || !strings.Contains(got, ": list ") {
+		t.Fatalf("log %q", got)
 	}
 }

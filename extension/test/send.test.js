@@ -77,7 +77,7 @@ class FakeSite {
     this.site = site;
     this.sel = SELECTORS[site];
     this.opts = { execWorks: true, pasteWorks: false, streamTicks: 3, loadTicks: 1, ...opts };
-    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, blocked: 0, signedIn: 0, dialog: 0, notice: 0, ...(opts.match || {}) };
+    this.match = { composer: 0, send: 0, stop: 0, streaming: 0, assistant: 0, user: 0, login: 0, blocked: 0, signedIn: 0, dialog: 0, notice: 0, loadError: 0, ...(opts.match || {}) };
     this.home = url;
     this.href = this.opts.redirectTo || url;
     this.loadLeft = this.opts.loadTicks;
@@ -126,6 +126,13 @@ class FakeSite {
   trapped() {
     return Boolean(this.dialogs) && this.dialogs.some((d) => d.open);
   }
+  broken() {
+    return Boolean(this.opts.loadError) && (this.opts.loadErrorAlways || !this.reloads);
+  }
+  reload() {
+    this.reloads = (this.reloads || 0) + 1;
+    this.loadLeft = this.opts.loadTicks;
+  }
   get location() {
     const u = new URL(this.href);
     return { href: u.href, pathname: u.pathname, host: u.host };
@@ -138,7 +145,13 @@ class FakeSite {
     const els = [];
     switch (r) {
       case 'composer':
-        if (!this.opts.noComposer) els.push(this.composer);
+        if (!this.opts.noComposer && !this.broken()) els.push(this.composer);
+        break;
+      case 'loadError':
+        // loadError: the conversation failed to load, so there is no
+        // composer; from loadErrorFromTick the page shows the site's error
+        // text. A reload fixes it unless loadErrorAlways.
+        if (this.broken() && this.ticks >= (this.opts.loadErrorFromTick || 0)) els.push(new El(this, 'MAIN', 'Could not load this ChatGPT conversation\nTry again'));
         break;
       case 'send':
         // sendReadyTick: the button stays disabled until that tick.
@@ -189,7 +202,7 @@ class FakeSite {
   lookup(sel) {
     const open = this.dialogs.filter((d) => d.open && d.within === sel).map((d) => d.el);
     if (open.length) return open;
-    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked', 'signedIn', 'dialog', 'notice']) {
+    for (const r of ['composer', 'send', 'stop', 'streaming', 'assistant', 'user', 'login', 'blocked', 'signedIn', 'dialog', 'notice', 'loadError']) {
       if (this.sel[r] && this.sel[r][this.match[r]] === sel) return this.role(r);
     }
     return [];
@@ -198,6 +211,9 @@ class FakeSite {
     const page = this;
     return {
       activeElement: null,
+      get title() {
+        return page.opts.title || '';
+      },
       querySelector: (s) => page.lookup(s)[0] || null,
       querySelectorAll: (s) => page.lookup(s),
       execCommand(cmd, _ui, val) {
@@ -265,7 +281,7 @@ function fakeChrome(makeSite) {
   const userTab = new FakeSite('chatgpt', 'https://chatgpt.com/c/users-own-chat');
   tabs.set(1, userTab);
   let next = 100;
-  const log = { created: [], removed: [], scripts: [], live: 0, maxLive: 0 };
+  const log = { created: [], removed: [], reloaded: [], scripts: [], live: 0, maxLive: 0 };
   const install = (page) => {
     const saved = { document: globalThis.document, location: globalThis.location };
     globalThis.document = page.doc;
@@ -299,6 +315,12 @@ function fakeChrome(makeSite) {
       async remove(id) {
         log.removed.push(id);
         if (tabs.delete(id)) log.live--;
+      },
+      async reload(id) {
+        log.reloaded.push(id);
+        const p = tabs.get(id);
+        if (!p) throw new Error('No tab with id: ' + id);
+        p.reload();
       },
     },
     scripting: {
@@ -512,6 +534,54 @@ test('no composer on the page: composer_not_found, tab closed', async () => {
   const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { noComposer: true }));
   await assert.rejects(sender(fc, { loadMs: 10000 }).send('chatgpt', { message: 'x' }), (e) => e.code === 'composer_not_found');
   assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('chatgpt conversation that failed to load: one reload, then the send goes ahead', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { loadError: true, neverFinish: true })));
+  const r = await sender(fc).send('chatgpt', { message: 'pong?', conversation_id: 'abc-123' });
+  assert.equal(r.conversation_id, 'abc-123');
+  assert.deepEqual(fc.log.reloaded, [100], 'reloaded its own tab once');
+  assert.deepEqual(page.submitted, ['pong?']);
+});
+
+test('chatgpt load error that shows only late in the load window: the reload gets a fresh window', async () => {
+  // Half-loaded (no composer, no error yet) for the whole 45s window,
+  // then the error page; reloading fixes it.
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('chatgpt', url, { loadError: true, loadErrorFromTick: 45, neverFinish: true })));
+  const r = await sender(fc, { loadMs: 45000 }).send('chatgpt', { message: 'pong?', conversation_id: 'abc-123' });
+  assert.equal(r.conversation_id, 'abc-123');
+  assert.deepEqual(fc.log.reloaded, [100]);
+  assert.deepEqual(page.submitted, ['pong?']);
+});
+
+test('chatgpt conversation that will not load: page_error soon after the error shows, nothing typed, tab closed', async () => {
+  const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { loadError: true, loadErrorAlways: true, title: 'New chat' }));
+  await assert.rejects(sender(fc, { loadMs: 45000 }).send('chatgpt', { message: 'x', conversation_id: 'abc-123' }), (e) => e.code === 'page_error' && /could not load the conversation/.test(e.message));
+  assert.ok(fc.now() <= 10000, `failed at ${fc.now()}ms`);
+  assert.deepEqual(fc.log.reloaded, [100], 'one reload only');
+  assert.equal(fc.log.scripts.filter((x) => x.func === pageFill || x.func === pageSubmit).length, 0, 'nothing typed or clicked');
+  assert.deepEqual(fc.log.removed, [100]);
+});
+
+test('no composer: the error says what the tab showed, never any composer text', async () => {
+  const fc = fakeChrome((url) => new FakeSite('chatgpt', url, { noComposer: true, title: 'New chat' }));
+  await assert.rejects(sender(fc, { loadMs: 10000 }).send('chatgpt', { message: 'secret words', conversation_id: 'abc-123' }), (e) => {
+    assert.equal(e.code, 'composer_not_found');
+    assert.match(e.message, /^no message box on the page; the tab showed \/c\/abc-123, titled "New chat", with 1 user and 1 assistant turns$/);
+    return true;
+  });
+  assert.deepEqual(fc.log.reloaded, [], 'no load error, no reload');
+});
+
+test('the chatgpt load-error signal needs the error text and no composer', () => {
+  const errorPage = '<html><body><main><button>Share</button><p>Could not load this ChatGPT conversation</p><button>Try again</button></main></body></html>';
+  assert.equal(probeHTML('chatgpt', errorPage, CHATGPT_CONV).loadError, true);
+  assert.equal(probeHTML('chatgpt', chatgptPage(), CHATGPT_CONV).loadError, false);
+  // A conversation that merely quotes the text still has its composer.
+  const quoted = chatgptPage().replace('<div>hi</div>', '<div>Could not load this ChatGPT conversation</div>');
+  assert.equal(probeHTML('chatgpt', quoted, CHATGPT_CONV).loadError, false);
 });
 
 test('logged out page: not_logged_in, nothing typed', async () => {
@@ -1688,6 +1758,67 @@ test('dots.close closes only the tab its send opened', async () => {
   assert.ok(fc.tabs.has(1) && fc.tabs.has(2), "the owner's tabs stay open");
 });
 
+// probeHTML runs pageProbe for site against html at href.
+function probeHTML(site, html, href) {
+  const saved = { document: globalThis.document, location: globalThis.location };
+  const u = new URL(href);
+  globalThis.document = parseHTML(html);
+  globalThis.location = { href: u.href, pathname: u.pathname, host: u.host };
+  try {
+    return pageProbe(SELECTORS[site]);
+  } finally {
+    globalThis.document = saved.document;
+    globalThis.location = saved.location;
+  }
+}
+
+// CHATGPT_PAGE is chatgpt.com's conversation markup as of 2026-10-27: a
+// ProseMirror textbox in the composer form (no #prompt-textarea) and
+// turns marked data-conversation-role.
+const chatgptPage = (draft = '') => `<html><body><main>
+<div data-turn-key="1"><h4 data-conversation-role="user"><span>You said:</span></h4><div>hi</div></div>
+<div data-turn-key="2"><h4 data-conversation-role="assistant"><span>ChatGPT said:</span></h4><div>hello</div></div>
+<div data-turn-key="3"><h4 data-conversation-role="user"><span>You said:</span></h4><div>again</div></div>
+<div data-turn-key="4"><h4 data-conversation-role="assistant"><span>ChatGPT said:</span></h4><div>hello again</div></div>
+<form><div data-composer-layout="1"><div data-rich-text-layout="1" role="presentation"><div contenteditable="true" role="textbox" aria-multiline="true" aria-label="Ask ChatGPT" class="ProseMirror">${draft ? `<p>${draft}</p>` : '<p></p>'}</div></div></div>
+<button type="button" aria-label="Add files and more"></button><button type="button" aria-label="Start Voice"></button></form>
+</main></body></html>`;
+const CHATGPT_CONV = 'https://chatgpt.com/c/c4a7c0de-0000-4000-8000-000000000001';
+
+test('the chatgpt selectors match the current conversation page', () => {
+  const p = probeHTML('chatgpt', chatgptPage(), CHATGPT_CONV);
+  assert.equal(p.composer, true);
+  assert.equal(p.composerEmpty, true);
+  assert.equal(p.userCount, 2);
+  assert.equal(p.assistantCount, 2);
+  assert.equal(p.generating, false);
+  assert.equal(p.loggedOut, false);
+
+  const draft = probeHTML('chatgpt', chatgptPage('half typed'), CHATGPT_CONV);
+  assert.equal(draft.composer, true);
+  assert.equal(draft.composerEmpty, false, 'a draft is never typed over');
+});
+
+test('the chatgpt send selectors find the submit button that appears with text, in any language', () => {
+  for (const label of ['Send', 'Enviar']) {
+    const doc = parseHTML(chatgptPage('x').replace('</form>', `<button type="submit" aria-label="${label}"></button></form>`));
+    const found = SELECTORS.chatgpt.send.map((s) => doc.querySelector(s)).find(Boolean);
+    assert.equal(found?.getAttribute('aria-label'), label, label);
+  }
+  // With an empty composer the page has no send button, and nothing else
+  // in the form matches.
+  const empty = parseHTML(chatgptPage());
+  assert.equal(SELECTORS.chatgpt.send.map((s) => empty.querySelector(s)).find(Boolean), undefined);
+});
+
+test('the chatgpt turn selectors still count the older data-message-author-role markup', () => {
+  const html = `<html><body><main><div data-message-author-role="user">q</div><div data-message-author-role="assistant">a</div><form><div contenteditable="true" id="prompt-textarea"></div></form></main></body></html>`;
+  const p = probeHTML('chatgpt', html, CHATGPT_CONV);
+  assert.equal(p.composer, true);
+  assert.equal(p.userCount, 1);
+  assert.equal(p.assistantCount, 1);
+});
+
 test('the dots selectors match the DM page markup', () => {
   const html = `<html><body><main><div class="ProseMirror" contenteditable="true" role="textbox" aria-label="Message"><p>draft</p></div><button aria-label="Send">Send</button></main></body></html>`;
   const saved = { document: globalThis.document, location: globalThis.location };
@@ -1749,4 +1880,64 @@ test('copilot send finishes while an idle session probe is still loading', async
     await probe;
   }
   assert.equal(fc.log.removed.includes(100), true, 'probe closes its own tab');
+});
+
+// ---- Claude Duet: the owner's 1:1 channel on claude.ai/messages, whose
+// composer is a textarea and whose send the timeline confirms.
+
+const DUET_CHAN = 'chan_0000000000000000chan01';
+const DUET_PAGE = `https://claude.ai/messages/${DUET_CHAN}`;
+const DUET_OWNER = 'user_owner';
+
+// duetFetch answers the organizations list, the channel record, its
+// timeline (newest first, with an owner message for each message a duet
+// page in fc took) and an idle event stream.
+function duetFetch(fc) {
+  const fn = async (url) => {
+    const u = String(url);
+    if (u === 'https://claude.ai/api/organizations') return jsonResponse([{ uuid: '11111111-2222-4333-8444-555555555555', capabilities: ['chat'] }]);
+    const base = `https://claude.ai/v1/code/channels/${DUET_CHAN}`;
+    if (u === base) return jsonResponse({ channel: { id: DUET_CHAN, name: 'research', agent_id: 'cagt_a', visibility: 'private', members: [], guests: [], archived_at: null, disabled_at: null, membership: { account_id: DUET_OWNER, role: 'owner' } } });
+    if (u.startsWith(`${base}/timeline?limit=`)) {
+      const data = [{ id: 'cmsg_old', created_at: '2026-10-01T00:00:00Z', author_agent_id: 'cagt_a', body: 'earlier answer', in_timeline: true, thread_status: 'idle' }];
+      [...fc.tabs.values()].filter((p) => p.site === 'duet').flatMap((p) => p.submitted).forEach((t, i) => {
+        data.unshift({ id: `cmsg_new${i + 1}`, created_at: new Date().toISOString(), author_account_id: DUET_OWNER, body: t, in_timeline: true, thread_status: 'idle' });
+      });
+      return jsonResponse({ data });
+    }
+    if (u === `${base}/messages/stream?from=tail`) return new Response('event: session_activity\ndata: {"working":false}\n\nevent: session_model\ndata: {}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    return jsonResponse({ detail: 'not found' }, 404);
+  };
+  return fn;
+}
+
+test('duet.send types into the channel textarea, clicks Send, and returns the new owner message id from the timeline', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('duet', url, { noId: true, neverFinish: true, textarea: true })));
+  const r = createRunner({ fetch: duetFetch(fc), sender: sender(fc) });
+  const frames = [];
+  await r.run('duet.send', { message: 'what changed this week?', conversation_id: DUET_CHAN }, (x) => frames.push(x));
+  assert.equal(fc.log.created[0].url, DUET_PAGE);
+  assert.equal(fc.log.created[0].active, false, 'background tab');
+  assert.deepEqual(page.submitted, ['what changed this week?']);
+  assert.equal(frames[0].result.conversation_id, DUET_CHAN);
+  assert.equal(frames[0].result.message_id, 'cmsg_new1');
+  assertOnlyFixedScripts(fc.log);
+});
+
+test('the duet selectors match a named channel and the main Duet chat (seen live)', () => {
+  const saved = { document: globalThis.document, location: globalThis.location };
+  try {
+    for (const box of ['<textarea placeholder="Message #research"></textarea>', '<textarea aria-label="Message Claude Duet"></textarea>']) {
+      globalThis.document = parseHTML(`<html><body><main>${box}<button aria-label="Send" disabled>Send</button></main></body></html>`);
+      globalThis.location = { href: DUET_PAGE, pathname: `/messages/${DUET_CHAN}`, host: 'claude.ai' };
+      const p = pageProbe(SELECTORS.duet);
+      assert.equal(p.composer, true, box);
+      assert.equal(p.composerEmpty, true, box);
+      assert.ok(document.querySelector(SELECTORS.duet.send[0]), box);
+    }
+  } finally {
+    globalThis.document = saved.document;
+    globalThis.location = saved.location;
+  }
 });

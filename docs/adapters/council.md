@@ -49,7 +49,7 @@ Attachments: text files are pasted into each member's prompt, cut to fit when ne
 
 By default these sit on a council:
 
-- every web teammate (`chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`);
+- every web teammate (`chatgpt-web`, `claude-web`, `grok-web`, `gemini-web`, `perplexity-web`, `copilot-web`, `dot-web`, `duet-web`);
 - every model teammate the relay can wake on demand: command-woken CLI agents (`codex`, `gemini-cli`, `grok-cli`) and webhook, email and always-on agents.
 
 These do not, unless you list them in `council.json`:
@@ -113,6 +113,8 @@ A gate entry for `council` replaces the default hold. `{"gate": {"council": {"fr
 Approval from an admin device is the owner's decision. The hold restrains agents only because they cannot approve. See the [trust model](../trust-model.md#council).
 
 Your dot (`dot-web`) is held by default too, since it acts in the apps you connected to it. Council's answer, review and chairman asks to the dot skip that hold only when you approved the council question they belong to (a `tincan council` run in a terminal on an admin device approves its own); every other ask to the dot is still held, and `approval.json` gates still apply to it. Approving a council question is therefore also approving that the dot reads it and answers with your authority in its connected apps. To keep the dot off councils, add `dot-web` to `exclude` in `council.json`. For blind review, Council strips the dot's DM footer, its attachment and delegation notes and any `@tincan ask` paragraph from its answer, and drops the `new chat` line from its prompts. The dot is not a default chairman, but `chairmen` or `--chairman` can name it. The dot can also convene by asking `council` (`@tincan ask council <question>`), which is held for you like any council.
+
+Claude in your Claude Duet chat (`duet-web`) is handled exactly like the dot: held by default, its council asks pass only under a council question you approved, its `your Duet channel:` footer, notes and `@tincan ask` paragraph are stripped for blind review, and `exclude` keeps it off.
 
 ## Install
 

@@ -114,6 +114,9 @@ func TestInstallWebServiceDarwinWritesPlistNotLoaded(t *testing.T) {
 		o := ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin <can>/tincan", UID: 501}
 		if WebSiteTakesThread(site) {
 			o.Thread = "0d0d0d0d-1111-7222-8333-000000000001"
+			if site == SourceDuet {
+				o.Thread = "chan_0000000000000000chan01"
+			}
 		}
 		res, err := InstallWebService(site, o)
 		if err != nil {

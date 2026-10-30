@@ -461,7 +461,7 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 		goos = runtime.GOOS
 	}
 	// A fixed thread goes into the definition as --thread <id>; the id
-	// is checked to hex and hyphens, and filled (escaped) like any value.
+	// is checked to the site's form, and filled (escaped) like any value.
 	launchd, systemd := webLaunchdTemplate, webSystemdTemplate
 	launchdThread, systemdThread := "", ""
 	thread := ""
@@ -469,13 +469,13 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	case WebSiteTakesThread(site):
 		id, ok := ParseWebThread(site, o.Thread)
 		if !ok {
-			return ServiceResult{}, fmt.Errorf("--site %s needs --thread <id>, the dot's thread id (got %q)", site, o.Thread)
+			return ServiceResult{}, fmt.Errorf("--site %s needs --thread <id>, %s (got %q)", site, WebThreadName(site), o.Thread)
 		}
 		thread = id
 		launchdThread = "\n    <string>--thread</string>\n    <string>__THREAD__</string>"
 		systemdThread = " --thread __THREAD__"
 	case o.Thread != "":
-		return ServiceResult{}, fmt.Errorf("--thread applies only to --site dots, not %s", site)
+		return ServiceResult{}, fmt.Errorf("--thread applies only to --site %s, not %s", WebThreadSites(), site)
 	}
 	launchd = strings.Replace(launchd, "__THREADARGS__", launchdThread, 1)
 	systemd = strings.Replace(systemd, "__THREADARGS__", systemdThread, 1)

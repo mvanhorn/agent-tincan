@@ -1,8 +1,8 @@
 package history
 
 // The live sites: everything that differs between chatgpt.com, claude.ai,
-// grok.com, gemini.google.com, www.perplexity.ai and copilot.com, in one
-// table. Adding a site is one entry here plus its reader file; nothing
+// grok.com, gemini.google.com, www.perplexity.ai, copilot.com, an OpenAI
+// dot's DM and a Claude Duet channel, in one table. Adding a site is one entry here plus its reader file; nothing
 // else branches on which site it is.
 
 import (
@@ -104,9 +104,40 @@ type webSite struct {
 	// under (dots under chatgpt): the extension's hello does not list it.
 	grantAs Source
 	// oneThread: the site's web agent serves one fixed conversation (a
-	// dot's DM), given with --thread. Every request goes there, the
-	// threading first line is sent as text, and each send names it.
+	// dot's DM, a Duet channel), given with --thread. Every request goes
+	// there, the threading first line is sent as text, and each send names
+	// it.
 	oneThread bool
+	// primary: the extension can name the account's default thread
+	// (dots.primary), so web install needs no --thread.
+	primary bool
+	// kind is the relay kind a one-thread site's agent must have, so the
+	// relay holds requests to it for the owner's approval.
+	kind string
+	// threadName is what a one-thread site's --thread is, in errors.
+	threadName string
+	// feed is how a one-thread site's replies and asks name who answers
+	// there and where.
+	feed *feedWords
+}
+
+// feedWords name a one-thread site's assistant and its conversation in
+// the notes tincan adds to a reply and in the asks it sends for it.
+type feedWords struct {
+	// who starts a sentence ("your dot"), them is its object ("the dot")
+	// and theirs its possessive ("the dot's").
+	who, them, theirs string
+	// where is the conversation in running text ("the DM"), place its
+	// name before a link ("its DM").
+	where, place string
+	// url is the conversation's address, less the thread id.
+	url string
+	// from is who an ask came from, in its body ("the owner's dot").
+	from string
+	// working is set when every read says whether the assistant is
+	// working: a read that cannot tell then counts as working, so a reply
+	// finishes only once a read confirms the assistant stopped.
+	working bool
 }
 
 // ConversationName is how a web agent's reply footer names a site's
@@ -289,6 +320,35 @@ var webSites = []*webSite{
 		webOnly:     true,
 		grantAs:     SourceChatGPT,
 		oneThread:   true,
+		primary:     true,
+		kind:        "dot-web",
+		threadName:  "the dot's thread id (hex and hyphens)",
+		feed:        dotsWords,
+	},
+	{
+		source:   SourceDuet,
+		label:    "Claude Duet",
+		dm:       "your Duet channel",
+		limiter:  "claude.ai",
+		host:     "claude.ai",
+		agent:    "duet-web",
+		opPrefix: "duet",
+		reader: func(c *Client, now func() time.Time) liveReader {
+			r := NewDuet(c)
+			r.Now = now
+			return r
+		},
+		nodes:       duetNodes,
+		stable:      &stableRule{polls: DefaultDotStablePolls, span: DefaultDotStableFor},
+		convPath:    duetConvPath,
+		canonID:     duetCanonicalID,
+		notLoggedIn: duetNotLoggedIn,
+		webOnly:     true,
+		grantAs:     SourceClaudeAI,
+		oneThread:   true,
+		kind:        "duet-web",
+		threadName:  "the Duet channel's id (chan_..., or its https://claude.ai/messages/<id> address)",
+		feed:        duetWords,
 	},
 }
 
@@ -338,7 +398,7 @@ const (
 	opSend    opKind = "send"
 	opClose   opKind = "close"
 	// opPrimary names the account's primary dot (dots.primary), for web
-	// install; only a one-thread site has it.
+	// install; only a site with a primary thread has it.
 	opPrimary opKind = "primary"
 )
 
@@ -354,11 +414,11 @@ func (k opKind) valid() bool {
 func (s *webSite) op(k opKind) Op { return Op(s.opPrefix + "." + string(k)) }
 
 // hasOp reports whether the site has operations of kind k: a web-only
-// site has no list or file operation, and only a one-thread site (dots)
-// has a primary operation.
+// site has no list or file operation, and only a site with a primary
+// thread (dots) has a primary operation.
 func (s *webSite) hasOp(k opKind) bool {
 	if k == opPrimary {
-		return s.oneThread
+		return s.primary
 	}
 	return !s.webOnly || (k != opList && k != opFile)
 }
@@ -376,6 +436,43 @@ func (op Op) resolve() (*webSite, opKind, bool) {
 		}
 	}
 	return nil, "", false
+}
+
+// WebThreadName says what site's --thread is, for errors.
+func WebThreadName(src Source) string {
+	if s := siteFor(src); s != nil && s.threadName != "" {
+		return s.threadName
+	}
+	return "a thread id"
+}
+
+// WebThreadSites lists the --site values that take --thread ("dots or
+// duet").
+func WebThreadSites() string {
+	var names []string
+	for _, s := range webSites {
+		if s.oneThread {
+			names = append(names, string(s.source))
+		}
+	}
+	return joinList(names, "or")
+}
+
+// WebSiteHasPrimary reports whether web install can find site's thread
+// itself (the account's primary dot), so --thread may be left out.
+func WebSiteHasPrimary(src Source) bool {
+	s := siteFor(src)
+	return s != nil && s.primary
+}
+
+// WebSiteKind is the relay kind site's agent must have so the relay holds
+// requests to it for the owner's approval ("dot-web"), or "" for a site
+// whose agent needs none.
+func WebSiteKind(src Source) string {
+	if s := siteFor(src); s != nil {
+		return s.kind
+	}
+	return ""
 }
 
 // WebSiteNames lists the --site values, for help and errors

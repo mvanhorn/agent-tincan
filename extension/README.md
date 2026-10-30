@@ -171,6 +171,27 @@ the same bearer `chatgptAuth` reads, which never leaves the worker.
 | `dots.close` | `conversation_id` | Closes the tab a dots send left open. |
 | `dots.primary` | none | `GET /backend-api/tbo/primary`. Returns the account's primary dot as `{thread, dot, name}` (its current thread, its id and its name), for `tincan web install --site dots` without `--thread`. An unexpected shape is `endpoint_changed`. |
 
+## Claude Duet (claude.ai/messages)
+
+The `duet.*` operations front the `duet-web` agent. They run under the
+existing claude.ai grant (`SITE_ALIASES` maps `duet` to `claudeai`), so there
+is no new site to grant. Reads go to `https://claude.ai/v1/code/channels/<id>`
+with the owner's cookies and the headers `x-organization-uuid` (the
+chat-capable organization from `/api/organizations`) and
+`anthropic-version: 2023-06-01`. No header, cookie or token is returned.
+
+Every read and send first checks the channel record and refuses it with
+`channel_refused` unless it is private, not archived or disabled, owned by
+the signed-in account (`membership.role` is `owner`), and has no other
+member or guest (`members` and `guests` empty, `members_truncated` false).
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `duet.detail` | `id` (the channel id, `chan_...`) | Checks the channel on every read, reads the channel's event stream (`GET .../messages/stream?from=tail`) for at most 4 seconds, only its opening `session_activity` snapshot, to learn whether Claude is working, and then reads `GET .../timeline?limit=32`. Returns `{thread, room, owner, paused: false, working, items: [{id, at, from, role, text, attachments}]}`, oldest first, where `role` is `owner`, `claude` (the channel's agent) or `other`, and `working` is true, false or null (no snapshot). Server notices and thread replies are left out. A message's `thread_status` is not read: it stays `idle` while Claude works. An unexpected shape is `endpoint_changed`. |
+| `duet.send` | `message`, `conversation_id` (the channel id; required, no new chat) | Checks the channel, then opens `https://claude.ai/messages/<id>` in a background tab. Before typing it waits, up to 2 minutes and never past the send's deadline, until the stream confirms Claude is not working; otherwise it fails `busy` with nothing typed (detail `working state unknown` when no read could tell). A send past its deadline types and clicks nothing. It types into the channel's textarea (`placeholder` "Message #<name>" in a named channel, `aria-label` "Message Claude Duet" in the main chat) and clicks `button[aria-label="Send"]`. A message box that already holds text is left alone (`send_failed`). The channel is checked again just before the click. The send is confirmed by polling the timeline for a new owner message with the same text, and returns its id. |
+| `duet.close` | `conversation_id` | Closes the tab a duet send left open. |
+| `duet.session` | none | The claude.ai session check (`claudeai.session`); reads no channel. |
+
 ## Failure codes
 
 Besides `not_logged_in`, `not_found`, `rate_limited` and the rest, the fetch
@@ -253,12 +274,13 @@ the published version. This change requests no additional browser permissions.
 
 ## Session operations
 
-These seven fixed operations accept no arguments and return only `{}` on positive authentication evidence. Typed errors report sign-out or an indeterminate outcome; indeterminate evidence cannot clear a known sign-out. No credentials or account fields are returned. Copilot probes use their own tab and do not queue sends behind the probe.
+These eight fixed operations accept no arguments and return only `{}` on positive authentication evidence. Typed errors report sign-out or an indeterminate outcome; indeterminate evidence cannot clear a known sign-out. No credentials or account fields are returned. Copilot probes use their own tab and do not queue sends behind the probe.
 
 | Operation | Arguments | What it reads |
 | --- | --- | --- |
 | `chatgpt.session` | None (`{}`) | Reads `GET https://chatgpt.com/api/auth/session` and requires an access token, which stays in the worker. |
 | `dots.session` | None (`{}`) | Uses the same ChatGPT session check; reads no dot thread or messages. |
+| `duet.session` | None (`{}`) | Uses the same claude.ai session check; reads no channel or messages. |
 | `claudeai.session` | None (`{}`) | Fetches `GET https://claude.ai/api/organizations` fresh and requires a valid organization UUID, preferring an organization with chat capability. |
 | `grok.session` | None (`{}`) | Reads `GET https://grok.com/rest/app-chat/conversations?pageSize=1`; a nonempty conversations list is positive evidence, an empty successful list is `indeterminate`, and HTTP 401 is `not_logged_in`. |
 | `gemini.session` | None (`{}`) | Fetches `https://gemini.google.com/app` fresh and checks its session token and build label; those values stay in worker memory. |

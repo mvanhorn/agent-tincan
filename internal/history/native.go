@@ -198,6 +198,12 @@ const (
 	// OpDotsPrimary names the account's primary dot and its current
 	// thread, for web install (the dot's address no longer shows one).
 	OpDotsPrimary Op = "dots.primary"
+	// Claude Duet (a 1:1 channel on claude.ai/messages, under claude.ai's
+	// grant) fronts a web agent only, like a dot: no list, file or primary
+	// operation, and a send always names the channel.
+	OpDuetDetail Op = "duet.detail"
+	OpDuetSend   Op = "duet.send"
+	OpDuetClose  Op = "duet.close"
 	// OpExtensionReload is sent only by the native host itself, never
 	// relayed from the socket.
 	OpExtensionReload Op = "extension.reload"
@@ -392,7 +398,18 @@ var (
 	ErrBlocked = errors.New("blocked by an anti-bot check")
 	// ErrPaused: the owner's dot is paused, so nothing was sent to it.
 	ErrPaused = errors.New("paused")
+	// ErrRefused: the site refused the conversation itself (a Duet channel
+	// shared with other people, archived, or not the owner's), so nothing
+	// was sent to it. The detail says why.
+	ErrRefused = errors.New("conversation refused")
+	// ErrBusy: the assistant was still working on something else for
+	// longer than a send waits, so nothing was sent.
+	ErrBusy = errors.New("busy")
 )
+
+// BusyUnknown is the extension's busy detail when it could not tell
+// whether the assistant is working before a send's wait ran out.
+const BusyUnknown = "working state unknown"
 
 // OptionsPageHint says where the extension's site grants are made.
 const OptionsPageHint = "chrome://extensions > Agent Tincan History > Details > Extension options"
@@ -455,6 +472,16 @@ func (e *UnavailableError) Error() string {
 		reason = site + " showed an anti-bot check; open " + site + " in Chrome, complete the check, then try again"
 	case ErrPaused:
 		reason = siteLabel(e.Source) + " is paused; unpause it in ChatGPT and ask again"
+	case ErrRefused:
+		reason = e.Detail
+		if reason == "" {
+			reason = "the conversation was refused"
+		}
+	case ErrBusy:
+		reason = siteLabel(e.Source) + " is still working on something else; ask again when it is done"
+		if e.Detail == BusyUnknown {
+			reason = "tincan could not tell whether " + siteLabel(e.Source) + " is working; ask again later"
+		}
 	case ErrRateLimited:
 		// The detail (a URL path, a cooldown note) adds nothing for the
 		// reader.
@@ -462,7 +489,7 @@ func (e *UnavailableError) Error() string {
 	default:
 		reason = site + " request failed"
 	}
-	if e.Detail != "" && e.Kind != ErrChromeNotRunning && e.Kind != ErrExtensionNotConnected && e.Kind != ErrNotLoggedIn && e.Kind != ErrTimeout && e.Kind != ErrPermissionMissing && e.Kind != ErrPaused {
+	if e.Detail != "" && e.Kind != ErrChromeNotRunning && e.Kind != ErrExtensionNotConnected && e.Kind != ErrNotLoggedIn && e.Kind != ErrTimeout && e.Kind != ErrPermissionMissing && e.Kind != ErrPaused && e.Kind != ErrRefused && e.Kind != ErrBusy {
 		reason += " (" + e.Detail + ")"
 	}
 	return "source unavailable: " + string(e.Source) + ": " + reason
@@ -633,6 +660,10 @@ func nativeErrorKind(s Source, ne *NativeError) error {
 		return unavailable(s, ErrBlocked, detail)
 	case "paused":
 		return unavailable(s, ErrPaused, detail)
+	case "channel_refused":
+		return unavailable(s, ErrRefused, detail)
+	case "busy":
+		return unavailable(s, ErrBusy, detail)
 	case "permission_missing":
 		return unavailable(s, ErrPermissionMissing, detail)
 	case "bad_request":
@@ -644,7 +675,9 @@ func nativeErrorKind(s Source, ne *NativeError) error {
 		return unavailable(s, ErrTimeout, detail)
 	case "composer_not_found":
 		return unavailable(s, ErrComposerNotFound, detail)
-	case "send_failed":
+	case "send_failed", "page_error":
+		// page_error: the site could not load the conversation, so
+		// nothing was typed; the detail says what the tab showed.
 		return unavailable(s, ErrSendFailed, detail)
 	case "unsupported":
 		return unavailable(s, ErrRejected, "the extension needs an update: "+detail)
@@ -843,6 +876,7 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 			return cerr
 		}
 	}
+	caller := ctx
 	ctx, cancel := context.WithTimeout(ctx, c.timeout(op))
 	defer cancel()
 	req := NativeRequest{ID: requestSeq.Add(1), Op: op, Args: args}
@@ -870,6 +904,17 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 	case errors.Is(err, ErrExtensionNotConnected), errors.Is(err, errHostClosed), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return unavailable(src, ErrExtensionNotConnected, "")
 	case errors.Is(err, context.DeadlineExceeded), isTimeout(err):
+		// The caller's own deadline is the caller running out of time
+		// (a history request's whole budget), not Chrome failing to
+		// answer, so it stays a context error for the caller to report.
+		// The socket shares that deadline and can time out just before
+		// the context's timer fires, so a passed deadline counts too.
+		if cerr := caller.Err(); cerr != nil {
+			return fmt.Errorf("%s: %w", src, cerr)
+		}
+		if d, ok := caller.Deadline(); ok && !time.Now().Before(d) {
+			return fmt.Errorf("%s: %w", src, context.DeadlineExceeded)
+		}
 		return unavailable(src, ErrTimeout, "")
 	case errors.Is(err, context.Canceled):
 		return err

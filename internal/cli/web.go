@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +16,6 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
-	"github.com/mvanhorn/agent-tincan/internal/onboard"
 )
 
 func webCmd() *cobra.Command {
@@ -41,22 +41,35 @@ func webSiteFlag(site string) (history.Source, error) {
 }
 
 // webThreadFlag checks --thread against the site: required and well formed
-// for a site whose agent serves one thread (dots), refused for the others.
+// for a site whose agent serves one thread (dots, duet), refused for the
+// others.
 func webThreadFlag(src history.Source, thread string) (string, error) {
 	if !history.WebSiteTakesThread(src) {
 		if thread != "" {
-			return "", fmt.Errorf("--thread applies only to --site dots, not %s", src)
+			return "", fmt.Errorf("--thread applies only to --site %s, not %s", history.WebThreadSites(), src)
 		}
 		return "", nil
 	}
 	id, ok := history.ParseWebThread(src, thread)
 	if !ok {
 		if thread == "" {
-			return "", fmt.Errorf("--site %s needs --thread <id>, the dot's thread id (tincan web install --site %s finds it and keeps it in the service)", src, src)
+			if history.WebSiteHasPrimary(src) {
+				return "", fmt.Errorf("--site %s needs --thread <id>, %s (tincan web install --site %s finds it and keeps it in the service)", src, history.WebThreadName(src), src)
+			}
+			return "", fmt.Errorf("--site %s needs --thread <id>, %s", src, history.WebThreadName(src))
 		}
-		return "", fmt.Errorf("--thread %q is not a dot thread id (hex and hyphens)", thread)
+		return "", fmt.Errorf("--thread %q is not %s", thread, history.WebThreadName(src))
 	}
 	return id, nil
+}
+
+// checkWebThread reads a one-thread site's thread once through the
+// extension (tests replace it), so web install and web serve refuse a
+// thread the site refuses (a shared Duet channel) up front.
+var checkWebThread = func(ctx context.Context, src history.Source, thread string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return history.NewClient().CheckWebThread(ctx, src, thread)
 }
 
 // serviceConfigPath is a service agent's own client config (web agents,
@@ -83,8 +96,9 @@ func webServeCmd() *cobra.Command {
 			"     with no file (or a * entry) any joined agent may ask;\n" +
 			"  2. the body is the message. A first line \"new chat\" or \"conversation: <id>\" picks the conversation;\n" +
 			"     otherwise it continues the one this asker used last (remembered in a 0600 state file).\n" +
-			"     --site dots (your OpenAI dot) needs --thread <id>: every request goes into that DM, sent as is;\n" +
-			"     the dot can ask teammates too: a dot message whose first line is \"@tincan ask <agent>\" is asked\n" +
+			"     --site dots (your OpenAI dot) and --site duet (Claude in your 1:1 Duet channel) need --thread <id>:\n" +
+			"     every request goes into that DM or channel, sent as is;\n" +
+			"     the dot or Claude can ask teammates too: a message from it whose first line is \"@tincan ask <agent>\" is asked\n" +
 			"     (agents listed in ~/.config/tincan/<name>-send.txt; no file means any joined agent) and the answer typed back;\n" +
 			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
 			"  4. the reply text (capped) comes back; ChatGPT and Grok attach their generated images, Gemini's when they can be fetched,\n" +
@@ -101,7 +115,7 @@ func webServeCmd() *cobra.Command {
 				return err
 			}
 			if teach && !history.WebSiteTakesThread(src) {
-				return fmt.Errorf("--teach applies only to --site dots, not %s", src)
+				return fmt.Errorf("--teach applies only to --site %s, not %s", history.WebThreadSites(), src)
 			}
 			if name == "" {
 				name = history.WebAgentName(src)
@@ -151,16 +165,17 @@ func webServeCmd() *cobra.Command {
 			if me.Name != name {
 				return wrongServeAgent("web serve", name, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
-			// The relay holds a request to the dot for the owner's approval
-			// only when it knows the agent's kind is dot-web; under any other
-			// kind (an invite without --kind leaves it empty) teammates' asks
-			// would reach the dot unapproved, so refuse to start.
-			if history.WebSiteTakesThread(src) && me.Kind != onboard.KindDotWeb {
+			// The relay holds a request to a dot or a Duet channel for the
+			// owner's approval only when it knows the agent's kind (dot-web,
+			// duet-web); under any other kind (an invite without --kind
+			// leaves it empty) teammates' asks would reach it unapproved, so
+			// refuse to start.
+			if want := history.WebSiteKind(src); want != "" && me.Kind != want {
 				kind := me.Kind
 				if kind == "" {
 					kind = "none"
 				}
-				return fmt.Errorf("web serve: %s's kind on the relay is %q, so requests to it would not be held for the owner's approval; run `tincan kind %s %s` from an admin device (the relay must run this tincan build or later to accept the kind) and start again", name, kind, name, onboard.KindDotWeb)
+				return fmt.Errorf("web serve: %s's kind on the relay is %q, so requests to it would not be held for the owner's approval; run `tincan kind %s %s` from an admin device (the relay must run this tincan build or later to accept the kind) and start again", name, kind, name, want)
 			}
 			// A connected extension that reports the site ungranted cannot
 			// serve it, so the service waits here for the grant rather than
@@ -172,6 +187,14 @@ func webServeCmd() *cobra.Command {
 			if err := waitForSiteGrant(ctx, native, src, cmd.ErrOrStderr(), name); err != nil {
 				cmd.PrintErrf("tincan web %s: stopped\n", name)
 				return nil
+			}
+			// A thread the site refuses (a Duet channel shared with someone
+			// else) is never served; any other failure (no extension yet)
+			// is left to each request's own reply.
+			if history.WebSiteTakesThread(src) && !history.WebSiteHasPrimary(src) {
+				if err := checkWebThread(ctx, src, thread); errors.Is(err, history.ErrRefused) {
+					return fmt.Errorf("web serve: %w", err)
+				}
 			}
 			agent := &history.WebAgent{
 				Relay:       r,
@@ -190,17 +213,18 @@ func webServeCmd() *cobra.Command {
 			}
 			cmd.PrintErrf("tincan web %s: serving %s on %s (%s)\n", name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
 			if history.WebSiteTakesThread(src) {
-				// The dot asks teammates by writing "@tincan ask <agent>" in
-				// its DM; the watcher asks them and types the answers back.
+				// The dot (or Claude in a Duet channel) asks teammates by
+				// writing "@tincan ask <agent>"; the watcher asks them and
+				// types the answers back.
 				sendPath := history.DefaultDotSendAllowlistPath(name)
 				agent.OutPath = history.DefaultDotOutPath(name)
 				agent.SendAllowlist = history.FileAllowlist(sendPath)
 				agent.SendAllowlistPath = sendPath
 				agent.Teach = teach
 				if sendAllowed, err := history.LoadAllowlist(sendPath); err != nil {
-					cmd.PrintErrf("tincan web %s: send allowlist: %v; the dot's asks are refused until it is fixed\n", name, err)
+					cmd.PrintErrf("tincan web %s: send allowlist: %v; @tincan asks are refused until it is fixed\n", name, err)
 				} else {
-					cmd.PrintErrf("tincan web %s: watching the dot's DM for @tincan asks (send %s)\n", name, history.DescribeAllowlist(sendPath, sendAllowed))
+					cmd.PrintErrf("tincan web %s: watching %s for @tincan asks (send %s)\n", name, history.ConversationName(src), history.DescribeAllowlist(sendPath, sendAllowed))
 				}
 			}
 			err = agent.Run(ctx)
@@ -216,8 +240,8 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "the agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/<name>.json)")
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
-	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only (required there): the dot's thread id, which tincan web install --site dots finds and keeps in the service")
-	cmd.Flags().BoolVar(&teach, "teach", false, "--site dots only: type the setup message that teaches the dot to ask teammates into its DM again (it is sent once per thread on its own)")
+	cmd.Flags().StringVar(&thread, "thread", "", "--site dots or duet only (required there): the dot's thread id, which tincan web install --site dots finds and keeps in the service, or the Duet channel's id or address")
+	cmd.Flags().BoolVar(&teach, "teach", false, "--site dots or duet only: type the setup message that teaches the dot or Claude to ask teammates into its conversation again (it is sent once per thread on its own)")
 	return cmd
 }
 
@@ -294,7 +318,7 @@ func webInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if thread == "" && history.WebSiteTakesThread(src) {
+			if thread == "" && history.WebSiteHasPrimary(src) {
 				// The dot's address no longer shows a thread, so the
 				// extension names the account's primary dot.
 				p, err := dotPrimary(cmd.Context())
@@ -307,6 +331,16 @@ func webInstallCmd() *cobra.Command {
 			thread, err := webThreadFlag(src, thread)
 			if err != nil {
 				return err
+			}
+			if history.WebSiteTakesThread(src) && !history.WebSiteHasPrimary(src) {
+				// A channel the site refuses is never installed; without the
+				// extension the check waits for web serve.
+				switch err := checkWebThread(cmd.Context(), src, thread); {
+				case errors.Is(err, history.ErrRefused):
+					return fmt.Errorf("web install: %w", err)
+				case err != nil:
+					cmd.PrintErrf("could not check %s through the Tincan Chrome extension (%v); web serve checks it again before serving\n", history.ConversationName(src), err)
+				}
 			}
 			if name == "" {
 				name = history.WebAgentName(src)
@@ -346,6 +380,6 @@ func webInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "invited agent name (default: site web agent name)")
 	cmd.Flags().StringVar(&configPath, "config", "", "client config saved into the service (default: TINCAN_CONFIG or ~/.config/tincan/<name>.json)")
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
-	cmd.Flags().StringVar(&thread, "thread", "", "--site dots only: the dot's thread id, kept in the service definition (default: the thread of the account's primary dot, from the Chrome extension)")
+	cmd.Flags().StringVar(&thread, "thread", "", "--site dots or duet only: the dot's thread id (default: the thread of the account's primary dot, from the Chrome extension), or the Duet channel's id or https://claude.ai/messages/<id> address (required); kept in the service definition")
 	return cmd
 }

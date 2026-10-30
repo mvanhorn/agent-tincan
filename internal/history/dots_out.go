@@ -3,7 +3,9 @@ package history
 // The dot asking teammates: dot-web watches the dot's DM for messages the
 // dot writes whose first line is "@tincan ask <agent>", asks that agent
 // through the relay as dot-web, and types the answer back into the DM as
-// "[tincan-reply from <agent>]". The watcher runs beside the request loop
+// "[tincan-reply from <agent>]". duet-web does the same for Claude in a
+// Duet channel: only Claude's own messages start an ask, never the
+// owner's or anyone else's. The watcher runs beside the request loop
 // and shares its one send path: it never types while an inbound request
 // is being sent or waits for its answer.
 
@@ -221,12 +223,13 @@ func dotAskRef(thread, msg string) string {
 }
 
 // dotAskBody is the body sent for an ask: the request text and, when the
-// ask has a reference, a last line carrying it.
-func dotAskBody(text, ref string) string {
+// ask has a reference, a last line carrying it and naming where the ask
+// came from (from: "the owner's dot").
+func dotAskBody(from, text, ref string) string {
 	if ref == "" {
 		return text
 	}
-	return text + "\n\n(from the owner's dot, ref " + ref + ")"
+	return text + "\n\n(from " + from + ", ref " + ref + ")"
 }
 
 func (st *dotOutState) thread(id string) *dotOutThread {
@@ -381,7 +384,7 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 		// history.
 		th.Started = now
 		for _, m := range feed.Messages {
-			if _, ok := parseDotAsk(m.Text); ok && !m.Owner {
+			if _, ok := parseDotAsk(m.Text); ok && !m.Owner && !m.Other {
 				th.Messages[m.ID] = &dotOutRecord{Status: dotBaseline, At: now, Done: true}
 			}
 		}
@@ -476,7 +479,7 @@ func (w *WebAgent) dotWork(ctx context.Context, thread string, feed DotFeed) err
 	// on a later tick, so it is asked exactly once.
 	sending := map[string]bool{}
 	for _, m := range feed.Messages {
-		if m.Owner || th.Messages[m.ID] != nil {
+		if m.Owner || m.Other || th.Messages[m.ID] != nil {
 			continue
 		}
 		ask, ok := parseDotAsk(m.Text)
@@ -632,7 +635,7 @@ func (w *WebAgent) refuseAsk(ask dotAsk, now time.Time) *dotOutRecord {
 // may be asked on a later tick.
 func (w *WebAgent) startAsk(ctx context.Context, ask dotAsk, rec *dotOutRecord) bool {
 	target := ask.target
-	res, err := w.Relay.Ask(ctx, target, dotAskBody(ask.text, rec.Ref), "", 0, false)
+	res, err := w.Relay.Ask(ctx, target, dotAskBody(w.site().feed.from, ask.text, rec.Ref), "", 0, false)
 	var ae *client.APIError
 	switch {
 	case errors.As(err, &ae) && ae.Code == http.StatusTooManyRequests:

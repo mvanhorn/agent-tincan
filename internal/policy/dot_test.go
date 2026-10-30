@@ -238,3 +238,17 @@ func TestApprovedCouncilAskToAnotherCouncilHeld(t *testing.T) {
 		t.Fatal("an approved council's ask to another council was not held")
 	}
 }
+
+// A Duet channel's agent is held like a dot: by default with no config,
+// and not again for a council question the owner approved.
+func TestDuetHeldByDefaultLikeADot(t *testing.T) {
+	f := councilFixture(t, nil)
+	f.agent(t, "duet-web", onboard.KindDuetWeb)
+	if req := prepare(t, f, "muse", "duet-web", "", envelope.KindAsk); req.Status != envelope.StatusHeld {
+		t.Fatalf("ask to duet-web = %q", req.Status)
+	}
+	parent := convened(t, f, true)
+	if req := prepare(t, f, "council", "duet-web", parent, envelope.KindAsk); req.Status == envelope.StatusHeld {
+		t.Fatal("council ask to duet-web under an approved council ask was held")
+	}
+}

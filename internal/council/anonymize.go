@@ -9,8 +9,9 @@ import (
 // Web agents end each reply with a tail after the answer text: an
 // optional truncation notice, a "Sources:" list, notes, the
 // "<Site> conversation: <id>" footer, and image lines. A dot's reply
-// ends in "<label>'s DM: <id>" instead ("your dot's DM", sites.go) and
-// may carry dotRun's attachment and delegation notes (history/dots.go).
+// ends in "<label>'s DM: <id>" instead ("your dot's DM", sites.go), a
+// Duet channel's in "your Duet channel: <id>", and either may carry
+// dotRun's attachment and delegation notes (history/dots.go).
 // The footer and notes name the site, so reviewers get the answer text
 // only.
 var (
@@ -21,6 +22,8 @@ var (
 		regexp.MustCompile(`^.{1,40}'s reply had \d+ images? that could not be attached; open the conversation to see (?:it|them)\.$`),
 		regexp.MustCompile(`^\(your dot also sent (?:an attachment|\d+ attachments); open the DM to see them\)$`),
 		regexp.MustCompile(`^\(your dot asked \S+ for help; tincan will pass \S+'s answer to the dot, and the dot's final answer will be in its DM(?:: \S+)?\)$`),
+		regexp.MustCompile(`^\(Claude also sent (?:an attachment|\d+ attachments); open the channel to see them\)$`),
+		regexp.MustCompile(`^\(Claude asked \S+ for help; tincan will pass \S+'s answer to Claude, and Claude's final answer will be in the channel(?:: \S+)?\)$`),
 	}
 )
 
@@ -42,8 +45,8 @@ func stripWebTail(body string) string {
 		paras = paras[:len(paras)-1]
 	}
 	if dot {
-		// A dot that delegated wrote an @tincan ask message; it would
-		// name the dot in a blind review.
+		// A dot or Claude in a Duet channel that delegated wrote an
+		// @tincan ask message; it would name its source in a blind review.
 		paras = slices.DeleteFunc(paras, func(p string) bool {
 			return len(paras) > 1 && dotAskLine.MatchString(p)
 		})
@@ -59,7 +62,7 @@ var dotAskLine = regexp.MustCompile(`(?i)^[*_\x60\s]*@tincan\s+ask\b`)
 // anything after it (image lines) running to the end.
 var (
 	webFooterLine = regexp.MustCompile(`^[^\n]{1,40} conversation: \S+$`)
-	dmFooterLine  = regexp.MustCompile(`^[^\n]{1,40}'s DM: \S+$`)
+	dmFooterLine  = regexp.MustCompile(`^(?:[^\n]{1,40}'s DM|your Duet channel): \S+$`)
 )
 
 // lastFooter is the start (at its preceding blank line) of the last line

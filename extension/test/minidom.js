@@ -90,6 +90,10 @@ export class Element extends Node {
   matches(sel) {
     return parseList(sel).some((chain) => matchChain(this, chain));
   }
+  closest(sel) {
+    for (let n = this; n; n = n.parentElement) if (n.matches(sel)) return n;
+    return null;
+  }
   querySelectorAll(sel) {
     const chains = parseList(sel);
     const out = [];

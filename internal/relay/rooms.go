@@ -37,7 +37,7 @@ var roomNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 // owner's private data. Neither may be in a room: a room would hand them
 // unapproved text, or hand what they retrieve to every member.
 var (
-	roomHeldKinds    = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWeb: true}
+	roomHeldKinds    = map[string]bool{onboard.KindCouncil: true, onboard.KindDotWeb: true, onboard.KindDuetWeb: true}
 	roomServiceKinds = map[string]bool{onboard.KindHistory: true, onboard.KindNotes: true, onboard.KindPass: true}
 )
 

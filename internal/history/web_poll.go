@@ -219,7 +219,7 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 				return raw, a.bound, nil
 			}
 			switch {
-			case !p.found || stable == nil:
+			case !p.found || stable == nil || p.busy:
 				prev, seen = "", 0
 			case p.sig == prev:
 				seen++
@@ -243,7 +243,7 @@ func (w *WebAgent) waitReply(ctx context.Context, convID string, a replyAnchor, 
 			w.logf("conversation %s: detail: %v (rate limited; next read in %s)", convID, err, after)
 			delay = after
 		case errors.Is(err, ErrNotLoggedIn), errors.Is(err, ErrEndpointChanged), errors.Is(err, ErrExtensionNotConnected), errors.Is(err, ErrChromeNotRunning), errors.Is(err, ErrRejected),
-			errors.Is(err, ErrPermissionMissing), errors.Is(err, ErrBlocked), errors.Is(err, ErrPaused):
+			errors.Is(err, ErrPermissionMissing), errors.Is(err, ErrBlocked), errors.Is(err, ErrPaused), errors.Is(err, ErrRefused):
 			return nil, a.bound, err
 		default:
 			failures++

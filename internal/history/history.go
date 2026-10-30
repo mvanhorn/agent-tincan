@@ -51,6 +51,10 @@ const (
 	// SourceDots is the owner's OpenAI dot's DM on chatgpt.com. It fronts
 	// the dot-web agent only and is not a history source (not in Sources).
 	SourceDots Source = "dots"
+	// SourceDuet is the owner's 1:1 Claude Duet channel on
+	// claude.ai/messages. It fronts the duet-web agent only and is not a
+	// history source (not in Sources).
+	SourceDuet Source = "duet"
 )
 
 // Sources lists every valid history Source: the live sites that are

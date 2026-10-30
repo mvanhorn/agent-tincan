@@ -477,3 +477,75 @@ func TestWebInstallCustomNameAndConfig(t *testing.T) {
 		t.Fatal("installed as wrong name")
 	}
 }
+
+// A Duet channel has no primary to find, so install needs --thread; a
+// channel the extension refuses (shared, archived, not the owner's) is
+// never installed, and an unreachable extension only warns.
+// web serve refuses a Duet channel the extension refuses (shared with
+// someone else) before it serves anything.
+func TestWebServeDuetRefusesASharedChannel(t *testing.T) {
+	shortNativeDir(t)
+	t.Setenv("HOME", t.TempDir())
+	saved := checkWebThread
+	checkWebThread = func(context.Context, history.Source, string) error {
+		return &history.UnavailableError{Source: history.SourceDuet, Kind: history.ErrRefused, Detail: "the Duet channel #team is shared"}
+	}
+	t.Cleanup(func() { checkWebThread = saved })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": "duet-web", "kind": "duet-web"})
+		case "/v1/poll":
+			<-r.Context().Done()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := Root()
+	var out syncBuffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"web", "serve", "--site", "duet", "--thread", "chan_0000000000000000chan01", "--config", serveConfig(t, srv.URL, "duet-web"), "--allowlist", filepath.Join(t.TempDir(), "allow.txt")})
+	err := cmd.ExecuteContext(ctx)
+	if !errors.Is(err, history.ErrRefused) || !strings.Contains(err.Error(), "shared") || strings.Contains(out.String(), "serving duet") {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+}
+
+func TestWebInstallDuetChecksTheChannel(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no service definition on " + runtime.GOOS)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	const channel = "chan_0000000000000000chan01"
+	stub := func(err error) {
+		saved := checkWebThread
+		checkWebThread = func(context.Context, history.Source, string) error { return err }
+		t.Cleanup(func() { checkWebThread = saved })
+	}
+	stub(nil)
+	if _, err := run(t, Root(), "web", "install", "--site", "duet", "--binary", "/opt/tincan/tincan"); err == nil || !strings.Contains(err.Error(), "--thread") {
+		t.Fatalf("install without --thread: %v", err)
+	}
+	stub(&history.UnavailableError{Source: history.SourceDuet, Kind: history.ErrRefused, Detail: "the Duet channel #team is shared"})
+	if _, err := run(t, Root(), "web", "install", "--site", "duet", "--thread", channel, "--binary", "/opt/tincan/tincan"); err == nil || !strings.Contains(err.Error(), "shared") {
+		t.Fatalf("install of a refused channel: %v", err)
+	}
+	stub(&history.UnavailableError{Source: history.SourceDuet, Kind: history.ErrExtensionNotConnected})
+	out, err := run(t, Root(), "web", "install", "--site", "duet", "--thread", "https://claude.ai/messages/"+channel, "--binary", "/opt/tincan/tincan")
+	if err != nil || !strings.Contains(out, "web serve checks it again") {
+		t.Fatalf("install without the extension: %v\n%s", err, out)
+	}
+	def := filepath.Join(home, ".config", "systemd", "user", "tincan-duet-web.service")
+	if runtime.GOOS == "darwin" {
+		def = filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.web.duet.plist")
+	}
+	if b, err := os.ReadFile(def); err != nil || !strings.Contains(string(b), channel) || strings.Contains(string(b), "https://") || !strings.Contains(string(b), "duet-web.json") {
+		t.Fatalf("definition %s (%v):\n%s", def, err, b)
+	}
+}

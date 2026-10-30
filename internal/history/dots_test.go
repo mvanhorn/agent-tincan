@@ -247,6 +247,13 @@ type dotsBrowser struct {
 	// seconds with it).
 	detailErr  string
 	retryAfter int
+	// duet makes it the extension for duet-web: the duet ops, the
+	// channel's id as the thread, and a working flag in each read.
+	duet bool
+	// busyReads is how many detail reads after a send say Claude is still
+	// working (duet only).
+	busyReads int
+	sentAt    int
 }
 
 type dotReply struct {
@@ -278,15 +285,20 @@ func (b *dotsBrowser) Exchange(_ context.Context, req NativeRequest, recv func(N
 	if err := ValidateOp(req.Op, req.Args); err != nil {
 		return fail("bad_request", false)
 	}
+	thread := dotThread
+	if b.duet {
+		thread = duetChan
+	}
 	switch req.Op {
-	case OpDotsSend:
+	case OpDotsSend, OpDuetSend:
 		b.sends = append(b.sends, req.Args)
 		if b.sendErr != "" {
 			return fail(b.sendErr, b.clicked)
 		}
-		if req.Args.ConversationID != dotThread {
+		if req.Args.ConversationID != thread {
 			return fail("not_found", false)
 		}
+		b.sentAt = b.details
 		now := time.Now()
 		b.seq++
 		id := fmt.Sprintf("msg-%d", b.seq)
@@ -299,10 +311,10 @@ func (b *dotsBrowser) Exchange(_ context.Context, req NativeRequest, recv func(N
 			b.pending = append(b.pending, pendingDot{item: dotItem(fmt.Sprintf("%s-dot-%d", id, i), from, r.text, now.Add(time.Second)), at: b.details + r.at})
 		}
 		b.replies = nil
-		res, _ := json.Marshal(map[string]any{"conversation_id": dotThread, "url": "https://chatgpt.com/dots/" + dotThread, "submitted_at": now.UnixMilli(), "message_id": id})
+		res, _ := json.Marshal(map[string]any{"conversation_id": thread, "url": "https://example.test/" + thread, "submitted_at": now.UnixMilli(), "message_id": id})
 		_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: res})
 		return err
-	case OpDotsDetail:
+	case OpDotsDetail, OpDuetDetail:
 		if b.detailErr != "" {
 			_, err := recv(NativeResponse{ID: req.ID, Error: &NativeError{Code: b.detailErr, Message: b.detailErr, RetryAfter: b.retryAfter}})
 			return err
@@ -317,9 +329,14 @@ func (b *dotsBrowser) Exchange(_ context.Context, req NativeRequest, recv func(N
 			}
 		}
 		b.pending = keep
+		if b.duet {
+			working := b.details-b.sentAt <= b.busyReads
+			_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: duetDetailJSON(working, b.items...)})
+			return err
+		}
 		_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: dotsDetailJSON(b.items...)})
 		return err
-	case OpDotsClose:
+	case OpDotsClose, OpDuetClose:
 		b.closes = append(b.closes, req.Args.ConversationID)
 		_, err := recv(NativeResponse{ID: req.ID, OK: true, Result: json.RawMessage(`{"closed":1}`)})
 		return err

@@ -85,7 +85,7 @@ func TestParseWebSiteUnknownListsKnownSites(t *testing.T) {
 		}
 	}
 	_, err := ParseWebSite("bard")
-	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini, perplexity, copilot or dots)` {
+	if err == nil || err.Error() != `unknown site "bard" (want chatgpt, claude-ai, grok, gemini, perplexity, copilot, dots or duet)` {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -152,7 +152,7 @@ func TestStabilityRuleIsClaudeOnly(t *testing.T) {
 
 // The table keeps each site's names and forms as they were.
 func TestSiteTableNames(t *testing.T) {
-	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity, copilot or dots" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web, copilot-web or dot-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
+	if WebSiteNames() != "chatgpt, claude-ai, grok, gemini, perplexity, copilot, dots or duet" || WebAgentNames() != "chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web, copilot-web, dot-web or duet-web" || LiveSourcesLabel() != "ChatGPT, claude.ai, Grok, Gemini and Copilot" {
 		t.Fatalf("names %q, agents %q, labels %q", WebSiteNames(), WebAgentNames(), LiveSourcesLabel())
 	}
 	if SourceNames() != "chatgpt, claude-ai, grok, gemini, copilot, codex, claude-code, grok-cli, cursor-cli, cursor-ide, copilot-cli, gemini-cli or opencode" {

@@ -127,13 +127,13 @@ func TestRoomMemberEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
-	for name, kind := range map[string]string{"council": "council", "dot-web": "dot-web", "history": "history", "notes": "notes", "pass": "pass", "phone": "phone", "chatgpt-web": "chatgpt-web", "copilot-cli": "copilot-cli", "cursor-cli": "cursor-cli"} {
+	for name, kind := range map[string]string{"council": "council", "dot-web": "dot-web", "duet-web": "duet-web", "history": "history", "notes": "notes", "pass": "pass", "phone": "phone", "chatgpt-web": "chatgpt-web", "copilot-cli": "copilot-cli", "cursor-cli": "cursor-cli"} {
 		m.JoinOnMachineOf(t, "muse", name)
 		if _, err := m.Store.SetAgentKind(t.Context(), name, kind); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for name, why := range map[string]string{"council": "held for the owner's approval", "dot-web": "held for the owner's approval", "history": "service agent", "notes": "service agent", "pass": "service agent", "instinct": "approval.json holds asks"} {
+	for name, why := range map[string]string{"council": "held for the owner's approval", "dot-web": "held for the owner's approval", "duet-web": "held for the owner's approval", "history": "service agent", "notes": "service agent", "pass": "service agent", "instinct": "approval.json holds asks"} {
 		if _, err := client.AddRoomMember(t.Context(), admin, "launch", name); !client.IsStatus(err, 400) || !strings.Contains(err.Error(), why) {
 			t.Errorf("add %s: %v", name, err)
 		}

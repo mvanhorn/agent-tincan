@@ -12,7 +12,7 @@ import (
 )
 
 var webKindSites = map[string]string{
-	"chatgpt-web": "chatgpt.com", "dot-web": "chatgpt.com", "claude-web": "claude.ai", "grok-web": "grok.com", "gemini-web": "gemini.google.com", "perplexity-web": "www.perplexity.ai", "copilot-web": "copilot.com",
+	"chatgpt-web": "chatgpt.com", "dot-web": "chatgpt.com", "duet-web": "claude.ai", "claude-web": "claude.ai", "grok-web": "grok.com", "gemini-web": "gemini.google.com", "perplexity-web": "www.perplexity.ai", "copilot-web": "copilot.com",
 }
 
 // MaxWebLimit is how far ahead a web agent's reported usage limit may

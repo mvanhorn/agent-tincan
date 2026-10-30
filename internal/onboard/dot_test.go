@@ -94,7 +94,7 @@ func TestDotWebBlock(t *testing.T) {
 	if !strings.Contains(k.Operator, "dot-web kind=dot-web wake=wait") {
 		t.Errorf("operator prompt lacks the dot-web team line:\n%s", k.Operator)
 	}
-	if !strings.Contains(k.Operator, "Requests to dot-web agents (kind dot-web) are held") {
+	if !strings.Contains(k.Operator, "Requests to dot-web and duet-web agents (kinds dot-web and duet-web) are held") {
 		t.Errorf("operator prompt should say requests to dot-web are held by default:\n%s", k.Operator)
 	}
 	// The other web agents keep their threading and carry no dot notes.
@@ -142,7 +142,7 @@ func TestDotWebAgreesWithCouncil(t *testing.T) {
 		t.Errorf("dot-web instructions still say a dot gets no new chat line:\n%s", a.Instructions)
 	}
 	c := strings.Join(block(t, k, "council").Setup, "\n")
-	if !strings.Contains(c, "every web teammate (including dot-web)") {
+	if !strings.Contains(c, "every web teammate (including dot-web and duet-web)") {
 		t.Errorf("council setup should name dot-web among the default members:\n%s", c)
 	}
 }

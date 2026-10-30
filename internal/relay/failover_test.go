@@ -197,6 +197,8 @@ func TestFailoverIneligible(t *testing.T) {
 		"maybe sent":     {req: ask, claimed: true},
 		"to dot-web":     {req: ask, to: "dot-web"},
 		"from dot-web":   {req: ask, from: "dot-web"},
+		"to duet-web":    {req: ask, to: "duet-web"},
+		"from duet-web":  {req: ask, from: "duet-web"},
 		"from council":   {req: ask, from: "council"},
 		"to a CLI":       {req: ask, to: "codex"},
 		"to copilot-cli": {req: ask, to: "copilot-cli"},

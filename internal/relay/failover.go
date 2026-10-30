@@ -59,7 +59,7 @@ type MoveChecker interface {
 // it may. It is a pure function of the stored request, whether it was
 // ever claimed (claimed: a web agent may already have typed it into its
 // site), and the kinds of its sender and target. An ask never moves when
-// it is to or from dot-web or any agent outside the six web chat kinds
+// it is to or from dot-web, duet-web or any agent outside the six web chat kinds
 // (the target), from a council, was ever held, is not an ask, is part of a
 // group, came from a room mention (the reply posts to the room as the
 // mentioned member), carries attachments, names a conversation, has a
@@ -69,7 +69,7 @@ func failoverIneligible(req envelope.Request, claimed bool, fromKind, toKind str
 	switch {
 	case !onboard.IsWebChatKind(toKind):
 		return "the target is not a web chat teammate"
-	case fromKind == onboard.KindDotWeb || fromKind == onboard.KindCouncil:
+	case onboard.IsHeldWebKind(fromKind) || fromKind == onboard.KindCouncil:
 		return "the asker is " + fromKind
 	case req.Kind != envelope.KindAsk:
 		return "it is a " + string(req.Kind)

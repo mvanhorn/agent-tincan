@@ -155,3 +155,12 @@ func TestStripWebTailManyFooterLikeLines(t *testing.T) {
 		t.Fatalf("took %s", d)
 	}
 }
+
+// A Duet channel's answer loses its footer, its notes and Claude's
+// @tincan ask paragraph, so the blind copy does not name its source.
+func TestStripWebTailDuetChannel(t *testing.T) {
+	body := "Here is my view.\n\n@tincan ask muse\ncheck the calendar\n\n(Claude also sent 2 attachments; open the channel to see them)\n\n(Claude asked muse for help; tincan will pass muse's answer to Claude, and Claude's final answer will be in the channel: https://claude.ai/messages/chan_0000000000000000chan01)\n\nyour Duet channel: chan_0000000000000000chan01"
+	if got := stripWebTail(body); got != "Here is my view." {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -40,7 +40,7 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			}
 			continue
 		}
-		if kind == KindNotes || kind == KindCouncil || kind == KindPass || kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb || kind == KindDotWeb {
+		if kind == KindNotes || kind == KindCouncil || kind == KindPass || kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb || kind == KindDotWeb || kind == KindDuetWeb {
 			// Web services keep the invited name in their own config; other services use the kind default.
 			configName := kind
 			if isWebKind(kind) {
