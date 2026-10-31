@@ -1882,11 +1882,11 @@ test('copilot send finishes while an idle session probe is still loading', async
   assert.equal(fc.log.removed.includes(100), true, 'probe closes its own tab');
 });
 
-// ---- Claude Duet: the owner's 1:1 channel on claude.ai/messages, whose
+// ---- Claude Duet: the owner's 1:1 channel on claude.ai/duet, whose
 // composer is a textarea and whose send the timeline confirms.
 
 const DUET_CHAN = 'chan_0000000000000000chan01';
-const DUET_PAGE = `https://claude.ai/messages/${DUET_CHAN}`;
+const DUET_PAGE = `https://claude.ai/duet/${DUET_CHAN}`;
 const DUET_OWNER = 'user_owner';
 
 // duetFetch answers the organizations list, the channel record, its
@@ -1925,12 +1925,30 @@ test('duet.send types into the channel textarea, clicks Send, and returns the ne
   assertOnlyFixedScripts(fc.log);
 });
 
+test('duet.send still takes a channel page that ended up at the older /messages address', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('duet', url, { noId: true, neverFinish: true, textarea: true, redirectTo: `https://claude.ai/messages/${DUET_CHAN}` })));
+  const r = createRunner({ fetch: duetFetch(fc), sender: sender(fc) });
+  const frames = [];
+  await r.run('duet.send', { message: 'still there?', conversation_id: DUET_CHAN }, (x) => frames.push(x));
+  assert.deepEqual(page.submitted, ['still there?']);
+  assert.equal(frames[0].result.conversation_id, DUET_CHAN);
+});
+
+test('duet.send refuses a page that landed on another channel', async () => {
+  let page;
+  const fc = fakeChrome((url) => (page = new FakeSite('duet', url, { noId: true, neverFinish: true, textarea: true, redirectTo: 'https://claude.ai/duet/chan_0000000000000000other1' })));
+  const r = createRunner({ fetch: duetFetch(fc), sender: sender(fc) });
+  await assert.rejects(r.run('duet.send', { message: 'wrong place', conversation_id: DUET_CHAN }, () => {}), (e) => e.code === 'not_found');
+  assert.deepEqual(page.submitted, [], 'nothing typed');
+});
+
 test('the duet selectors match a named channel and the main Duet chat (seen live)', () => {
   const saved = { document: globalThis.document, location: globalThis.location };
   try {
     for (const box of ['<textarea placeholder="Message #research"></textarea>', '<textarea aria-label="Message Claude Duet"></textarea>']) {
       globalThis.document = parseHTML(`<html><body><main>${box}<button aria-label="Send" disabled>Send</button></main></body></html>`);
-      globalThis.location = { href: DUET_PAGE, pathname: `/messages/${DUET_CHAN}`, host: 'claude.ai' };
+      globalThis.location = { href: DUET_PAGE, pathname: `/duet/${DUET_CHAN}`, host: 'claude.ai' };
       const p = pageProbe(SELECTORS.duet);
       assert.equal(p.composer, true, box);
       assert.equal(p.composerEmpty, true, box);

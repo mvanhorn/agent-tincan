@@ -52,7 +52,7 @@ const (
 	// the dot-web agent only and is not a history source (not in Sources).
 	SourceDots Source = "dots"
 	// SourceDuet is the owner's 1:1 Claude Duet channel on
-	// claude.ai/messages. It fronts the duet-web agent only and is not a
+	// claude.ai/duet. It fronts the duet-web agent only and is not a
 	// history source (not in Sources).
 	SourceDuet Source = "duet"
 )
