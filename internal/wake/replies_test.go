@@ -343,6 +343,10 @@ func TestReplyRetryCoalescesWithRequest(t *testing.T) {
 	for !(rc.count() == 1 && armed()) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+	if !(rc.count() == 1 && armed()) {
+		w.Stop()
+		t.Fatal("first wake did not arm its reply retry before the deadline")
+	}
 	queued(w, "hermes", 1) // pulls the hour-long retry in to the debounce
 	w.Flush()
 	if rc.count() != 3 {
