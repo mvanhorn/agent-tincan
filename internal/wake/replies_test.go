@@ -335,15 +335,18 @@ func TestReplyRetryCoalescesWithRequest(t *testing.T) {
 	// request in that gap would leave the retry armed for Flush to wait out.
 	deadline := time.Now().Add(5 * time.Second)
 	armed := func() bool {
+		if rc.count() != 1 {
+			return false
+		}
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		p := w.pending["hermes"]
 		return p != nil && p.timer != nil
 	}
-	for !(rc.count() == 1 && armed()) && time.Now().Before(deadline) {
+	for !armed() && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if !(rc.count() == 1 && armed()) {
+	if !armed() {
 		w.Stop()
 		t.Fatal("first wake did not arm its reply retry before the deadline")
 	}
