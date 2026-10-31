@@ -6,12 +6,17 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -461,6 +466,65 @@ func TestPerRequestNeedsInputResumesInAFreshWorker(t *testing.T) {
 	if got := w.starts(); len(got) != 1 {
 		t.Fatalf("starts = %v, want the first worker only while it runs", got)
 	}
+	w.release(id)
+	eventually(t, "a fresh worker", func() bool { return len(w.starts()) == 2 })
+	got := w.result(id, envelope.StatusFailed)
+	if !strings.Contains(got.Reply.Body, "exit code 0") {
+		t.Fatalf("fresh worker's reply: %+v", got.Reply)
+	}
+	body := w.read(id + ".body")
+	if !strings.HasPrefix(body, "which repo?") || !strings.Contains(body, "agent-tincan") {
+		t.Fatalf("stdin of the fresh worker: %q", body)
+	}
+}
+
+// A renewal already on its way when the asker answers takes the request back
+// out of the queue. The fresh worker still starts, here instead of after the
+// lease ends.
+func TestPerRequestRenewalThatTakesAnAnswerStartsAFreshWorker(t *testing.T) {
+	w := newWorkerRig(t, relay.Config{})
+	listenWorkerReclaimEvery = 20 * time.Millisecond
+	target, err := url.Parse(w.m.URL("muse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var armed atomic.Bool
+	held, answered := make(chan struct{}), make(chan struct{})
+	hold := sync.OnceFunc(func() { close(held) })
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if armed.Load() && strings.HasSuffix(r.URL.Path, "/claim") {
+			hold()
+			<-answered
+		}
+		proxy.ServeHTTP(rw, r)
+	}))
+	t.Cleanup(ts.Close)
+	o := w.options(w.fixture())
+	o.newClient = func(session string) (*client.Relay, error) {
+		r, err := client.NewRelayFor(client.Config{Relay: ts.URL, Agent: "muse"})
+		if err == nil {
+			r.SetSession(session)
+		}
+		return r, err
+	}
+	w.listen(o)
+	id := w.ask("which repo?")
+	w.started(id)
+	armed.Store(true)
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no renewal")
+	}
+	armed.Store(false)
+	if _, err := w.session(id).Reply(t.Context(), id, "name the repo", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.grokbot.Answer(t.Context(), id, "agent-tincan"); err != nil {
+		t.Fatal(err)
+	}
+	close(answered)
 	w.release(id)
 	eventually(t, "a fresh worker", func() bool { return len(w.starts()) == 2 })
 	got := w.result(id, envelope.StatusFailed)
