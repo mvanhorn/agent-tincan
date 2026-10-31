@@ -490,7 +490,7 @@ func TestPerRequestRenewalThatTakesAnAnswerStartsAFreshWorker(t *testing.T) {
 	}
 	var armed atomic.Bool
 	held, answered := make(chan struct{}), make(chan struct{})
-	hold := sync.OnceFunc(func() { close(held) })
+	hold, answer := sync.OnceFunc(func() { close(held) }), sync.OnceFunc(func() { close(answered) })
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if armed.Load() && strings.HasSuffix(r.URL.Path, "/claim") {
@@ -500,6 +500,7 @@ func TestPerRequestRenewalThatTakesAnAnswerStartsAFreshWorker(t *testing.T) {
 		proxy.ServeHTTP(rw, r)
 	}))
 	t.Cleanup(ts.Close)
+	t.Cleanup(answer)
 	o := w.options(w.fixture())
 	o.newClient = func(session string) (*client.Relay, error) {
 		r, err := client.NewRelayFor(client.Config{Relay: ts.URL, Agent: "muse"})
@@ -524,7 +525,7 @@ func TestPerRequestRenewalThatTakesAnAnswerStartsAFreshWorker(t *testing.T) {
 	if _, err := w.grokbot.Answer(t.Context(), id, "agent-tincan"); err != nil {
 		t.Fatal(err)
 	}
-	close(answered)
+	answer()
 	w.release(id)
 	eventually(t, "a fresh worker", func() bool { return len(w.starts()) == 2 })
 	got := w.result(id, envelope.StatusFailed)

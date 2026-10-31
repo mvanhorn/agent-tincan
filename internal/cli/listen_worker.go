@@ -172,24 +172,17 @@ func newWorkerSession() string {
 // back from the queue after the asker answered: no other listener can start
 // it while this session holds the claim. ctx is the listener's.
 func runWorker(ctx context.Context, wr *client.Relay, req envelope.Request, o workerOptions) {
-	for runWorkerOnce(ctx, wr, req, o) {
-		next, err := wr.Claim(ctx, req.ID)
-		if err != nil {
-			if !client.IsStatus(err, 409) && ctx.Err() == nil {
-				listenLogf("request %s: claim for a fresh worker: %v", req.ID, err)
-			}
-			return
-		}
-		req = next
+	for next := &req; next != nil; {
+		next = runWorkerOnce(ctx, wr, *next, o)
 	}
 }
 
 // runWorkerOnce holds req's claim while one process runs, and answers for a
-// worker that left the request open. It reports whether a renewal took an
-// answered request, which is waiting for a fresh worker.
-func runWorkerOnce(ctx context.Context, wr *client.Relay, req envelope.Request, o workerOptions) (again bool) {
+// worker that left the request open. It returns the answered request a
+// renewal took, which is waiting for a fresh worker, or nil.
+func runWorkerOnce(ctx context.Context, wr *client.Relay, req envelope.Request, o workerOptions) (next *envelope.Request) {
 	stop := keepWorkerClaim(ctx, wr, req)
-	release := sync.OnceFunc(func() { again = stop() })
+	release := sync.OnceFunc(func() { next = stop() })
 	defer release()
 	runCtx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -200,17 +193,17 @@ func runWorkerOnce(ctx context.Context, wr *client.Relay, req envelope.Request, 
 			listenLogf("request %s: worktree of %s: %v", req.ID, o.repo, err)
 			release()
 			postWorkerFailed(ctx, wr, req, "tincan listen could not make this request's worktree, so no worker ran.")
-			return false
+			return nil
 		}
 		defer tree.remove(ctx, req.ID)
 		dir = tree.dir
 	}
 	outcome := runWorkerProcess(ctx, runCtx, o, req, wr.Session(), dir)
 	release()
-	if !again {
+	if next == nil {
 		postWorkerFailed(ctx, wr, req, outcome)
 	}
-	return again
+	return next
 }
 
 // runWorkerProcess runs the worker to its end and says how it ended, for the
@@ -278,13 +271,13 @@ func workerStdin(req envelope.Request) string {
 // the worker's to hold: closed, or waiting on the asker. Claiming would pull
 // a request the asker just answered out of the queue, away from the fresh
 // worker it is waiting for. An answer landing between that check and the
-// claim is pulled out anyway, and stop then reports true: the request has
-// gained an exchange and is held for a fresh worker. A claim outlives stop, so
+// claim is pulled out anyway, and stop then returns the request, which has
+// gained an answer and is held for a fresh worker. A claim outlives stop, so
 // a claim the relay made is never missed.
-func keepWorkerClaim(listener context.Context, wr *client.Relay, req envelope.Request) (stop func() (taken bool)) {
+func keepWorkerClaim(listener context.Context, wr *client.Relay, req envelope.Request) (stop func() *envelope.Request) {
 	ctx, cancel := context.WithCancel(listener)
 	done := make(chan struct{})
-	var took bool
+	var took *envelope.Request
 	go func() {
 		defer close(done)
 		t := time.NewTicker(listenWorkerReclaimEvery)
@@ -305,12 +298,13 @@ func keepWorkerClaim(listener context.Context, wr *client.Relay, req envelope.Re
 			if err != nil && listener.Err() == nil {
 				listenLogf("request %s: renew claim: %v", req.ID, err)
 			}
-			if took = err == nil && len(got.Exchanges) > len(req.Exchanges); took {
+			if err == nil && got.AnsweredExchanges() > req.AnsweredExchanges() {
+				took = &got
 				return
 			}
 		}
 	}()
-	return func() bool {
+	return func() *envelope.Request {
 		cancel()
 		<-done
 		return took
