@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Duet reads the owner's 1:1 Claude Duet channel on claude.ai/messages for
+// Duet reads the owner's 1:1 Claude Duet channel on claude.ai/duet for
 // the duet-web agent. Like a dot's DM it is not a history source (the site
 // entry is webOnly): there is only duet.detail, which the extension
 // answers in the dot feed's shape, with each message's author role and
@@ -54,11 +54,12 @@ func (r *Duet) live() *live {
 // duetChannelPattern is a Duet channel id as its address shows it.
 var duetChannelPattern = regexp.MustCompile(`^chan_[A-Za-z0-9]{8,64}$`)
 
-// duetConvPath matches a Duet channel's address, /messages/<channel>.
-var duetConvPath = regexp.MustCompile(`^/messages/(chan_[A-Za-z0-9]{8,64})/?$`)
+// duetConvPath matches a Duet channel's address, /duet/<channel>, or the
+// older /messages/<channel> that claude.ai redirects there.
+var duetConvPath = regexp.MustCompile(`^/(?:duet|messages)/(chan_[A-Za-z0-9]{8,64})/?$`)
 
 // duetCanonicalID checks a channel id's shape. It also takes the channel's
-// address (https://claude.ai/messages/<channel>), which is what the owner
+// address (https://claude.ai/duet/<channel>), which is what the owner
 // can copy from the browser.
 func duetCanonicalID(id string) (string, bool) {
 	id = strings.TrimSpace(id)
@@ -84,7 +85,7 @@ func duetNotLoggedIn(string) string {
 func duetNodes(raw json.RawMessage) ([]webNode, error) { return feedNodes(duetWords, raw) }
 
 // duetWords name Claude and its Duet channel.
-var duetWords = &feedWords{who: "Claude", them: "Claude", theirs: "Claude's", where: "the channel", place: "the channel", url: "https://claude.ai/messages/", from: "the owner's Duet channel", working: true}
+var duetWords = &feedWords{who: "Claude", them: "Claude", theirs: "Claude's", where: "the channel", place: "the channel", url: "https://claude.ai/duet/", from: "the owner's Duet channel", working: true}
 
 // parseDuetDetail turns the channel into turns, as parseDotsDetail does.
 func parseDuetDetail(id string, raw json.RawMessage) (thread, error) {

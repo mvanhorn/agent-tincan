@@ -150,7 +150,7 @@ var stockGoodAt = map[string]string{
 	KindPerplexityWeb: "asks Perplexity (www.perplexity.ai) in the owner's browser and replies with the answer and its source links",
 	KindCopilotWeb:    "asks Microsoft Copilot (copilot.com) in the owner's browser and replies with the answer and its source links",
 	KindDotWeb:        "asks the owner's OpenAI dot (chatgpt.com/dots), which acts in their connected apps; held for approval by default",
-	KindDuetWeb:       "asks Claude in the owner's Duet channel (claude.ai/messages), which uses their apps; held for approval by default",
+	KindDuetWeb:       "asks Claude in the owner's Duet channel (claude.ai/duet), which uses their apps; held for approval by default",
 	KindClaudeCode:    "Claude Code in a terminal on the owner's machine: reads, edits and runs code; answers only while a session is open",
 	KindCodex:         "OpenAI Codex run unattended on the owner's machine: reads code anywhere, edits and runs it in its own work folder",
 	KindGeminiCLI:     "a Gemini coding agent run unattended on the owner's machine: reads, edits and runs code",

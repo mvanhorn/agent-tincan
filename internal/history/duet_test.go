@@ -44,17 +44,20 @@ func TestDuetCanonicalID(t *testing.T) {
 		"https://claude.ai/messages/" + duetChan:               duetChan,
 		"https://claude.ai/messages/" + duetChan + "/":         duetChan,
 		"https://claude.ai/messages/" + duetChan + "?thread=x": duetChan,
+		"https://claude.ai/duet/" + duetChan:                   duetChan,
+		"https://claude.ai/duet/" + duetChan + "/":             duetChan,
+		"https://claude.ai/duet/" + duetChan + "#latest":       duetChan,
 	} {
 		if got, ok := duetCanonicalID(in); !ok || got != want {
 			t.Errorf("duetCanonicalID(%q) = %q, %v", in, got, ok)
 		}
 	}
-	for _, in := range []string{"", "chan_", "chan_short", "0d0d0d0d-1111-7222-8333-000000000001", "https://claude.ai/chat/" + duetChan, "https://evil.test/messages/" + duetChan, "chan_abc/../x"} {
+	for _, in := range []string{"", "chan_", "chan_short", "0d0d0d0d-1111-7222-8333-000000000001", "https://claude.ai/chat/" + duetChan, "https://evil.test/messages/" + duetChan, "https://evil.test/duet/" + duetChan, "https://claude.ai/duet/" + duetChan + "/x", "chan_abc/../x"} {
 		if got, ok := duetCanonicalID(in); ok {
 			t.Errorf("duetCanonicalID(%q) = %q, accepted", in, got)
 		}
 	}
-	if id, ok := ParseWebThread(SourceDuet, "https://claude.ai/messages/"+duetChan); !ok || id != duetChan {
+	if id, ok := ParseWebThread(SourceDuet, "https://claude.ai/duet/"+duetChan); !ok || id != duetChan {
 		t.Fatalf("ParseWebThread = %q, %v", id, ok)
 	}
 }

@@ -198,7 +198,7 @@ const (
 	// OpDotsPrimary names the account's primary dot and its current
 	// thread, for web install (the dot's address no longer shows one).
 	OpDotsPrimary Op = "dots.primary"
-	// Claude Duet (a 1:1 channel on claude.ai/messages, under claude.ai's
+	// Claude Duet (a 1:1 channel on claude.ai/duet, under claude.ai's
 	// grant) fronts a web agent only, like a dot: no list, file or primary
 	// operation, and a send always names the channel.
 	OpDuetDetail Op = "duet.detail"

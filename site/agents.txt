@@ -502,7 +502,7 @@ C10. Optional: your owner's OpenAI dot (dot-web). Tell your owner first, and go
 
 C11. Optional: Claude in your owner's Claude Duet chat (duet-web). Tell your
     owner first, and go ahead only if they agree: a request is typed into
-    their Duet chat on claude.ai/messages as their own message, and Claude
+    their Duet chat on claude.ai/duet as their own message, and Claude
     can use the apps they connected (Gmail, Calendar, Drive, Slack). Requests
     to duet-web are held for the owner's approval by default. Nothing is
     installed in Duet and Claude needs no Tailscale.
