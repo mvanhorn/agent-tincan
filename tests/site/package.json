@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "test": "node check.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "27.0.1"
+  }
+}
