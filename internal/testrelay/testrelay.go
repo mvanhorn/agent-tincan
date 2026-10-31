@@ -20,8 +20,10 @@ import (
 
 // Mesh is a relay with grokbot, instinct, and muse joined, each on its own
 // machine. "admin" is an admin device that has not joined; "stranger" is a
-// machine that is neither joined nor an admin. JoinOnMachineOf adds more
-// agents to an existing machine.
+// machine that is neither joined nor an admin; "visitor" is a machine that
+// another person's account owns, which reaches the relay because the owner
+// shared it. JoinOnMachineOf adds more agents to an existing machine, and
+// JoinGuest joins a guest on the visitor machine.
 type Mesh struct {
 	Server *relay.Server
 	Store  *store.Store
@@ -32,10 +34,24 @@ type Mesh struct {
 	h      http.Handler
 }
 
-var addrs = map[string]string{"grokbot": "100.0.0.2:1", "instinct": "100.0.0.3:1", "muse": "100.0.0.4:1", "admin": "100.0.0.1:1", "stranger": "100.0.0.9:1"}
+var addrs = map[string]string{"grokbot": "100.0.0.2:1", "instinct": "100.0.0.3:1", "muse": "100.0.0.4:1", "admin": "100.0.0.1:1", "stranger": "100.0.0.9:1", "visitor": "100.0.0.8:1"}
 
 // New starts the mesh.
-func New(t *testing.T, cfg relay.Config) *Mesh {
+func New(t *testing.T, cfg relay.Config) *Mesh { return start(t, cfg, nil, nil) }
+
+// NewWithAdminLogin starts the mesh on a relay run with --admin-login Login,
+// which a relay needs before it invites a guest.
+func NewWithAdminLogin(t *testing.T, cfg relay.Config) *Mesh {
+	return start(t, cfg, []string{Login}, nil)
+}
+
+// NewWithIdentityStore is NewWithAdminLogin with the directory's store passed
+// through wrap, so a test can land a write between two of the relay's reads.
+func NewWithIdentityStore(t *testing.T, cfg relay.Config, wrap func(identity.Store) identity.Store) *Mesh {
+	return start(t, cfg, []string{Login}, wrap)
+}
+
+func start(t *testing.T, cfg relay.Config, adminLogins []string, wrap func(identity.Store) identity.Store) *Mesh {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -48,8 +64,13 @@ func New(t *testing.T, cfg relay.Config) *Mesh {
 		addrs["instinct"]: {ID: "nINST", Name: "instinct", User: Login},
 		addrs["muse"]:     {ID: "nMUSE", Name: "muse", User: Login},
 		addrs["stranger"]: {ID: "nLAPTOP", Name: "old-laptop", User: Login},
+		addrs["visitor"]:  {ID: "nVISIT", Name: "friends-laptop", User: GuestLogin},
 	})
-	dir := identity.NewDirectory(st, identity.WithVirtual(who), identity.Config{Admins: []string{"macbook-pro-44"}})
+	var ids identity.Store = st
+	if wrap != nil {
+		ids = wrap(st)
+	}
+	dir := identity.NewDirectory(ids, identity.WithVirtual(who), identity.Config{Admins: []string{"macbook-pro-44"}, AdminLogins: adminLogins})
 	srv := relay.New(dir, st, cfg)
 	srv.SetPreparer(policy.New(st, policy.Config{}))
 	m := &Mesh{Server: srv, Store: st, Dir: dir, Who: who, urls: map[string]string{}, addrs: map[string]string{}, h: srv.Handler()}
@@ -78,6 +99,9 @@ func (m *Mesh) endpoint(t *testing.T, addr string) string {
 // Login is the tailnet owner every mesh machine belongs to, as on a
 // single-person tailnet.
 const Login = "owner@example.com"
+
+// GuestLogin is the other person's account that owns the visitor machine.
+const GuestLogin = "friend@example.net"
 
 // Rebuild replaces agent's machine with a new tailnet node called
 // machineName, as rebuilding a sandbox does: the old node leaves the tailnet
@@ -132,12 +156,28 @@ func (m *Mesh) JoinOnMachineOf(t *testing.T, host, name string) *client.Relay {
 	return m.Client(t, name)
 }
 
+// JoinGuest invites name as a guest from the admin device, joins it on the
+// visitor machine and returns its client.
+func (m *Mesh) JoinGuest(t *testing.T, name string, in client.GuestInvite) *client.Relay {
+	t.Helper()
+	inv, err := m.Client(t, "admin").InviteGuest(t.Context(), name, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.urls[name] = m.urls["visitor"]
+	m.addrs[name] = m.addrs["visitor"]
+	if _, err := m.Client(t, name).Join(t.Context(), inv.Code); err != nil {
+		t.Fatal(err)
+	}
+	return m.Client(t, name)
+}
+
 // Client returns a relay client that the relay sees as agent name. Like a
 // real client with a saved config, it names its agent on every call.
 func (m *Mesh) Client(t *testing.T, name string) *client.Relay {
 	t.Helper()
 	cfg := client.Config{Relay: m.urls[name], Agent: name}
-	if name == "admin" || name == "stranger" {
+	if name == "admin" || name == "stranger" || name == "visitor" {
 		cfg.Agent = ""
 	}
 	r, err := client.NewRelayFor(cfg)

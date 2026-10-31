@@ -68,7 +68,14 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 				return
 			}
 		}
-		note := s.wakeNote(agent, wk, s.onlineTeammates(roster, now, req.From, agent), now)
+		online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, agent)
+		var note string
+		if guestAsker(roster, req.From) {
+			// How a teammate wakes and how that went are not a guest's to read.
+			note = fmt.Sprintf("%s has not picked this up yet. The request is still queued.", agent) + suggest(online, "If it can't wait, cancel it and ask")
+		} else {
+			note = s.wakeNote(agent, wk, online, now)
+		}
 		s.noteAndTell(ctx, req, store.NoteWake, 0, note, now)
 	}
 }
@@ -203,7 +210,7 @@ func (s *Server) tellSwept(ctx context.Context, t store.Transition) {
 	if err != nil {
 		log.Printf("relay note %s: roster: %v", t.ID, err)
 	}
-	online := s.onlineTeammates(roster, now, req.From, req.To)
+	online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, req.To)
 	if staleClaim {
 		note := fmt.Sprintf("%s claimed this %s ago and did not reply or post progress before its claim lease ran out; it has been requeued", req.To, ageText(now.Sub(t.ClaimedAt)))
 		if s.wake != nil && relayWoken(s.wake.WakeMethod(req.To)) {
@@ -302,9 +309,7 @@ func (s *Server) polledRecently(last, now time.Time) bool {
 // asker's own request id and a preview of what they asked, so a fresh
 // session knows which request it is about.
 func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, note string) {
-	body := fmt.Sprintf("About your request %s to %s (you asked: %s): %s No reply needed.",
-		req.ID, req.To, strings.Join(strings.Fields(approvalPreview(req.Body)), " "), note)
-	n := envelope.Request{From: "relay", To: req.From, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: body}
+	n := askerNotice(req, note)
 	n, err := s.store.Enqueue(ctx, n, s.requestTTL(ctx, n.To))
 	if err != nil {
 		log.Printf("wake notice %s: tell %s: %v", req.ID, req.From, err)
@@ -313,4 +318,11 @@ func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, note str
 	}
 	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"wake_notice_for": req.ID, "to": n.To}))
 	s.noticeQueued(ctx, n)
+}
+
+// askerNotice is the notify noticeAsker sends.
+func askerNotice(req envelope.Request, note string) envelope.Request {
+	body := fmt.Sprintf("About your request %s to %s (you asked: %s): %s No reply needed.",
+		req.ID, req.To, strings.Join(strings.Fields(approvalPreview(req.Body)), " "), note)
+	return envelope.Request{From: "relay", To: req.From, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: body}
 }

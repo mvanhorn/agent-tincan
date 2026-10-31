@@ -184,12 +184,16 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 		fetch += len(owned)
 	}
 	// A full or cut-short list may have older conversations behind it.
+	listStart := time.Now()
 	cands, more, err := l.list(ctx, fetch)
+	listTook := time.Since(listStart)
 	if err != nil {
-		return Page{}, err
+		return Page{}, &ReadProgressError{ListTook: listTook, Err: err}
 	}
 	// prev is the time of the last candidate read, for an undated list.
 	var prev time.Time
+	read := 0
+	var detailTook time.Duration
 	now := l.clock()
 	page, err := pick(q, w, now, len(cands), more,
 		func(i int) time.Time {
@@ -209,10 +213,13 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 			if owned[cands[i].ID] && !opts.All {
 				return thread{}, false, nil
 			}
+			detailStart := time.Now()
 			th, err := l.detail(ctx, cands[i].ID)
+			detailTook += time.Since(detailStart)
 			if err != nil {
 				return thread{}, false, err
 			}
+			read++
 			if th.conv.UpdatedAt.IsZero() {
 				th.conv.UpdatedAt = cands[i].UpdatedAt
 			}
@@ -236,11 +243,25 @@ func (l *live) Read(ctx context.Context, q Query, opts Options) (Page, error) {
 			return th, len(th.turns) > 0, nil
 		})
 	if err != nil {
-		return Page{}, err
+		return Page{}, &ReadProgressError{Listed: len(cands), Read: read, ListTook: listTook, DetailTook: detailTook, Err: err}
 	}
 	page.Conversations = l.resolve(ctx, page.Conversations)
 	return page, nil
 }
+
+// ReadProgressError is a live read that failed: how long its list and
+// its conversation reads took, how many conversations were listed and how
+// many were read before err. Its text is err's, so it only adds detail
+// for the history service's log. Images are fetched only after every
+// read succeeded, so a failed read never spent time on them.
+type ReadProgressError struct {
+	Listed, Read         int
+	ListTook, DetailTook time.Duration
+	Err                  error
+}
+
+func (e *ReadProgressError) Error() string { return e.Err.Error() }
+func (e *ReadProgressError) Unwrap() error { return e.Err }
 
 // resolve fetches the bytes of every placeholder image in convs. An image
 // that cannot be fetched or is not an allowed image is dropped; the text

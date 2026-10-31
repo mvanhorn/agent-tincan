@@ -529,6 +529,111 @@ func TestAgentsListAdmitsUnjoinedAdmin(t *testing.T) {
 	}
 }
 
+// marked returns the names a roster marks as the caller.
+func marked(out struct{ Agents []client.AgentInfo }) []string {
+	var names []string
+	for _, a := range out.Agents {
+		if a.Self {
+			names = append(names, a.Name)
+		}
+	}
+	return names
+}
+
+// The roster marks the caller's own entry and no other, and a caller that
+// is no agent gets it unmarked.
+func TestAgentsListMarksCaller(t *testing.T) {
+	h := newHarness(t, Config{})
+	var out struct{ Agents []client.AgentInfo }
+	h.do(museAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	if got := marked(out); !slices.Equal(got, []string{"muse"}) {
+		t.Fatalf("marked = %v, want muse only", got)
+	}
+	rec := h.doAs(grokAddr, "grokbot", "GET", "/v1/agents", "", http.StatusOK, nil)
+	if n := strings.Count(rec.Body.String(), `"self":`); n != 1 {
+		t.Fatalf("self appears %d times, want once: %s", n, rec.Body.String())
+	}
+}
+
+// An agent on an admin device sees its row marked even though the admin
+// path skips attribution. An unjoined admin device, a name not on the
+// device, several agents with none named, and the local admin socket all
+// still get the roster, unmarked.
+func TestAgentsListMarksCallerOnAdminDevice(t *testing.T) {
+	h := newHarness(t, Config{})
+	unmarked := func(want int, label string, out struct{ Agents []client.AgentInfo }) {
+		t.Helper()
+		if len(out.Agents) != want || len(marked(out)) != 0 {
+			t.Fatalf("%s: roster = %+v, want %d agents unmarked", label, out.Agents, want)
+		}
+	}
+	var out struct{ Agents []client.AgentInfo }
+	h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	unmarked(3, "unjoined", out)
+	out.Agents = nil
+	h.doAs(macAddr, "muse", "GET", "/v1/agents", "", http.StatusOK, &out)
+	unmarked(3, "name bound elsewhere", out)
+
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"laptop"}`, http.StatusOK, &inv)
+	h.doAs(macAddr, "laptop", "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	out.Agents = nil
+	h.doAs(macAddr, "laptop", "GET", "/v1/agents", "", http.StatusOK, &out)
+	if got := marked(out); !slices.Equal(got, []string{"laptop"}) {
+		t.Fatalf("named: marked = %v, want laptop", got)
+	}
+	out.Agents = nil
+	h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	if got := marked(out); !slices.Equal(got, []string{"laptop"}) {
+		t.Fatalf("one agent, no name: marked = %v, want laptop", got)
+	}
+
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"laptop2"}`, http.StatusOK, &inv)
+	h.doAs(macAddr, "laptop2", "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	out.Agents = nil
+	h.do(macAddr, "GET", "/v1/agents", "", http.StatusOK, &out)
+	unmarked(5, "several agents, no name", out)
+
+	req := httptest.NewRequest("GET", "/v1/agents", nil)
+	req.RemoteAddr = "@"
+	rec := httptest.NewRecorder()
+	h.srv.AdminHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin socket: status %d: %s", rec.Code, rec.Body.String())
+	}
+	out.Agents = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	unmarked(5, "admin socket", out)
+}
+
+// Marking the row is a lookup. A rebuilt admin device reading the roster
+// re-admits nothing: a rebind happens only on a call made as the agent,
+// where it is audited.
+func TestAgentsListDoesNotReadmitAdminDevice(t *testing.T) {
+	h := newHarness(t, Config{})
+	h.who.Set(macAddr, identity.Node{ID: "nMAC", Name: "macbook-pro-44", User: login})
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"laptop"}`, http.StatusOK, &inv)
+	h.doAs(macAddr, "laptop", "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	h.who.Remove(macAddr)
+	h.who.Set(rebuiltAddr, identity.Node{ID: "nMAC2", Name: "macbook-pro-44", User: login})
+
+	var out struct{ Agents []client.AgentInfo }
+	h.doAs(rebuiltAddr, "laptop", "GET", "/v1/agents", "", http.StatusOK, &out)
+	if got := marked(out); len(got) != 0 {
+		t.Fatalf("marked = %v, want none", got)
+	}
+	a, ok, err := h.srv.dir.Agent(t.Context(), "laptop")
+	if err != nil || !ok || a.NodeID != "nMAC" {
+		t.Fatalf("laptop = %+v, %v, %v; want it still on nMAC", a, ok, err)
+	}
+	if ev := h.rebindEvents(); len(ev) != 0 {
+		t.Fatalf("rebind audit = %+v, want none", ev)
+	}
+}
+
 func kinds(t *testing.T, h *harness) map[string]string {
 	t.Helper()
 	var out struct{ Agents []client.AgentInfo }

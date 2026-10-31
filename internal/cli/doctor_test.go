@@ -110,10 +110,7 @@ command = "gh"
 
 func TestConfigCheck(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	cfg := filepath.Join(dir, "mcp.json")
 	raw := `{"mcpServers":{"user-tincan mcp":{"command":"` + exe + ` mcp"},"github":{"command":"gh"}},
 	"projects":{"/x":{"mcpServers":{"tincan":{"command":"` + exe + `","args":["mcp"]}}}}}`
@@ -154,9 +151,10 @@ func TestConfigCheck(t *testing.T) {
 }
 
 func TestDoctorProgressToolCount(t *testing.T) {
+	skipOnWindows(t, "the fake MCP server is a shell script")
 	for _, missingProgress := range []bool{false, true} {
 		t.Run(fmt.Sprint(missingProgress), func(t *testing.T) {
-			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment", "watch", "room_post", "room_read", "list_rooms"}
+			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment", "watch", "room_post", "room_read", "list_rooms", "lease", "list_leases", "list_schedules", "cancel_schedule"}
 			if !missingProgress {
 				names = append(names, "progress")
 			}
@@ -178,7 +176,7 @@ func TestDoctorProgressToolCount(t *testing.T) {
 				if got.Status != "fail" || !strings.Contains(got.Detail, "missing progress") {
 					t.Fatalf("old tools: %+v", got)
 				}
-			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 17 tools") {
+			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 21 tools") {
 				t.Fatalf("tools: %+v", got)
 			}
 		})

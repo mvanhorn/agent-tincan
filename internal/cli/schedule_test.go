@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
-	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
@@ -18,8 +17,8 @@ import (
 func TestFormatAgentsSchedule(t *testing.T) {
 	now := time.Now()
 	got := formatAgents([]client.AgentInfo{
-		{Name: "fo", Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, ExpectReplySeconds: 600}, LastPoll: now.Add(-3 * time.Minute)},
-		{Name: "late", Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, ExpectReplySeconds: 600, Overdue: true}, LastPoll: now.Add(-25 * time.Minute)},
+		{Name: "fo", Wake: "schedule", CheckEverySeconds: 300, ExpectReplySeconds: 600, LastPoll: now.Add(-3 * time.Minute)},
+		{Name: "late", Wake: "schedule", CheckEverySeconds: 300, ExpectReplySeconds: 600, Overdue: true, LastPoll: now.Add(-25 * time.Minute)},
 		{Name: "grokbot", Wake: "webhook", LastPoll: now},
 	}, now)
 	want := "fo             offline  wake=schedule (every 5m) last seen 3m ago\n" +
@@ -57,8 +56,8 @@ func TestFormatAgentsUnanswered(t *testing.T) {
 	now := time.Now()
 	got := formatAgents([]client.AgentInfo{
 		{Name: "grokbot", Wake: "webhook", LastPoll: now.Add(-3 * time.Hour), Kind: "openclaw", GoodAt: "phone calls",
-			Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true}},
-		{Name: "hermes", Wake: "webhook", LastPoll: now, Target: envelope.Target{WokenAt: now.Add(-time.Minute), WakeResult: "ok"}},
+			WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true},
+		{Name: "hermes", Wake: "webhook", LastPoll: now, WokenAt: now.Add(-time.Minute), WakeResult: "ok"},
 	}, now)
 	want := `grokbot        offline  wake=webhook last seen 3h ago kind=openclaw unanswered="woken 12m ago, no check-in (webhook ok)" good_at="phone calls"` + "\n" +
 		"hermes         offline  wake=webhook last seen just now\n"

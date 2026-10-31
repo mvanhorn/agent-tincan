@@ -3,7 +3,7 @@ package mcpserver
 import (
 	"fmt"
 	"os"
-	"runtime"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -77,8 +77,20 @@ func TestLaunchRunning(t *testing.T) {
 	if LaunchRunning(Launch{PID: os.Getpid(), Started: now, Ended: now}) {
 		t.Fatal("an ended record counts as running")
 	}
-	if runtime.GOOS != "windows" && LaunchRunning(Launch{PID: os.Getpid(), Started: now.Add(-24 * time.Hour)}) {
+	if LaunchRunning(Launch{PID: os.Getpid(), Started: now.Add(-24 * time.Hour)}) {
 		t.Fatal("a pid reused by a later process counts as running")
+	}
+}
+
+// A process killed before it could note its end leaves a record with no end
+// time, and that record stops counting once the process is gone.
+func TestLaunchRunningSeesAGoneProcess(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if LaunchRunning(Launch{PID: cmd.Process.Pid, Started: time.Now()}) {
+		t.Fatal("a process that is gone counts as running")
 	}
 }
 

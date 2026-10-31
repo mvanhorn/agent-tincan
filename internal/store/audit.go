@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE INDEX IF NOT EXISTS audit_trace ON audit(trace_id);
 CREATE INDEX IF NOT EXISTS audit_actor_at ON audit(actor, at);
+-- AgentStats reads the approval of each held request it counts.
+CREATE INDEX IF NOT EXISTS audit_approved ON audit(request_id) WHERE event = 'approved';
 `
 
 // AuditEvent is one entry in the append-only audit log.
@@ -237,11 +239,17 @@ func (s *Store) RecentTraces(ctx context.Context, limit int, excludePings bool, 
 }
 
 // Participants lists every agent that sent or received a request in a chain.
+// The target of a follow-on the owner has not approved received nothing yet:
+// counting it would show it the reply the hold keeps from it.
 func Participants(steps []TraceStep) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, st := range steps {
-		for _, a := range append([]string{st.Request.From, st.Request.To}, st.Request.Chain...) {
+		to := st.Request.To
+		if st.Request.FollowOf != "" && st.Request.WasHeld && !st.Request.Approved {
+			to = ""
+		}
+		for _, a := range append([]string{st.Request.From, to}, st.Request.Chain...) {
 			if a != "" && !seen[a] {
 				seen[a] = true
 				out = append(out, a)

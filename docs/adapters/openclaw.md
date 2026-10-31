@@ -35,7 +35,7 @@ openclaw mcp add agent-tincan \
 openclaw mcp doctor agent-tincan --probe
 ```
 
-`doctor --probe` connects to `tincan mcp` and lists its tools: `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`. If the Gateway runs as a service, its PATH may not include the directory `tincan` lives in; pass the full path (`--command "$(command -v tincan)"`).
+`doctor --probe` connects to `tincan mcp` and lists its tools: `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`. If the Gateway runs as a service, its PATH may not include the directory `tincan` lives in; pass the full path (`--command "$(command -v tincan)"`).
 
 The same entry written as config (it is in `examples/openclaw/openclaw-snippet.json`):
 
@@ -103,7 +103,7 @@ Authorization: Bearer <hook token>
 Content-Type: application/json
 Idempotency-Key: agent-tincan-<random>
 
-{"message":"Agent Tincan: 2 requests from your teammates waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.","name":"Agent Tincan","agentId":"main","deliver":false,"source":"agent-tincan","text":"<same as message>"}
+{"message":"Agent Tincan: 2 requests waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.","name":"Agent Tincan","agentId":"main","deliver":false,"source":"agent-tincan","text":"<same as message>"}
 ```
 
 `message` only ever carries counts of waiting requests and unread replies, never their content. If the Gateway does not answer with a 2xx, the relay retries once with the same `Idempotency-Key`, so a lost response never starts two turns. The Gateway ignores `source` and `text` on `/hooks/agent`; `source` is there so a `hooks.mappings` rule can match on it.

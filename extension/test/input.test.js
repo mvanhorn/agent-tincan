@@ -107,20 +107,47 @@ test('candidate page refuses drafts and does not count FileList as ready', () =>
  let pending = false;
  const input = { files: [] };
  const composer = { innerText: '', closest: () => form };
- const form = { querySelector: (s) => s === 'input[type="file"]' ? input : s === 'button[data-testid="send-button"]' ? { disabled: false } : s.includes('progressbar') && pending ? {} : null, querySelectorAll: () => previews };
+ const form = { querySelector: (s) => s === 'input[type="file"]' ? input : s === SELECTORS.chatgpt.send[0] ? { disabled: false } : s.includes('progressbar') && pending ? {} : null, querySelectorAll: () => previews };
  globalThis.document = { querySelector: () => composer };
  try {
   input.files = [{}];
-  assert.equal(pageInputImages([meta], true).ok, false);
-  assert.equal(pageInputImages([meta]).ready, false);
+  assert.equal(pageInputImages([meta], true, SELECTORS.chatgpt).ok, false);
+  assert.equal(pageInputImages([meta], false, SELECTORS.chatgpt).ready, false);
   input.files = []; composer.innerText = 'owner draft';
-  assert.equal(pageInputImages([meta], true).ok, false);
+  assert.equal(pageInputImages([meta], true, SELECTORS.chatgpt).ok, false);
   composer.innerText = '';
   previews = [{ complete: true, naturalWidth: 10, alt: meta.name }];
-  assert.equal(pageInputImages([meta]).ready, true);
-  assert.equal(pageInputImages([meta], true).ok, false);
+  assert.equal(pageInputImages([meta], false, SELECTORS.chatgpt).ready, true);
+  assert.equal(pageInputImages([meta], true, SELECTORS.chatgpt).ok, false);
   pending = true;
-  assert.equal(pageInputImages([meta]).ready, false);
+  assert.equal(pageInputImages([meta], false, SELECTORS.chatgpt).ready, false);
+ } finally { globalThis.document = previous; }
+});
+
+import { SELECTORS, pageSubmit } from '../send.js';
+import { parseHTML } from './minidom.js';
+test('candidate page finds the file control and send button through the chatgpt selectors on the current layout', () => {
+ const previous = globalThis.document;
+ // chatgpt.com as of 2026-10-27: no #prompt-textarea, a bare submit button.
+ const page = (draft, button) => `<html><body><main><form><input type="file"><div contenteditable="true" role="textbox" class="ProseMirror">${draft ? `<p>${draft}</p>` : '<p></p>'}</div>${button ? '<button type="submit" aria-label="Send"></button>' : ''}</form></main></body></html>`;
+ try {
+  globalThis.document = parseHTML(page('', true));
+  const state = pageInputImages([meta], false, SELECTORS.chatgpt);
+  assert.deepEqual(state, { ok: true, ready: false }, 'found the control; no preview yet');
+  globalThis.document = parseHTML(page('owner draft', false));
+  assert.deepEqual(pageInputImages([meta], true, SELECTORS.chatgpt), { ok: false, error: 'existing text or image draft was left untouched' });
+
+  // The image submit clicks the form's send button only once the preview
+  // has loaded.
+  globalThis.document = parseHTML(page('look', true).replace('<input type="file">', `<input type="file"><img alt="${meta.name}">`));
+  const img = document.querySelector('form img');
+  const btn = document.querySelector('form button[type="submit"]');
+  let clicks = 0;
+  btn.click = () => clicks++;
+  assert.deepEqual(pageSubmit(SELECTORS.chatgpt, [meta.name], 'look'), { ok: false, code: 'disabled' }, 'preview still loading');
+  img.alt = meta.name; img.complete = true; img.naturalWidth = 10; // minidom has no img properties
+  assert.deepEqual(pageSubmit(SELECTORS.chatgpt, [meta.name], 'look'), { ok: true, how: 'button' });
+  assert.equal(clicks, 1);
  } finally { globalThis.document = previous; }
 });
 

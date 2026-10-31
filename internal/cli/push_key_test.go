@@ -13,6 +13,7 @@ import (
 // The relay's VAPID key is created on first run, private to its owner,
 // and read back unchanged; a key file others can read is refused.
 func TestPushKeyFile(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	dir := t.TempDir()
 	p, err := loadOrCreatePusher(dir)
 	if err != nil || p == nil {
@@ -44,6 +45,7 @@ func TestPushKeyFile(t *testing.T) {
 
 // A symlink in place of the key file is refused rather than followed.
 func TestPushKeyFileRefusesSymlink(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	dir := t.TempDir()
 	target := filepath.Join(t.TempDir(), "elsewhere")
 	if err := os.WriteFile(target, bytes.Repeat([]byte{1}, 32), 0o600); err != nil {

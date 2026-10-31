@@ -74,7 +74,7 @@ func TestOpenClaimForSession(t *testing.T) {
 	s, _ := open(t, ":memory:")
 	ctx := context.Background()
 	req := ask(t, s, "grokbot", "hermes", "plan the trip")
-	if _, err := s.ClaimLeasesFrom(ctx, req.ID, "hermes", "a", time.Minute, time.Minute); err != nil {
+	if _, err := s.ClaimLeasesFrom(ctx, req.ID, "hermes", "a", QueueScope{}, time.Minute, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok, err := s.OpenClaimFor(ctx, "hermes", "a"); err != nil || !ok || got.ID != req.ID {
@@ -87,7 +87,7 @@ func TestOpenClaimForSession(t *testing.T) {
 		t.Fatalf("agent-wide = %+v %v %v", got, ok, err)
 	}
 	// Claiming again from another session keeps the first claim's session.
-	if _, err := s.ClaimLeasesFrom(ctx, req.ID, "hermes", "b", time.Minute, time.Minute); err != nil {
+	if _, err := s.ClaimLeasesFrom(ctx, req.ID, "hermes", "b", QueueScope{}, time.Minute, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := s.OpenClaimFor(ctx, "hermes", "b"); ok {

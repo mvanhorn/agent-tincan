@@ -33,16 +33,16 @@ func TestAttention(t *testing.T) {
 		{"channel down", client.AgentInfo{Queued: 1, Wake: "channel"}, 8, "QUEUED-OFFLINE"},
 		{"wait loop up", client.AgentInfo{Online: true, Queued: 1, Wake: "wait"}, 0, ""},
 		{"scheduled on time", client.AgentInfo{Queued: 1, Wake: "schedule"}, 0, ""},
-		{"scheduled overdue", client.AgentInfo{Queued: 1, Wake: "schedule", Target: envelope.Target{Overdue: true}}, 10, "QUEUED-OFFLINE|OVERDUE"},
+		{"scheduled overdue", client.AgentInfo{Queued: 1, Wake: "schedule", Overdue: true}, 10, "QUEUED-OFFLINE|OVERDUE"},
 		{"stale", client.AgentInfo{Online: true, Queued: 1, OldestQueued: now.Add(-time.Hour - time.Second)}, 4, "STALE"},
 		{"boundary", client.AgentInfo{Online: true, Queued: 1, OldestQueued: now.Add(-time.Hour)}, 0, ""},
-		{"overdue", client.AgentInfo{Wake: "schedule", Target: envelope.Target{Overdue: true}}, 2, "OVERDUE"},
+		{"overdue", client.AgentInfo{Wake: "schedule", Overdue: true}, 2, "OVERDUE"},
 		{"old", client.AgentInfo{Version: "1.1.0"}, 1, "OLD BUILD"},
 		{"new", client.AgentInfo{Version: "1.3.0"}, 0, ""},
 		{"claims", client.AgentInfo{Claimed: 2}, 0, "CLAIMED"},
-		{"unanswered webhook", client.AgentInfo{Queued: 1, Wake: "webhook", Target: envelope.Target{Unanswered: true}}, 6, "UNANSWERED"},
-		{"unanswered email, stale", client.AgentInfo{Queued: 1, Wake: "email", OldestQueued: now.Add(-2 * time.Hour), Target: envelope.Target{Unanswered: true}}, 10, "UNANSWERED|STALE"},
-		{"unanswered, nothing queued", client.AgentInfo{Wake: "webhook", Target: envelope.Target{Unanswered: true}}, 6, "UNANSWERED"},
+		{"unanswered webhook", client.AgentInfo{Queued: 1, Wake: "webhook", Unanswered: true}, 6, "UNANSWERED"},
+		{"unanswered email, stale", client.AgentInfo{Queued: 1, Wake: "email", OldestQueued: now.Add(-2 * time.Hour), Unanswered: true}, 10, "UNANSWERED|STALE"},
+		{"unanswered, nothing queued", client.AgentInfo{Wake: "webhook", Unanswered: true}, 6, "UNANSWERED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			score, flags := attention(tc.agent, "1.2.0", now)
@@ -53,14 +53,26 @@ func TestAttention(t *testing.T) {
 	}
 }
 
+// The record columns leave room for a release version in the 80 columns a
+// default terminal has, on the header and on a row.
+func TestRenderFrameVersionFitsEightyColumns(t *testing.T) {
+	f := topFrame{at: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), roster: client.Roster{Agents: []client.AgentInfo{{Name: "alpha", Online: true, Wake: "none", Version: "0.19.2", Stats: client.AgentStats{Answered: 12, Failed: 1, MedianReplyMS: new(int64(180_000))}}}}}
+	got := renderFrame(f, 80)
+	for _, want := range []string{" VERSION\n", " 0.19.2\n"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q cut off at 80 columns:\n%s", want, got)
+		}
+	}
+}
+
 func TestRenderFrame(t *testing.T) {
 	at := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	f := topFrame{at: at, roster: client.Roster{RelayVersion: "1.2.0", Agents: []client.AgentInfo{{Name: "alpha", Online: true, Wake: "none", Version: "1.2.0"}, {Name: "zeta", Wake: "none", Queued: 2}}}, note: "held and recent chains need an admin device"}
+	f := topFrame{at: at, roster: client.Roster{RelayVersion: "1.2.0", Agents: []client.AgentInfo{{Name: "alpha", Online: true, Wake: "none", Version: "1.2.0", Stats: client.AgentStats{Answered: 12, Failed: 1, MedianReplyMS: new(int64(180_000))}}, {Name: "zeta", Wake: "none", Queued: 2}}}, note: "held and recent chains need an admin device"}
 	want := "tincan top | relay 1.2.0 | online 1/2 | queued 2 | held ? | 12:00:00\n" +
-		"AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS VERSION\n" +
-		"zeta             offline none              2      -      0 \n" +
+		"AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS   ANS MEDIAN VERSION\n" +
+		"zeta             offline none              2      -      0     -      - \n" +
 		"  QUEUED-OFFLINE\n" +
-		"alpha            online  none              0      -      0 1.2.0\n" +
+		"alpha            online  none              0      -      0 12/13     3m 1.2.0\n" +
 		"held and recent chains need an admin device\n"
 	if got := renderFrame(f, 120); got != want {
 		t.Fatalf("got:\n%q\nwant:\n%q", got, want)
@@ -329,7 +341,7 @@ func TestRenderFrameAgeAndLocalTime(t *testing.T) {
 		{Name: "muse", Wake: "wait", Version: "1.0.0", Queued: 25, OldestQueued: at.Add(-(23*time.Hour + 31*time.Minute + 12*time.Second))},
 	}}, chains: []envelope.Result{{Request: envelope.Request{From: "a", To: "b", Body: "hi", CreatedAt: sent}, Status: envelope.StatusAnswered}}}
 	out := renderFrame(f, 120)
-	if !strings.Contains(out, "     25    23h      0 1.0.0") {
+	if !strings.Contains(out, "     25    23h      0     -      - 1.0.0") {
 		t.Fatalf("queue row not aligned:\n%s", out)
 	}
 	if want := "  " + sent.Local().Format("15:04:05") + " a -> b"; !strings.Contains(out, want) {
@@ -351,7 +363,7 @@ func TestTopUnansweredOrder(t *testing.T) {
 	at := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	f := topFrame{at: at, roster: client.Roster{Agents: []client.AgentInfo{
 		{Name: "alpha", Wake: "webhook", Queued: 1},
-		{Name: "grokbot", Wake: "webhook", Queued: 1, Target: envelope.Target{WokenAt: at.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true}},
+		{Name: "grokbot", Wake: "webhook", Queued: 1, WokenAt: at.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true},
 		{Name: "muse", Wake: "wait", Queued: 1},
 	}}}
 	var order []string
@@ -379,12 +391,12 @@ func TestTopRelayStatus(t *testing.T) {
 	idle := client.AgentInfo{Name: "beta", Online: true, Wake: "wait", Status: client.StatusIdle}
 	f := topFrame{at: at, roster: client.Roster{Agents: []client.AgentInfo{busy, idle, stuck}}}
 	want := "tincan top | relay  | online 3/3 | queued 1 | held ? | 12:00:00\n" +
-		"AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS VERSION\n" +
-		"zeta             stuck   wait              1      -      0 \n" +
+		"AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS   ANS MEDIAN VERSION\n" +
+		"zeta             stuck   wait              1      -      0     -      - \n" +
 		"  STUCK (claim lapsed)\n" +
-		"alpha            busy    channel           0      -      1 \n" +
+		"alpha            busy    channel           0      -      1     -      - \n" +
 		"  BUSY (muse's request, 12m)\n" +
-		"beta             idle    wait              0      -      0 \n"
+		"beta             idle    wait              0      -      0     -      - \n"
 	if got := renderFrame(f, 120); got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
@@ -412,7 +424,7 @@ func TestTopRelayStatus(t *testing.T) {
 }
 
 func TestSignedOutOnlineAttention(t *testing.T) {
-	score, flags := attention(client.AgentInfo{Online: true, Target: envelope.Target{SignedOutSite: "chatgpt.com"}}, "", time.Now())
+	score, flags := attention(client.AgentInfo{Online: true, SignedOutSite: "chatgpt.com"}, "", time.Now())
 	if score != 6 || len(flags) != 1 || flags[0] != "SIGNED-OUT" {
 		t.Fatalf("attention = %d %v", score, flags)
 	}

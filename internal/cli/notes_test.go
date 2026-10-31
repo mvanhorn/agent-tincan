@@ -22,6 +22,7 @@ type notesDoctorEnv struct {
 
 func newNotesDoctorEnv(t *testing.T, relayURL, agent string) notesDoctorEnv {
 	t.Helper()
+	skipOnWindows(t, "the notes service is a macOS service")
 	t.Setenv("TINCAN_RELAY", "")
 	t.Setenv("TINCAN_PROXY", "")
 	dir := t.TempDir()
@@ -262,11 +263,12 @@ func TestNotesDoctorUnreachableRelay(t *testing.T) {
 }
 
 func TestNotesInstallPrintsBootstrap(t *testing.T) {
+	skipOnWindows(t, "the notes service is a macOS service")
 	if os.Getenv("HOME") == "" {
 		t.Skip("no HOME")
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	lib := filepath.Join(home, "Notes Library")
 	out, _, err := runSplit(t, notesCmd(), "install", "--library-root", lib, "--binary", "/usr/local/bin/tincan")
 	if err != nil {
@@ -283,6 +285,7 @@ func TestNotesInstallPrintsBootstrap(t *testing.T) {
 }
 
 func TestNotesInstallRequiresLibraryRoot(t *testing.T) {
+	skipOnWindows(t, "the notes service is a macOS service")
 	_, _, err := runSplit(t, notesCmd(), "install", "--binary", "/usr/local/bin/tincan")
 	if err == nil || !strings.Contains(err.Error(), "library-root") {
 		t.Fatalf("install without --library-root: %v", err)

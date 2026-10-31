@@ -41,3 +41,9 @@ func DialPushForTest(ctx context.Context, hostPort string) error {
 	}
 	return err
 }
+
+// Routes lists the patterns Handler serves, and GuestAllowed the ones it
+// serves to a guest.
+func (s *Server) Routes() []string { return s.routes().patterns }
+
+var GuestAllowed = guestRoutes

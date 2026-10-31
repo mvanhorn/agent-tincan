@@ -433,3 +433,33 @@ func TestCheckMove(t *testing.T) {
 		t.Fatalf("hop limit: %v", err)
 	}
 }
+
+// NoParent, which only the relay sets, starts a new chain whatever claims the
+// sender holds, for an agent-wide and a session-scoped send alike.
+func TestNoParentStartsNewChain(t *testing.T) {
+	f := newFixture(t, Config{})
+	ctx := context.Background()
+	asked, err := f.send(t, "instinct", "grokbot", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.Deliver(ctx, "grokbot", 1, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.st.Claim(ctx, asked.ID, "grokbot", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []string{"", "other"} {
+		req := envelope.Request{From: "grokbot", To: "instinct", Kind: envelope.KindAsk, Body: "x", NoParent: true, FromSession: session}
+		if err := f.pol.Prepare(ctx, &req); err != nil {
+			t.Fatalf("session %q: %v", session, err)
+		}
+		if req.ParentID != "" || req.Hop != 1 || len(req.Chain) != 1 || req.Chain[0] != "grokbot" {
+			t.Fatalf("session %q: %+v", session, req)
+		}
+	}
+	req := envelope.Request{From: "grokbot", To: "instinct", Kind: envelope.KindAsk, Body: "x"}
+	if err := f.pol.Prepare(ctx, &req); !errors.Is(err, ErrCycle) {
+		t.Fatalf("without NoParent: %v", err)
+	}
+}

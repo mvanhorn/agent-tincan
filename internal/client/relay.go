@@ -40,6 +40,13 @@ const VersionHeader = "X-Tincan-Version"
 // agent, never an identity. Old relays ignore it.
 const SessionHeader = "X-Tincan-Session"
 
+// ProjectHeader names the project the calling session works in, so an ask
+// naming that project reaches it before the agent's other sessions. It is a
+// routing label like SessionHeader, never an identity. Optional: a client
+// that sends none takes such an ask after the fallback, and a relay that
+// predates it ignores it.
+const ProjectHeader = "X-Tincan-Project"
+
 // FeaturesHeader advertises capabilities supported by this client.
 const FeaturesHeader = "X-Tincan-Features"
 
@@ -108,6 +115,9 @@ type AgentInfo struct {
 	Queued       int       `json:"queued,omitempty"`
 	OldestQueued time.Time `json:"oldest_queued_at,omitzero"`
 	Claimed      int       `json:"claimed,omitempty"`
+	// Stats is the agent's record over the last 7 days, left out for an
+	// agent with none and by relays that predate it.
+	Stats AgentStats `json:"stats,omitzero"`
 	// NodeID, NodeName and NodeUser name the Tailscale node the agent is
 	// bound to: its stable node id, machine name, and owning login. The
 	// relay fills them only for admin callers, and never for a virtual
@@ -115,11 +125,57 @@ type AgentInfo struct {
 	NodeID   string `json:"node_id,omitempty"`
 	NodeName string `json:"node_name,omitempty"`
 	NodeUser string `json:"node_user,omitempty"`
+	// Self marks the caller's own entry, so an agent can tell itself from a
+	// teammate when several of its windows share its name. The relay sets
+	// it only on the entry of the agent the caller resolves to. False from
+	// relays that predate it.
+	Self bool `json:"self,omitempty"`
+	// GuestUntil is when a guest's access ends. Only an admin's roster lists
+	// guests, and whoami tells a guest its own. Zero for a teammate.
+	GuestUntil time.Time `json:"guest_until,omitzero"`
 	// Target carries the relay's schedule facts for an agent on wake method
 	// schedule, or its last wake for a webhook or email agent the relay has
 	// woken, and is left out otherwise and by older relays. Its fields sit
 	// at the top level of each roster entry.
 	envelope.Target
+}
+
+// AgentStats is an agent's record of asks finished in a window: counts and
+// a duration, never text. Agent is set in a StatsReport and empty on a
+// roster entry. MedianReplyMS is over answered asks, nil when none has a
+// known reply time; a known median can be 0.
+type AgentStats struct {
+	Agent         string `json:"agent,omitempty"`
+	Answered      int    `json:"answered"`
+	Failed        int    `json:"failed"`
+	Expired       int    `json:"expired"`
+	MedianReplyMS *int64 `json:"median_reply_ms,omitempty"`
+}
+
+// StatsReport is GET /v1/stats: every joined agent's record for asks
+// finished at or after Since.
+type StatsReport struct {
+	Since  time.Time    `json:"since"`
+	Agents []AgentStats `json:"agents"`
+}
+
+// Finished counts the asks the record covers.
+func (s AgentStats) Finished() int { return s.Answered + s.Failed + s.Expired }
+
+// MedianReply is the median reply time for a person to read: "<1s", "45s",
+// "3m", "2h". Empty when it is unknown.
+func (s AgentStats) MedianReply() string {
+	if s.MedianReplyMS == nil {
+		return ""
+	}
+	d := time.Duration(*s.MedianReplyMS) * time.Millisecond
+	switch {
+	case d < time.Second:
+		return "<1s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	return QueueAge(d)
 }
 
 // The statuses a relay reports in AgentInfo.Status. Busy means the agent
@@ -164,6 +220,19 @@ func (a AgentInfo) LastSeen(now time.Time) string {
 		return "never seen"
 	}
 	return "last seen " + ageAgo(now.Sub(last))
+}
+
+// StatsField is the agent's record for a roster line, such as
+// answered=12/13 median=3m, or "" for an agent with none.
+func (a AgentInfo) StatsField() string {
+	if a.Stats.Finished() == 0 {
+		return ""
+	}
+	field := fmt.Sprintf("answered=%d/%d", a.Stats.Answered, a.Stats.Finished())
+	if median := a.Stats.MedianReply(); median != "" {
+		field += " median=" + median
+	}
+	return field
 }
 
 func (a AgentInfo) Backlog(now time.Time) string {
@@ -244,6 +313,7 @@ type Relay struct {
 	agent    string // sent as AgentHeader when set
 	version  string // sent as VersionHeader when set
 	session  string // sent as SessionHeader when set
+	project  string // sent as ProjectHeader when set
 	// socketWake adds SocketWakeFeature to FeaturesHeader. It is atomic
 	// because the socket-wake loop flips it while other calls are in flight.
 	socketWake atomic.Bool
@@ -347,7 +417,31 @@ func (r *Relay) proxyFor(req *http.Request) (*url.URL, error) {
 	if pu != nil {
 		return pu, nil
 	}
-	return http.ProxyFromEnvironment(req)
+	return envProxy(req)
+}
+
+// envProxy is the environment's proxy for a request. Tests replace it: the
+// standard library reads the environment only once.
+var envProxy = http.ProxyFromEnvironment
+
+// ThroughRemoteProxy says relay calls leave this machine through a proxy on
+// another host, so the relay sees that host's tailnet node, not this
+// machine's. A proxy on loopback stays here, as a userspace tailscaled's does.
+// A proxy that cannot be read counts as remote.
+func (r *Relay) ThroughRemoteProxy() bool {
+	req, err := http.NewRequest("GET", r.Base(), nil)
+	if err != nil {
+		return true
+	}
+	pu, err := r.proxyFor(req)
+	if err != nil {
+		return true
+	}
+	if pu == nil || strings.EqualFold(pu.Hostname(), "localhost") {
+		return false
+	}
+	ip := net.ParseIP(pu.Hostname())
+	return ip == nil || !ip.IsLoopback()
 }
 
 // NewRelayFor returns a client for the saved config at ConfigPath(). It
@@ -431,6 +525,9 @@ func (r *Relay) GroupMembers(ctx context.Context, group string) ([]envelope.Grou
 type sent = envelope.SendResponse
 
 func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
+	if project := projectOf(ctx); project != "" {
+		in["project"] = project
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	if err == nil {
@@ -473,6 +570,39 @@ func (r *Relay) Ask(ctx context.Context, to, body, parent string, wait time.Dura
 		return Result{}, err
 	}
 	return r.asked(ctx, s, wait)
+}
+
+// ErrThenUnsupported means the relay does not advertise follow-ons. Such a
+// relay would silently drop the then field, so the client refuses to send.
+var ErrThenUnsupported = errors.New("this relay does not support follow-on asks (upgrade the relay)")
+
+// AskThen is Ask with a follow-on: once to answers, the relay sends then as
+// a new ask from this agent, with the reply attached as data.
+func (r *Relay) AskThen(ctx context.Context, to, body, parent string, then envelope.Then, wait time.Duration, urgent bool) (Result, error) {
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("check relay capabilities: %w", err)
+	}
+	if !caps.Then {
+		return Result{}, ErrThenUnsupported
+	}
+	s, err := r.send(ctx, map[string]any{"to": to, "body": body, "kind": envelope.KindAsk, "parent_id": parent, "urgent": urgent, "then": then})
+	if err != nil {
+		return Result{}, err
+	}
+	return r.asked(ctx, s, wait)
+}
+
+// ThenNote is what an asker is told about a follow-on it just queued, given
+// the status its ask has come back with.
+func ThenNote(to string, status envelope.Status) string {
+	switch status {
+	case envelope.StatusAnswered:
+		return "This is answered, so the relay is sending your follow-on to " + to + ". If that is refused, you get a notice."
+	case envelope.StatusFailed, envelope.StatusDeclined, envelope.StatusCancelled, envelope.StatusExpired:
+		return "This ended without an answer, so your follow-on to " + to + " was dropped."
+	}
+	return "Once this is answered, the relay sends your follow-on to " + to + ". If that is refused, you get a notice. If this ends without an answer, the follow-on is dropped."
 }
 
 // What a poll does with unseen replies to this agent's own requests. No
@@ -533,6 +663,14 @@ type Waiting struct {
 	// Pending names the oldest queued requests (id and sender, no body).
 	// A relay that predates it leaves it empty.
 	Pending []envelope.Pending `json:"pending,omitempty"`
+	// Hidden counts queued requests left out because they name another
+	// project, so this peek does not show the agent's whole queue. A relay
+	// that predates it leaves it zero.
+	Hidden int `json:"hidden,omitempty"`
+	// HiddenIDs names up to the first 50 of the Hidden requests, without
+	// bodies, so a peek can tell one of them from a request that left the
+	// queue.
+	HiddenIDs []string `json:"hidden_ids,omitempty"`
 }
 
 // Poll waits up to hold for requests addressed to this agent or unseen
@@ -630,6 +768,14 @@ func (r *Relay) Roster(ctx context.Context) (Roster, error) {
 	return out, err
 }
 
+// Stats reads every joined agent's record over the window since, such as
+// 7d or 12h. An older relay answers its plain 404.
+func (r *Relay) Stats(ctx context.Context, since string) (StatsReport, error) {
+	var out StatsReport
+	err := r.call(ctx, r.api, "GET", "/v1/stats?"+url.Values{"since": {since}}.Encode(), nil, &out)
+	return out, err
+}
+
 // Join binds this machine to the agent name behind code.
 func (r *Relay) Join(ctx context.Context, code string) (string, error) {
 	var out struct {
@@ -656,6 +802,80 @@ func (r *Relay) InviteKind(ctx context.Context, name, kind string) (string, erro
 	}
 	err := r.call(ctx, r.api, "POST", "/v1/admin/invite", in, &out)
 	return out.Code, err
+}
+
+// GuestInvite is what a guest invite asks the relay for.
+type GuestInvite struct {
+	Ask        []string `json:"ask"`
+	ForSeconds int64    `json:"for_seconds"`
+	NoHold     bool     `json:"no_hold,omitempty"`
+}
+
+// GuestInvited is the relay's answer to a guest invite. HoldAlerts says a
+// held ask would reach the owner by a notify teammate or a push to a phone.
+type GuestInvited struct {
+	Code       string    `json:"code"`
+	GuestUntil time.Time `json:"guest_until,omitzero"`
+	GuestAsks  []string  `json:"guest_asks,omitempty"`
+	HoldAlerts bool      `json:"hold_alerts,omitempty"`
+}
+
+// ErrGuestsUnsupported identifies a relay that would not keep a guest's
+// limits. An older relay ignores them and mints a full teammate.
+var ErrGuestsUnsupported = errors.New("this relay does not support guests (upgrade the relay); no code was issued")
+
+// InviteGuest mints a join code for a guest (admin devices only). It asks
+// first whether the relay knows guests, then checks that the relay echoed the
+// limits, and returns no code if it did not.
+func (r *Relay) InviteGuest(ctx context.Context, name string, in GuestInvite) (GuestInvited, error) {
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return GuestInvited{}, fmt.Errorf("check relay capabilities: %w", err)
+	}
+	if !caps.Guests {
+		return GuestInvited{}, ErrGuestsUnsupported
+	}
+	var out GuestInvited
+	if err := r.call(ctx, r.api, "POST", "/v1/admin/invite", map[string]any{"name": name, "guest": in}, &out); err != nil {
+		return GuestInvited{}, err
+	}
+	if out.GuestUntil.IsZero() {
+		return GuestInvited{}, ErrGuestsUnsupported
+	}
+	return out, nil
+}
+
+// GuestConnected is the relay's answer to connecting a gateway guest. Cards
+// are the A2A agent card URLs of the teammates it may ask, Unpublished the
+// ones among them a2a.json does not publish yet.
+type GuestConnected struct {
+	Code        string    `json:"code"`
+	Cards       []string  `json:"cards,omitempty"`
+	Unpublished []string  `json:"unpublished,omitempty"`
+	GuestUntil  time.Time `json:"guest_until,omitzero"`
+	GuestAsks   []string  `json:"guest_asks,omitempty"`
+	HoldAlerts  bool      `json:"hold_alerts,omitempty"`
+}
+
+// ConnectGuest binds a guest through the gateway and mints its login code
+// (admin devices only), with InviteGuest's two checks: an older relay would
+// ignore the limits and bind a full teammate.
+func (r *Relay) ConnectGuest(ctx context.Context, name string, in GuestInvite) (GuestConnected, error) {
+	caps, err := r.Capabilities(ctx)
+	if err != nil {
+		return GuestConnected{}, fmt.Errorf("check relay capabilities: %w", err)
+	}
+	if !caps.GatewayGuests {
+		return GuestConnected{}, ErrGuestsUnsupported
+	}
+	var out GuestConnected
+	if err := r.call(ctx, r.api, "POST", "/v1/admin/connect", map[string]any{"name": name, "guest": in}, &out); err != nil {
+		return GuestConnected{}, err
+	}
+	if out.GuestUntil.IsZero() {
+		return GuestConnected{}, ErrGuestsUnsupported
+	}
+	return out, nil
 }
 
 // SetKind records a joined agent's kind; "" clears it (admin devices only).
@@ -879,6 +1099,10 @@ func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, i
 	return err
 }
 
+// MaxResponseBytes is the most of a response a client reads. A longer one is
+// cut off and fails to decode.
+const MaxResponseBytes = 4 << 20
+
 func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -902,7 +1126,7 @@ func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path strin
 	}
 	defer resp.Body.Close()
 	r.noteHeld(resp)
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
 	if err != nil {
 		return err
 	}
@@ -944,6 +1168,9 @@ func (r *Relay) headers(req *http.Request) {
 	if r.session != "" {
 		req.Header.Set(SessionHeader, r.session)
 	}
+	if r.project != "" {
+		req.Header.Set(ProjectHeader, r.project)
+	}
 }
 
 // SetSession names the session every later call comes from (SessionHeader);
@@ -952,6 +1179,26 @@ func (r *Relay) SetSession(session string) { r.session = session }
 
 // Session is the session set by SetSession.
 func (r *Relay) Session() string { return r.session }
+
+// SetProject names the project every later call comes from (ProjectHeader);
+// "" names none. Set it before the client is shared between goroutines.
+func (r *Relay) SetProject(project string) { r.project = project }
+
+// projectKey carries the project a send names; see WithProject.
+type projectKey struct{}
+
+// WithProject returns a context whose sends name project: the ask is for a
+// session of that project. Every way of sending an ask (plain, attached,
+// notify, grouped) reads it, so none of them takes a parameter for it. ""
+// names none.
+func WithProject(ctx context.Context, project string) context.Context {
+	return context.WithValue(ctx, projectKey{}, project)
+}
+
+func projectOf(ctx context.Context) string {
+	project, _ := ctx.Value(projectKey{}).(string)
+	return project
+}
 
 // AdvertiseSocketWake turns SocketWakeFeature on or off for every later
 // call. It is safe to call while the client is in use.
@@ -1206,7 +1453,7 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 	g := GroupResult{Group: newGroupID()}
 	for _, targetName := range targets {
 		var target *envelope.Target
-		req := envelope.Request{To: targetName, Body: body, Kind: kind, ParentID: parent, Group: g.Group, Urgent: urgent}
+		req := envelope.Request{To: targetName, Body: body, Kind: kind, ParentID: parent, Group: g.Group, Urgent: urgent, Project: projectOf(ctx)}
 		ups, err := r.UploadFiles(ctx, attachPaths)
 		if err == nil {
 			for _, up := range ups {
@@ -1268,7 +1515,7 @@ func (r *Relay) GetGroup(ctx context.Context, id string, wait time.Duration) (Gr
 			if found {
 				continue
 			}
-			entry := GroupEntry{Result: Result{Request: envelope.Request{ID: member.ID, To: member.To}}}
+			entry := GroupEntry{Request: envelope.Request{ID: member.ID, To: member.To}}
 			if replace >= 0 {
 				g.Results[replace] = entry
 			} else {

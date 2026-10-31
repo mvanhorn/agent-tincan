@@ -27,6 +27,7 @@ const (
 // writeCreds writes a credentials file with the given mode.
 func writeCreds(t *testing.T, mode os.FileMode, fields map[string]string) string {
 	t.Helper()
+	skipOnWindows(t, "the release tools check unix file modes; maintainers run them on macOS or Linux")
 	dir := filepath.Join(t.TempDir(), "tincan-release")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -537,12 +538,66 @@ func TestManifestVersionGreater(t *testing.T) {
 	}
 }
 
+// make dist runs the real Makefile recipe with a fake go that writes each
+// -o file: the release must carry both Windows exes under their .exe names,
+// checksummed, and no other platform gets the suffix.
+func TestMakeDistListsWindowsBinaries(t *testing.T) {
+	skipOnWindows(t, "make dist is a maintainer step that needs a unix make, sh and shasum")
+	for _, tool := range []string{"make", "sh", "shasum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH", tool)
+		}
+	}
+	mk, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	mk = append(mk, "\n# test fake\nextension:\n\tmkdir -p dist && echo zip > dist/tincan-history-extension.zip\n"...)
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), mk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	fakeGo := "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -o ] && echo \"$GOOS/$GOARCH\" > \"$2\"; shift; done\n"
+	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(fakeGo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("make", "-s", "dist")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("make dist: %v\n%s", err, out)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "dist", "checksums.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for line := range strings.Lines(string(raw)) {
+		if f := strings.Fields(line); len(f) == 2 {
+			listed[f[1]] = true
+		}
+	}
+	for _, name := range []string{
+		"tincan_windows_amd64.exe", "tincan_windows_arm64.exe",
+		"tincan_linux_amd64", "tincan_linux_arm64", "tincan_darwin_amd64", "tincan_darwin_arm64",
+	} {
+		if !listed[name] {
+			t.Errorf("checksums.txt lacks %s:\n%s", name, raw)
+		}
+	}
+	if len(listed) != 7 { // the six binaries and the extension zip
+		t.Errorf("checksums.txt lists %d files, want 7:\n%s", len(listed), raw)
+	}
+}
+
 // releaseRepo makes a git repo holding the real Makefile with dist,
 // checksums and store replaced by fakes, a bare remote with main pushed,
 // and fake gh and tincan commands that log their arguments. storeRecipe is
 // the fake store recipe.
 func releaseRepo(t *testing.T, storeRecipe string) (repo, remote, logFile string, env []string) {
 	t.Helper()
+	skipOnWindows(t, "make release needs a unix make, sh and shasum")
 	for _, tool := range []string{"make", "git", "sh", "shasum"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not on PATH", tool)
@@ -561,7 +616,7 @@ func releaseRepo(t *testing.T, storeRecipe string) (repo, remote, logFile string
 	fakes := "\n# test fakes\n" +
 		"extension:\n\tmkdir -p dist\n" +
 		"mac-app:\n\ttrue\n" +
-		"dist:\n\tmkdir -p dist && for f in tincan_darwin_amd64 tincan_darwin_arm64 tincan_linux_amd64 tincan_linux_arm64 tincan-history-extension.zip; do echo $$f > dist/$$f; done\n" +
+		"dist:\n\tmkdir -p dist && for f in tincan_darwin_amd64 tincan_darwin_arm64 tincan_linux_amd64 tincan_linux_arm64 tincan_windows_amd64.exe tincan_windows_arm64.exe tincan-history-extension.zip; do echo $$f > dist/$$f; done\n" +
 		"checksums:\n\tcd dist && shasum -a 256 tincan_* > checksums.txt\n" +
 		"store:\n\t" + storeRecipe + "\n"
 	if err := os.WriteFile(filepath.Join(repo, "Makefile"), append(mk, fakes...), 0o644); err != nil {
@@ -638,7 +693,7 @@ func TestMakeReleaseDryRun(t *testing.T) {
 		"faketincan release-tools cws-upload --dry-run dist/tincan-history-extension-store.zip",
 		"git push " + remote + " refs/tags/v0.0.0",
 		"gh release create v0.0.0 --repo mvanhorn/agent-tincan --verify-tag --title v0.0.0 --notes-file " + notes +
-			" dist/checksums.txt dist/tincan-history-extension.zip dist/tincan_darwin_amd64 dist/tincan_darwin_arm64 dist/tincan_linux_amd64 dist/tincan_linux_arm64",
+			" dist/checksums.txt dist/tincan-history-extension.zip dist/tincan_darwin_amd64 dist/tincan_darwin_arm64 dist/tincan_linux_amd64 dist/tincan_linux_arm64 dist/tincan_windows_amd64.exe dist/tincan_windows_arm64.exe",
 		"faketincan release-tools cws-upload --publish dist/tincan-history-extension-store.zip",
 	}
 	if strings.Join(steps, "\n") != strings.Join(want, "\n") {

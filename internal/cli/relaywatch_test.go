@@ -137,11 +137,12 @@ func TestRelayWatchRefusesBadFlags(t *testing.T) {
 }
 
 func TestRelayWatchInstall(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("no service definition here")
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	cfg := filepath.Join(t.TempDir(), "hermes.json")
 	if err := client.SaveConfigTo(cfg, client.Config{Relay: "http://tincan-relay", Agent: "hermes"}); err != nil {
 		t.Fatal(err)

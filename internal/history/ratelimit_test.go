@@ -656,7 +656,9 @@ func TestNativeHostRecheckDoesNotRepeatRecordedDrift(t *testing.T) {
 		}
 		st.At = st.At.Add(-7 * time.Hour)
 		b, _ = json.Marshal(st)
-		if err := os.WriteFile(statePath, b, 0o600); err != nil {
+		// Atomic like the host's own write: its next recheck may read this
+		// file at any moment, and a truncated one looks like no reload at all.
+		if err := writeFileAtomic(statePath, b, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

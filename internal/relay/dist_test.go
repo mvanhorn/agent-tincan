@@ -22,12 +22,15 @@ func distDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range map[string]string{
-		"tincan_linux_amd64":   "linux binary",
-		"tincan_darwin_arm64":  "darwin binary",
-		"checksums.txt":        "abc  tincan_linux_amd64.tar.gz\n",
-		"VERSION":              "0.4.0\n",
-		"wake.json":            `{"secret":true}`,
-		"tincan_windows_amd64": "not a supported platform",
+		"tincan_linux_amd64":       "linux binary",
+		"tincan_darwin_arm64":      "darwin binary",
+		"tincan_windows_amd64.exe": "windows amd64 binary",
+		"tincan_windows_arm64.exe": "windows arm64 binary",
+		"checksums.txt":            "abc  tincan_linux_amd64.tar.gz\n",
+		"VERSION":                  "0.4.0\n",
+		"wake.json":                `{"secret":true}`,
+		"tincan_windows_amd64":     "a Windows name without .exe is not a release file",
+		"tincan_linux_amd64.exe":   "only Windows builds end in .exe",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -45,8 +48,13 @@ func TestDistServesOnlyAllowedFilesToJoinedAgents(t *testing.T) {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
 	h.do(macAddr, "GET", "/v1/dist/tincan_darwin_arm64", "", http.StatusOK, nil) // admin device
+	for name, body := range map[string]string{"tincan_windows_amd64.exe": "windows amd64 binary", "tincan_windows_arm64.exe": "windows arm64 binary"} {
+		if rec := h.do(museAddr, "GET", "/v1/dist/"+name, "", http.StatusOK, nil); rec.Body.String() != body {
+			t.Fatalf("%s body = %q", name, rec.Body.String())
+		}
+	}
 	h.do(grokAddr, "GET", "/v1/dist/checksums.txt", "", http.StatusOK, nil)
-	for _, name := range []string{"wake.json", "VERSION", "tincan_windows_amd64", "tincan_linux_arm64", "..%2Fwake.json"} {
+	for _, name := range []string{"wake.json", "VERSION", "tincan_windows_amd64", "tincan_linux_amd64.exe", "tincan_linux_arm64", "..%2Fwake.json"} {
 		h.do(grokAddr, "GET", "/v1/dist/"+name, "", http.StatusNotFound, nil)
 	}
 	h.do(strangerAddr, "GET", "/v1/dist/tincan_linux_amd64", "", http.StatusForbidden, nil)
@@ -61,7 +69,12 @@ func TestDistManifest(t *testing.T) {
 	if m.Version != "0.4.0" {
 		t.Fatalf("version = %q", m.Version)
 	}
-	want := map[string]string{"tincan_darwin_arm64": sum([]byte("darwin binary")), "tincan_linux_amd64": sum([]byte("linux binary"))}
+	want := map[string]string{
+		"tincan_darwin_arm64":      sum([]byte("darwin binary")),
+		"tincan_linux_amd64":       sum([]byte("linux binary")),
+		"tincan_windows_amd64.exe": sum([]byte("windows amd64 binary")),
+		"tincan_windows_arm64.exe": sum([]byte("windows arm64 binary")),
+	}
 	if len(m.Files) != len(want) {
 		t.Fatalf("files = %+v, want %v", m.Files, want)
 	}
@@ -80,7 +93,7 @@ func TestDistManifestWithoutVersion(t *testing.T) {
 	h.srv.SetDist(dir)
 	var m client.DistManifest
 	h.do(instinctAddr, "GET", "/v1/dist", "", http.StatusOK, &m)
-	if m.Version != "" || len(m.Files) != 2 {
+	if m.Version != "" || len(m.Files) != 4 {
 		t.Fatalf("manifest = %+v", m)
 	}
 }
@@ -113,8 +126,8 @@ func TestDistFollowsSymlinkedBinary(t *testing.T) {
 	if got := m.SHA256Of("tincan_linux_arm64"); got != sum([]byte("arm linux binary")) {
 		t.Fatalf("symlinked binary sha256 = %q, manifest = %+v", got, m)
 	}
-	if m.SHA256Of("tincan_darwin_amd64") != "" || len(m.Files) != 3 {
-		t.Fatalf("manifest = %+v, want the two regular binaries and the symlinked one", m)
+	if m.SHA256Of("tincan_darwin_amd64") != "" || len(m.Files) != 5 {
+		t.Fatalf("manifest = %+v, want the four regular binaries and the symlinked one", m)
 	}
 	rec := h.do(museAddr, "GET", "/v1/dist/tincan_linux_arm64", "", http.StatusOK, nil)
 	if rec.Body.String() != "arm linux binary" {

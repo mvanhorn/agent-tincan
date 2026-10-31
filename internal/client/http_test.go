@@ -50,8 +50,7 @@ func TestLimitBodyRejectsOversize(t *testing.T) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		LimitBody(w, r, 8)
 		_, err := io.ReadAll(r.Body)
-		var mbe *http.MaxBytesError
-		if !errors.As(err, &mbe) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); !ok {
 			t.Errorf("want MaxBytesError, got %v", err)
 		}
 	})

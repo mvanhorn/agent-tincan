@@ -1,9 +1,11 @@
 // Package policy fills in a request's chain and stops runaway loops between
-// trusted agents. It never restricts who may ask whom: joined agents trust
-// each other. It enforces the hop limit, rejects cycles, rate-limits each
-// sender as a backstop against an agent stuck starting new chains, and holds
-// asks for the owner's approval (approval.json, and by default asks to the
-// kinds in holdByDefault).
+// trusted agents. It never restricts who may ask whom among teammates: they
+// trust each other. It enforces the hop limit, rejects cycles, rate-limits
+// each sender as a backstop against an agent stuck starting new chains, and
+// holds asks for the owner's approval (approval.json, by default asks to the
+// kinds in holdByDefault, and by default a guest's ask and what follows from
+// it). The relay refuses a guest's send before it gets here unless the guest
+// is listed for the target.
 package policy
 
 import (
@@ -12,10 +14,12 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/store"
@@ -78,7 +82,11 @@ func New(st *store.Store, cfg Config) *Policy {
 // Prepare sets TraceID, Hop, Chain, and ParentID, then applies the loop and
 // rate checks.
 func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
-	parent, ok, err := p.parent(ctx, req)
+	sender, _, err := p.st.AgentByName(ctx, req.From)
+	if err != nil {
+		return reject(http.StatusServiceUnavailable, err)
+	}
+	parent, ok, err := p.parent(ctx, req, sender)
 	if err != nil {
 		return err
 	}
@@ -88,7 +96,7 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	// for the cycle, hop, and allowlist checks, and only starts its own
 	// trace.
 	guard, guarded := parent, ok
-	if !ok && req.ParentID == "" && req.FromSession != "" {
+	if !ok && req.ParentID == "" && req.FromSession != "" && !req.NoParent && !sender.Guest.Set() {
 		if guard, guarded, err = p.st.OpenClaim(ctx, req.From); err != nil {
 			return err
 		}
@@ -98,7 +106,14 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	}
 	if ok {
 		req.ParentID, req.TraceID, req.Hop = parent.ID, parent.TraceID, parent.Hop+1
-		req.Chain = append(slices.Clone(parent.Chain), req.From)
+		// A follow-on's sender is already in the chain, as the first
+		// request's sender; the agent that answered joins it, so a follow-on
+		// back to that agent is a cycle.
+		last := req.From
+		if req.FollowOf != "" {
+			last = parent.To
+		}
+		req.Chain = append(slices.Clone(parent.Chain), last)
 	} else if guarded {
 		req.ParentID, req.TraceID, req.Hop = "", "", guard.Hop+1
 		req.Chain = append(slices.Clone(guard.Chain), req.From)
@@ -122,6 +137,18 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Kind == envelope.KindPing {
 		return nil
 	}
+	if err := p.markGuest(ctx, req, sender, parent, ok); err != nil {
+		p.Refund(*req)
+		return err
+	}
+	// Ahead of Approval.Held, so an approval.json entry cannot lift it. The
+	// file's TTL and notify still apply.
+	noHold := sender.Guest.Set() && sender.Guest.NoHold
+	if req.FromGuest && !req.GuestApproved && !noHold {
+		req.Status = envelope.StatusHeld
+		req.HoldTTL, req.ApprovalNotify = p.cfg.Approval.guestHold(req.To)
+		return nil
+	}
 	held, err := p.cfg.Approval.Held(req)
 	if held {
 		req.Status = envelope.StatusHeld
@@ -131,8 +158,63 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		p.Refund(*req)
 		return reject(http.StatusServiceUnavailable, err)
 	}
-	p.holdByKind(ctx, req, parent, ok)
+	// A follow-on has no parent here: the owner's approval of the request it
+	// follows covers that request, not whatever was queued to run after it.
+	p.holdByKind(ctx, req, parent, ok && req.FollowOf == "")
 	return nil
+}
+
+// markGuest sets FromGuest on a request a guest sent, and on one sent while
+// the sender holds any claim a guest's ask led to, however the request found
+// its parent: the parent, the session guard's claim, or several claims the
+// relay cannot pick between. The store's count covers the last two, and a
+// parent named to get away from the marked claim. A named parent the sender
+// only had delivered is the one case the count misses, so it is read too.
+// GuestApproved says the owner approved all of them. A follow-on never
+// inherits that, for the reason holdByKind gets no parent for it. The body
+// line is added here, once, for clients that ignore the field: first and with
+// its text framed on what a guest wrote, so it can choose no conversation or
+// form and cannot pass for another request, and through markedBody on what a
+// teammate wrote. A relay fire (NoParent) reads no claims: its text was fixed
+// when it was scheduled, and a schedule cannot be made while a marked ask is
+// open with its asker or changed after, so what the asker holds at fire time
+// did not lead to it.
+func (p *Policy) markGuest(ctx context.Context, req *envelope.Request, sender identity.Agent, parent envelope.Request, hasParent bool) error {
+	if sender.Guest.Set() {
+		req.FromGuest, req.GuestApproved = true, false
+	} else if !req.NoParent {
+		marked, unapproved, err := p.st.OpenGuestClaims(ctx, req.From)
+		if err != nil {
+			return reject(http.StatusServiceUnavailable, err)
+		}
+		req.FromGuest = marked > 0 || (hasParent && parent.FromGuest)
+		req.GuestApproved = req.FromGuest && unapproved == 0 && (!hasParent || !parent.FromGuest || parent.GuestApproved) && req.FollowOf == ""
+	}
+	switch {
+	case sender.Guest.Set():
+		req.Body = envelope.GuestPrefix + envelope.GuestText(req.Body)
+	case req.FromGuest:
+		req.Body = p.markedBody(ctx, *req)
+	}
+	return nil
+}
+
+// structuredKinds parse a request's body as a form, so they get no body line.
+// They are programs, not models, and what they send on is marked in turn.
+var structuredKinds = map[string]bool{onboard.KindCouncil: true, onboard.KindPass: true, onboard.KindNotes: true, onboard.KindHistory: true}
+
+// markedBody is the body of a marked request a teammate wrote, with the
+// guest line where it keeps the teammate's first-line directive working: a
+// web teammate reads a threading line only as the first line. A failed kind
+// lookup keeps the line.
+func (p *Policy) markedBody(ctx context.Context, req envelope.Request) string {
+	if kind, err := p.kindOf(ctx, req.To); err == nil && structuredKinds[kind] {
+		return req.Body
+	}
+	if first, rest, _ := strings.Cut(req.Body, "\n"); envelope.IsThreadingLine(first) {
+		return first + "\n" + envelope.GuestPrefix + rest
+	}
+	return envelope.GuestPrefix + req.Body
 }
 
 // ErrMoveHeld refuses moving a request to a target whose asks are held
@@ -213,8 +295,26 @@ func (p *Policy) holdByKind(ctx context.Context, req *envelope.Request, parent e
 // parent resolves the request's parent: the one it names, or else the
 // request the sender currently has claimed. The model cannot opt out of a
 // chain by leaving the parent blank. A sender that names a session continues
-// only a claim made from that session or with none (see Prepare).
-func (p *Policy) parent(ctx context.Context, req *envelope.Request) (envelope.Request, bool, error) {
+// only a claim made from that session or with none (see Prepare). A relay
+// fire (NoParent) has no parent, whatever the sender holds. A
+// follow-on's parent is the request it follows, answered and addressed to
+// someone else, which is why FollowOf is relay-only: a client's parent_id
+// keeps both checks. A guest has none: the relay refuses its parent_id, and
+// the only claims it can hold are the relay's notices.
+func (p *Policy) parent(ctx context.Context, req *envelope.Request, sender identity.Agent) (envelope.Request, bool, error) {
+	if req.NoParent {
+		return envelope.Request{}, false, nil
+	}
+	if sender.Guest.Set() {
+		return envelope.Request{}, false, nil
+	}
+	if req.FollowOf != "" {
+		parent, _, err := p.st.Request(ctx, req.FollowOf)
+		if errors.Is(err, store.ErrNotFound) {
+			return envelope.Request{}, false, reject(http.StatusBadRequest, ErrBadParent)
+		}
+		return parent, err == nil, err
+	}
 	if req.ParentID == "" {
 		if req.FromSession != "" {
 			return p.st.OpenClaimFor(ctx, req.From, req.FromSession)

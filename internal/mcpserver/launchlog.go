@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -186,8 +187,8 @@ func (r *Recorder) saveLocked() {
 func ReadLaunches(dir string) []Launch {
 	names := launchFiles(dir)
 	out := make([]Launch, 0, len(names))
-	for i := len(names) - 1; i >= 0; i-- {
-		raw, err := os.ReadFile(filepath.Join(dir, names[i]))
+	for _, name := range slices.Backward(names) {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}

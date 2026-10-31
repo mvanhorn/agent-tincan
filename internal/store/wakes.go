@@ -269,7 +269,7 @@ func (s *Store) RelayNote(ctx context.Context, id string) (*envelope.Progress, e
 // first and then oldest claim, at most limit. needs_input is not held: the
 // agent already answered with a question.
 func (s *Store) HeldClaims(ctx context.Context, agent string, limit int) ([]envelope.Held, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, urgent, claimed_at FROM requests
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, urgent, claimed_at, from_guest, guest_approved FROM requests
 		WHERE to_agent = ? AND status = ? AND kind = ? ORDER BY urgent DESC, claimed_at, rowid LIMIT ?`,
 		agent, string(envelope.StatusClaimed), string(envelope.KindAsk), limit)
 	if err != nil {
@@ -280,7 +280,7 @@ func (s *Store) HeldClaims(ctx context.Context, agent string, limit int) ([]enve
 	for rows.Next() {
 		var h envelope.Held
 		var ms int64
-		if err := rows.Scan(&h.ID, &h.From, &h.Urgent, &ms); err != nil {
+		if err := rows.Scan(&h.ID, &h.From, &h.Urgent, &ms, &h.FromGuest, &h.GuestApproved); err != nil {
 			return nil, err
 		}
 		if ms > 0 {

@@ -677,3 +677,11 @@ func TestFollowUpAfterFinishedWorkSendsNothing(t *testing.T) {
 		t.Fatalf("sends = %d, want 2: nothing after the agent finished its asks (last: %+v)", n, rc.mail(t, n-1))
 	}
 }
+
+// A project label is routing, so a request email does not carry it.
+func TestRequestEmailLeavesOutProject(t *testing.T) {
+	subject, text := requestEmail(envelope.Request{ID: "r1", From: "muse", Body: "the ask", Project: "secret-label"}, "tag")
+	if strings.Contains(subject+text, "secret-label") {
+		t.Fatalf("email carries the label: %s\n%s", subject, text)
+	}
+}

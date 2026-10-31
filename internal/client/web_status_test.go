@@ -16,7 +16,7 @@ func TestSignedOutRenderingAndPromptReturn(t *testing.T) {
 	}
 	// No configured HTTP client: known sign-out must not attempt an inline GET.
 	r := &Relay{}
-	result, err := r.asked(t.Context(), sent{Request: envelope.Request{ID: "held-id", To: "web", Status: envelope.StatusHeld}, Target: target}, time.Minute)
+	result, err := r.asked(t.Context(), sent{ID: "held-id", To: "web", Status: envelope.StatusHeld, Target: target}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

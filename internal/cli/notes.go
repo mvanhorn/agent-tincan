@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
-	"github.com/mvanhorn/agent-tincan/internal/history"
 	"github.com/mvanhorn/agent-tincan/internal/notes"
 )
 
@@ -160,9 +159,9 @@ func notesInstallCmd() *cobra.Command {
 				return err
 			}
 			res, err := notes.InstallService(notes.ServiceOptions{
-				ServiceOptions: history.ServiceOptions{Binary: binary},
-				LibraryRoot:    root,
-				HelperPath:     expandHome(helperPath),
+				Binary:      binary,
+				LibraryRoot: root,
+				HelperPath:  expandHome(helperPath),
 			})
 			if err != nil {
 				return err

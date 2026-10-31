@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/paths"
 )
@@ -387,8 +388,7 @@ func unreachable(err error) bool {
 	if socksConnectFailed(err) {
 		return true
 	}
-	var api *APIError
-	if errors.As(err, &api) {
+	if api, ok := errors.AsType[*APIError](err); ok {
 		// Through a proxy (Muse), a relay that no longer answers comes
 		// back as the proxy's 502 or 504; the relay never sends those.
 		return api.Code == http.StatusBadGateway || api.Code == http.StatusGatewayTimeout
@@ -554,10 +554,11 @@ func appendNew(to, add []string) []string {
 }
 
 // procRoot is where a Linux userspace tailscaled is looked for; tests
-// replace it, and userHome.
+// replace it, userHome, and defaultSocket.
 var (
-	procRoot = "/proc"
-	userHome = os.UserHomeDir
+	procRoot      = "/proc"
+	userHome      = os.UserHomeDir
+	defaultSocket = paths.DefaultTailscaledSocket
 )
 
 // tailscaledSockets are the tailscaled LocalAPI sockets to ask: TS_SOCKET
@@ -579,7 +580,7 @@ func tailscaledSockets(ctx context.Context) ([]string, error) {
 	if goos == "darwin" || goos == "windows" {
 		return []string{""}, nil
 	}
-	def := paths.DefaultTailscaledSocket()
+	def := defaultSocket()
 	_, err := os.Stat(def)
 	if err == nil {
 		return []string{def}, nil
@@ -703,11 +704,7 @@ func cliStatusNetmap(ctx context.Context) ([]string, error) {
 	var wg sync.WaitGroup
 	for i, sock := range socks {
 		wg.Go(func() {
-			args := []string{"status", "--json"}
-			if sock != "" && sock != paths.DefaultTailscaledSocket() {
-				args = append([]string{"--socket", sock}, args...)
-			}
-			raw, err := exec.CommandContext(ctx, bin, args...).Output()
+			raw, err := exec.CommandContext(ctx, bin, tailscaleArgs(sock, "status", "--json")...).Output()
 			if err == nil {
 				var got []string
 				if got, err = ipv4sFromStatusJSON(raw); err == nil {
@@ -734,6 +731,14 @@ func cliStatusNetmap(ctx context.Context) ([]string, error) {
 		return nil, lastErr
 	}
 	return ips, nil
+}
+
+// tailscaleArgs builds a tailscale CLI command line for the tailscaled on sock.
+func tailscaleArgs(sock string, args ...string) []string {
+	if sock != "" && sock != defaultSocket() {
+		return append([]string{"--socket", sock}, args...)
+	}
+	return args
 }
 
 // ipv4sFromStatusJSON reads Self and Peer TailscaleIPs from `tailscale
@@ -769,6 +774,134 @@ func ipv4sFromStatusJSON(raw []byte) ([]string, error) {
 		add(p.TailscaleIPs)
 	}
 	return out, nil
+}
+
+// TailnetSelf is what one tailscaled says about this machine.
+type TailnetSelf struct {
+	Socket  string   // "" is the platform default
+	Version string   // tailscaled's long version, as in 1.104.4-tabc123-gdef456
+	Running bool     // logged in and up; only then does Tags say anything
+	Tags    []string // this node's ACL tags
+	SSH     *bool    // whether Tailscale SSH is on; nil when prefs cannot be read
+}
+
+// localPrefs asks LocalAPI for this node's prefs. Tests replace it.
+var localPrefs = func(ctx context.Context, lc *local.Client) (*ipn.Prefs, error) {
+	return lc.GetPrefs(ctx)
+}
+
+// tailscaleOutput runs the tailscale CLI. Tests replace it.
+var tailscaleOutput = func(ctx context.Context, args ...string) ([]byte, error) {
+	bin := tailscaleBinary()
+	if bin == "" {
+		return nil, errors.New("tailscale CLI not found")
+	}
+	return exec.CommandContext(ctx, bin, args...).Output()
+}
+
+// selfSockets are the tailscaled sockets a report on this machine reads:
+// tailscaledSockets, plus any userspace sockets beside the default one, which
+// a search for the relay does not need. The stock service passes --socket
+// with /run where the default path says /var/run, so sockets are compared by
+// file, or one daemon would count as two.
+func selfSockets(ctx context.Context) ([]string, error) {
+	socks, err := tailscaledSockets(ctx)
+	if err != nil || !slices.Equal(socks, []string{defaultSocket()}) {
+		return socks, err
+	}
+	var out []string
+	var seen []os.FileInfo
+	for _, sock := range append(socks, userspaceSockets(ctx)...) {
+		st, err := os.Stat(sock)
+		if err != nil || slices.ContainsFunc(seen, func(o os.FileInfo) bool { return os.SameFile(o, st) }) {
+			continue
+		}
+		seen = append(seen, st)
+		out = append(out, sock)
+	}
+	return out, nil
+}
+
+// TailnetSelves reads this machine's Tailscale state from every tailscaled
+// on selfSockets, LocalAPI first, then the CLI. A tailscaled that neither can
+// read is left out, so a machine without Tailscale gets an empty list.
+func TailnetSelves(ctx context.Context) []TailnetSelf {
+	socks, err := selfSockets(ctx)
+	useLocal := err == nil
+	if !useLocal {
+		socks = []string{""} // the CLI may still find tailscaled itself
+	}
+	found := make([]*TailnetSelf, len(socks))
+	var wg sync.WaitGroup
+	for i, sock := range socks {
+		wg.Go(func() {
+			if useLocal {
+				if s, err := localSelf(ctx, sock); err == nil {
+					found[i] = s
+					return
+				}
+			}
+			if s, err := cliSelf(ctx, sock); err == nil {
+				found[i] = s
+			}
+		})
+	}
+	wg.Wait()
+	var out []TailnetSelf
+	for _, s := range found {
+		if s != nil {
+			out = append(out, *s)
+		}
+	}
+	return out
+}
+
+func localSelf(ctx context.Context, sock string) (*TailnetSelf, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	lc := localClientFor(sock)
+	st, err := localStatus(ctx, lc)
+	if err != nil {
+		return nil, err
+	}
+	s := &TailnetSelf{Socket: sock, Version: st.Version, Running: st.BackendState == ipn.Running.String()}
+	if st.Self != nil && st.Self.Tags != nil {
+		s.Tags = st.Self.Tags.AsSlice()
+	}
+	if p, err := localPrefs(ctx, lc); err == nil {
+		s.SSH = &p.RunSSH
+	}
+	return s, nil
+}
+
+func cliSelf(ctx context.Context, sock string) (*TailnetSelf, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	raw, err := tailscaleOutput(ctx, tailscaleArgs(sock, "status", "--json")...)
+	if err != nil {
+		return nil, err
+	}
+	var st struct {
+		Version      string
+		BackendState string
+		Self         *struct {
+			Tags []string
+		}
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
+	}
+	s := &TailnetSelf{Socket: sock, Version: st.Version, Running: st.BackendState == ipn.Running.String()}
+	if st.Self != nil {
+		s.Tags = st.Self.Tags
+	}
+	var prefs struct {
+		RunSSH *bool
+	}
+	if raw, err := tailscaleOutput(ctx, tailscaleArgs(sock, "debug", "prefs")...); err == nil && json.Unmarshal(raw, &prefs) == nil {
+		s.SSH = prefs.RunSSH
+	}
+	return s, nil
 }
 
 func tailscaleBinary() string {

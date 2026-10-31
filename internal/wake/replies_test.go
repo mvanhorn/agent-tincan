@@ -219,7 +219,7 @@ func TestWaitingMessage(t *testing.T) {
 		{2, 0, Message(2)},
 		{0, 1, "Agent Tincan: 1 reply to your request is waiting. Run check_inbox (or `tincan inbox`) to read it."},
 		{0, 3, "Agent Tincan: 3 replies to your requests are waiting. Run check_inbox (or `tincan inbox`) to read them."},
-		{1, 2, "Agent Tincan: 1 request from your teammates and 2 replies to your requests waiting. Run check_inbox (or `tincan inbox`) before other work to read the replies and pick up the request, then reply to it."},
+		{1, 2, "Agent Tincan: 1 request and 2 replies to your requests waiting. Run check_inbox (or `tincan inbox`) before other work to read the replies and pick up the request, then reply to it."},
 	} {
 		if got := WaitingMessage(tc.requests, tc.replies); got != tc.want {
 			t.Errorf("WaitingMessage(%d, %d) = %q, want %q", tc.requests, tc.replies, got, tc.want)
@@ -330,9 +330,25 @@ func TestReplyRetryCoalescesWithRequest(t *testing.T) {
 		Options{Debounce: 5 * time.Millisecond, ReplyGrace: time.Millisecond, ReplyRetries: []time.Duration{time.Hour, 10 * time.Millisecond},
 			UnseenReplies: unseen(&n)})
 	replied(w, "hermes")
+	// The hour-long retry must be armed before the request arrives. The
+	// recorder counts the wake before its send returns and arms it, and a
+	// request in that gap would leave the retry armed for Flush to wait out.
 	deadline := time.Now().Add(5 * time.Second)
-	for rc.count() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	armed := func() bool {
+		if rc.count() != 1 {
+			return false
+		}
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		p := w.pending["hermes"]
+		return p != nil && p.timer != nil
+	}
+	for !armed() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !armed() {
+		w.Stop()
+		t.Fatal("first wake did not arm its reply retry before the deadline")
 	}
 	queued(w, "hermes", 1) // pulls the hour-long retry in to the debounce
 	w.Flush()

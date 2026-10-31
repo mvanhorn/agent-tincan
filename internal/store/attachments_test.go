@@ -50,8 +50,8 @@ func TestAttachmentReserveCommitRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := AttachmentRecord{
-		Attachment: envelope.Attachment{ID: id, Name: "cat.png", MIME: "image/png", Size: 1234},
-		SHA256:     "deadbeef", Uploader: "history", Ready: true, CreatedAt: c.t.UTC().Truncate(time.Millisecond),
+		ID: id, Name: "cat.png", MIME: "image/png", Size: 1234,
+		SHA256: "deadbeef", Uploader: "history", Ready: true, CreatedAt: c.t.UTC().Truncate(time.Millisecond),
 	}
 	if a != want {
 		t.Fatalf("committed =\n%+v\nwant\n%+v", a, want)

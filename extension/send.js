@@ -96,15 +96,27 @@ const NOTICE = Object.freeze(['[role="alert"]', '[role="status"]']);
 
 export const SELECTORS = Object.freeze({
   chatgpt: Object.freeze({
-    composer: ['#prompt-textarea', 'div[contenteditable="true"][id="prompt-textarea"]', 'textarea[data-id="root"]', 'form div[contenteditable="true"]'],
-    send: ['[data-testid="send-button"]', '#composer-submit-button', 'button[aria-label*="Send"]'],
+    // The composer is a ProseMirror textbox in the page's composer form;
+    // its label is localized and the old #prompt-textarea id is gone, so
+    // structure comes first and the ids are late fallbacks.
+    composer: ['form div[contenteditable="true"][role="textbox"]', 'form div[contenteditable="true"]', '#prompt-textarea', 'textarea[data-id="root"]'],
+    // The send button appears only once the composer has text, as a
+    // submit button in the composer form with no testid or id; the form's
+    // submit button covers a localized label.
+    send: ['[data-testid="send-button"]', '#composer-submit-button', 'button[aria-label*="Send"]', 'form button[type="submit"]'],
     stop: ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'],
     streaming: ['.result-streaming'],
-    assistant: ['[data-message-author-role="assistant"]'],
-    user: ['[data-message-author-role="user"]'],
+    assistant: ['[data-conversation-role="assistant"]', '[data-message-author-role="assistant"]'],
+    user: ['[data-conversation-role="user"]', '[data-message-author-role="user"]'],
     notice: NOTICE,
     login: ['[data-testid="login-button"]', 'a[href*="/auth/login"]'],
     loginPaths: ['/auth/login', '/log-in'],
+    // A conversation chatgpt.com failed to fetch sits half-loaded (no
+    // composer, no turns), then shows this text and never a composer; the
+    // error carries no stable attribute. Only a page without a composer
+    // counts, so a conversation quoting the text is not mistaken for it.
+    loadError: ['main'],
+    loadErrorText: ['Could not load this ChatGPT conversation'],
   }),
   claudeai: Object.freeze({
     composer: ['div[contenteditable="true"].ProseMirror', 'fieldset div[contenteditable="true"]', '[contenteditable="true"][aria-label*="prompt" i]', 'div[contenteditable="true"]'],
@@ -359,6 +371,8 @@ export function pageProbe(sel) {
       (Array.isArray(sel.blockedText) && qa(sel.dialog || []).some((d) => sel.blockedText.some((t) => textOf(d).includes(t)))),
     composer: Boolean(composer),
     composerEmpty: draft.trim() === '',
+    loadError: !composer && Array.isArray(sel.loadErrorText) && qa(sel.loadError || []).some((el) => sel.loadErrorText.some((t) => textOf(el).includes(t))),
+    title: String(document.title || '').slice(0, 80),
     generating: Boolean(q(sel.stop)) || Boolean(q(sel.streaming)),
     assistantCount: qa(sel.assistant).length,
     userCount: qa(sel.user).length,
@@ -402,11 +416,23 @@ export function pageDismiss(sel) {
   return { clicked };
 }
 
-// Candidate ChatGPT file flow. These fixed selectors and readiness signals
-// require live acceptance before IMAGE_INPUT_SITES may include chatgpt.
-// The returned state never contains page URLs, tokens or user draft text.
-export function pageInputImages(files, attach = false) {
-  const composer = document.querySelector('#prompt-textarea');
+// Candidate ChatGPT file flow. The composer and send button come from sel,
+// the same lists a text send uses; these readiness signals require live
+// acceptance before IMAGE_INPUT_SITES may include chatgpt. The returned
+// state never contains page URLs, tokens or user draft text.
+export function pageInputImages(files, attach, sel) {
+  const first = (root, list) => {
+    for (const s of list) {
+      try {
+        const el = root.querySelector(s);
+        if (el) return el;
+      } catch {
+        // Skipped.
+      }
+    }
+    return null;
+  };
+  const composer = first(document, sel.composer);
   const form = composer && composer.closest('form');
   const input = form && form.querySelector('input[type="file"]');
   if (!form || !input) return { ok: false, error: 'image file control not found' };
@@ -425,7 +451,7 @@ export function pageInputImages(files, attach = false) {
   if (form.querySelector('[role="alert"]')) return { ok: false, error: 'the composer reported an upload error' };
   // FileList assignment alone is never readiness. Require a loaded preview
   // for every filename, no upload progress and an enabled send button.
-  const button = form.querySelector('button[data-testid="send-button"]');
+  const button = first(form, sel.send);
   const ready = previews.length === files.length && files.every((f, i) => {
     const img = previews[i];
     return img.complete && img.naturalWidth > 0 && (img.alt === f.name || img.closest('[title]')?.getAttribute('title') === f.name);
@@ -514,11 +540,22 @@ export function pageFill(sel, message) {
 // that matches first. A disabled button is reported so the caller can
 // retry.
 export function pageSubmit(sel, inputNames = null, message = null) {
+  const first = (root, list) => {
+    for (const s of list) {
+      try {
+        const el = root.querySelector(s);
+        if (el) return el;
+      } catch {
+        // Skipped.
+      }
+    }
+    return null;
+  };
   if (inputNames) {
-    const composer = document.querySelector('#prompt-textarea');
+    const composer = first(document, sel.composer);
     const form = composer?.closest('form');
     const previews = form ? [...form.querySelectorAll('img')] : [];
-    const button = form?.querySelector('button[data-testid="send-button"]');
+    const button = form && first(form, sel.send);
     const ready = previews.length === inputNames.length && inputNames.every((name, i) => {
       const img = previews[i];
       return img.complete && img.naturalWidth > 0 && (img.alt === name || img.closest('[title]')?.getAttribute('title') === name);
@@ -527,17 +564,6 @@ export function pageSubmit(sel, inputNames = null, message = null) {
     button.click();
     return { ok: true, how: 'button' };
   }
-  const q = (list) => {
-    for (const s of list) {
-      try {
-        const el = document.querySelector(s);
-        if (el) return el;
-      } catch {
-        // Skipped.
-      }
-    }
-    return null;
-  };
   const shown = (el) => {
     if (typeof el.checkVisibility === 'function') return el.checkVisibility() !== false;
     if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
@@ -566,7 +592,7 @@ export function pageSubmit(sel, inputNames = null, message = null) {
     btn.click();
     return { ok: true, how: 'button' };
   }
-  const composer = q(sel.composer);
+  const composer = first(document, sel.composer);
   if (!composer) return { ok: false, code: 'composer_not_found' };
   composer.focus();
   composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
@@ -680,11 +706,26 @@ function cleanProbe(r) {
     blocked: o.blocked === true,
     composer: o.composer === true,
     composerEmpty: o.composerEmpty === true,
+    loadError: o.loadError === true,
+    title: str(o.title, 80),
     generating: o.generating === true,
     assistantCount: Number.isSafeInteger(o.assistantCount) ? o.assistantCount : 0,
     userCount: Number.isSafeInteger(o.userCount) ? o.userCount : 0,
     notice: str(o.notice, MAX_NOTICE),
   };
+}
+
+// pageState describes what a probed page showed, for a send that failed
+// before typing: its path, title and turn counts, never composer text.
+function pageState(p) {
+  if (!p) return '';
+  let path = '';
+  try {
+    path = new URL(p.href).pathname;
+  } catch {
+    // An address that does not parse is left out.
+  }
+  return `; the tab showed ${path || 'no address'}, titled "${p.title}", with ${p.userCount} user and ${p.assistantCount} assistant turns`;
 }
 
 // elsewhere returns url as a URL when it is an http(s) address on another
@@ -837,8 +878,14 @@ export function createSender({
   // anti-bot check, and ready(page). A page that shows its login marks is
   // not_logged_in at once; one that never shows the signed-in mark is
   // not_logged_in when loadBy passes; one that is never ready fails with
-  // notReady(). seen, when given, gets every probe of the page.
-  async function load(tabId, cfg, sel, { loadBy, late, ready, notReady, seen }) {
+  // notReady(page). seen, when given, gets every probe of the page.
+  //
+  // A page showing the site's load error (sel.loadError) is reloaded
+  // once when restart is given; restart returns the new loadBy, since
+  // the error can show late in the window. Nothing has been typed yet, so
+  // the reload is safe. If the error shows again once the reload has
+  // taken effect, the load fails with page_error.
+  async function load(tabId, cfg, sel, { loadBy, late, ready, notReady, seen, restart }) {
     const host = new URL(cfg.newURL).host;
     // An anti-bot interstitial can be transient (a challenge that passes
     // by itself and reloads the page), so a blocked page is polled like a
@@ -846,6 +893,13 @@ export function createSender({
     // load time runs out.
     let page = null;
     let blocked = false;
+    let reloaded = false;
+    // reloading: the reload has not yet taken effect (the tab was not seen
+    // loading and settleMs has not passed), so an error still on screen
+    // may belong to the old page.
+    let reloading = false;
+    let reloadedAt = 0;
+    const loadFailed = () => new OpError('page_error', `${host} could not load the conversation${reloaded ? ', before and after one reload' : ''}; nothing was typed${pageState(page)}`);
     for (;;) {
       // While loading, a tab on another host gets one short settle before
       // it fails: a logged-in Google session can pass through
@@ -853,18 +907,33 @@ export function createSender({
       if (awayError(await tabURL(tabId), cfg)) await sleep(settleMs);
       const t = await onSite(tabId, cfg);
       blocked = false;
+      if (t.status !== 'complete' || now() >= reloadedAt + settleMs) reloading = false;
       if (t.status === 'complete') {
         page = cleanProbe(await inject(tabId, pageProbe, [sel]));
         if (seen) seen(page);
         blocked = page.blocked;
         if (!blocked && page.loggedOut) throw new OpError('not_logged_in', `logged out of ${host}`);
         if (!blocked && page.signedIn && ready(page)) return page;
+        if (!blocked && page.loadError && restart && !reloading) {
+          if (reloaded) throw loadFailed();
+          if (!owned.has(tabId)) throw new OpError('internal', 'refusing to reload a tab the extension did not open');
+          reloaded = true;
+          reloading = true;
+          reloadedAt = now();
+          try {
+            await tabs.reload(tabId);
+          } catch {
+            throw new OpError('send_failed', 'the worker tab was closed');
+          }
+          loadBy = restart();
+        }
       }
       if (now() >= loadBy) {
         if (blocked) throw new OpError('blocked', `anti-bot check on ${host}`);
         if (page && !page.signedIn) throw new OpError('not_logged_in', `no signed-in account on ${host}`);
         if (late()) throw new OpError('timeout', 'the page did not load in time');
-        throw notReady();
+        if (page && page.loadError) throw loadFailed();
+        throw notReady(page);
       }
       await sleep(pollMs);
     }
@@ -940,7 +1009,8 @@ export function createSender({
         loadBy: Math.min(deadline, start + loadMs),
         late,
         ready: (p) => p.composer,
-        notReady: () => new OpError('composer_not_found', 'no message box on the page'),
+        notReady: (p) => new OpError('composer_not_found', 'no message box on the page' + pageState(p)),
+        restart: () => Math.min(deadline, now() + loadMs),
         seen: (p) => {
           if (p.notice) notice = p.notice;
         },
@@ -987,7 +1057,7 @@ export function createSender({
         // Mark possible exposure before injection, since a lost injection
         // response cannot establish that change was never dispatched.
         uploaded = true;
-        const attached = await inject(tab.id, pageInputImages, [images, true]);
+        const attached = await inject(tab.id, pageInputImages, [images, true, sel]);
         if (!attached?.ok) throw new OpError('send_failed', attached?.error || 'image upload failed');
         for (;;) {
           await onSite(tab.id, cfg);
@@ -995,7 +1065,7 @@ export function createSender({
           if (p.loggedOut) throw new OpError('not_logged_in', 'logged out during image upload');
           if (p.blocked) throw blockedErr();
           inputActive();
-          const state = await inject(tab.id, pageInputImages, [images, false]);
+          const state = await inject(tab.id, pageInputImages, [images, false, sel]);
           if (!state?.ok) throw new OpError('send_failed', state?.error || 'image upload failed');
           if (state.ready) break;
           if (late()) throw new OpError('timeout', 'image upload readiness was not confirmed');
@@ -1037,7 +1107,7 @@ export function createSender({
         }
         if (images) {
           inputActive();
-          const state = await inject(tab.id, pageInputImages, [images, false]);
+          const state = await inject(tab.id, pageInputImages, [images, false, sel]);
           if (!state?.ok || !state.ready) throw new OpError('send_failed', 'image readiness was lost before submission');
         }
         submittedAt = now();

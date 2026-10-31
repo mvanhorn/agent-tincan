@@ -58,6 +58,7 @@ func TestUpgradeInboxAndWait(t *testing.T) {
 }
 
 func TestListenUpgradeEnvironment(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	old := client.Version
 	client.Version = "0.5.4"
 	t.Cleanup(func() { client.Version = old })
@@ -157,6 +158,7 @@ func TestWaitDoesNotEndForUpgradeAlone(t *testing.T) {
 }
 
 func TestListenUpgradeRetriesAndDeduplicates(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	oldVersion, oldCooldown := client.Version, listenCooldown
 	client.Version, listenCooldown = "0.5.4", time.Millisecond
 	t.Cleanup(func() { client.Version, listenCooldown = oldVersion, oldCooldown })

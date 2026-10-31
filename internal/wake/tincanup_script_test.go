@@ -147,7 +147,7 @@ func (h *tincanUpHarness) killRelay() {
 		return
 	}
 	if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		_ = signalPID(pid, syscall.SIGTERM)
 	}
 }
 

@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS replies (
   created_at INTEGER NOT NULL,
   attachments TEXT NOT NULL DEFAULT ''
 );
+-- AgentStats reads the replies written in a window; finding them by time
+-- keeps it off the rest of the request history.
+CREATE INDEX IF NOT EXISTS replies_created ON replies(created_at);
 `
 
 // Store is the relay's SQLite store.
@@ -246,6 +249,26 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate rooms: %w", err)
 	}
+	if err := s.migrateProject(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate project: %w", err)
+	}
+	if err := s.migrateLeases(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate leases: %w", err)
+	}
+	if err := s.migrateSchedules(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schedules: %w", err)
+	}
+	if err := s.migrateFollowups(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate followups: %w", err)
+	}
+	if err := s.migrateGuests(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate guests: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -404,6 +427,31 @@ func (s *Store) migrateAgentGoodAt() error {
 	return err
 }
 
+// migrateProject adds to_project (the project of the session a request is
+// for, "" for any session), queued_at (when its fallback clock started) and
+// fallback_woken (whether FallenBack reported it since that clock started).
+// Old rows name no project, so a zero queued_at never counts. It is a no-op
+// on a current table.
+func (s *Store) migrateProject() error {
+	for _, col := range []struct{ name, definition string }{
+		{"to_project", "TEXT NOT NULL DEFAULT ''"},
+		{"queued_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"fallback_woken", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		var has bool
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, col.name).Scan(&has); err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN ` + col.name + ` ` + col.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) migrateAgentFeatures() error {
 	var pollColumn bool
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'poll_features')`).Scan(&pollColumn); err != nil {
@@ -508,17 +556,22 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt); err != nil {
+	until, asks, err := encodeGuest(a.Guest)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at, guest_until, guest_asks, guest_no_hold, guest_ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt, until, asks, a.Guest.NoHold, a.Guest.Ended); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 // DeleteAgent removes name and, in the same transaction, the last wake the
-// relay sent it, every idle watch it set or that watches it, and its room
-// memberships, so an agent joined again under the name starts with none and
-// in no rooms. Its room posts stay, shown under its name.
+// relay sent it, every idle watch it set or that watches it, every scheduled
+// ask from or to it, and its room memberships, so an agent joined again under
+// the name starts with none and in no rooms. Its room posts stay, shown under
+// its name.
 func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -539,7 +592,13 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM watches WHERE watcher = ? OR target = ?`, name, name); err != nil {
 		return false, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM schedules WHERE from_agent = ? OR to_agent = ?`, name, name); err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE agent = ?`, name); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM work_leases WHERE holder = ?`, name); err != nil {
 		return false, err
 	}
 	return n > 0, tx.Commit()
@@ -663,7 +722,7 @@ func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, b
 }
 
 func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]identity.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, '') FROM agents WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, ''), guest_until, guest_asks, guest_no_hold, guest_ended FROM agents WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -671,11 +730,15 @@ func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]i
 	var out []identity.Agent
 	for rows.Next() {
 		var a identity.Agent
-		var joined int64
-		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt); err != nil {
+		var joined, until int64
+		var asks string
+		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt, &until, &asks, &a.Guest.NoHold, &a.Guest.Ended); err != nil {
 			return nil, err
 		}
 		a.JoinedAt = time.UnixMilli(joined)
+		if a.Guest.Until, a.Guest.Asks, err = decodeGuest(until, asks); err != nil {
+			return nil, err
+		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -701,8 +764,12 @@ func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM invites WHERE name = ? AND code != ?`, inv.Name, inv.Code); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO invites(code, name, expires, kind, new_only, mint_node) VALUES (?, ?, ?, ?, ?, ?)`,
-		inv.Code, inv.Name, inv.Expires.UnixMilli(), nullable(inv.Kind), inv.NewOnly, nullable(inv.MintNode)); err != nil {
+	until, asks, err := encodeGuest(inv.Guest)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO invites(code, name, expires, kind, new_only, mint_node, guest_until, guest_asks, guest_no_hold) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		inv.Code, inv.Name, inv.Expires.UnixMilli(), nullable(inv.Kind), inv.NewOnly, nullable(inv.MintNode), until, asks, inv.Guest.NoHold); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -713,8 +780,9 @@ func (s *Store) PutInvite(ctx context.Context, inv identity.Invite) error {
 // code never reaches the database.
 func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, bool, error) {
 	var inv identity.Invite
-	var exp int64
-	err := s.db.QueryRowContext(ctx, `DELETE FROM invites WHERE code = ? RETURNING code, name, expires, COALESCE(kind, ''), new_only, COALESCE(mint_node, '')`, code).Scan(&inv.Code, &inv.Name, &exp, &inv.Kind, &inv.NewOnly, &inv.MintNode)
+	var exp, until int64
+	var asks string
+	err := s.db.QueryRowContext(ctx, `DELETE FROM invites WHERE code = ? RETURNING code, name, expires, COALESCE(kind, ''), new_only, COALESCE(mint_node, ''), guest_until, guest_asks, guest_no_hold`, code).Scan(&inv.Code, &inv.Name, &exp, &inv.Kind, &inv.NewOnly, &inv.MintNode, &until, &asks, &inv.Guest.NoHold)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Invite{}, false, nil
 	}
@@ -722,6 +790,9 @@ func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, b
 		return identity.Invite{}, false, err
 	}
 	inv.Expires = time.UnixMilli(exp)
+	if inv.Guest.Until, inv.Guest.Asks, err = decodeGuest(until, asks); err != nil {
+		return identity.Invite{}, false, err
+	}
 	return inv, true, nil
 }
 
@@ -789,11 +860,14 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0})
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved)
 	if err != nil {
+		return envelope.Request{}, err
+	}
+	if err := s.followOnTx(ctx, tx, req); err != nil {
 		return envelope.Request{}, err
 	}
 	return req, nil
@@ -805,22 +879,54 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 // whatever its size; the rest wait for the next poll.
 const maxDeliverBytes = 1 << 20
 
+// QueueScope is which of an agent's queued requests one caller may take. The
+// zero scope takes them all, as before projects existed.
+type QueueScope struct {
+	// Project is the caller's project label, "" for none.
+	Project string
+	// Grace is how long a request for another project stays closed to the
+	// caller after it was queued. Age decides, not whether a session of
+	// that project looks live, because an open idle window keeps calling
+	// the relay and would otherwise strand the request.
+	Grace time.Duration
+}
+
+// scopeOpen is the test for a request a scope may take, with the arguments
+// QueueScope.filter gives it.
+const scopeOpen = `(to_project = '' OR to_project = ? OR queued_at <= ?)`
+
+// filter narrows a query on requests to what the scope may take at now. It
+// is the one test every delivery path shares.
+func (scope QueueScope) filter(now time.Time) (string, []any) {
+	if scope.Grace <= 0 {
+		return "", nil
+	}
+	return ` AND ` + scopeOpen, []any{scope.Project, now.Add(-scope.Grace).UnixMilli()}
+}
+
 // Deliver hands up to limit queued requests for agent to its poller, marking
 // them delivered under a lease. A request delivered but never claimed returns
 // to the queue when the lease runs out, so a crash after polling strands
 // nothing. A request held back (HoldBack) waits until its time.
 func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time.Duration) ([]envelope.Request, error) {
+	return s.DeliverFor(ctx, agent, QueueScope{}, limit, lease)
+}
+
+// DeliverFor is Deliver of what scope may take.
+func (s *Store) DeliverFor(ctx context.Context, agent string, scope QueueScope, limit int, lease time.Duration) ([]envelope.Request, error) {
 	now := s.now()
+	filter, filterArgs := scope.filter(now)
+	args := []any{string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
+		agent, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli()}
+	args = append(append(args, filterArgs...), limit, maxDeliverBytes)
 	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?
 		WHERE id IN (SELECT id FROM (
 			SELECT id, SUM(length(body) + length(exchanges)) OVER (ORDER BY urgent DESC, created_at, rowid) AS running,
 				ROW_NUMBER() OVER (ORDER BY urgent DESC, created_at, rowid) AS n
-			FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ?
+			FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ?`+filter+`
 			ORDER BY urgent DESC, created_at, rowid LIMIT ?
 		) WHERE n = 1 OR running <= ?)
-		RETURNING `+requestCols,
-		string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
-		agent, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), limit, maxDeliverBytes)
+		RETURNING `+requestCols, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -831,6 +937,24 @@ func (s *Store) Deliver(ctx context.Context, agent string, limit int, lease time
 	}
 	sortByPriority(out)
 	return out, nil
+}
+
+// FallenBack returns the queued requests that named a project and have now
+// been queued for grace, so any session may take them, each once per fallback
+// clock. A caller that found nothing during the grace has no other reason to
+// look again, so the relay wakes the target for these. A request held back
+// (HoldBack) waits until its time, as Deliver skips it.
+func (s *Store) FallenBack(ctx context.Context, grace time.Duration) ([]envelope.Request, error) {
+	now := s.now()
+	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET fallback_woken = 1
+		WHERE status = ? AND to_project != '' AND fallback_woken = 0 AND queued_at <= ? AND expires_at > ? AND deliver_after <= ?
+		RETURNING `+requestCols,
+		string(envelope.StatusQueued), now.Add(-grace).UnixMilli(), now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequests(rows)
 }
 
 // CountQueued returns how many requests are waiting for agent without
@@ -850,6 +974,19 @@ func (s *Store) QueuedIDs(ctx context.Context, agent string) ([]string, error) {
 	now := s.now().UnixMilli()
 	return s.ids(ctx, `SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ? ORDER BY created_at, rowid`,
 		agent, string(envelope.StatusQueued), now, now)
+}
+
+// HiddenIDsFor lists up to limit ids of agent's queued requests that scope
+// may not take yet, oldest first.
+func (s *Store) HiddenIDsFor(ctx context.Context, agent string, scope QueueScope, limit int) ([]string, error) {
+	at := s.now()
+	filter, filterArgs := scope.filter(at)
+	if filter == "" {
+		return nil, nil
+	}
+	now := at.UnixMilli()
+	args := append(append([]any{agent, string(envelope.StatusQueued), now, now}, filterArgs...), limit)
+	return s.ids(ctx, `SELECT id FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ? AND NOT `+scopeOpen+` ORDER BY created_at, rowid LIMIT ?`, args...)
 }
 
 // ids runs a query whose rows are single ids.
@@ -892,10 +1029,17 @@ func (s *Store) AgentsWithQueuedRequests(ctx context.Context) ([]string, error) 
 
 // CountUrgentQueued returns how many of agent's queued requests are urgent.
 func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error) {
+	return s.CountUrgentQueuedFor(ctx, agent, QueueScope{})
+}
+
+// CountUrgentQueuedFor is CountUrgentQueued of what scope may take.
+func (s *Store) CountUrgentQueuedFor(ctx context.Context, agent string, scope QueueScope) (int, error) {
 	var n int
-	now := s.now().UnixMilli()
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND urgent = 1 AND expires_at > ? AND deliver_after <= ?`,
-		agent, string(envelope.StatusQueued), now, now).Scan(&n)
+	at := s.now()
+	now := at.UnixMilli()
+	filter, filterArgs := scope.filter(at)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE to_agent = ? AND status = ? AND urgent = 1 AND expires_at > ? AND deliver_after <= ?`+filter,
+		append([]any{agent, string(envelope.StatusQueued), now, now}, filterArgs...)...).Scan(&n)
 	return n, err
 }
 
@@ -905,13 +1049,22 @@ func (s *Store) CountUrgentQueued(ctx context.Context, agent string) (int, error
 // only query a request email reads, so it never returns a held request (or
 // one that was held and never approved), a ping, a notify, an ask built
 // from a room mention (its text is the room's, so its wake carries counts
-// only), or a request paused for input or already finished: none of those
-// may reach an email.
+// only), a request marked from_guest (an email cannot carry its framing, and
+// a mail reader holds no claim for the mark to follow, so it is taken through
+// the inbox), or a request paused for input or already finished: none of
+// those may reach an email.
 func (s *Store) OpenAsks(ctx context.Context, agent string) ([]envelope.Request, error) {
+	return s.OpenAsksFor(ctx, agent, QueueScope{})
+}
+
+// OpenAsksFor is OpenAsks of what scope may take.
+func (s *Store) OpenAsksFor(ctx context.Context, agent string, scope QueueScope) ([]envelope.Request, error) {
+	now := s.now()
+	filter, filterArgs := scope.filter(now)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
-		WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?) AND expires_at > ? AND NOT (was_held = 1 AND approved = 0) AND room_post_id IS NULL
+		WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?) AND expires_at > ? AND NOT (was_held = 1 AND approved = 0) AND room_post_id IS NULL AND from_guest = 0`+filter+`
 		ORDER BY urgent DESC, created_at, rowid`,
-		agent, string(envelope.KindAsk), string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), s.now().UnixMilli())
+		append([]any{agent, string(envelope.KindAsk), string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli()}, filterArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -991,19 +1144,26 @@ func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 // Queued pings come first and have their own limit, so a backlog of other
 // requests never hides a ping from a peek-based responder.
 func (s *Store) PendingRequests(ctx context.Context, agent string, limit int) ([]envelope.Pending, error) {
-	out, err := s.pendingRequests(ctx, agent, "kind = ?", limit)
+	return s.PendingRequestsFor(ctx, agent, QueueScope{}, limit)
+}
+
+// PendingRequestsFor is PendingRequests of what scope may take.
+func (s *Store) PendingRequestsFor(ctx context.Context, agent string, scope QueueScope, limit int) ([]envelope.Pending, error) {
+	out, err := s.pendingRequests(ctx, agent, scope, "kind = ?", limit)
 	if err != nil {
 		return nil, err
 	}
-	rest, err := s.pendingRequests(ctx, agent, "kind != ?", limit)
+	rest, err := s.pendingRequests(ctx, agent, scope, "kind != ?", limit)
 	return append(out, rest...), err
 }
 
-func (s *Store) pendingRequests(ctx context.Context, agent, kindCond string, limit int) ([]envelope.Pending, error) {
-	now := s.now().UnixMilli()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent FROM requests
-		WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ? AND `+kindCond+` ORDER BY urgent DESC, created_at, rowid LIMIT ?`,
-		agent, string(envelope.StatusQueued), now, now, string(envelope.KindPing), limit)
+func (s *Store) pendingRequests(ctx context.Context, agent string, scope QueueScope, kindCond string, limit int) ([]envelope.Pending, error) {
+	at := s.now()
+	now := at.UnixMilli()
+	filter, filterArgs := scope.filter(at)
+	args := append(append([]any{agent, string(envelope.StatusQueued), now, now, string(envelope.KindPing)}, filterArgs...), limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, from_agent, kind, urgent, updated_at FROM requests
+		WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ? AND `+kindCond+filter+` ORDER BY urgent DESC, created_at, rowid LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1011,7 +1171,7 @@ func (s *Store) pendingRequests(ctx context.Context, agent, kindCond string, lim
 	var out []envelope.Pending
 	for rows.Next() {
 		var p envelope.Pending
-		if err := rows.Scan(&p.ID, &p.From, &p.Kind, &p.Urgent); err != nil {
+		if err := rows.Scan(&p.ID, &p.From, &p.Kind, &p.Urgent, &p.Rev); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -1031,14 +1191,16 @@ func (s *Store) Claim(ctx context.Context, id, agent string, lease time.Duration
 // claimed_at records when this claim began; claiming again while claimed
 // keeps it.
 func (s *Store) ClaimLeases(ctx context.Context, id, agent string, lease, urgentLease time.Duration) (envelope.Request, error) {
-	return s.ClaimLeasesFrom(ctx, id, agent, "", lease, urgentLease)
+	return s.ClaimLeasesFrom(ctx, id, agent, "", QueueScope{}, lease, urgentLease)
 }
 
 // ClaimLeasesFrom is ClaimLeases from the claimer's session, which is
 // recorded with the claim like claimed_at: claiming again while claimed
 // keeps the first session. "" is a claim made with no session. A queued
-// request held back (HoldBack) cannot be claimed before its time.
-func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, lease, urgentLease time.Duration) (envelope.Request, error) {
+// request held back (HoldBack) cannot be claimed before its time, and a
+// request outside scope cannot be claimed at all, so a claim by id reaches
+// no further than a poll.
+func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, scope QueueScope, lease, urgentLease time.Duration) (envelope.Request, error) {
 	req, _, err := s.lookup(ctx, id)
 	if err != nil {
 		return envelope.Request{}, err
@@ -1047,14 +1209,15 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 		return envelope.Request{}, notTarget(req, agent)
 	}
 	now := s.now()
+	filter, filterArgs := scope.filter(now)
+	args := []any{string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
+		string(envelope.StatusClaimed), now.UnixMilli(), string(envelope.StatusClaimed), session, now.UnixMilli(), id, agent,
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli(),
+		string(envelope.StatusQueued), now.UnixMilli()}
 	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
 		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
 		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL
-		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?) AND expires_at > ? AND (status != ? OR deliver_after <= ?)`,
-		string(envelope.StatusClaimed), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
-		string(envelope.StatusClaimed), now.UnixMilli(), string(envelope.StatusClaimed), session, now.UnixMilli(), id, agent,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli(),
-		string(envelope.StatusQueued), now.UnixMilli())
+		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?) AND expires_at > ? AND (status != ? OR deliver_after <= ?)`+filter, append(args, filterArgs...)...)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1160,6 +1323,9 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if err := s.mirrorReplyTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
+	if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
+		return envelope.Reply{}, err
+	}
 	return rep, nil
 }
 
@@ -1222,6 +1388,19 @@ func (s *Store) replyFor(ctx context.Context, id string) (*envelope.Reply, error
 
 // Cancel lets the sender withdraw a request the target has not claimed.
 func (s *Store) Cancel(ctx context.Context, id, agent string) error {
+	return s.cancel(ctx, id, agent, "")
+}
+
+// CancelUntaken is Cancel for a gateway guest. A request back in the queue
+// after a teammate claimed it, or after its question was answered, is not that
+// guest's to withdraw: a claim is what marks what the teammate sends, and
+// cancelling here would stop that claim from ever coming back while the
+// teammate may still be acting on what it read.
+func (s *Store) CancelUntaken(ctx context.Context, id, agent string) error {
+	return s.cancel(ctx, id, agent, ` AND resumed = 0 AND claim_lapsed = 0`)
+}
+
+func (s *Store) cancel(ctx context.Context, id, agent, cond string) error {
 	req, _, err := s.lookup(ctx, id)
 	if err != nil {
 		return err
@@ -1229,7 +1408,7 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 	if req.From != agent {
 		return ErrForbidden
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`,
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`+cond,
 		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusHeld))
 	if err != nil {
 		return err
@@ -1380,7 +1559,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1390,7 +1569,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var created, progressAt int64
 	var note string
 	var roomPost sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID = roomPost.Int64
@@ -1474,10 +1653,12 @@ func (s *Store) CountHeld(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// Release queues a held request with a fresh delivery TTL and its original creation time.
+// Release queues a held request with a fresh delivery TTL and its original
+// creation time. Time held is not time queued, so its fallback clock starts
+// here.
 func (s *Store) Release(ctx context.Context, id string, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, approved = 1, updated_at = ?, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, approved = 1, guest_approved = from_guest, updated_at = ?, queued_at = ?, fallback_woken = 0, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1575,9 +1756,16 @@ func (s *Store) SetPollFeatures(ctx context.Context, name, state string) error {
 // CountQueuedWithPings counts queued requests and pings from the same
 // snapshot, leaving out requests held back (HoldBack) until their time.
 func (s *Store) CountQueuedWithPings(ctx context.Context, agent string) (int, int, error) {
+	return s.CountQueuedWithPingsFor(ctx, agent, QueueScope{})
+}
+
+// CountQueuedWithPingsFor is CountQueuedWithPings of what scope may take.
+func (s *Store) CountQueuedWithPingsFor(ctx context.Context, agent string, scope QueueScope) (int, int, error) {
 	var queued, pings int
-	now := s.now().UnixMilli()
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN kind = ? THEN 1 END) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ?`,
-		string(envelope.KindPing), agent, string(envelope.StatusQueued), now, now).Scan(&queued, &pings)
+	at := s.now()
+	now := at.UnixMilli()
+	filter, filterArgs := scope.filter(at)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN kind = ? THEN 1 END) FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ?`+filter,
+		append([]any{string(envelope.KindPing), agent, string(envelope.StatusQueued), now, now}, filterArgs...)...).Scan(&queued, &pings)
 	return queued, pings, err
 }

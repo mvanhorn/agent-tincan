@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -30,7 +32,9 @@ func upgradeCmd() *cobra.Command {
 running binary. Agents without GitHub access update this way.
 
 The new binary is written next to the old one and renamed over it, so the old
-file is never modified in place. Long-running tincan processes (wait or listen
+file is never modified in place. Windows will not replace a running exe, so
+there the old one is first renamed to tincan.old-<timestamp>, and later runs
+delete it once nothing holds it open. Long-running tincan processes (wait or listen
 loops, MCP servers) keep running the old build until they are restarted; the
 output names each running tincan mcp on the old build and how its app
 reloads it.
@@ -80,7 +84,7 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 		}
 		return err
 	}
-	name := "tincan_" + runtime.GOOS + "_" + runtime.GOARCH
+	name := releaseAsset(runtime.GOOS, runtime.GOARCH)
 	want := m.SHA256Of(name)
 	available := m.Version
 	if available == "" {
@@ -144,9 +148,7 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	// Rename gives the path a new inode. Overwriting a signed binary in
-	// place gets it killed on macOS.
-	if err := os.Rename(tmp.Name(), exe); err != nil {
+	if err := replaceBinary(runtime.GOOS, tmp.Name(), exe); err != nil {
 		return fmt.Errorf("replace %s: %w", exe, err)
 	}
 	done = true
@@ -158,6 +160,81 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 	}
 	fmt.Fprint(out, reloadAdvice(mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath())), available, mcpserver.LaunchRunning))
 	return nil
+}
+
+// releaseAsset names the release binary for a platform.
+func releaseAsset(goos, goarch string) string {
+	name := "tincan_" + goos + "_" + goarch
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+// oldBinaryPrefix starts the name of a binary moved aside on Windows.
+const oldBinaryPrefix = "tincan.old-"
+
+// replaceBinary moves the new file at tmp to exe. Rename gives the path a new
+// inode: overwriting a signed binary in place gets it killed on macOS.
+//
+// Windows refuses that rename while exe runs, but lets a running exe be
+// renamed, so exe first moves to a name of its own. The name is unique
+// because a running tincan mcp can hold an earlier one open.
+func replaceBinary(goos, tmp, exe string) error {
+	if goos != "windows" {
+		return os.Rename(tmp, exe)
+	}
+	aside := oldBinaryPath(filepath.Dir(exe))
+	if err := os.Rename(exe, aside); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		if rerr := os.Rename(aside, exe); rerr != nil {
+			return fmt.Errorf("%w; the old binary is now %s (%v)", err, aside, rerr)
+		}
+		return err
+	}
+	return nil
+}
+
+// oldBinaryPath picks an unused tincan.old-<timestamp> name in dir.
+func oldBinaryPath(dir string) string {
+	for t := time.Now().UnixNano(); ; t++ {
+		p := filepath.Join(dir, oldBinaryPrefix+strconv.FormatInt(t, 10))
+		if _, err := os.Lstat(p); err != nil {
+			return p
+		}
+	}
+}
+
+// removeOldBinaries deletes the moved-aside binaries in dir that it can. One
+// still running or held open stays until a later run.
+func removeOldBinaries(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), oldBinaryPrefix) && e.Type().IsRegular() {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
+// RemoveOldBinaries clears what earlier upgrades moved aside on Windows. It
+// runs on every start and never fails the command.
+func RemoveOldBinaries() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if exe, err = filepath.EvalSymlinks(exe); err != nil {
+		return
+	}
+	removeOldBinaries(filepath.Dir(exe))
 }
 
 // postUpgradeRefresh runs the new binary's services refresh on macOS, so the

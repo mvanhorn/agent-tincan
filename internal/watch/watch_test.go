@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
 // rig drives a Watcher one probe per simulated minute.
@@ -263,11 +261,11 @@ func plistStrings(s string) string {
 func TestInstallServiceDarwin(t *testing.T) {
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin & can/tincan", UID: 501},
-		Config:         "/Users/o/.config/tincan/hermes.json",
-		AlertCmd:       `TINCAN_ALERT_TO=owner@example.com "/Users/o/bin/imessage-alert.sh" && echo <ok>`,
-		After:          10 * time.Minute,
-		Every:          time.Minute,
+		GOOS: "darwin", Home: home, Binary: "/opt/tin & can/tincan", UID: 501,
+		Config:   "/Users/o/.config/tincan/hermes.json",
+		AlertCmd: `TINCAN_ALERT_TO=owner@example.com "/Users/o/bin/imessage-alert.sh" && echo <ok>`,
+		After:    10 * time.Minute,
+		Every:    time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -305,11 +303,11 @@ func TestInstallServiceLinux(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "linux", Home: home, Binary: "/opt/tin can/tincan"},
-		Config:         "/home/o/.config/tincan/hermes.json",
-		AlertCmd:       `notify "$HOME" 100%`,
-		After:          10 * time.Minute,
-		Every:          time.Minute,
+		GOOS: "linux", Home: home, Binary: "/opt/tin can/tincan",
+		Config:   "/home/o/.config/tincan/hermes.json",
+		AlertCmd: `notify "$HOME" 100%`,
+		After:    10 * time.Minute,
+		Every:    time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -335,11 +333,11 @@ func TestInstallServiceLinux(t *testing.T) {
 
 func TestInstallServiceRefusesWhatItCannotWrite(t *testing.T) {
 	base := ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: t.TempDir(), Binary: "/usr/local/bin/tincan", UID: 501},
-		Config:         "/c.json",
-		AlertCmd:       "true",
-		After:          time.Minute,
-		Every:          time.Minute,
+		GOOS: "darwin", Home: t.TempDir(), Binary: "/usr/local/bin/tincan", UID: 501,
+		Config:   "/c.json",
+		AlertCmd: "true",
+		After:    time.Minute,
+		Every:    time.Minute,
 	}
 	for name, mut := range map[string]func(*ServiceOptions){
 		"no alert command":     func(o *ServiceOptions) { o.AlertCmd = "" },
@@ -420,11 +418,11 @@ func TestStaleRecoveryFoldsIntoNextDownAlert(t *testing.T) {
 func TestInstallServiceDarwinUsesLauncher(t *testing.T) {
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan"},
-		Config:         "/c.json",
-		AlertCmd:       "true",
-		After:          10 * time.Minute,
-		Every:          time.Minute,
+		GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan",
+		Config:   "/c.json",
+		AlertCmd: "true",
+		After:    10 * time.Minute,
+		Every:    time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)

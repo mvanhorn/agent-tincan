@@ -153,6 +153,7 @@ func TestAgentsOnAdminDeviceWithoutJoin(t *testing.T) {
 // socket limit.
 func adminSocket(t *testing.T, m *testrelay.Mesh) string {
 	t.Helper()
+	skipOnWindows(t, skipRelayHost)
 	dir, err := os.MkdirTemp("", "tc")
 	if err != nil {
 		t.Fatal(err)

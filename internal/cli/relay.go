@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,6 +61,14 @@ type relayFlags struct {
 	gatewayHostname string
 	gatewayListen   string
 	gatewayURL      string
+}
+
+// relayHostErr refuses to run the relay where it is not supported.
+func relayHostErr(goos string) error {
+	if goos == "windows" {
+		return errors.New("tincan relay runs on Linux and macOS; on Windows, tincan is a client only (experimental, CI tested only)")
+	}
+	return nil
 }
 
 func relayCmd() *cobra.Command {
@@ -110,7 +119,8 @@ off with --no-auto-rebind.
 With --dist <dir>, the relay serves tincan release binaries from dir to joined
 agents and admins, so tincan upgrade works on machines without GitHub access.
 Put the raw binaries there as tincan_<os>_<arch> (linux or darwin, amd64 or
-arm64), plus checksums.txt and a VERSION file naming the release. An admin can
+arm64) and tincan_windows_<arch>.exe, plus checksums.txt and a VERSION file
+naming the release. An admin can
 then upgrade the relay itself with tincan relay-upgrade: it installs the dist
 build over this binary (which the relay user must own) and re-executes, or
 with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
@@ -135,6 +145,9 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 			}
 			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
 				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
+			}
+			if err := relayHostErr(runtime.GOOS); err != nil {
+				return err
 			}
 			err := runRelay(cmd.Context(), f)
 			if rs, ok := errors.AsType[*errRelayRestart](err); ok {
@@ -563,8 +576,11 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		if err != nil {
 			return err
 		}
-		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Base: base})
-		gw := client.Configure(&http.Server{Handler: gateway.New(base, oauth, srv.Handler(), Version).Handler()}, client.RelayAPI)
+		a2aFile := filepath.Join(f.stateDir, "a2a.json")
+		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Base: base, A2AFile: a2aFile})
+		pub := gateway.New(base, oauth, srv.Handler(), Version)
+		pub.SetA2AFile(a2aFile)
+		gw := client.Configure(&http.Server{Handler: pub.Handler()}, client.RelayAPI)
 		go func() { errc <- gw.Serve(gln) }()
 		servers = append(servers, gw)
 		log.Printf("chatgpt gateway serving at %s/mcp", base)

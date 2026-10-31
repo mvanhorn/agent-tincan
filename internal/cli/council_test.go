@@ -112,7 +112,7 @@ func ownerMesh(t *testing.T, councilName, owner string, tty bool) (*testrelay.Me
 	t.Setenv("TINCAN_RELAY", "")
 	t.Setenv("TINCAN_PROXY", "")
 	// Keep the approve path off any real relay's admin socket.
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	m := testrelay.New(t, relay.Config{})
 	m.Server.SetAttachmentDir(t.TempDir())
 	c := m.JoinOnMachineOf(t, "muse", councilName)
@@ -244,10 +244,10 @@ func TestCouncilConveneOnAdminTerminal(t *testing.T) {
 		if b, err := os.ReadFile(p); err != nil || !bytes.Equal(b, want) {
 			t.Fatalf("saved %s = %q, %v", p, b, err)
 		}
-		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		if st, _ := os.Stat(p); !hasMode(st, 0o600) {
 			t.Fatalf("%s mode %v, want 0600", p, st.Mode().Perm())
 		}
-		if st, _ := os.Stat(filepath.Dir(p)); st.Mode().Perm() != 0o700 {
+		if st, _ := os.Stat(filepath.Dir(p)); !hasMode(st, 0o700) {
 			t.Fatalf("%s mode %v, want 0700", filepath.Dir(p), st.Mode().Perm())
 		}
 	}
@@ -372,7 +372,7 @@ func TestCouncilLeaderboardCard(t *testing.T) {
 	if err != nil || !bytes.HasPrefix(b, []byte("\x89PNG")) {
 		t.Fatalf("card %s is not a PNG: %v", p, err)
 	}
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(p); !hasMode(st, 0o600) {
 		t.Fatalf("card mode %v, want 0600", st.Mode().Perm())
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
-	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
@@ -22,8 +21,8 @@ func roster() []client.AgentInfo {
 		{Name: "copilot-cli", Kind: "copilot-cli", Online: true},
 		{Name: "cursor-cli", Kind: "cursor-cli", Online: true},
 		{Name: "dot-web", Kind: "dot-web", Online: true},
-		{Name: "gone-web", Kind: "gemini-web", Target: envelope.Target{SignedOutSite: "gemini.google.com"}},
-		{Name: "tired-web", Kind: "grok-web", Status: client.StatusLimited, Target: envelope.Target{LimitedUntil: now.Add(time.Hour)}},
+		{Name: "gone-web", Kind: "gemini-web", SignedOutSite: "gemini.google.com"},
+		{Name: "tired-web", Kind: "grok-web", Status: client.StatusLimited, LimitedUntil: now.Add(time.Hour)},
 	}
 }
 

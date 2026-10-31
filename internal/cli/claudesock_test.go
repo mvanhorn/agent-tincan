@@ -31,6 +31,7 @@ type claudeSockFixture struct {
 
 func newClaudeSockFixture(t *testing.T) claudeSockFixture {
 	t.Helper()
+	skipOnWindows(t, skipSocketWake)
 	// macOS caps unix socket paths near 104 bytes, so the socket lives in a
 	// short directory under /tmp rather than t.TempDir.
 	dir, err := os.MkdirTemp("/tmp", "tccs")

@@ -11,6 +11,7 @@ import (
 // Explicit dependency injection models an opener returning a different file.
 // No concurrent path mutation, live state, or secret values are used.
 func TestInvitePepperValidatesOpenedDescriptor(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "invite-pepper")
 	other := filepath.Join(dir, "other-fixture")
@@ -41,6 +42,7 @@ func TestInvitePepperValidatesOpenedDescriptor(t *testing.T) {
 }
 
 func TestInvitePepperReaderRejectsInvalidFiles(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	for _, name := range []string{"empty", "short", "long", "permissive", "directory", "symlink", "dangling"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -83,6 +85,7 @@ func TestInvitePepperReaderRejectsInvalidFiles(t *testing.T) {
 }
 
 func TestInvitePepperMissingFilePreservesError(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	if _, err := readInvitePepperFile(filepath.Join(t.TempDir(), "absent")); !os.IsNotExist(err) {
 		t.Fatal("missing-file error no longer allows initialization")
 	}

@@ -1141,7 +1141,7 @@ func (w *Waker) allow(agent string) bool {
 
 // Message is the wake text for n waiting requests.
 func Message(n int) string {
-	return fmt.Sprintf("Agent Tincan: %d %s from your teammates waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.", n, plural(n, "request", "requests"))
+	return fmt.Sprintf("Agent Tincan: %d %s waiting. Run check_inbox (or `tincan inbox`) before other work to pick them up, then reply to each.", n, plural(n, "request", "requests"))
 }
 
 // WaitingMessage is the only text a count-only wake carries, which is every
@@ -1161,7 +1161,7 @@ func WaitingMessage(requests, replies int) string {
 	if requests == 1 {
 		then = "reply to it"
 	}
-	return fmt.Sprintf("Agent Tincan: %d %s from your teammates and %d %s waiting. Run check_inbox (or `tincan inbox`) before other work to read the %s and pick up the %s, then %s.",
+	return fmt.Sprintf("Agent Tincan: %d %s and %d %s waiting. Run check_inbox (or `tincan inbox`) before other work to read the %s and pick up the %s, then %s.",
 		requests, plural(requests, "request", "requests"), replies, plural(replies, "reply to your request", "replies to your requests"),
 		plural(replies, "reply", "replies"), plural(requests, "request", "requests"), then)
 }
@@ -1327,7 +1327,7 @@ func secretForms(sec string) []string {
 			}
 		}
 	}
-	for _, f := range forms[:len(forms):len(forms)] {
+	for _, f := range slices.Clip(forms) {
 		forms = append(forms, strings.ReplaceAll(f, "/", `\/`))
 	}
 	slices.Sort(forms)
@@ -1366,14 +1366,14 @@ func leaksSecret(s string, secrets []string) bool {
 		}
 		views = append(views, strings.Join(strs, "\n"))
 	}
-	for _, v := range views[:len(views):len(views)] {
+	for _, v := range slices.Clip(views) {
 		if d, err := url.PathUnescape(v); err == nil && d != v {
 			views = append(views, d)
 		} else if d, err := url.QueryUnescape(v); err == nil && d != v {
 			views = append(views, d)
 		}
 	}
-	for _, v := range views[:len(views):len(views)] {
+	for _, v := range slices.Clip(views) {
 		if d := html.UnescapeString(v); d != v {
 			views = append(views, d)
 		}

@@ -157,6 +157,7 @@ func TestWaitExitsOnUnseenReplyWithoutTakingIt(t *testing.T) {
 // tincan listen fires for an unseen reply too, counting it in
 // TINCAN_WAITING, without marking it seen.
 func TestListenFiresForUnseenReply(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	m := testrelay.New(t, relay.Config{PollHold: 2 * time.Second})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

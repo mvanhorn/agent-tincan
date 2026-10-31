@@ -274,7 +274,19 @@ func TestUpgradeAvailableNeedsPlatformBinaryAndSeesInPlaceEdits(t *testing.T) {
 	if got := ask("darwin_arm64"); got != "0.5.5" {
 		t.Fatalf("staged binary = %v", got)
 	}
-	for _, platform := range []string{"", "linux_amd64", "windows_amd64", "../darwin_arm64"} {
+	for _, platform := range []string{"", "linux_amd64", "windows_amd64", "windows_arm64", "../darwin_arm64"} {
+		if got := ask(platform); got != nil {
+			t.Fatalf("platform %q = %v", platform, got)
+		}
+	}
+	// Windows clients send windows_<arch> and install the .exe.
+	if err := os.WriteFile(filepath.Join(dir, "tincan_windows_amd64.exe"), []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ask("windows_amd64"); got != "0.5.5" {
+		t.Fatalf("staged exe = %v", got)
+	}
+	for _, platform := range []string{"windows_arm64", "windows_amd64.exe"} {
 		if got := ask(platform); got != nil {
 			t.Fatalf("platform %q = %v", platform, got)
 		}

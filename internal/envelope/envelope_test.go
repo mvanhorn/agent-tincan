@@ -289,3 +289,30 @@ func TestWakeAccepted(t *testing.T) {
 		}
 	}
 }
+
+func TestParseSendThen(t *testing.T) {
+	req, err := ParseSend([]byte(`{"to":"muse","body":"b","then":{"to":" instinct ","body":"file it"}}`), "grokbot", DefaultMaxBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Then == nil || req.Then.To != "instinct" || req.Then.Body != "file it" {
+		t.Fatalf("then = %+v", req.Then)
+	}
+	if req, err := ParseSend([]byte(`{"to":"muse","body":"b"}`), "grokbot", DefaultMaxBody); err != nil || req.Then != nil {
+		t.Fatalf("no then: %+v %v", req.Then, err)
+	}
+}
+
+func TestParseSendIgnoresFollowOf(t *testing.T) {
+	req, err := ParseSend([]byte(`{"to":"muse","body":"b","follow_of":"abc","FollowOf":"abc"}`), "grokbot", DefaultMaxBody)
+	if err != nil || req.FollowOf != "" {
+		t.Fatalf("follow_of = %q, %v", req.FollowOf, err)
+	}
+}
+
+func TestFollowOfStaysOffTheWire(t *testing.T) {
+	raw, err := json.Marshal(Request{To: "muse", FollowOf: "abc"})
+	if err != nil || strings.Contains(string(raw), "abc") {
+		t.Fatalf("%s %v", raw, err)
+	}
+}

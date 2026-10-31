@@ -127,7 +127,7 @@ func TestGroupOutcomes(t *testing.T) {
 	} {
 		var g client.GroupResult
 		for _, s := range tc.statuses {
-			g.Results = append(g.Results, client.GroupEntry{Result: client.Result{Status: s}})
+			g.Results = append(g.Results, client.GroupEntry{Status: s})
 		}
 		if got := g.ExitCode(); got != tc.code {
 			t.Fatalf("%v: %d", tc.statuses, got)
@@ -158,7 +158,7 @@ func TestGroupWaitPollsConcurrently(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	g, err := c.WaitGroup(ctx, client.GroupResult{Group: "group-test", Results: []client.GroupEntry{
-		{Result: client.Result{Request: envelope.Request{ID: "a"}}}, {Result: client.Result{Request: envelope.Request{ID: "b"}}},
+		{Request: envelope.Request{ID: "a"}}, {Request: envelope.Request{ID: "b"}},
 	}}, time.Second)
 	if err != nil || g.Outcome != "partial" {
 		t.Fatalf("%+v %v", g, err)
@@ -280,8 +280,8 @@ func TestGroupPollErrorPreservesResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	g, err := c.WaitGroup(t.Context(), client.GroupResult{Group: "group-errors", Results: []client.GroupEntry{
-		{Result: client.Result{Request: envelope.Request{ID: "success", To: "a"}, Status: envelope.StatusQueued}},
-		{Result: client.Result{Request: envelope.Request{ID: "failed", To: "b"}, Status: envelope.StatusQueued}},
+		{Request: envelope.Request{ID: "success", To: "a"}, Status: envelope.StatusQueued},
+		{Request: envelope.Request{ID: "failed", To: "b"}, Status: envelope.StatusQueued},
 	}}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +358,7 @@ func TestGroupConcurrentPollDoesNotRegress(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			g := client.GroupResult{Group: "group-r", Results: []client.GroupEntry{{Result: client.Result{Request: envelope.Request{ID: "r", To: "a"}, Status: envelope.StatusQueued}}}}
+			g := client.GroupResult{Group: "group-r", Results: []client.GroupEntry{{Request: envelope.Request{ID: "r", To: "a"}, Status: envelope.StatusQueued}}}
 			done := make(chan client.GroupResult, 1)
 			go func() { result, _ := c.WaitGroup(t.Context(), g, 0); done <- result }()
 			<-started
@@ -388,7 +388,7 @@ func TestGroupPollFollowsRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := client.GroupResult{Group: "group-requeue", Results: []client.GroupEntry{{Result: client.Result{Request: envelope.Request{ID: "r", To: "a"}, Status: envelope.StatusQueued}}}}
+	g := client.GroupResult{Group: "group-requeue", Results: []client.GroupEntry{{Request: envelope.Request{ID: "r", To: "a"}, Status: envelope.StatusQueued}}}
 	if g, err = c.WaitGroup(t.Context(), g, 0); err != nil || g.Results[0].Status != envelope.StatusClaimed {
 		t.Fatalf("first poll = %+v %v", g, err)
 	}

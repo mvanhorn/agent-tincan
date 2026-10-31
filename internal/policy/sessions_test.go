@@ -24,7 +24,7 @@ func (f *fixture) sendFrom(t *testing.T, from, session, to string) (envelope.Req
 // claimFrom claims id for agent from session.
 func (f *fixture) claimFrom(t *testing.T, id, agent, session string) {
 	t.Helper()
-	if _, err := f.st.ClaimLeasesFrom(context.Background(), id, agent, session, time.Hour, time.Hour); err != nil {
+	if _, err := f.st.ClaimLeasesFrom(context.Background(), id, agent, session, store.QueueScope{}, time.Hour, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -18,7 +18,7 @@ claude mcp add --scope user agent-tincan -- tincan mcp --channel
 
 `--scope user` registers the server for every project. The default scope is the directory the command runs in, so a session started anywhere else would have no tincan tools and no channel.
 
-That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`) and, with `--channel`, pushes teammate requests straight into the running session. Without `--channel`, it wakes an idle session through the session's own socket instead (below).
+That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`) and, with `--channel`, pushes teammate requests straight into the running session. Without `--channel`, it wakes an idle session through the session's own socket instead (below).
 
 ## Receive requests without typing (channels)
 
@@ -52,6 +52,7 @@ When teammate requests, or replies to this session's own requests, are waiting a
 
 - Each item is sent once, with no re-announce after 10 minutes. It still shows on the next `check_inbox`.
 - A reply to an ask goes only to the window that sent it.
+- An ask that names a project goes only to that project's window for its first 10 minutes.
 - A teammate request starts one turn per agent per machine, however many windows are open. The windows share a lock and a delivery record in `socket-wake/` beside the agent's config, and the first idle window takes the item.
 - Upgrade notices are not sent this way; they show on the next tool call.
 
@@ -68,6 +69,20 @@ claude mcp add --scope user agent-tincan -- tincan mcp --channel --share-title
 ```
 
 Teammates then see `working_on="Fix flaky relay test"` on this agent's `list_agents` and `tincan agents` line: the session's custom title, else the title Claude Code wrote for it. Only title records are read, not your prompts, but a title can still say what you asked: Claude Code's generated titles summarize the conversation, and a hook that names sessions from their first prompt turns that prompt into the custom title. It works with or without `--channel`. Each server re-sends its title every 2 minutes and removes it when it exits; a window that stops without a clean exit drops off within 10 minutes. With several windows open the line shows the most recently refreshed title and a count of the others, such as `(+2)`. It is off by default, and every joined agent can read it, so leave it off if your session titles name things the team should not see.
+
+## Send an ask to one project's window
+
+With several windows open as one agent, an ask goes to whichever window checks first, which may be on the wrong repo. Name the project to reach the right one:
+
+```bash
+tincan ask claude-code --project agent-tincan "why does the relay test flake?"
+```
+
+The `ask` tool takes `project` the same way. Each `tincan mcp` tells the relay its project: the name of the git repository around its working directory, lowercased, with a linked worktree counting as its main repository. Use `--project <label>` on the server command to set another name, or `--no-project` to send none.
+
+Only a window on that project is told about the ask and can take it. A window that stays open but never checks does not strand it: after 10 minutes in the queue any window can take it. When no window on that project is live, the ask says so at once. An older `tincan` client takes such an ask only after the 10 minutes, and an older relay ignores the project and delivers as before.
+
+The label is routing only, like the session id. See the [trust model](../trust-model.md).
 
 ## Fallback: open a session in cmux
 

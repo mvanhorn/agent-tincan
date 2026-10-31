@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,6 +73,7 @@ func settle() { time.Sleep(300 * time.Millisecond) }
 // One teammate request starts one turn on the machine, however many
 // windows are idle.
 func TestSocketWakeOneWindowPerRequest(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, 50*time.Millisecond)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -95,6 +97,7 @@ func TestSocketWakeOneWindowPerRequest(t *testing.T) {
 
 // A reply to an ask a window sent goes to that window only.
 func TestSocketWakeOwnReplyToAskingWindow(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, 50*time.Millisecond)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -126,6 +129,7 @@ func TestSocketWakeOwnReplyToAskingWindow(t *testing.T) {
 // A reply to a request sent with no session is shown to every window, and
 // still wakes only one.
 func TestSocketWakeSessionlessReplyWakesOne(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, 50*time.Millisecond)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -149,6 +153,7 @@ func TestSocketWakeSessionlessReplyWakesOne(t *testing.T) {
 
 // A busy window never holds a request back from an idle one.
 func TestSocketWakeBusyWindowDoesNotBlockIdle(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, 50*time.Millisecond)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -166,6 +171,7 @@ func TestSocketWakeBusyWindowDoesNotBlockIdle(t *testing.T) {
 // A request is delivered once: the window that pushed it may go away, and
 // nobody announces it again, even after reannounceAfter.
 func TestSocketWakeDeliversOnce(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, 50*time.Millisecond)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -191,6 +197,7 @@ func TestSocketWakeDeliversOnce(t *testing.T) {
 // the window's own reply goes first, and the request waits for the next
 // recheck rather than landing in a session that just started a turn.
 func TestSocketWakeOwnReplyWithoutLock(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, 50*time.Millisecond)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -222,6 +229,7 @@ func TestSocketWakeOwnReplyWithoutLock(t *testing.T) {
 // Upgrade notices never go through the socket: each socket message spends
 // a turn, and the notice reaches the agent on its next tool call anyway.
 func TestSocketWakeSkipsUpgradeNotice(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	old := client.Version
 	client.Version = "0.5.4"
 	t.Cleanup(func() { client.Version = old })
@@ -243,6 +251,7 @@ func TestSocketWakeSkipsUpgradeNotice(t *testing.T) {
 // polling until the socket checks out again. Its peeks advertise socket
 // wake and the keepalive after them does not.
 func TestSocketWakeStopsPeekingWhenSocketFails(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 10*time.Millisecond, time.Hour)
 	var polls, whoami atomic.Int32
 	var peekFeatures, keepFeatures atomic.Value
@@ -340,6 +349,7 @@ func TestClaudeSocketIdleIgnoresStatusAge(t *testing.T) {
 // it is listed, and a change in the count drops it at once, so such a
 // request is not kept from its turn for good.
 func TestSocketWakeCountOnlyRelayAnnouncesAgain(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 10*time.Millisecond, time.Hour)
 	old := socketRecordKeep
 	socketRecordKeep = 150 * time.Millisecond
@@ -406,6 +416,7 @@ func TestWakeSocketOnByDefault(t *testing.T) {
 // Once a fresh check of the socket passes, socketWake pushes again and the
 // relay hears socket wake again.
 func TestSocketWakeResumesAfterReverify(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 10*time.Millisecond, time.Hour)
 	var features sync.Map
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -443,6 +454,7 @@ func TestSocketWakeResumesAfterReverify(t *testing.T) {
 // request, but it is new work: it gets its own turn once it has left the
 // queue in between.
 func TestSocketWakeAnnouncesRequeuedRequest(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, time.Hour)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
@@ -474,6 +486,7 @@ func TestSocketWakeAnnouncesRequeuedRequest(t *testing.T) {
 
 // Each answer to an ask is its own reply generation and gets its own turn.
 func TestSocketWakeAnnouncesNewReplyGeneration(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, time.Hour)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	w := newFakeWindow()
@@ -510,6 +523,7 @@ func TestSocketWakeAnnouncesNewReplyGeneration(t *testing.T) {
 // A delivery the record cannot save would be sent again on the next peek,
 // so it counts as a failed write and ends socket wake after the limit.
 func TestSocketWakeUnsavedRecordCountsAsFailure(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 10*time.Millisecond, time.Hour)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	dir := t.TempDir()
@@ -538,6 +552,7 @@ func TestSocketWakeUnsavedRecordCountsAsFailure(t *testing.T) {
 // The own-reply record outlives one pushSocket run, so a socket that
 // recovers does not announce a reply it already delivered.
 func TestSocketWakeOwnReplySurvivesRestart(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, time.Hour)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	muse := museWindow(t, m, "mcp-a")
@@ -565,6 +580,7 @@ func TestSocketWakeOwnReplySurvivesRestart(t *testing.T) {
 // A peek taken before another window saved its delivery must not delete
 // that delivery: the older peek simply had not seen the request yet.
 func TestSocketWakeOlderPeekKeepsNewerDelivery(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	shared := socketShared{dir: t.TempDir(), agent: "muse"}
 	peekedAt := time.Now()
 	saved := peekedAt.Add(time.Second)
@@ -594,6 +610,7 @@ func TestSocketWakeOlderPeekKeepsNewerDelivery(t *testing.T) {
 // one reply starts one turn on the machine. (Seen live against an older
 // relay, where both windows woke for one reply.)
 func TestSocketWakeOwnReplyOnceAcrossWindowsOnOlderRelay(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 20*time.Millisecond, time.Hour)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -631,6 +648,7 @@ func TestSocketWakeOwnReplyOnceAcrossWindowsOnOlderRelay(t *testing.T) {
 // written) means nothing can be delivered, so it counts as a failed write
 // and ends socket wake instead of advertising a wake that never comes.
 func TestSocketWakeLockErrorCountsAsFailure(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
 	fastChannel(t, 10*time.Millisecond, time.Hour)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	blocker := filepath.Join(t.TempDir(), "file")
@@ -648,4 +666,236 @@ func TestSocketWakeLockErrorCountsAsFailure(t *testing.T) {
 	if n := w.count(); n != 0 {
 		t.Fatalf("pushes = %d, want none without the lock", n)
 	}
+}
+
+// A peek that left out a request naming another project has not seen the
+// whole queue, so the push the matching window made must stand: without this
+// that window would push the same request again after every such peek.
+func TestSocketWakeHiddenRequestKeepsDelivery(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	shared := socketShared{dir: t.TempDir(), agent: "muse"}
+	if err := os.MkdirAll(shared.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	saved := time.Now()
+	if err := shared.write(map[string]time.Time{pendingKey("r1"): saved}); err != nil {
+		t.Fatal(err)
+	}
+	var peek client.Waiting
+	if err := json.Unmarshal([]byte(`{"waiting":0,"queued":0,"hidden":1}`), &peek); err != nil {
+		t.Fatal(err)
+	}
+	w := newFakeWindow()
+	later := saved.Add(time.Second)
+	if _, err := pushShared(t.Context(), w, peek, shared, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shared.read()[pendingKey("r1")]; !ok {
+		t.Fatal("a peek that hid a request deleted its delivery")
+	}
+	if _, err := pushShared(t.Context(), w, client.Waiting{}, shared, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shared.read()[pendingKey("r1")]; ok {
+		t.Fatal("a peek of the whole queue kept a request that left it")
+	}
+}
+
+// A peek that names what it hid knows the whole queue: the hidden request's
+// push stands, and a request that is in neither list has left. One hidden
+// request it cannot name leaves the record alone, as a capped list does.
+func TestSocketWakeHiddenIDsSeparateDeliveries(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	shared := socketShared{dir: t.TempDir(), agent: "muse"}
+	if err := os.MkdirAll(shared.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	saved := time.Now()
+	if err := shared.write(map[string]time.Time{pendingKey("theirs"): saved, pendingKey("gone"): saved}); err != nil {
+		t.Fatal(err)
+	}
+	w := newFakeWindow()
+	later := saved.Add(time.Second)
+	capped := client.Waiting{Hidden: 2, HiddenIDs: []string{"theirs"}}
+	if _, err := pushShared(t.Context(), w, capped, shared, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shared.read()[pendingKey("gone")]; !ok {
+		t.Fatal("a peek with a capped hidden list deleted a delivery")
+	}
+	whole := client.Waiting{Hidden: 1, HiddenIDs: []string{"theirs"}}
+	if _, err := pushShared(t.Context(), w, whole, shared, later); err != nil {
+		t.Fatal(err)
+	}
+	rec := shared.read()
+	if _, ok := rec[pendingKey("theirs")]; !ok {
+		t.Fatal("a peek deleted the delivery of a request it hid")
+	}
+	if _, ok := rec[pendingKey("gone")]; ok {
+		t.Fatal("a peek that named every queued request kept one that left")
+	}
+	if n := w.count(); n != 0 {
+		t.Fatalf("pushes = %d, want a hidden request left to its own window", n)
+	}
+}
+
+// The other half of once-only delivery: however many empty peeks another
+// project's window makes, the matching window pushes its request once.
+func TestSocketWakeHiddenRequestPushedOnce(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	fastChannel(t, 20*time.Millisecond, time.Hour)
+	m := testrelay.New(t, relay.Config{PollHold: 200 * time.Millisecond})
+	shared := socketShared{dir: t.TempDir(), agent: "muse"}
+	alpha, beta := museWindow(t, m, "mcp-a"), museWindow(t, m, "mcp-b")
+	alpha.SetProject("alpha")
+	beta.SetProject("beta")
+	wa, wb := newFakeWindow(), newFakeWindow()
+	startSocket(t, alpha, wa, shared)
+	startSocket(t, beta, wb, shared)
+	if _, err := m.Client(t, "grokbot").Send(client.WithProject(t.Context(), "alpha"), "muse", "book dinner", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitPushes(t, wa.recordPusher, 1); len(got) != 1 {
+		t.Fatalf("first pushes = %v", got)
+	}
+	time.Sleep(time.Second)
+	if a, b := wa.count(), wb.count(); a != 1 || b != 0 {
+		t.Fatalf("pushes = alpha %d, beta %d, want alpha once", a, b)
+	}
+}
+
+// A window's own request leaves the queue while another project's request
+// sits there unseen. Its record must still go, or the request's return after
+// a clarification would look already delivered and the idle window would
+// never hear of it.
+func TestSocketWakeAnnouncesRequeuedRequestBesideHidden(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	fastChannel(t, 20*time.Millisecond, time.Hour)
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	shared := socketShared{dir: t.TempDir(), agent: "muse"}
+	alpha, beta := museWindow(t, m, "mcp-a"), museWindow(t, m, "mcp-b")
+	alpha.SetProject("alpha")
+	beta.SetProject("beta")
+	wa, wb := newFakeWindow(), newFakeWindow()
+	wb.busy.Store(true)
+	startSocket(t, alpha, wa, shared)
+	startSocket(t, beta, wb, shared)
+	grok := m.Client(t, "grokbot")
+	req, err := grok.Send(client.WithProject(t.Context(), "alpha"), "muse", "book dinner", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := waitPushes(t, wa.recordPusher, 1); len(got) != 1 {
+		t.Fatalf("first pushes = %v", got)
+	}
+	if _, err := grok.Send(client.WithProject(t.Context(), "beta"), "muse", "fix the build", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	// The push started a turn, so alpha is busy until it has asked its
+	// question.
+	wa.busy.Store(true)
+	if _, err := alpha.Claim(t.Context(), req.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alpha.Reply(t.Context(), req.ID, "which restaurant?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	wa.busy.Store(false)
+	// Longer than one poll hold, so alpha's idle peek sees its request gone.
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := grok.Answer(t.Context(), req.ID, "Nopa, 2 people"); err != nil {
+		t.Fatal(err)
+	}
+	got := waitPushes(t, wa.recordPusher, 2)
+	if len(got) != 2 || got[1]["request_ids"] != req.ID {
+		t.Fatalf("pushes after the answer = %v, want the request announced again", got)
+	}
+}
+
+// A return to the queue is announced even when the hidden list is capped
+// and so cannot show the old record is stale.
+func TestSocketWakeAnnouncesRequeuedRequestPastHiddenCap(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	shared := socketShared{dir: t.TempDir(), agent: "muse"}
+	if err := shared.write(map[string]time.Time{pendingKey("r1"): time.Now(), revKey(envelope.Pending{ID: "r1", Rev: 100}): time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	hidden := make([]string, relay.MaxPeekPending)
+	for i := range hidden {
+		hidden[i] = fmt.Sprintf("hidden-%d", i)
+	}
+	w := client.Waiting{
+		Total:     1,
+		Queued:    1,
+		Pending:   []envelope.Pending{{ID: "r1", From: "grokbot", Kind: envelope.KindAsk, Rev: 200}},
+		Hidden:    len(hidden) + 1,
+		HiddenIDs: hidden,
+	}
+	p := newFakeWindow()
+	wrote, err := pushShared(t.Context(), p, w, shared, time.Now())
+	if err != nil || !wrote {
+		t.Fatalf("pushShared = %v, %v", wrote, err)
+	}
+	if got := p.pushes(); len(got) != 1 || got[0]["request_ids"] != "r1" {
+		t.Fatalf("pushes = %v", got)
+	}
+	// The same return is one delivery.
+	wrote, err = pushShared(t.Context(), p, w, shared, time.Now())
+	if err != nil || wrote {
+		t.Fatalf("second pushShared = %v, %v", wrote, err)
+	}
+}
+
+// A hidden request's rev key stands too, since the hidden list names only
+// its id: without it a later return could not be told from an old window's
+// delivery.
+func TestSocketWakeHiddenRecordKeepsRev(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	shared := socketShared{dir: t.TempDir(), agent: "muse"}
+	if err := shared.write(map[string]time.Time{revKey(envelope.Pending{ID: "r1", Rev: 100}): time.Now().Add(-socketRecordKeep * 3 / 4)}); err != nil {
+		t.Fatal(err)
+	}
+	w := client.Waiting{Hidden: 1, HiddenIDs: []string{"r1"}}
+	if _, err := pushShared(t.Context(), newFakeWindow(), w, shared, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := shared.read()[revKey(envelope.Pending{ID: "r1", Rev: 100})]; !ok || time.Since(at) > time.Minute {
+		t.Fatalf("rev key of a hidden request went stale: %v, %v", at, ok)
+	}
+}
+
+// Windows from before rev share the record during an upgrade. A delivery
+// either side made holds for the other, and neither drops the other's key.
+func TestSocketWakeMixedVersionsAnnounceOnce(t *testing.T) {
+	skipOnWindows(t, skipSocketWake)
+	queued := client.Waiting{
+		Total:   1,
+		Queued:  1,
+		Pending: []envelope.Pending{{ID: "r1", From: "grokbot", Kind: envelope.KindAsk, Rev: 200}},
+	}
+	t.Run("old window delivered", func(t *testing.T) {
+		shared := socketShared{dir: t.TempDir(), agent: "muse"}
+		if err := shared.write(map[string]time.Time{pendingKey("r1"): time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		p := newFakeWindow()
+		for range 3 {
+			if wrote, err := pushShared(t.Context(), p, queued, shared, time.Now()); err != nil || wrote {
+				t.Fatalf("pushShared = %v, %v", wrote, err)
+			}
+		}
+		if _, ok := shared.read()[pendingKey("r1")]; !ok {
+			t.Fatal("old window's key was dropped")
+		}
+	})
+	t.Run("new window delivered", func(t *testing.T) {
+		shared := socketShared{dir: t.TempDir(), agent: "muse"}
+		if wrote, err := pushShared(t.Context(), newFakeWindow(), queued, shared, time.Now()); err != nil || !wrote {
+			t.Fatalf("pushShared = %v, %v", wrote, err)
+		}
+		// An old window finds its own key, the only one it reads.
+		if _, ok := shared.read()[pendingKey("r1")]; !ok {
+			t.Fatalf("record = %v, want the request key", shared.read())
+		}
+	})
 }

@@ -23,7 +23,7 @@ func TestWebInstallWritesDefinitionWithoutLoading(t *testing.T) {
 		t.Skip("no service definition on " + runtime.GOOS)
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	// A PATH with no launchctl or systemctl proves install never runs them.
 	t.Setenv("PATH", t.TempDir())
 	for _, site := range []string{"chatgpt", "claude-ai"} {
@@ -88,7 +88,7 @@ func TestWebServeRefusesAnotherAgentAndMissingConfig(t *testing.T) {
 
 func TestHistoryInstallExtensionDir(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", filepath.Join(home, "native"))
 	ext, err := filepath.Abs(filepath.Join("..", "..", "extension"))
 	if err != nil {
@@ -114,13 +114,14 @@ func TestHistoryInstallExtensionDir(t *testing.T) {
 // socket path, with HOME moved so nothing touches the real config.
 func shortNativeDir(t *testing.T) string {
 	t.Helper()
+	skipOnWindows(t, "the native host socket is a unix socket")
 	dir, err := os.MkdirTemp("/tmp", "tcw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", dir)
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	return dir
 }
 
@@ -296,7 +297,7 @@ func TestWebDotsNeedsThread(t *testing.T) {
 		return
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("PATH", t.TempDir())
 	// Without --thread, install asks the extension for the primary dot;
 	// when it cannot answer, install fails naming the reason and --thread.
@@ -338,7 +339,7 @@ func TestWebInstallDotsFindsThePrimaryDotsThread(t *testing.T) {
 		t.Skip("no service definition on " + runtime.GOOS)
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("PATH", t.TempDir())
 	const thread = "0d0d0d0d-1111-7222-8333-00000000000f"
 	stubDotPrimary(t, history.DotPrimary{Thread: thread, Name: "Orbit"}, nil)
@@ -383,7 +384,7 @@ func TestWebTeachIsDotsOnly(t *testing.T) {
 // and gets past the check for kind dot-web.
 func TestWebServeDotsNeedsDotWebKind(t *testing.T) {
 	shortNativeDir(t)
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	for _, kind := range []string{"", "codex", "dot-web"} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -443,8 +444,9 @@ func TestWebServeDotsNeedsDotWebKind(t *testing.T) {
 }
 
 func TestWebInstallCustomNameAndConfig(t *testing.T) {
+	skipOnWindows(t, skipNoService)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("PATH", t.TempDir())
 	cfg := filepath.Join(home, "my configs", "dayward.json")
 	if err := os.MkdirAll(filepath.Dir(cfg), 0700); err != nil {
@@ -485,7 +487,7 @@ func TestWebInstallCustomNameAndConfig(t *testing.T) {
 // someone else) before it serves anything.
 func TestWebServeDuetRefusesASharedChannel(t *testing.T) {
 	shortNativeDir(t)
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	saved := checkWebThread
 	checkWebThread = func(context.Context, history.Source, string) error {
 		return &history.UnavailableError{Source: history.SourceDuet, Kind: history.ErrRefused, Detail: "the Duet channel #team is shared"}
@@ -520,7 +522,7 @@ func TestWebInstallDuetChecksTheChannel(t *testing.T) {
 		t.Skip("no service definition on " + runtime.GOOS)
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("PATH", t.TempDir())
 	const channel = "chan_0000000000000000chan01"
 	stub := func(err error) {

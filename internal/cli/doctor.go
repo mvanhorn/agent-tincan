@@ -53,7 +53,9 @@ the tools can still run it from a shell.
 
 It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, on an admin device any webhook or email agent that
-was woken and has not checked in, a self-test of tincan mcp in both stdio framings,
+was woken and has not checked in, this machine's Tailscale (its version against
+the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
+tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
 actually been starting tincan mcp (every tincan mcp records its launch),
 and whether a running tincan mcp is on a different build than this
@@ -94,7 +96,7 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 
 	// 1. Join and relay.
 	cfg, err := client.LoadConfig()
-	joined := false
+	joined, guest := false, false
 	var r *client.Relay
 	switch {
 	case err != nil:
@@ -112,8 +114,9 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		// whoami also says whether this relay hands out its key, which
 		// decides what a key missing from the saved config means below.
 		var me struct {
-			Name     string `json:"name"`
-			RelayKey string `json:"relay_key"`
+			Name       string    `json:"name"`
+			RelayKey   string    `json:"relay_key"`
+			GuestUntil time.Time `json:"guest_until"`
 		}
 		err = r.Raw(cctx, "GET", "/v1/whoami", nil, &me)
 		cancel()
@@ -123,7 +126,7 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		case err != nil:
 			add(relayUnreachableCheck(cfg, r, err))
 		default:
-			joined = true
+			joined, guest = true, !me.GuestUntil.IsZero()
 			add(check{"relay", "ok", fmt.Sprintf("reachable at %s; this machine is agent %q", r.Base(), me.Name), ""})
 			client.LearnRelayKey(ctx, r)
 			saved, _ := client.LoadConfig()
@@ -133,6 +136,8 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 				if len(saved.RelayURLs) > 0 {
 					add(addressCheck(ctx, r, saved.RelayURLs))
 				}
+			case !me.GuestUntil.IsZero():
+				add(check{"guest", "ok", "this machine is a guest until " + me.GuestUntil.Local().Format(time.RFC1123) + "; if the relay's address changes, ask the owner for the new one", ""})
 			case me.RelayKey == "":
 				add(check{"relay moves", "warn", "the relay did not hand out its key (relay older than 0.5.0-rc12), so this agent cannot find the relay by itself if its address changes", "Upgrade the relay, then run tincan doctor again."})
 			case os.Getenv("TINCAN_RELAY") != "":
@@ -158,6 +163,13 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		add(webStatusCheck(ctx, r))
 		add(webLimitCheck(ctx, r, time.Now()))
 	}
+
+	// 2c. This host's Tailscale, which matters joined or not.
+	var joinedRelay *client.Relay
+	if joined {
+		joinedRelay = r
+	}
+	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, guest)...)
 
 	// 3. Self-test of tincan mcp in both framings.
 	if exe != "" {
@@ -283,7 +295,7 @@ func versionCheck(ctx context.Context, r *client.Relay, exe string) check {
 	if err != nil {
 		return check{"version", "warn", fmt.Sprintf("tincan %s; the relay does not say which release is current (%v)", Version, err), ""}
 	}
-	want := m.SHA256Of("tincan_" + runtime.GOOS + "_" + runtime.GOARCH)
+	want := m.SHA256Of(releaseAsset(runtime.GOOS, runtime.GOARCH))
 	have, err := fileSHA256(exe)
 	if want == "" || err != nil {
 		return check{"version", "warn", fmt.Sprintf("tincan %s; relay release %s has no build to compare for this platform", Version, m.Version), ""}

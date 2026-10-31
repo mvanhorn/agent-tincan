@@ -9,13 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
-	"github.com/mvanhorn/agent-tincan/internal/history"
 	"github.com/mvanhorn/agent-tincan/internal/watch"
 )
 
@@ -45,6 +45,9 @@ func (f *relayWatchFlags) check() (string, error) {
 		return "", errors.New("--after must be positive")
 	case f.every <= 0:
 		return "", errors.New("--every must be positive")
+	}
+	if err := needsShell(runtime.GOOS, "tincan relay-watch"); err != nil {
+		return "", err
 	}
 	path := f.config
 	if path == "" {
@@ -144,11 +147,11 @@ func relayWatchInstallCmd() *cobra.Command {
 				return err
 			}
 			res, err := watch.InstallService(watch.ServiceOptions{
-				ServiceOptions: history.ServiceOptions{Binary: binary},
-				Config:         path,
-				AlertCmd:       f.alertCmd,
-				After:          f.after,
-				Every:          f.every,
+				Binary:   binary,
+				Config:   path,
+				AlertCmd: f.alertCmd,
+				After:    f.after,
+				Every:    f.every,
 			})
 			if err != nil {
 				return err

@@ -647,7 +647,7 @@ func (c *clockRelay) SendEach(_ context.Context, outs []client.Outgoing, _ envel
 	var g client.GroupResult
 	for _, o := range outs {
 		c.next++
-		g.Results = append(g.Results, client.GroupEntry{Result: client.Result{Request: envelope.Request{ID: fmt.Sprintf("r%d", c.next), To: o.To}, Status: envelope.StatusQueued}})
+		g.Results = append(g.Results, client.GroupEntry{Request: envelope.Request{ID: fmt.Sprintf("r%d", c.next), To: o.To}, Status: envelope.StatusQueued})
 	}
 	return g, make([]error, len(outs)), nil
 }

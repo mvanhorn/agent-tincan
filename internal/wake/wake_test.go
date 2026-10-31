@@ -996,9 +996,11 @@ func TestLateFailedSendDoesNotReplaceNewerOK(t *testing.T) {
 	now.set(start)
 	var queuedN atomic.Int32
 	queuedN.Store(1)
+	// The clock stands still at the second send's time, so a retry of the
+	// first send would tie with it; this test is about the first send alone.
 	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, st, Options{
 		Debounce:   time.Millisecond,
-		RetryDelay: 200 * time.Millisecond,
+		RetryDelay: time.Hour,
 		WakeGrace:  skipFollowUp,
 		Queued:     func(string) int { return int(queuedN.Load()) },
 		LastPoll:   func(string) time.Time { return time.Time{} },

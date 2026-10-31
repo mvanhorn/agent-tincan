@@ -34,7 +34,7 @@ func useConfig(t *testing.T, cfg client.Config) {
 	// under the user config dir; point it at an empty dir so a relay running
 	// on the test machine is never reached.
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	if !reflect.DeepEqual(cfg, client.Config{}) {
 		if err := client.SaveConfig(cfg); err != nil {

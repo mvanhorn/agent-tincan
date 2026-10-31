@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1014,5 +1015,82 @@ func TestLeaseLapsedMigrationIdempotent(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("lease_lapsed_at columns = %d", n)
 		}
+	}
+}
+
+// A guest's limits live on its agent row and on the invite that carries them
+// to the join, and a rewrite of the row keeps them.
+func TestGuestTermsRoundTrip(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	until := time.UnixMilli(time.Now().Add(time.Hour).UnixMilli())
+	terms := identity.GuestTerms{Until: until, Asks: []string{"muse", "hermes"}, NoHold: true}
+	if err := st.PutInvite(ctx, identity.Invite{Code: "c", Name: "friend", Expires: until, NewOnly: true, Guest: terms}); err != nil {
+		t.Fatal(err)
+	}
+	inv, ok, err := st.TakeInvite(ctx, "c")
+	if err != nil || !ok || !inv.Guest.Until.Equal(until) || !inv.Guest.NoHold || !slices.Equal(inv.Guest.Asks, terms.Asks) {
+		t.Fatalf("invite = %+v, %v, %v", inv, ok, err)
+	}
+	if err := st.PutAgent(ctx, identity.Agent{Name: "friend", NodeID: "n1", NodeName: "m", JoinedAt: until, Guest: terms}); err != nil {
+		t.Fatal(err)
+	}
+	a, ok, err := st.AgentByName(ctx, "friend")
+	if err != nil || !ok || !a.Guest.Set() || !a.Guest.Until.Equal(until) || !a.Guest.NoHold || !slices.Equal(a.Guest.Asks, terms.Asks) {
+		t.Fatalf("agent = %+v, %v, %v", a, ok, err)
+	}
+	if err := st.PutAgent(ctx, identity.Agent{Name: "mate", NodeID: "n2", NodeName: "m2", JoinedAt: until}); err != nil {
+		t.Fatal(err)
+	}
+	if mate, _, _ := st.AgentByName(ctx, "mate"); mate.Guest.Set() {
+		t.Fatalf("teammate = %+v", mate)
+	}
+	past := until.Add(time.Second)
+	due, err := st.GuestsEnding(ctx, past)
+	if err != nil || len(due) != 1 || due[0].Name != "friend" {
+		t.Fatalf("due = %+v, %v", due, err)
+	}
+	if err := st.MarkGuestEnded(ctx, "friend"); err != nil {
+		t.Fatal(err)
+	}
+	if due, err = st.GuestsEnding(ctx, past); err != nil || len(due) != 0 {
+		t.Fatalf("due after end = %+v, %v", due, err)
+	}
+	a, _, _ = st.AgentByName(ctx, "friend")
+	if !a.Guest.Ended {
+		t.Fatalf("agent = %+v", a)
+	}
+}
+
+// A store from before guests opens with every agent still a teammate.
+func TestGuestColumnsMigrate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := st.PutAgent(ctx, identity.Agent{Name: "old", NodeID: "n1", NodeName: "m", JoinedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{`ALTER TABLE agents DROP COLUMN guest_until`, `ALTER TABLE agents DROP COLUMN guest_asks`, `ALTER TABLE agents DROP COLUMN guest_no_hold`, `ALTER TABLE agents DROP COLUMN guest_ended`,
+		`ALTER TABLE invites DROP COLUMN guest_until`, `ALTER TABLE invites DROP COLUMN guest_asks`, `ALTER TABLE invites DROP COLUMN guest_no_hold`,
+		`ALTER TABLE requests DROP COLUMN from_guest`, `ALTER TABLE requests DROP COLUMN guest_approved`} {
+		if _, err := st.DB().Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	st.Close()
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if a, ok, err := st.AgentByName(ctx, "old"); err != nil || !ok || a.Guest.Set() {
+		t.Fatalf("agent = %+v, %v, %v", a, ok, err)
 	}
 }

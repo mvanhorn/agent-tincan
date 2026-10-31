@@ -84,6 +84,9 @@ func TestScriptsInsertTextOnly(t *testing.T) {
 			t.Errorf("%s names an absolute URL", name)
 		}
 	}
+	if !strings.Contains(read(t, "app.js"), `el("p", "body", item.then.body)`) {
+		t.Error("the held card should show a follow-on's text, as text")
+	}
 	if !strings.Contains(read(t, "app.js"), "textContent") {
 		t.Error("app.js should set text with textContent")
 	}
@@ -230,6 +233,19 @@ func TestRoomQuestionNamesRequest(t *testing.T) {
 	}
 	if body := funcBody(t, app, "postCard"); !strings.Contains(body, "needs_input") || !strings.Contains(body, "questionTag(m.request_id)") {
 		t.Errorf("postCard must name a questioned mention's request:\n%s", body)
+	}
+}
+
+// A held card rebuilds when the relay's text for it changes: approval needs
+// the whole text showing, so a card must not stay on a cut preview once the
+// relay hands it a fresh nonce for the full body.
+func TestHeldCardFollowsItsText(t *testing.T) {
+	app := read(t, "app.js")
+	if body := funcBody(t, app, "heldText"); !strings.Contains(body, "item.body") || !strings.Contains(body, "item.then.body") {
+		t.Error("heldText must cover the body and the follow-on text")
+	}
+	if body := funcBody(t, app, "mergeHeld"); !strings.Contains(body, "heldText(old) !== heldText(item)") || !strings.Contains(body, "replaceWith(heldCard(entry))") {
+		t.Error("mergeHeld must rebuild a card whose text changed")
 	}
 }
 

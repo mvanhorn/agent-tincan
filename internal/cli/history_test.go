@@ -39,7 +39,7 @@ func historyEnv(t *testing.T) (codexHome, claudeDir string) {
 	// socket, and the other CLI sources fall back to dirs under HOME.
 	isolated := filepath.Join(base, "home")
 	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", filepath.Join(base, "native"))
-	t.Setenv("HOME", isolated)
+	setHome(t, isolated)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(isolated, ".config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(isolated, ".local", "share"))
 	for _, env := range []string{"GEMINI_CLI_HOME", "GROK_HOME", "COPILOT_HOME", "CURSOR_CONFIG_DIR", "OPENCODE_DB", "TINCAN_CONFIG"} {
@@ -127,7 +127,7 @@ func TestHistorySearchWritesImages(t *testing.T) {
 			t.Fatalf("image %s not in %s", p, dir)
 		}
 		st, err := os.Stat(p)
-		if err != nil || st.Mode().Perm() != 0o600 {
+		if err != nil || !hasMode(st, 0o600) {
 			t.Fatalf("image %s: %v %v", p, st, err)
 		}
 	}
@@ -151,6 +151,7 @@ func TestHistoryClaudeCodeSearchAndID(t *testing.T) {
 // tincan history grok-cli reads the owner's $GROK_HOME and leaves out the
 // runs a grok-cli wake recorded beside its tincan config, unless --all.
 func TestHistoryGrokCLI(t *testing.T) {
+	skipOnWindows(t, skipPOSIXPaths)
 	historyEnv(t)
 	base := t.TempDir()
 	grokHome := filepath.Join(base, "grok")
@@ -162,7 +163,7 @@ func TestHistoryGrokCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GROK_HOME", grokHome)
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	out, err := run(t, Root(), "history", "grok-cli")
 	if err != nil || !strings.Contains(out, "does this diagram match") || !strings.Contains(out, "Parser refactor plan") {
 		t.Fatalf("latest: %v\n%s", err, out)
@@ -212,7 +213,7 @@ func TestHistoryPerplexityIsUnknownSource(t *testing.T) {
 func TestHistoryAcceptsNewCLISources(t *testing.T) {
 	historyEnv(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	_, err := run(t, Root(), "history", "cursor-ide")
 	if err == nil || !strings.Contains(err.Error(), "no Cursor IDE history found in") || strings.Contains(err.Error(), "unknown history source") {
@@ -347,7 +348,7 @@ func TestHistoryJSONStaysABareArrayWithTheNoteOnStderr(t *testing.T) {
 
 func TestHistoryInstallWritesManifest(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", filepath.Join(home, "native"))
 	out, err := run(t, Root(), "history", "install", "--binary", "/opt/tincan/tincan")
 	if err != nil {
@@ -394,7 +395,7 @@ func TestHistoryInstallWritesServiceDefinitionWithoutLoading(t *testing.T) {
 		t.Skip("no service definition on " + runtime.GOOS)
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("TINCAN_HISTORY_NATIVE_DIR", filepath.Join(home, "native"))
 	// A PATH with no launchctl or systemctl proves install never runs them.
 	t.Setenv("PATH", t.TempDir())
@@ -611,7 +612,7 @@ func TestServeLearnsRelayKeyIntoItsOwnConfig(t *testing.T) {
 			t.Setenv("TINCAN_PROXY", "")
 			// history serve checks the native-host manifest and web serve keeps
 			// its state under HOME, so neither touches the real one.
-			t.Setenv("HOME", t.TempDir())
+			setHome(t, t.TempDir())
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

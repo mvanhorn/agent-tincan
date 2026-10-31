@@ -119,6 +119,11 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.WebLimits = true
 	caps.Handback = true
 	caps.Rooms = true
+	caps.Leases = true
+	caps.Schedules = true
+	caps.Then = true
+	caps.Guests = true
+	caps.GatewayGuests = true
 	writeJSON(w, http.StatusOK, caps)
 }
 
@@ -202,8 +207,7 @@ func (s *Server) writeBlob(r *http.Request, dir, id string) (client.UploadedAtta
 	head := &headBuffer{}
 	n, err := io.Copy(io.MultiWriter(tmp, h, head), r.Body)
 	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
+		if tooBig, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return client.UploadedAttachment{}, http.StatusRequestEntityTooLarge, fmt.Errorf("attachment is larger than %d bytes", tooBig.Limit)
 		}
 		return client.UploadedAttachment{}, http.StatusBadRequest, fmt.Errorf("read upload: %w", err)

@@ -85,6 +85,15 @@ type libHarness struct {
 	env                     []string
 }
 
+// signalPID sends sig to pid. A signal of 0 only checks that pid is alive.
+func signalPID(pid int, sig os.Signal) error {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return p.Signal(sig)
+}
+
 func newLibHarness(t *testing.T) *libHarness {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -253,7 +262,7 @@ func TestWakeLibLiveLockExitsWithoutRunning(t *testing.T) {
 }
 
 func alive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+	return signalPID(pid, syscall.Signal(0)) == nil
 }
 
 func readPid(t *testing.T, p string) int {
@@ -543,7 +552,7 @@ func TestWakeLibTimeoutKillsTERMIgnoringChild(t *testing.T) {
 			}
 			r := h.run(driver, env...)
 			child := readPid(t, filepath.Join(h.dir, "child.pid"))
-			t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+			t.Cleanup(func() { _ = signalPID(child, syscall.SIGKILL) })
 			if code := exitCode(r.err); code != 124 {
 				t.Fatalf("exit = %d (%v), want 124\nstderr:\n%s", code, r.err, r.stderr)
 			}
@@ -592,7 +601,7 @@ func TestWakeLibSignalCleansUp(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond) // let the pid files be written in full
 	cli, child := readPid(t, filepath.Join(h.dir, "cli.pid")), readPid(t, childFile)
-	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL); _ = syscall.Kill(cli, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = signalPID(child, syscall.SIGKILL); _ = signalPID(cli, syscall.SIGKILL) })
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +743,7 @@ func TestWakeLibCleanExitReapsLeftoverChildren(t *testing.T) {
 			}
 			r := h.run(driver, env...)
 			child := readPid(t, filepath.Join(h.dir, "child.pid"))
-			t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+			t.Cleanup(func() { _ = signalPID(child, syscall.SIGKILL) })
 			if r.err != nil {
 				t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
 			}

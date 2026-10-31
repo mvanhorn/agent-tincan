@@ -158,7 +158,7 @@ func (w *WebAgent) stageInputs(ctx context.Context, attachments []envelope.Attac
 			return nil, cleanup, fmt.Errorf("%q: %w", a.Name, err)
 		}
 		remaining -= downloaded.Size
-		out = append(out, stagedInput{InputFile: InputFile{Name: a.Name, MIME: a.MIME, Size: downloaded.Size, SHA256: downloaded.SHA256}, path: path})
+		out = append(out, stagedInput{Name: a.Name, MIME: a.MIME, Size: downloaded.Size, SHA256: downloaded.SHA256, path: path})
 	}
 	ok = true
 	return out, cleanup, nil

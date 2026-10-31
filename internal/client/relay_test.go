@@ -687,3 +687,20 @@ func TestWatch(t *testing.T) {
 		t.Fatalf("older relay: %v, posted %v", err, posted)
 	}
 }
+
+// The note says what became of the follow-on, not only what is planned.
+func TestThenNoteFollowsStatus(t *testing.T) {
+	for status, want := range map[envelope.Status]string{
+		envelope.StatusQueued:    "Once this is answered",
+		envelope.StatusHeld:      "Once this is answered",
+		envelope.StatusAnswered:  "is sending",
+		envelope.StatusFailed:    "was dropped",
+		envelope.StatusDeclined:  "was dropped",
+		envelope.StatusCancelled: "was dropped",
+		envelope.StatusExpired:   "was dropped",
+	} {
+		if got := client.ThenNote("hermes", status); !strings.Contains(got, want) || !strings.Contains(got, "hermes") {
+			t.Errorf("%s: %q", status, got)
+		}
+	}
+}

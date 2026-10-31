@@ -87,7 +87,7 @@ func TestAttachCLIRoundTrip(t *testing.T) {
 		t.Fatalf("attachment get = %q, want path %s", out, want)
 	}
 	st, err := os.Stat(want)
-	if err != nil || st.Mode().Perm() != 0o600 {
+	if err != nil || !hasMode(st, 0o600) {
 		t.Fatalf("saved file = %v, %v", st, err)
 	}
 	if got, _ := os.ReadFile(want); string(got) != "tabby, 4kg" {

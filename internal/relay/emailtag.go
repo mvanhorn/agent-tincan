@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
 // EmailTagKeyFile is the relay-local key that signs request-email tags, in
@@ -85,9 +86,11 @@ func (s *Server) VerifyRequestEmailTag(tag string, req envelope.Request) bool {
 
 // OpenAsks returns agent's open asks for request emails (store.OpenAsks):
 // queued, delivered or claimed asks, urgent first and then oldest, never a
-// held request, ping or notify.
+// held request, ping or notify. An email is a delivery to no session, so an
+// ask naming a project is left out until it falls back, as for a poll with
+// no label.
 func (s *Server) OpenAsks(agent string) ([]envelope.Request, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return s.store.OpenAsks(ctx, agent)
+	return s.store.OpenAsksFor(ctx, agent, store.QueueScope{Grace: SessionGrace})
 }

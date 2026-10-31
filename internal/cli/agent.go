@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -122,7 +124,7 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd(), watchCmd()}
+	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd(), watchCmd(), schedulesCmd(), unscheduleCmd()}
 }
 
 func joinCmd() *cobra.Command {
@@ -180,15 +182,35 @@ func joinCmd() *cobra.Command {
 }
 
 func inviteCmd() *cobra.Command {
-	var relayURL, socket, kind string
+	var relayURL, socket, kind, guestFor string
+	var guest, noHold bool
+	var guestAsk []string
 	cmd := &cobra.Command{
 		Use:   "invite <name>",
 		Short: "Create a one-time code that joins a machine as <name> (admin devices only)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !guest && (len(guestAsk) > 0 || guestFor != "" || noHold) {
+				return errors.New("--ask, --for and --no-hold need --guest")
+			}
+			var in client.GuestInvite
+			if guest {
+				var err error
+				if in, err = guestInvite(kind, guestAsk, guestFor, noHold); err != nil {
+					return err
+				}
+			}
 			r, err := adminRelay(socket, relayURL)
 			if err != nil {
 				return err
+			}
+			if guest {
+				inv, err := r.InviteGuest(cmd.Context(), args[0], in)
+				if err != nil {
+					return err
+				}
+				printGuestInvite(cmd, args[0], inv, guestRelayURL(cmd.Context(), r, relayURL, socket))
+				return nil
 			}
 			code, err := r.InviteKind(cmd.Context(), args[0], kind)
 			if err != nil {
@@ -220,7 +242,69 @@ func inviteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().StringVar(&kind, "kind", "", "the agent's runtime (hermes, codex, ...), recorded on join so tincan onboard tailors its block")
+	cmd.Flags().BoolVar(&guest, "guest", false, "invite someone outside the team, who may only ask the teammates in --ask, until --for runs out")
+	cmd.Flags().StringSliceVar(&guestAsk, "ask", nil, "with --guest: the teammates the guest may ask")
+	cmd.Flags().StringVar(&guestFor, "for", "", "with --guest: how long the guest lasts, such as 12h or 7d (30 days at most)")
+	cmd.Flags().BoolVar(&noHold, "no-hold", false, "with --guest: do not hold this guest's asks for your approval (approval.json still applies)")
 	return cmd
+}
+
+// guestInvite reads invite's guest flags.
+func guestInvite(kind string, ask []string, term string, noHold bool) (client.GuestInvite, error) {
+	switch {
+	case kind != "":
+		return client.GuestInvite{}, errors.New("a guest takes no --kind")
+	case len(ask) == 0:
+		return client.GuestInvite{}, errors.New("--guest needs --ask, the teammates the guest may ask")
+	case term == "":
+		return client.GuestInvite{}, errors.New("--guest needs --for, how long the guest lasts, such as 12h or 7d")
+	}
+	d, err := guestTerm(term)
+	if err != nil {
+		return client.GuestInvite{}, err
+	}
+	return client.GuestInvite{Ask: ask, ForSeconds: int64(d / time.Second), NoHold: noHold}, nil
+}
+
+// guestTerm reads a Go duration, or a whole number of days such as 7d.
+func guestTerm(term string) (time.Duration, error) {
+	if days, ok := strings.CutSuffix(term, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil && n > 0 {
+			return time.Duration(n) * 24 * time.Hour, nil
+		}
+	}
+	d, err := time.ParseDuration(term)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("--for %q: use a time such as 12h or 7d", term)
+	}
+	return d, nil
+}
+
+// guestRelayURL is the address a guest joins by. A guest is on another
+// tailnet, where a short machine name means nothing, so the relay's own full
+// address wins over the one the owner reaches it by.
+func guestRelayURL(ctx context.Context, r *client.Relay, relayURL, socket string) string {
+	var urls struct {
+		RelayURLs []string `json:"relay_urls"`
+	}
+	if r.Raw(ctx, "GET", "/v1/admin/urls", nil, &urls) == nil && len(urls.RelayURLs) > 0 {
+		return urls.RelayURLs[0]
+	}
+	return inviteRelayURL(relayURL, socket)
+}
+
+// printGuestInvite gives the owner the code and what has to happen on the
+// tailnet for it to work.
+func printGuestInvite(cmd *cobra.Command, name string, inv client.GuestInvited, relay string) {
+	cmd.Printf("Guest invite code for %q (valid 10 minutes): %s\n", name, inv.Code)
+	cmd.Printf("Lasts until %s, and may ask: %s.\n\n", inv.GuestUntil.Local().Format(time.RFC1123), strings.Join(inv.GuestAsks, ", "))
+	cmd.Printf("1. Share the relay machine with the guest's Tailscale account, from the machine's Share option in the Tailscale admin console.\n" +
+		"   Share in this direction only: a guest's machine shared into your tailnet is quarantined and cannot reach the relay.\n")
+	cmd.Printf("2. Once they accept the share, have them run:\n  tincan join %s --relay %s\n\n", inv.Code, relay)
+	cmd.Printf("Its asks wait for you in tincan held, unless this guest has --no-hold.\n")
+	if !inv.HoldAlerts {
+		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Set notify in approval.json or subscribe a phone to push, or check tincan held yourself.\n")
+	}
 }
 
 // olderRelayKind turns a relay's "unknown kind" rejection of a kind this
@@ -399,11 +483,17 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if unanswered := a.UnansweredField(now); unanswered != "" {
 			fmt.Fprintf(&b, " %s", unanswered)
 		}
+		if record := a.StatsField(); record != "" {
+			fmt.Fprintf(&b, " %s", record)
+		}
 		if workingOn := a.WorkingOnField(); workingOn != "" {
 			fmt.Fprintf(&b, " %s", workingOn)
 		}
 		if goodAt := a.GoodAtField(); goodAt != "" {
 			fmt.Fprintf(&b, " %s", goodAt)
+		}
+		if self := a.SelfField(); self != "" {
+			fmt.Fprintf(&b, " %s", self)
 		}
 		b.WriteString("\n")
 	}
@@ -415,30 +505,54 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 
 func askCmd() *cobra.Command {
 	var wait time.Duration
-	var parent string
+	var parent, project, at, every, thenTo string
 	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent[,agent...]> <message...>",
 		Short: "Ask another agent to do something and wait briefly for the reply",
-		Args:  cobra.MinimumNArgs(2),
+		Long: `Ask another agent to do something and wait briefly for the reply.
+
+With --at, --every or both the relay sends the ask later or on a repeat
+instead, as a new request with every send check applied at that time.
+"tincan schedules" lists yours and "tincan unschedule" stops one.`,
+		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := envelope.ValidProject(project); err != nil {
+				return err
+			}
+			if err := checkThenArgs(thenTo, args, notify, attach); err != nil {
+				return err
+			}
 			r, _, err := connect()
 			if err != nil {
 				return err
 			}
 			defer printHeld(cmd, r)
+			ctx := client.WithProject(cmd.Context(), project)
 			body := strings.Join(args[1:], " ")
+			if thenTo != "" {
+				// The message and the follow-on are one argument each.
+				body = args[1]
+			}
 			targets, err := client.NormalizeTargets(strings.Split(args[0], ","), "")
 			if err != nil {
 				return err
+			}
+			// Changed, not the values: an empty --at "$WHEN" asked for a
+			// schedule and must never turn into a send now.
+			if cmd.Flags().Changed("at") || cmd.Flags().Changed("every") {
+				if len(targets) > 1 || notify || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
+					return errors.New("a scheduled ask goes to one teammate, with no --notify, --parent, --attach, --project or --then")
+				}
+				return scheduleAsk(cmd, r, client.ScheduledAsk{To: targets[0], Body: body, Urgent: urgent}, at, every, asJSON)
 			}
 			if len(targets) > 1 {
 				kind := envelope.KindAsk
 				if notify {
 					kind = envelope.KindNotify
 				}
-				g, err := r.SendGroup(cmd.Context(), targets, body, kind, parent, attach, urgent)
+				g, err := r.SendGroup(ctx, targets, body, kind, parent, attach, urgent)
 				if err != nil {
 					return err
 				}
@@ -458,7 +572,7 @@ func askCmd() *cobra.Command {
 			}
 			ids := client.AttachmentIDs(ups)
 			if notify {
-				sent, err := r.SendAttachedResult(cmd.Context(), args[0], body, envelope.KindNotify, parent, ids, urgent)
+				sent, err := r.SendAttachedResult(ctx, args[0], body, envelope.KindNotify, parent, ids, urgent)
 				if err != nil {
 					return err
 				}
@@ -467,6 +581,7 @@ func askCmd() *cobra.Command {
 					return writeJSON(cmd.OutOrStdout(), sentJSON{Outcome: "sent", Request: req, Target: sent.Target})
 				}
 				cmd.Print(client.SignedOutHint(req.To, sent.Target))
+				cmd.Print(client.ProjectHint(req.To, sent.Target))
 				if req.Status == envelope.StatusHeld {
 					cmd.Printf("Request %s: held, waiting for the owner's approval.\n", req.ID)
 				} else {
@@ -474,7 +589,12 @@ func askCmd() *cobra.Command {
 				}
 				return nil
 			}
-			res, err := r.AskAttached(cmd.Context(), args[0], body, parent, ids, client.ClampWait(wait), urgent)
+			var res client.Result
+			if thenTo != "" {
+				res, err = r.AskThen(ctx, args[0], body, parent, envelope.Then{To: thenTo, Body: args[2]}, client.ClampWait(wait), urgent)
+			} else {
+				res, err = r.AskAttached(ctx, args[0], body, parent, ids, client.ClampWait(wait), urgent)
+			}
 			if err != nil {
 				return err
 			}
@@ -486,16 +606,43 @@ func askCmd() *cobra.Command {
 			} else {
 				cmd.Print(client.FormatResult(res))
 			}
+			if thenTo != "" {
+				cmd.Println(client.ThenNote(thenTo, res.Status))
+			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&thenTo, "then", "", `once answered, have the relay ask this agent too: ask muse "..." --then hermes "file the receipt"`)
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
+	cmd.Flags().StringVar(&project, "project", "", "the project of the session this is for, usually its repo directory name: that session gets it first, any session after about 10 minutes")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")
+	cmd.Flags().StringVar(&at, "at", "", "have the relay send this later: an RFC 3339 time, or a delay such as 2h")
+	cmd.Flags().StringVar(&every, "every", "", "have the relay send this on a repeat, such as 1h (at least 15m)")
 	return cmd
+}
+
+// checkThenArgs refuses --then on anything but one ask. With --then the
+// message and the follow-on are exactly one argument each: the words of an
+// unquoted message cannot be told from the follow-on's.
+func checkThenArgs(thenTo string, args []string, notify bool, attach []string) error {
+	switch {
+	case thenTo == "":
+		return nil
+	case len(args) != 3:
+		return errors.New(`--then takes one quoted message and one quoted follow-on: tincan ask <agent> "<message>" --then <agent> "<follow-on>"`)
+	case strings.Contains(args[0], ","):
+		return errors.New("--then takes one target")
+	case notify:
+		return errors.New("--then needs an ask, not --notify")
+	case len(attach) != 0:
+		return errors.New("--then does not take --attach")
+	}
+	_, err := client.NormalizeTargets([]string{thenTo}, "")
+	return err
 }
 
 func getCmd() *cobra.Command {
@@ -938,12 +1085,19 @@ func heldCmd() *cobra.Command {
 				if req.ToKind != "" {
 					to += " (" + req.ToKind + ")"
 				}
-				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, to, strings.Join(req.Chain, " -> "), req.Body)
+				// Above the body, which a long one could push out of view.
+				if req.FromGuest {
+					cmd.Printf("guest: the next entry is a guest's ask, or work that follows from one\n")
+				}
+				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, to, strings.Join(req.Chain, " -> "), heldText(req.Body))
 				switch {
 				case req.Pass != nil:
 					cmd.Printf("  pass: %s conversation %s -> %s\n", history.SourceLabel(history.Source(req.Pass.Source)), req.Pass.ConversationID, req.Pass.To)
 				case req.PassError != "":
 					cmd.Printf("  pass: will fail: %s\n", req.PassError)
+				}
+				if req.Then != nil {
+					cmd.Printf("  then, once answered: asks %s: %s\n", req.Then.To, heldText(req.Then.Body))
 				}
 				for _, a := range req.Attachments {
 					cmd.Printf("  attachment: %s (%d bytes)\n", a.Name, a.Size)
@@ -954,6 +1108,26 @@ func heldCmd() *cobra.Command {
 	cmd.Flags().StringVar(&socket, "socket", "", "local admin socket")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL")
 	return cmd
+}
+
+// heldText is relay text for the owner's terminal, where reading it is the
+// review: a control sequence shows as its code instead of hiding what would
+// be delivered, and a later line is indented so it cannot pass for an entry.
+func heldText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString("\n    ")
+		case r == '\t':
+			b.WriteRune(r)
+		case unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+			fmt.Fprintf(&b, "\\u%04x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func approvalCmd(action string) *cobra.Command {

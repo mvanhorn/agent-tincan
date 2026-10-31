@@ -319,11 +319,11 @@ func councilResultBlock(res client.Result) (string, bool) {
 	}
 	const open = council.ResultFence + "\n"
 	body := res.Reply.Body
-	i := strings.LastIndex(body, open)
-	if i < 0 {
+	_, rest, found := strings.CutLast(body, open)
+	if !found {
 		return "", false
 	}
-	block, _, ok := strings.Cut(body[i+len(open):], "\n```")
+	block, _, ok := strings.Cut(rest, "\n```")
 	if !ok {
 		return "", false
 	}

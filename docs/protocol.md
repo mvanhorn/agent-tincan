@@ -10,6 +10,8 @@ The relay answers 403 to any request whose `Host` is not one of its own addresse
 |---|---|---|
 | `id` | relay | Request id, assigned when queued. |
 | `from` | relay | Sending agent, resolved from the tailnet node. A client-supplied value is ignored. |
+| `from_guest` | relay | Set on a guest's ask and on anything a teammate sends while it holds work a guest's ask led to, except a relay fire of a scheduled ask (see Scheduled asks). A client-supplied value is ignored. See [Guests](#guests). |
+| `guest_approved` | relay | Set when the owner approved the guest's ask behind this request. A client-supplied value is ignored. |
 | `to` | client | Target agent name. Must differ from the sender. |
 | `parent_id` | client (the tincan client fills it in automatically) | The request the sender is currently handling, if any. The relay uses it to continue that request's chain. A client that names a session continues only that session's work; see Sessions within one agent. |
 | `trace_id` | relay | Chain id, inherited from the parent or new. |
@@ -17,11 +19,13 @@ The relay answers 403 to any request whose `Host` is not one of its own addresse
 | `chain` | relay | Agents the request has passed through, oldest first. |
 | `urgent` | client | Optional boolean, default false. Urgent requests are delivered first, oldest first within each priority. Relay-side wakes bypass debounce and the online skip, within the hourly wake cap. |
 | `kind` | client | `ask` (expects a reply, the default), `notify`, or `ping` (automatic client reply). |
+| `project` | client | Optional. The project of the target's session this request is for: up to 64 bytes of lowercase letters, digits, `.`, `_` and `-`. Anything else is a 400, and so is a `ping` that names one. See Projects within one agent. |
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
 | `attachments` | client names ids, relay fills the rest | Files stored on the relay: `[{"id", "name", "mime", "size"}]`. See Attachments. Left out when there are none. |
 | `created_at` | relay | When the relay queued it. |
 | `exchanges` | relay | Optional clarification history: `[{"question", "answer", "at"}]`. `at` is the question's timestamp; `answer` is absent until answered. Client-supplied exchanges are ignored. |
 | `resumed` | relay | Optional boolean, true after the asker has supplied clarification. Retained on subsequent deliveries and claims. |
+| `then` | client | Optional follow-on, `{"to", "body"}`: one ask the relay sends once this one is answered. See Follow-on asks. |
 | `moved_from` | relay | Optional list, oldest first, of the web agents the request moved off because their site was out of messages before it was sent there (see Failover). `to` is then the agent that took it. A client-supplied value is ignored. |
 
 ## Reply
@@ -90,7 +94,7 @@ A reply starts unseen by the agent that sent the request. It counts as seen once
 | `replies=take` | Returned, left unseen until the client acknowledges them (below). check_inbox and `tincan inbox` use this. |
 | `replies=keep` | Returned, left unseen, never acknowledged. `tincan wait` uses this to end the wait and print a count. |
 | `replies=none` | Left out, and they do not end the hold. |
-| `peek=1` | Nothing is taken. The response is `{"waiting": <total>, "queued": <requests>}`. When requests are queued it also carries `"pending": [{"id": "...", "from": "..."}, ...]`, naming up to 50 of them, oldest first, without bodies. With `replies=keep` (or `take`) it also carries `"replies": [...]` and `waiting` counts them; without, replies are not counted. A peek changes no request's state (nothing becomes `delivered` or `claimed`) and marks no reply seen. `tincan listen` and the Claude Code channel (`tincan mcp --channel`) send `peek=1&replies=keep`; the channel never claims, and the model takes the items with check_inbox. `pending` is additive: clients that predate it ignore it. |
+| `peek=1` | Nothing is taken. The response is `{"waiting": <total>, "queued": <requests>}`. When requests are queued it also carries `"pending": [{"id": "...", "from": "...", "rev": <number>}, ...]`, naming up to 50 of them, oldest first, without bodies. `rev` is opaque and changes each time a request returns to the queue, so a client can announce the return without seeing the whole queue. With `replies=keep` (or `take`) it also carries `"replies": [...]` and `waiting` counts them; without, replies are not counted. A peek changes no request's state (nothing becomes `delivered` or `claimed`) and marks no reply seen. `tincan listen` and the Claude Code channel (`tincan mcp --channel`) send `peek=1&replies=keep`; the channel never claims, and the model takes the items with check_inbox. `pending` is additive: clients that predate it ignore it. When the caller's project leaves queued requests out (see Projects within one agent), the response also carries `"hidden": <count>` and `"hidden_ids": ["...", ...]`, naming up to 50 of them without bodies, including on a peek with nothing else to report, which then answers 200 rather than 204. |
 
 Any other `replies` value is a 400.
 
@@ -114,6 +118,29 @@ Several clients can share one agent name, for example one `tincan mcp` per Claud
 - An ask with no `parent_id` is filed under (gets the `parent_id` and `trace_id` of) only an open claim made from the same session or with no session. When the agent-wide rule (exactly one open claim) would continue a claim from another session, the ask still takes that claim's `chain` and `hop`, so the cycle check, the hop limit, and allowlists see what they saw before sessions; only the trace is new.
 - Wake, the roster, and the audit log stay per agent and do not show sessions.
 
+`tincan listen --exec <cmd> --per-request` uses only these existing routes and adds nothing to the wire. It reads `pending` from a peek and claims each entry of kind `ask` with `POST /v1/requests/{id}/claim` from a fresh session (`worker-<hex>`), then hands that session to the process it starts as `TINCAN_SESSION`. The claim records the session, so the process's own asks continue its own request's chain while other workers hold other claims. While the process runs, the listener claims again every 2 minutes. A claim on a live claim renews the lease and keeps the first session, and a claim on a request whose lease lapsed takes it back under that session. It stops once the request is closed (409) or has gained a clarification question, and a process that left the request open gets `failed` from the same session. A relay whose peeks carry no `pending` kinds starts no workers, and the listener logs that once.
+
+### Projects within one agent
+
+An ask can name the project of the session it is for, so it reaches the window on the right repo. A client advertises its project with the `X-Tincan-Project` header on every call, in the same format as the `project` field of a request. Any other value is a 400 on the routes that read it (poll, claim). The header is optional. `tincan mcp` sends the name of the git repository around its working directory, with a linked worktree counting as its main repository; `--project <label>` sets it and `--no-project` sends none. Set the request's field with `tincan ask --project <label>` or the `ask` tool's `project`.
+
+| Request `project` | Caller's project | Queued 10 minutes | Taken |
+|---|---|---|---|
+| none | any | n/a | yes |
+| set | same | n/a | yes |
+| set | different or none | no | no |
+| set | different or none | yes | yes |
+
+- A poll, a claim by id and a peek all apply this table. A peek's `queued` and `pending` hold only what the same caller's poll would take, so a window that has nothing to take stays quiet; `hidden_ids` gives the ids of the rest, so a client can tell them from requests that left the queue. A claim that the table refuses is a 409.
+- Fallback goes by how long the request has been queued, not by whether a session of the project looks live, because an open idle window keeps calling the relay. The clock starts when the request is queued, restarts when the owner approves a held request or the asker answers a clarification, and keeps running when a delivery or claim lease lapses.
+- A client that sends no header takes a request that names a project only after fallback, and takes everything else as before. A relay that predates projects ignores the header and the field, and any session takes the request.
+- `tincan listen --per-request` sends no header, so an ask that names a project reaches its workers only after fallback, about 10 minutes later. Leave `project` off an ask to an agent that runs this way.
+- A request email goes to no session, so an ask that names a project is emailed only after fallback.
+- A wake stays per agent and carries no label, so a webhook or email agent is woken for such an ask at once, and again when it falls back, since its inbox shows nothing before then.
+- A move (see Failover) drops the label, since it named a session of the old target. A group names the project for each target. A room mention names none.
+- A schedule cannot name a project (400, see Scheduled asks), and a follow-on carries no label, though the first ask of a `then` can name one, so a scheduled ask or a follow-on goes to any session of its target.
+- Labels the relay sees are kept in memory only. The label a request names is stored on the request. A target reads it as `project` on the request, except on a request held and never approved.
+
 ### Request emails and email replies
 
 An email-method agent with `"include_requests": true` in `wake.json` gets one email per open ask (queued, delivered or claimed; never held, ping or notify) instead of the count-only text. The subject is `Agent Tincan: request from <asker> [tincan <id>.<tag>]`. The body carries the request id, asker, urgent flag, the request text up to 64 KiB, earlier clarification rounds, an attachment count, and reply instructions. A new ask is emailed on the wake debounce, even while a follow-up for older asks is pending. Follow-ups re-send only asks whose last email is at least one wake grace old, never-emailed asks first. `max_per_hour` counts wakes, not emails. Fallback paths keep the count-only text.
@@ -136,7 +163,7 @@ The MCP `search` tool accepts `query` and an optional `limit` and returns the sa
 
 Requests and replies can carry images and small files. The file goes to the relay first, and the message names it by id.
 
-`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8, "search": true}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
+`GET /v1/capabilities` says what the relay supports: `{"attachments": true, "max_attachment_bytes": 10485760, "max_attachments": 8, "search": true, "then": true}`. A relay that predates attachments answers 404 there, and it would also drop an `attachments` field without a word, since it decodes sends and replies with unknown fields ignored. So the tincan client checks this first and refuses to send attachments to a relay that does not report `"attachments": true`. A relay reports false when it has no place to keep files.
 
 `POST /v1/attachments?name=<display name>` uploads one file as the calling agent. The body is the raw file and `Content-Type` its media type; when that is missing, unparseable, or `application/octet-stream`, the relay detects the type from the first bytes. The name is display metadata only, reduced to its last path element; the relay stores the file by id. The response is `201` with `{"id", "name", "mime", "size", "sha256"}`. This is the one route not held to the relay's 1 MB body limit; it has its own 10 MB limit and a 5 minute read deadline.
 
@@ -173,7 +200,11 @@ Admin devices and the local admin socket have these endpoints; agent callers
 receive 403:
 
 - `GET /v1/admin/held`: array of request envelopes, with bodies truncated to
-  200 Unicode characters, including sender, chain and target. Each entry may
+  200 Unicode characters, including sender, chain and target. A held follow-on
+  or guest ask keeps its whole body. Those whole bodies and any `then` text
+  share 3 MiB of the response, oldest first, so it stays under
+  the 4 MiB a client reads. Past that, the text is cut to 200 characters with a
+  note saying how much is not shown. Each entry may
   also carry `to_kind`, the target's kind; for a target of kind `pass`, `pass`
   (`{"source", "conversation_id", "to"}`, parsed from the whole body as the
   pass service will read it) or `pass_error` (why it will fail). A tailnet
@@ -189,6 +220,8 @@ receive 403:
   the reason. Missing reason means an empty reply body.
 
 Approval and denial require an unexpired held request; other states return 409.
+Approving a request whose text the listing cut answers 412 until older requests
+are decided and it fits. Denying one needs no such wait.
 
 A browser caller must also send `{"nonce":"..."}` (with `reason` on a deny),
 the matching nonce from its own held listing. A nonce is bound to the request,
@@ -261,6 +294,7 @@ same 409 and the code is spent. The caller's own agent
 (bound to the calling device) may be invited again, and from the local admin
 socket any existing name is refused. Without `new_only`, as `tincan invite`
 sends it, an invite for an existing name still moves that agent on join.
+An invite with `guest` is new-only whatever else it says; see [Guests](#guests).
 
 `GET /phone/` and the files under it are the [phone page](phone.md), served
 to admin devices only (403 otherwise), on the relay's tailnet listeners and,
@@ -349,7 +383,7 @@ The relay validates an absolute HTTP(S) URL without user info or a fragment, ser
 
 `POST /v1/admin/relay/upgrade` installs a release over the relay's own binary. Only admin devices and the local admin socket may call it; agents and other callers get 403. The optional body is `{"force": false, "from_github": "v0.8.0"}`.
 
-With `from_github`, the relay first downloads that tag's `checksums.txt` and every `tincan_<os>_<arch>` it lists from its release URL (`tincan relay --release-url`; the request cannot change it, and without the flag the relay refuses `from_github` with 422), checks each binary against it, and moves them into `--dist`, `VERSION` last, restoring the old files if a move fails. Then it reads `--dist/VERSION`, checks `tincan_<its os>_<its arch>` against `--dist/checksums.txt`, keeps the old binary as `<binary>.<old version>`, and renames the new one into place.
+With `from_github`, the relay first downloads that tag's `checksums.txt` and every `tincan_<os>_<arch>` (`tincan_windows_<arch>.exe` on Windows) it lists from its release URL (`tincan relay --release-url`; the request cannot change it, and without the flag the relay refuses `from_github` with 422), checks each binary against it, and moves them into `--dist`, `VERSION` last, restoring the old files if a move fails. Then it reads `--dist/VERSION`, checks `tincan_<its os>_<its arch>` against `--dist/checksums.txt`, keeps the old binary as `<binary>.<old version>`, and renames the new one into place.
 
 Success returns `{"from": "0.7.0", "to": "0.8.0", "restart": "re-exec"}` (or `"exit"` for a relay started with `--upgrade-exit`), writes a `relay_upgraded` audit event with the two versions and the source (`dist` or `github`), and only then restarts the relay: it drains, closes its store, and re-executes itself or exits with status 75. Errors change nothing:
 
@@ -357,6 +391,100 @@ Success returns `{"from": "0.7.0", "to": "0.8.0", "restart": "re-exec"}` (or `"e
 - 409: the release is not newer than the relay's build and `force` is false, an upgrade is already pending a restart, or the relay user cannot write its binary or the directory holding it;
 - 422: no valid `VERSION`, no binary for the relay's platform, no `checksums.txt` entry for it, or a checksum mismatch;
 - 502: the release download failed.
+
+## Guests
+
+A guest is someone outside the team, on another tailnet, who may ask the teammates the owner listed until a set time. The relay advertises `"guests": true` in `GET /v1/capabilities`, and the client checks it before inviting, then checks that the relay echoed `guest_until` before it prints a code, so an older relay that dropped the `guest` field cannot turn the code into a full teammate's.
+
+`POST /v1/admin/invite` takes an optional `guest` object: `{"name": "friend", "guest": {"ask": ["muse", "instinct"], "for_seconds": 259200, "no_hold": false}}`. The answer adds `guest_until`, `guest_asks` and `hold_alerts`, which is false when nothing would tell the owner a guest's ask is held. It is refused with 400 when `ask` is empty, when the term is not above zero or is over 30 days, with `kind`, or when a listed name is not a joined teammate (a guest, a phone and the history, notes and pass services cannot be listed). It is refused with 400 on a relay started without `--admin-login`, since machine names alone could not tell a guest from an admin device. A guest invite is always new-only: it answers 409 for a name that is taken, on any machine, and `POST /v1/join` checks again when the code is redeemed.
+
+A name does not change tier. `POST /v1/admin/invite` without `guest` answers 409 for a guest's name, connecting the gateway to one does too, and a guest invite for an existing teammate does the same. `tincan remove` frees the name. A machine carries one guest or only teammates: `POST /v1/join` answers 409 for a second guest's code or a code of the other tier. A machine carrying a guest is never an admin device, whatever its name or login, and is never re-admitted to a new machine's name.
+
+A wrapper in front of every route answers 403 with `guests may not use this route` to a guest unless the route is on this list. A route added later is refused until someone adds it.
+
+| Route | For a guest |
+|---|---|
+| `POST /v1/send` | See below. |
+| `GET /v1/poll` | Replies to its own asks and the relay's notices. |
+| `POST /v1/replies/ack` | As for anyone. |
+| `GET /v1/requests/{id}` | Its own asks only, as for anyone. |
+| `POST /v1/requests/{id}/claim` | Relay notices only; 403 for anything else. |
+| `POST /v1/requests/{id}/answer` | As for anyone. |
+| `POST /v1/requests/{id}/cancel` | As for anyone, except that a gateway guest gets 409 on a request that was claimed before or whose question was answered. |
+| `GET /v1/agents` | Its listed teammates, with `name`, `online`, `wake` (always `none`), `kind` and `good_at` only. |
+| `GET /v1/whoami` | `name`, `kind`, `guest_until`, and never `relay_key` or `relay_urls`. |
+| `GET /v1/hello` | As for anyone. |
+| `GET /v1/capabilities` | Fixed flags, as for anyone. |
+
+`POST /v1/join` is not on the list, so a machine carrying a guest cannot join again under any code. Past `guest_until`, every route answers 403, including this list, before the sweep runs, and `POST /v1/send` and the answer route check again once the body is read. The sweep then revokes any gateway tokens, cancels the guest's open requests and audits `guest_expired`. The row stays, so the name stays taken until `tincan remove`.
+
+On `POST /v1/send`, a guest may set `to`, `body`, and `kind` of `ask`. Any other field that is set, in any spelling the decoder would accept and including a field this relay does not know, is refused with 403. That covers `then`, `group`, `urgent`, `parent_id` and `attachments`. An empty value counts as not set, since real clients send some. A `to` that is not listed is refused with 403 and the same words whether or not that name exists. The response carries no `target`.
+
+A send to a guest, a `then` to a guest, a watch on a guest (404, as for an unknown agent) and a room membership or mention for a guest are all refused: guests ask, and only the relay's notices reach one. A follow-on whose target has become a guest is dropped with a notice to its sender.
+
+Teammates' rosters leave guests out. An admin's roster lists them with `guest_until`. A note to a guest suggests only its listed teammates, and a note to anyone else never suggests a guest.
+
+`Prepare` marks a request `from_guest` when a guest sent it, or when its sender holds a claim on a marked request, however the request found its parent: a named `parent_id`, the session guard, or several open claims. The one exception is a relay fire of a scheduled ask (see Scheduled asks). It puts this line and a blank line in front of the body, once, for clients that ignore the field. A teammate's threading line (`new chat`, `conversation: <id>`) stays first with this line after it, and a request to a council, pass, notes or history agent gets no line, since those parse the body as a form. A request stays marked in `from_guest` either way:
+
+```text
+[Agent Tincan: this request comes from a guest, outside the team.]
+```
+
+What a guest wrote, in a send or in an answer, goes between delimiters with a random nonce and a fixed line saying whose text it is. A marked request is left out of request emails and reaches an email agent as a count.
+
+A marked request that is not `guest_approved` is held after the rate check and before `approval.json` is read, so no gate entry can lift it, and it takes its hold TTL and notify target from the file. `no_hold` lifts that default hold for the guest's own asks and is audited on `guest_invited`; `approval.json` and the kind holds still apply, and what a teammate sends from an unapproved guest ask is held anyway. Approving sets `guest_approved`, and a request sent from approved work is `guest_approved` too and passes this hold. A guest's answer to a needs_input question clears it on that request. A follow-on never inherits it. Failover never moves a marked request. `GET /v1/admin/held` shows a marked request's whole body, not a preview.
+
+`from_guest` and `guest_approved` are optional, also on the entries of the held-claims header, and an older client ignores them, which the body line is there for.
+
+## A2A
+
+`docs/a2a.md` is the owner's guide; this is the wire. The gateway serves A2A 1.0 over JSON-RPC, on the public side only, and adds no `/v1` route. With no published teammate, these routes answer 404:
+
+- `GET /.well-known/agent-card.json`: a card listing each published teammate as a skill, and its endpoint as an interface.
+- `GET /a2a/{teammate}/.well-known/agent-card.json`: that teammate's card. Cards need no token and carry `Cache-Control: public, max-age=300`.
+- `POST /a2a/{teammate}`: the JSON-RPC endpoint. It needs a gateway bearer token and the `A2A-Version` header.
+
+`a2a.json` in the relay's state directory lists who is published. Mode 0600, a regular file, read on every call:
+
+```json
+{"teammates": [{"name": "muse", "description": "Writes and edits. Answers can take a while."}]}
+```
+
+The order of checks on the endpoint is: published (404), token (401 with the usual `WWW-Authenticate`), caller is a guest (403 otherwise, and 403 past its term), JSON-RPC envelope, then `A2A-Version`. An empty header means 0.3 and answers `-32009`, as does anything other than 1.0 or 1.0.x. Anything after the 403 is HTTP 200 with a JSON-RPC body.
+
+| Method | Maps to | Result |
+|---|---|---|
+| `SendMessage` | `POST /v1/send` from the guest, or `POST /v1/requests/{id}/answer` when `message.taskId` names a task in needs_input | `{"task": Task}` |
+| `GetTask` | `GET /v1/requests/{id}` | `Task` |
+| `CancelTask` | `POST /v1/requests/{id}/cancel`, only for a task in `TASK_STATE_SUBMITTED` | `Task` |
+
+The task id is the request id, and `contextId` is the same id. A new message's `contextId` is ignored, since asks share no conversation; on a continuation it must match the task or the call answers `-32602`. `configuration.returnImmediately` returns at once. Otherwise `SendMessage` waits at most 25 seconds and returns the state so far, so a client must be ready to poll. A held ask returns at once. Only `text` parts are read; message and request `metadata`, `referenceTaskIds` and `historyLength` are ignored and never reach the relay, and `acceptedOutputModes` is not checked.
+
+| Request status | Task state |
+|---|---|
+| `held`, `queued` | `TASK_STATE_SUBMITTED` |
+| `delivered`, `claimed` | `TASK_STATE_WORKING` |
+| `needs_input` | `TASK_STATE_INPUT_REQUIRED`, the question in `status.message` |
+| `answered` | `TASK_STATE_COMPLETED`, the reply in the artifact `reply` |
+| `failed`, `expired` | `TASK_STATE_FAILED`, any reply in `status.message` |
+| `declined` | `TASK_STATE_REJECTED`, any reply in `status.message` |
+| `cancelled` | `TASK_STATE_CANCELED` |
+
+Reply attachments are not carried, and neither are progress or relay notes.
+
+| Code | When |
+|---|---|
+| `-32001` | The id is unknown, is another caller's, or went to another teammate |
+| `-32002` | `CancelTask` on a task past `TASK_STATE_SUBMITTED` |
+| `-32003` | `configuration.taskPushNotificationConfig` was set |
+| `-32004` | Another A2A method, a message to a task not in needs_input, or the relay refused the guest, such as a teammate it is not listed for |
+| `-32005` | A part with `raw`, `url` or `data` |
+| `-32009` | `A2A-Version` is not 1.0 |
+| `-32600`, `-32601`, `-32602`, `-32603`, `-32700` | As in JSON-RPC. A call with no `id`, or with an `id` that is not a string or number, is `-32600`, and so is a batch. Anything after the one request in the body is `-32700`. A bad `id` comes back as `null` |
+
+`POST /v1/admin/connect` takes an optional `guest` object, the same shape as on an invite: `{"name": "pal", "guest": {"ask": ["muse"], "for_seconds": 2592000}}`. It binds a virtual guest and answers `code`, `cards`, `unpublished` (listed teammates `a2a.json` does not publish), `guest_until`, `guest_asks` and `hold_alerts`, and audits `guest_connected`. It is new-only: a taken name answers 409, even a guest's. `replace` and `no_hold` answer 400, and so does any list or term a guest invite would refuse. `--admin-login` is not needed, because a virtual guest has no machine name to pass off as an admin device. The relay advertises `"gateway_guests": true` in `GET /v1/capabilities`. The client checks it first and then checks that `guest_until` came back, because a relay without it would ignore the field and bind a full teammate.
+
+A gateway guest's token answers 403 on `/mcp`.
 
 ## Agent roster
 
@@ -372,11 +500,17 @@ An entry may also include `good_at`: the owner's line saying what the agent is g
 
 An entry may also include `working_on` and `working_on_others`: the title of the agent's most recently refreshed session that shares one (`tincan mcp --share-title`), and how many of its other sessions share one too. Both are omitted for an agent with no shared title, and by older relays, and older clients ignore them. The title is the session's own description of itself, for agents to read; the relay never routes on it and it grants nothing.
 
+An entry may also include `self`: `true` on the caller's own entry, so an agent can tell itself from a teammate when several of its sessions share its name. It is omitted on every other entry, when the caller is no joined agent (an admin device that never joined, the local admin socket), when an admin device carrying several agents names none in `X-Tincan-Agent`, when a rebuilt admin device names an agent not yet re-admitted, or names none while another agent from its old machine still waits, and by older relays, and older clients ignore it. The mark grants nothing, and an admin device's read of the roster never re-admits a rebuilt machine: a call made as the agent does that, and the mark follows.
+
+An entry may also include `stats`: the agent's record for asks finished in the last 7 days, as `{"answered": 12, "failed": 1, "expired": 0, "median_reply_ms": 180000}`. It is omitted for an agent with no such ask and by older relays, and older clients ignore it.
+
+`GET /v1/stats?since=<duration>` returns the same record for every joined agent, to any joined agent or admin caller, except that a guest is listed only for an admin caller, as on the roster: `{"since": "<RFC3339>", "agents": [{"agent": "muse", "answered": 12, "failed": 1, "expired": 0, "median_reply_ms": 180000}, ...]}`. An agent with no finished ask appears with zero counts. `since` is a window back from now in days or a Go duration (`7d`, `12h`), positive and at most 365 days, default `7d`; anything else answers 400. `since` in the response is where that window starts. An ask is in the window when its reply was written. An expired ask is dated by its deadline, or by its last progress note if that held the claim past the deadline, never by when a relay that was down got round to expiring it. Pings, notifies, declined and cancelled requests, open requests, held requests the owner never approved and asks that expired in `needs_input`, waiting on their asker, are left out. `median_reply_ms` is the median over answered asks of the time from `created_at` to the reply, or from the `approved` audit event for a held ask, so the owner's delay is not charged to the teammate; it is omitted when no answered ask has a known time and present even when the median is 0, and an even count takes the midpoint of the middle two. The time includes any wait for a clarification answer. The relay reads each window from the store at most once every 60 seconds, so a roster or stats read can be up to 60 seconds old. It reads at most 8 windows other than the default in those 60 seconds; a further window answers 429 with `Retry-After`, and the default window and windows already read keep working. A relay that predates the route answers Go's plain-text `404 page not found`, which `tincan stats` reports as needing a relay upgrade. No field carries request or reply text, a sender or a request id.
+
 `PUT /v1/agents/self/working-on` with `{"text": "Fix flaky relay test"}` sets the calling session's line and answers 204; `DELETE` on the same path removes it and answers 204. Both use the caller's existing authentication and require `X-Tincan-Session` (400 without it). The line belongs to the authenticated agent and that session, never to a name in the body, so no agent can write or remove another agent's line. The body must be exactly one object with only `text`; unknown fields, a second value, or a line that is empty or fails the `good_at` checks (one line of at most 120 characters, valid UTF-8, no control or format characters) answer 400 and store nothing. The relay keeps lines in memory only and drops a session's line once it goes 10 minutes (the session grace) without a refresh, so a client re-sends an unchanged line every few minutes. A relay that predates the routes answers 404 or 405, and the client then stops reporting for the life of its process.
 
 Every entry from a current relay includes `status`, the relay's one word for what the agent is doing, computed in one place so every surface shows the same thing:
 
-- `busy`: the agent holds a request with a live claim lease, or one of its sessions' hosts reports it busy (below). For a claim, `busy_for` names the asker of the agent's oldest live claim and `busy_since` is when that claim began; a host-reported busy names neither. The roster never carries a request's text or progress note.
+- `busy`: the agent holds a request with a live claim lease, or one of its sessions' hosts reports it busy (below). For a claim, `busy_for` names the asker of the agent's oldest live claim and `busy_since` is when that claim began; a host-reported busy names neither. A guest is named to an admin only: for anyone else `busy_for` is left out and `busy_since` stays. The roster never carries a request's text or progress note.
 - `stuck`: work waits on the agent and nothing is moving. `status_reason` says which: `claim lapsed` (a claim's lease ran out with no progress note and the relay put the request back in the queue; it stays until the agent claims or answers it), `woken, silent 15m` (a relay-woken agent that has not checked in since its last wake, as `unanswered`), `overdue check` (a schedule agent that has missed its checks, as `overdue`), `3 queued while offline` (work queued for an offline agent the relay does not wake), or `oldest queued 2h` (a request untaken for over an hour). Stuck wins over busy. Nothing is reported stuck in the first claim lease (30 minutes by default) after the relay starts.
 - `limited`: a web agent that is polling now and whose site reported it out of messages (see Web authentication observations) until `limited_until`, which the entry carries; `status_reason` is `until 14:00 UTC`. Limited wins over stuck and busy, since nothing it is sent goes out before then. It ends when the reset passes or the agent reports `authenticated`.
 - `idle`: none of the above, and the agent is polling now (`online`).
@@ -416,11 +550,75 @@ A mention's text belongs to its room. A mention continues the poster's chain, so
 
 Audit rows `room_created`, `room_member_added`, `room_member_removed` and `room_posted` carry the room, ids, agent names and byte counts, never post text. Rooms live in `rooms`, `room_members` and `room_posts` tables, with no foreign key to `agents`, and a nullable `room_post_id` column on `requests`; an older relay opening the database ignores them, and mentions stop mirroring until the newer relay is back.
 
+## Work leases
+
+A work lease is a named, expiring, advisory claim on a resource, so teammates can see who has taken what. The relay advertises `"leases": true` in `GET /v1/capabilities`. A relay that predates leases answers 404 or 405 on these routes; a client that gets one checks capabilities and reports an upgrade message. Nothing about leases is added to any other route.
+
+A resource is an opaque string: the relay never reads it as a path or a repo. A resource ending in `*` is a prefix and covers everything that starts with the text before the star (`a/**` is the same prefix as `a/*`; a lone `*` covers every resource); any other resource, stars inside it included, is exact. So `a/*` overlaps `a/b`, `a/` and `a/b/*`, and does not overlap `ab` or `a`.
+
+- `POST /v1/leases` with `{"resource": "agent-tincan:internal/relay/*", "ttl_seconds": 7200, "note": "splitting server.go"}` takes a lease for the authenticated caller. `ttl_seconds` and `note` are optional. The body must be exactly one object with only those fields (400 otherwise). `resource` is required, and it and `note` are trimmed and must each be one line of at most 120 characters with no control characters (400 otherwise). `ttl_seconds` defaults to 3600 and must be between 1 and 86400 (400 otherwise). A new lease answers 201 with `{"resource", "holder", "note", "created_at", "expires_at"}`. Acquiring a resource the caller already holds renews it and answers 200 with the same fields and `"renewed": true`: the expiry restarts from now, and the note changes only when a new one is given.
+- A teammate's overlapping live lease answers 409 with `{"error": "\"a/*\" is held by muse until <RFC 3339>", "resource": "a/*", "holder": "muse", "expires_at": "<RFC 3339>"}`, where `resource` is the lease in the way. The caller's own leases never conflict with each other. An acquire is one transaction, so of two racing acquires exactly one wins.
+- A new lease past the caller's 32 live leases answers 409 with an `error` and no `holder`. A renewal is not refused at the cap.
+- `DELETE /v1/leases` with `{"resource": "a/*"}` drops the lease on exactly that resource and answers 200 with it. Only its holder, an admin device that also sends `"admin": true`, or the local admin socket may (403 otherwise, 404 when no live lease has that resource). Without that field an admin device gets no override, so an agent running on one releases as itself; the field gives nothing to a caller that is not an admin. Releasing `a/*` leaves a lease on `a/b` alone.
+- `GET /v1/leases` answers `{"leases": [...]}`, every live lease by resource, to any joined agent, admin device or the local admin socket.
+
+An expired lease is skipped by every read at once, can be taken with no call from its holder, and its row is cleared by the sweep or by the next acquire. `tincan remove` clears the agent's leases with it. A rebind keeps them, since the agent keeps its name.
+
+Audit rows `lease_acquired`, `lease_renewed`, `lease_released` (with `reason` `holder`, `admin` or `removed`) and `lease_expired` carry the resource, the holder and, on the first two, the TTL and the note's byte count, never the note. Leases live in a `work_leases` table with no foreign key to agents, since a rebind re-inserts the agent row.
+
+## Scheduled asks
+
+A scheduled ask is an ask the relay sends later, once or on a repeat. The relay advertises `"schedules": true` in `GET /v1/capabilities`. Clients check it before every schedule call and refuse without it (`relay does not support scheduled asks, so nothing was sent`): they never fall back to `POST /v1/send`, because an older relay would send the ask at once.
+
+`POST /v1/schedules` takes the fields of a send plus a time, and answers 201 with the schedule. The owner is the authenticated caller.
+
+| Field | Meaning |
+|---|---|
+| `to` | Target agent. One agent, checked like a send: an unknown agent answers 404, and a phone or a guest 400. |
+| `body` | The ask's text, as for a send. |
+| `urgent` | Optional, as for a send. Each fire spends the sender's urgent allowance. |
+| `at` | Optional RFC 3339 time of the first fire. Must be in the future. |
+| `every_seconds` | Optional repeat, from 900 (15 minutes) to 31622400 (366 days). Without `at` the first fire is one interval from now. |
+
+One of `at` and `every_seconds` is required. `parent_id`, `group`, `also`, `attachments`, `project`, `then` and any `kind` but `ask` are refused with 400: a fire starts a new chain, goes to one teammate, and carries no files, no project label and no follow-on. A caller with an open claim is refused with 409, by the lookup a send uses to continue a chain (the session's own claim, else the agent's one claim). So is a caller with an open marked ask (see Guests) that has reached it, one `queued`, `delivered`, `claimed` or `needs_input` but not `held`, however many other claims it holds, because a fire carries no mark. An agent has at most 32 live schedules; the 33rd is refused with 409. Nothing is checked against `approval.json` here: the owner's holds apply at fire time.
+
+A schedule is `{"id", "from", "to", "body", "urgent", "next_at", "every_seconds", "created_at", "last_request", "blocked"}`. `urgent`, `every_seconds`, `last_request` (the request its latest fire made) and `blocked` (its latest fire was rejected) are left out when empty. Ids are never reused.
+
+`GET /v1/schedules` answers `{"schedules": [...]}` with the caller's schedules, and with `?all=1` every agent's, for an admin device or the local admin socket (403 otherwise), oldest first. A client that sends `?after=<id>` (0 to start) reads it in pages of at most 500 schedules, each carrying `"next_after": <id>` when more follow; without `after` the whole listing comes back in one response. Each `body` in a listing is a preview, the first 200 characters of the text on one line with control and bidi characters mapped to spaces, so a page stays inside what a client reads of a response at any number of agents; a fire sends the whole text. `DELETE /v1/schedules/{id}` stops one and answers 200 with it, whole text included. A joined agent can stop only its own: anything else answers 404, as an unknown id does. An admin device or the local admin socket can stop any. A request a fire already sent is not touched; cancel it by its id.
+
+The relay fires what is due on every sweep, its periodic pass over expiries and leases, which approve, deny and `GET /v1/admin/held` also run. A fire:
+
+1. Moves the schedule first: a one-shot is deleted, and a recurring schedule moves to its next time after now, in one update conditional on the `next_at` it read. Only the sweep that won that update goes on, so racing sweeps send once. A relay that stops between this step and the next loses that occurrence rather than sending it twice.
+2. Skips the occurrence, for a recurring schedule, while `last_request` is open (held, queued, delivered, claimed or needing input).
+3. Checks the target as a send does, then sends through the path a send takes: loop, hop and rate checks, the owner's holds, delivery, wake and failover. The request has a new `id` and trace, `hop` 1 and `chain` of the owner alone, whatever claims the owner holds. Those claims do not mark it or hold it as a guest's either: its text was fixed before they opened, since a schedule cannot be made while a marked ask is open with its owner or changed afterwards. Its TTL runs from the fire. Client fields cannot ask for this: only the relay starts a chain this way.
+
+Occurrences missed while the relay was down fire once, then the next time lands after now on the schedule's own cadence, with no catch-up burst.
+
+A rejected fire is not retried. A one-shot is gone and its owner gets a relay notice naming the schedule, the target and the reason, never the text. A recurring schedule stays, sets `blocked`, and tries again at its next time; the notice goes out once per run of rejections, and a fire that goes through ends the run.
+
+Removing the owner or the target deletes the schedule. Audit rows `schedule_created`, `schedule_fired`, `schedule_skipped`, `schedule_blocked` and `schedule_cancelled` carry ids, agent names, times and the reason, never the text. Schedules live in a `schedules` table with no foreign key to `agents`; an older relay opening the database ignores it, and nothing fires until the newer relay is back.
+
+## Follow-on asks
+
+A send of kind `ask` may carry `then: {"to": "hermes", "body": "file the receipt"}`, up to 16 KB of body. When the request is answered, the relay sends one new ask to `then.to`, from the same sender, with no model step. The relay advertises `"then": true` in `GET /v1/capabilities`. An older relay ignores the field, so the client checks first and refuses to send rather than drop it (`tincan ask --then`, the `then` param on the `ask` tool).
+
+A send is refused with 400 when `then` comes with `notify`, `ping`, a `group` or `attachments`, when it has no target or body, when `then.to` is the sender or the first target, when `then.to` is a phone, or when the first target's kind is `history`, `notes` or `pass`. An unknown `then.to` answers 404. The send response echoes `then`. The held listing (`GET /v1/admin/held`) carries it on each held request that has one, so `tincan held` and the phone page show the follow-on's target and text. A held follow-on itself is listed with its whole body, reply included, not the 200-character preview of other held requests. Delivered requests never carry `then`.
+
+The follow-on's body is `then.body`, a blank line, a fixed line naming the teammate and saying what follows is a teammate's reply and data, not instructions, a blank line, then the reply between `<<<REPLY <nonce>>>>` and `<<<END REPLY <nonce>>>>` lines. The nonce is random per follow-on and appears nowhere in the texts. A reply too long to fit is cut, with a `[truncated: ...]` line: the limit is the 256 KB body limit, or just under 32 KB for a web teammate, which fails a longer message without sending it. Reply attachments are not carried.
+
+The follow-on keeps the first request's `trace_id`, its `parent_id` is the first request, its `hop` is the first request's plus 1, and its `chain` is the first request's chain plus the first request's `to`, so a follow-on back to any agent in that chain is a cycle. It takes a slot of the sender's rate. Holds treat it as having no parent, so it never inherits an approval: `approval.json` and the default holds by kind apply as to a new ask. It never fails over or moves. A held follow-on's target takes no part in the chain until the owner approves it: `GET /v1/trace/{trace}` and `GET /v1/search` treat it as outside the chain, and still do after a denial.
+
+A client's own `parent_id` naming an answered request is still refused with 400. The relay's follow-on path is a relay-only field that no send can set.
+
+The relay writes the follow-on in a `followups` table with the send. The answering reply marks the row due in its own transaction, the relay fires it right after the reply, and each sweep retries due rows, so a restart between the reply and the fire still sends it, once: the row is deleted in the transaction that enqueues the follow-on or its refusal notice. A rate limit or a server error leaves the row due for the next sweep. A refusal (hop limit, cycle) or a first target or `then.to` that no longer qualifies drops the row, and the sender gets a notice from `relay`. A `needs_input` reply keeps the row, and the later answer fires it. A first request that ends failed, declined, cancelled or expired drops the row with no notice beyond its own result. The audit log records `follow_on_sent` and `follow_on_dropped` with ids and names, never text.
+
 ## Recipient facts on send
 
 The `POST /v1/send` response is the queued request with one optional extra field, `target`, set when the recipient is on wake method `schedule`: `{"check_every_seconds": 300, "expect_reply_seconds": 600, "overdue": false}`, or on `webhook` or `email` and woken before: `{"woken_at": "...", "wake_result": "ok", "unanswered": true}`, with the roster's meanings. Those fields are omitted for other recipients, for requests held for owner approval, and by older relays, which older clients ignore. The relay does not store it, and `GET /v1/requests/{id}` never returns it; the tincan client copies it from the send response onto the result an ask returns, so the pending-reply text can say when to expect an answer.
 
 For every recipient whose wake method the relay knows, `target` also carries `wake_via` and `listening`: `{"wake_via": "socket", "listening": true}`. `wake_via` is `socket` while one of the recipient's sessions has peeked advertising `socket-wake` (see Ping capability) within the last 10 minutes, and otherwise the recipient's wake method from the relay's wake config (`channel`, `wait`, `command`, `none`, `schedule`, `webhook` or `email`). `listening` is the roster's `online`: an inbox poll within one poll hold plus 30 seconds. They sit beside the schedule and wake fields above, and their names differ from the roster's `wake` and `online` so the roster entry, which carries target fields at its top level, keeps both. A relay with no wake config sends neither. The tincan client adds one line to the pending-reply text from them: for `socket`, that the recipient is listening and a session will be prompted when it is idle, or is not connected and the request waits until a session opens; for `channel`, the same, except that a listening session started without channels may not see the request until its next turn; for `wait` and `command`, that it is listening and will start a turn when it picks the request up, or that its listener is not running and the request waits until it restarts; and for `none`, that it checks only when its owner next prompts it. `schedule`, `webhook` and `email` keep the lines their own fields give and get no new one. The line states facts and never a reply time. A client reading a relay that sends neither field shows the text it showed before.
+
+When the send names a project, `target` also carries `project_match`: `live` when a session of that project called the relay in the last 10 minutes, `none` when none did and the request waits for fallback. It is left out for a request that moved or is held for approval, and for 10 minutes after the relay starts, while it cannot tell which sessions are gone. It is a report only: delivery goes by the table in Projects within one agent, so a `live` session that never polls does not keep the request from falling back.
 
 ## Ping capability
 

@@ -675,7 +675,9 @@ func nativeErrorKind(s Source, ne *NativeError) error {
 		return unavailable(s, ErrTimeout, detail)
 	case "composer_not_found":
 		return unavailable(s, ErrComposerNotFound, detail)
-	case "send_failed":
+	case "send_failed", "page_error":
+		// page_error: the site could not load the conversation, so
+		// nothing was typed; the detail says what the tab showed.
 		return unavailable(s, ErrSendFailed, detail)
 	case "unsupported":
 		return unavailable(s, ErrRejected, "the extension needs an update: "+detail)
@@ -874,6 +876,7 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 			return cerr
 		}
 	}
+	caller := ctx
 	ctx, cancel := context.WithTimeout(ctx, c.timeout(op))
 	defer cancel()
 	req := NativeRequest{ID: requestSeq.Add(1), Op: op, Args: args}
@@ -901,6 +904,17 @@ func (c *Client) exchange(ctx context.Context, op Op, args OpArgs, recv func(Nat
 	case errors.Is(err, ErrExtensionNotConnected), errors.Is(err, errHostClosed), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return unavailable(src, ErrExtensionNotConnected, "")
 	case errors.Is(err, context.DeadlineExceeded), isTimeout(err):
+		// The caller's own deadline is the caller running out of time
+		// (a history request's whole budget), not Chrome failing to
+		// answer, so it stays a context error for the caller to report.
+		// The socket shares that deadline and can time out just before
+		// the context's timer fires, so a passed deadline counts too.
+		if cerr := caller.Err(); cerr != nil {
+			return fmt.Errorf("%s: %w", src, cerr)
+		}
+		if d, ok := caller.Deadline(); ok && !time.Now().Before(d) {
+			return fmt.Errorf("%s: %w", src, context.DeadlineExceeded)
+		}
 		return unavailable(src, ErrTimeout, "")
 	case errors.Is(err, context.Canceled):
 		return err
@@ -1160,8 +1174,7 @@ func chromeRunning() bool {
 		if err == nil {
 			return true
 		}
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) {
+		if _, ok := errors.AsType[*exec.ExitError](err); !ok {
 			return true
 		}
 	}

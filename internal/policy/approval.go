@@ -221,6 +221,16 @@ func (a *Approval) holdDefaults(target string) (entry bool, ttl time.Duration, n
 	return entry, a.ttl, a.good.Notify
 }
 
+// guestHold reloads the policy and gives the hold TTL and notify target for a
+// guest's held ask, which is decided ahead of Held and so needs its own read.
+// A bad file holds all the same, with the last good values or the defaults.
+// Nil-safe.
+func (a *Approval) guestHold(target string) (time.Duration, string) {
+	_, _, _ = a.load()
+	_, ttl, notify := a.holdDefaults(target)
+	return ttl, notify
+}
+
 // Reject ambiguous JSON rather than letting a repeated field replace a rule.
 func approvalJSON(d *json.Decoder) error {
 	token, err := d.Token()

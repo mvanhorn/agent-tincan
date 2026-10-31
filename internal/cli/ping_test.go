@@ -57,6 +57,7 @@ func TestWaitAnswersPingAndKeepsWaiting(t *testing.T) {
 }
 
 func TestListenAnswersPingsWithoutExec(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	m := testrelay.New(t, relay.Config{PollHold: time.Second})
 	target, sender := m.Client(t, "muse"), m.Client(t, "grokbot")
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

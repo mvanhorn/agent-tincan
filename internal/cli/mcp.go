@@ -22,7 +22,8 @@ import (
 )
 
 func mcpCmd() *cobra.Command {
-	var channel, wakeSocket, shareTitle bool
+	var channel, wakeSocket, shareTitle, noProject bool
+	var project string
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Run the Agent Tincan MCP server over stdio (add this to your agent's MCP config)",
@@ -54,7 +55,12 @@ With --share-title, inside a Claude Code session it also shows the
 session's title (its custom title, else the title Claude Code wrote for
 it) as a working_on field on the roster, refreshed every few minutes and
 removed when the server exits. Every joined agent can read it. Off by
-default.`,
+default.
+
+The session tells the relay which project it works in, so an ask naming that
+project (tincan ask --project) reaches this window before the agent's other
+windows. The label is the git repository's directory name; --project sets it
+and --no-project sends none.`,
 		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			// Record the launch before anything can fail, so tincan doctor
 			// can tell an app that never starts tincan from one that does.
@@ -75,6 +81,11 @@ default.`,
 				// asks. One-shot CLI commands name no session and see all.
 				r.SetSession(newSession())
 			}
+			label, err := sessionProject(project, noProject)
+			if err != nil {
+				return err
+			}
+			r.SetProject(label)
 			// Inside a Claude Code session, the session's own idle or
 			// busy state shows on the roster. Elsewhere the parent has no
 			// registry file, so no goroutine is started to poll for one.
@@ -126,7 +137,87 @@ default.`,
 	cmd.Flags().BoolVar(&channel, "channel", false, "announce waiting teammate requests and replies in a running Claude Code session (channels preview)")
 	cmd.Flags().BoolVar(&shareTitle, "share-title", false, "show this Claude Code session's title as its working_on line on the roster, readable by every joined agent")
 	cmd.Flags().BoolVar(&wakeSocket, "wake-socket", true, "without --channel, wake an idle Claude Code session through its own messaging socket")
+	cmd.Flags().StringVar(&project, "project", "", "the project this session works in, instead of the git repository's directory name")
+	cmd.Flags().BoolVar(&noProject, "no-project", false, "tell the relay no project: this session takes asks naming one only after the fallback")
+	cmd.MarkFlagsMutuallyExclusive("project", "no-project")
 	return cmd
+}
+
+// sessionProject is the project label this MCP server advertises: flag when
+// set, none with off, else the name of the git repository around the
+// working directory. A name that is not a valid label is made into one; a
+// flag is taken as written, so a mistyped one is refused at startup.
+func sessionProject(flag string, off bool) (string, error) {
+	if off {
+		return "", nil
+	}
+	if flag != "" {
+		return flag, envelope.ValidProject(flag)
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", nil // no label is a working session, only a less routed one
+	}
+	return projectLabel(gitRepoName(dir)), nil
+}
+
+// gitRepoName is the directory name of the git repository holding dir, ""
+// outside one. A linked worktree counts as its main repository, so every
+// worktree of a repo answers to one name. It reads the files directly: a
+// window must not depend on git being installed.
+func gitRepoName(dir string) string {
+	for {
+		info, err := os.Stat(filepath.Join(dir, ".git"))
+		if err == nil {
+			if !info.IsDir() {
+				if main := worktreeMain(filepath.Join(dir, ".git")); main != "" {
+					return filepath.Base(main)
+				}
+			}
+			return filepath.Base(dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// worktreeMain reads a .git file and returns the main repository's
+// directory when it points into <main>/.git/worktrees, "" otherwise (a
+// submodule's .git file points elsewhere).
+func worktreeMain(gitFile string) string {
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return ""
+	}
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	if !ok {
+		return ""
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(filepath.Dir(gitFile), gitdir)
+	}
+	main, _, ok := strings.Cut(filepath.ToSlash(filepath.Clean(gitdir)), "/.git/worktrees/")
+	if !ok {
+		return ""
+	}
+	return filepath.FromSlash(main)
+}
+
+// projectLabel turns a directory name into a valid project label.
+func projectLabel(name string) string {
+	label := strings.Map(func(c rune) rune {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+			return c
+		case c >= 'A' && c <= 'Z':
+			return c + 'a' - 'A'
+		}
+		return '-'
+	}, name)
+	return label[:min(len(label), envelope.MaxProject)]
 }
 
 // sessionKeepalive is how often an MCP server without a channel calls the

@@ -191,3 +191,62 @@ func TestConnectWithoutReplaceFieldIsRefused(t *testing.T) {
 		t.Fatalf("muse lost its node: %+v", a)
 	}
 }
+
+// tincan connect --guest prints the card to hand over and the one-time code,
+// and warns about a listed teammate no card serves.
+func TestConnectGuestPrintsCards(t *testing.T) {
+	m := gatewayMesh(t)
+	out, err := run(t, connectCmd(), "pal", "--guest", "--ask", "muse,instinct", "--for", "3d", "--relay", m.URL("admin"))
+	if err != nil {
+		t.Fatalf("connect --guest: %v\n%s", err, out)
+	}
+	for _, want := range []string{gatewayBase + "/a2a/muse/.well-known/agent-card.json", gatewayBase + "/a2a/instinct/.well-known/agent-card.json", "muse, instinct", "tincan held", "a2a.json"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if !loginCode.MatchString(out) {
+		t.Errorf("no code:\n%s", out)
+	}
+	a, ok, err := m.Dir.Agent(t.Context(), "pal")
+	if err != nil || !ok || !a.Guest.Set() || len(a.Guest.Asks) != 2 || a.Guest.NoHold {
+		t.Fatalf("pal = %+v %v %v", a, ok, err)
+	}
+}
+
+func TestConnectGuestFlags(t *testing.T) {
+	m := gatewayMesh(t)
+	for name, args := range map[string][]string{
+		"no ask":            {"pal", "--guest", "--for", "3d"},
+		"no term":           {"pal", "--guest", "--ask", "muse"},
+		"ask alone":         {"pal", "--ask", "muse"},
+		"for alone":         {"pal", "--for", "3d"},
+		"too long":          {"pal", "--guest", "--ask", "muse", "--for", "31d"},
+		"guest+replace":     {"pal", "--guest", "--ask", "muse", "--for", "3d", "--replace"},
+		"unknown ask":       {"pal", "--guest", "--ask", "nobody", "--for", "3d"},
+		"a teammate's name": {"muse", "--guest", "--ask", "instinct", "--for", "3d"},
+	} {
+		if out, err := run(t, connectCmd(), append(args, "--relay", m.URL("admin"))...); err == nil {
+			t.Errorf("%s: accepted:\n%s", name, out)
+		}
+	}
+	if _, ok, _ := m.Dir.Agent(t.Context(), "pal"); ok {
+		t.Fatal("a refused connect left pal behind")
+	}
+}
+
+// A gateway guest's name stays a guest's: connecting it again in either tier
+// is refused until tincan remove.
+func TestConnectGuestNameKeepsItsTier(t *testing.T) {
+	m := gatewayMesh(t)
+	guest := []string{"pal", "--guest", "--ask", "muse", "--for", "3d", "--relay", m.URL("admin")}
+	if out, err := run(t, connectCmd(), guest...); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if out, err := run(t, connectCmd(), guest...); err == nil {
+		t.Fatalf("second connect --guest accepted:\n%s", out)
+	}
+	if out, err := run(t, connectCmd(), "pal", "--relay", m.URL("admin")); err == nil {
+		t.Fatalf("plain connect over a guest accepted:\n%s", out)
+	}
+}
