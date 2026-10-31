@@ -330,9 +330,18 @@ func TestReplyRetryCoalescesWithRequest(t *testing.T) {
 		Options{Debounce: 5 * time.Millisecond, ReplyGrace: time.Millisecond, ReplyRetries: []time.Duration{time.Hour, 10 * time.Millisecond},
 			UnseenReplies: unseen(&n)})
 	replied(w, "hermes")
+	// The hour-long retry must be armed before the request arrives. The
+	// recorder counts the wake before its send returns and arms it, and a
+	// request in that gap would leave the retry armed for Flush to wait out.
 	deadline := time.Now().Add(5 * time.Second)
-	for rc.count() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	armed := func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		p := w.pending["hermes"]
+		return p != nil && p.timer != nil
+	}
+	for !(rc.count() == 1 && armed()) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
 	queued(w, "hermes", 1) // pulls the hour-long retry in to the debounce
 	w.Flush()
