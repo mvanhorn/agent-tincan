@@ -39,7 +39,8 @@ func heldOf(t *testing.T, rec *http.Response) []envelope.Held {
 
 // An urgent claim gets the urgent lease and each progress note renews it by
 // that lease; a routine claim keeps ClaimLease. When the urgent claim runs
-// out it is requeued and the asker is told once; the routine one later.
+// out after progress it fails to its asker with a typed reply; the routine
+// one, which never reported progress, is requeued once and the asker told.
 func TestUrgentClaimLeaseAndStaleClaimNotice(t *testing.T) {
 	h, clk, rec := sweepHarness(t, Config{})
 	var urgent envelope.Request
@@ -47,6 +48,7 @@ func TestUrgentClaimLeaseAndStaleClaimNotice(t *testing.T) {
 	routine := h.send(museAddr, "grokbot", "whenever")
 	h.do(grokAddr, "GET", "/v1/poll?hold=0", "", http.StatusOK, nil)
 	h.do(grokAddr, "POST", "/v1/requests/"+urgent.ID+"/claim", "", http.StatusOK, nil)
+	claimedAt := clk.Now().Truncate(time.Millisecond).UTC()
 	h.do(grokAddr, "POST", "/v1/requests/"+routine.ID+"/claim", "", http.StatusOK, nil)
 
 	clk.advance(9 * time.Minute)
@@ -58,36 +60,39 @@ func TestUrgentClaimLeaseAndStaleClaimNotice(t *testing.T) {
 	}
 	clk.advance(2 * time.Minute)
 	h.srv.Sweep(t.Context())
-	if st := statusOf(t, h, instinctAddr, urgent.ID); st != envelope.StatusQueued {
-		t.Fatalf("20m, 11m since progress: urgent status %s, want queued", st)
+	if st := statusOf(t, h, instinctAddr, urgent.ID); st != envelope.StatusFailed {
+		t.Fatalf("20m, 11m since progress: urgent status %s, want failed", st)
+	}
+	var res envelope.Result
+	h.do(instinctAddr, "GET", "/v1/requests/"+urgent.ID, "", http.StatusOK, &res)
+	want := "failed: claim_lapsed (grokbot claimed at " + claimedAt.Format(time.RFC3339) + ", no reply by " + claimedAt.Add(DefaultUrgentClaimLease).Format(time.RFC3339) + ")"
+	if res.Reply == nil || res.Reply.Status != envelope.StatusFailed || res.Reply.Body != want {
+		t.Fatalf("urgent reply = %+v, want body %q", res.Reply, want)
 	}
 	if st := statusOf(t, h, museAddr, routine.ID); st != envelope.StatusClaimed {
 		t.Fatalf("20m: routine status %s, want still claimed", st)
 	}
-	got := inbox(t, h, instinctAddr)
-	if len(got) != 1 || got[0].From != "relay" || !strings.Contains(got[0].Body, urgent.ID) ||
-		!strings.Contains(got[0].Body, "grokbot claimed this 20m ago and did not reply or post progress before its claim lease ran out; it has been requeued.") {
-		t.Fatalf("asker inbox = %+v", got)
-	}
-	rec.mu.Lock()
-	if n := len(rec.to); n < 2 || rec.to[n-2] != "instinct" || rec.to[n-1] != "grokbot" {
-		t.Errorf("queue events = %v, want the asker told and the target woken again", rec.to)
-	}
-	rec.mu.Unlock()
-	var res envelope.Result
-	h.do(instinctAddr, "GET", "/v1/requests/"+urgent.ID, "", http.StatusOK, &res)
-	if res.RelayNote == nil || !strings.Contains(res.RelayNote.Note, "claimed this 20m ago") {
-		t.Fatalf("relay note = %+v", res.RelayNote)
-	}
-	h.srv.Sweep(t.Context())
 	if got := inbox(t, h, instinctAddr); len(got) != 0 {
-		t.Fatalf("told twice: %+v", got)
+		t.Fatalf("asker inbox = %+v, want only the reply", got)
 	}
 
 	clk.advance(11 * time.Minute)
 	h.srv.Sweep(t.Context())
-	if got := inbox(t, h, museAddr); len(got) != 1 || !strings.Contains(got[0].Body, routine.ID) || !strings.Contains(got[0].Body, "claimed this 31m ago") {
+	if st := statusOf(t, h, museAddr, routine.ID); st != envelope.StatusQueued {
+		t.Fatalf("31m: routine status %s, want requeued", st)
+	}
+	if got := inbox(t, h, museAddr); len(got) != 1 || got[0].From != "relay" || !strings.Contains(got[0].Body, routine.ID) ||
+		!strings.Contains(got[0].Body, "grokbot claimed this but did not answer; requeued") {
 		t.Fatalf("routine asker inbox = %+v", got)
+	}
+	rec.mu.Lock()
+	if n := len(rec.to); n < 2 || rec.to[n-2] != "muse" || rec.to[n-1] != "grokbot" {
+		t.Errorf("queue events = %v, want the asker told and the target woken again", rec.to)
+	}
+	rec.mu.Unlock()
+	h.srv.Sweep(t.Context())
+	if got := inbox(t, h, museAddr); len(got) != 0 {
+		t.Fatalf("told twice: %+v", got)
 	}
 }
 

@@ -39,6 +39,9 @@ type agentStatus struct {
 	reason    string
 	busyFor   string
 	busySince time.Time
+	// request is the id of the request a stuck agent's work is held up on,
+	// or of the one a busy agent has claimed.
+	request string
 }
 
 // computeStatus is the one place an agent's status is decided, so every
@@ -56,12 +59,12 @@ func computeStatus(f statusFacts, now, quietUntil time.Time) agentStatus {
 	}
 	if !now.Before(quietUntil) {
 		if reason := stuckReason(f, now); reason != "" {
-			return agentStatus{status: client.StatusStuck, reason: reason}
+			return agentStatus{status: client.StatusStuck, reason: reason, request: f.stat.OldestQueuedID}
 		}
 	}
 	switch {
 	case f.stat.Claimed > 0:
-		return agentStatus{status: client.StatusBusy, busyFor: f.stat.ClaimAsker, busySince: f.stat.OldestClaim}
+		return agentStatus{status: client.StatusBusy, busyFor: f.stat.ClaimAsker, busySince: f.stat.OldestClaim, request: f.stat.OldestClaimID}
 	case f.hostBusy:
 		return agentStatus{status: client.StatusBusy}
 	case f.online:
@@ -203,5 +206,5 @@ func (s *Server) hostBusy(agent string, now time.Time) bool {
 
 // applyStatus fills info's status fields from st.
 func applyStatus(info *client.AgentInfo, st agentStatus) {
-	info.Status, info.StatusReason, info.BusyFor, info.BusySince = st.status, st.reason, st.busyFor, st.busySince
+	info.Status, info.StatusReason, info.BusyFor, info.BusySince, info.StatusRequest = st.status, st.reason, st.busyFor, st.busySince, st.request
 }

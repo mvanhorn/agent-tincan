@@ -544,21 +544,20 @@ func TestCapabilitiesHandback(t *testing.T) {
 	}
 }
 
-// An ask whose earlier claim lapsed may already have been typed into a
-// site, so a later claimant cannot hand it back to move: the handback gets
-// 409 and the ask stays claimed with its target.
-func TestFailoverReclaimedAskHandbackRefused(t *testing.T) {
+// An ask whose claim lapsed on a web chat teammate may already have been
+// typed into its site, so it is neither requeued nor moved: it fails to its
+// asker, and a later claim finds it closed.
+func TestFailoverLapsedWebAskFailsInsteadOfMoving(t *testing.T) {
 	h, clk := failoverHarness(t)
 	sent := h.send(instinctAddr, "grokbot", "summarize this paper")
 	h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
 	clk.advance(DefaultClaimLease + time.Second)
 	h.srv.Sweep(t.Context())
 	listen(h, grokAddr, museAddr)
-	h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
-	until := limitAt(h, clk, grokAddr, time.Hour)
-	handback(h, grokAddr, sent.ID, until, http.StatusConflict)
-	if res := getAs(h, instinctAddr, sent.ID); res.Request.To != "grokbot" || res.Status != envelope.StatusClaimed {
-		t.Fatalf("a reclaimed ask moved: %+v %s", res.Request, res.Status)
+	h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusConflict, nil)
+	res := getAs(h, instinctAddr, sent.ID)
+	if res.Request.To != "grokbot" || res.Status != envelope.StatusFailed || res.Reply == nil || !strings.HasPrefix(res.Reply.Body, "failed: claim_lapsed (grokbot claimed at ") {
+		t.Fatalf("a lapsed web ask: %+v %s %+v", res.Request, res.Status, res.Reply)
 	}
 	if m := auditEvents(h, "moved"); len(m) != 0 {
 		t.Fatalf("moved audit = %+v", m)

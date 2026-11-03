@@ -385,10 +385,10 @@ func TestPerRequestWorkerOutlivingItsLeaseIsNotStartedTwice(t *testing.T) {
 		requeued = requeued || st == envelope.StatusQueued
 		return requeued && st == envelope.StatusClaimed
 	})
-	// A second process would start from a later peek, so outlast a few.
-	for end := time.Now().Add(3 * listenWorkerReclaimEvery); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		w.m.Server.Sweep(t.Context())
-	}
+	// A second process would start from a later peek, so outlast a few. No
+	// sweep runs here: the lease is far shorter than the reclaim interval,
+	// so a sweep would lapse the claim a second time, which the relay fails.
+	time.Sleep(3 * listenWorkerReclaimEvery)
 	if got := w.starts(); len(got) != 1 {
 		t.Fatalf("starts = %v, want one", got)
 	}

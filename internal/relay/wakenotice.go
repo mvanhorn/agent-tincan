@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
@@ -188,16 +190,15 @@ func (s *Server) noteAndTell(ctx context.Context, req envelope.Request, kind str
 	s.noticeAsker(ctx, req, note)
 }
 
-// tellSwept tells askers about what a sweep did to their asks: a claim
-// whose lease ran out with no reply or progress (requeued), and a request
-// that expired with no reply. Pings, notifies, held requests and the
+// tellSwept tells askers about what a sweep did to their asks: a request
+// that expired with no reply (a claim whose lease ran out is told by
+// resolveLapses). Pings, notifies, held requests and the
 // relay's own notices are left alone.
 func (s *Server) tellSwept(ctx context.Context, t store.Transition) {
 	if t.Held || t.Kind != envelope.KindAsk || !s.isAgent(ctx, t.From) {
 		return
 	}
-	staleClaim := t.Status == envelope.StatusQueued && t.Prev == envelope.StatusClaimed
-	if !staleClaim && t.Status != envelope.StatusExpired {
+	if t.Status != envelope.StatusExpired {
 		return
 	}
 	req, _, err := s.store.Request(ctx, t.ID)
@@ -211,15 +212,6 @@ func (s *Server) tellSwept(ctx context.Context, t store.Transition) {
 		log.Printf("relay note %s: roster: %v", t.ID, err)
 	}
 	online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, req.To)
-	if staleClaim {
-		note := fmt.Sprintf("%s claimed this %s ago and did not reply or post progress before its claim lease ran out; it has been requeued", req.To, ageText(now.Sub(t.ClaimedAt)))
-		if s.wake != nil && relayWoken(s.wake.WakeMethod(req.To)) {
-			note += " and woken again"
-		}
-		note += "." + suggest(online, "If it can't wait, cancel it and ask")
-		s.noteAndTell(ctx, req, store.NoteStaleClaim, t.ClaimedAt.UnixMilli(), note, now)
-		return
-	}
 	var held string
 	switch t.Prev {
 	case envelope.StatusNeedsInput:
@@ -325,4 +317,85 @@ func askerNotice(req envelope.Request, note string) envelope.Request {
 	body := fmt.Sprintf("About your request %s to %s (you asked: %s): %s No reply needed.",
 		req.ID, req.To, strings.Join(strings.Fields(approvalPreview(req.Body)), " "), note)
 	return envelope.Request{From: "relay", To: req.From, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: body}
+}
+
+// resolveLapses winds up the requests whose claim ran out of lease, in the
+// sweep that found them. A first lapse with no progress, on a target that
+// does not type asks into a site, goes back to the queue as if fresh (same
+// id, sender and chain) with one note to the asker. Any other lapse (a
+// second one, one after progress, or one on a web chat teammate, whose
+// claimant may have sent the ask) fails the request to its asker, so it is
+// never left queued with a lapsed claim until it expires. The relay-side
+// services are always requeued (redeliversOnLapse).
+func (s *Server) resolveLapses(ctx context.Context) {
+	lapses, err := s.store.Lapsed(ctx)
+	if err != nil {
+		log.Printf("lapse sweep: %v", err)
+		return
+	}
+	for _, l := range lapses {
+		req := l.Request
+		to, _, err := s.dir.Agent(ctx, req.To)
+		if err != nil {
+			log.Printf("lapse sweep %s: %v", req.ID, err)
+			continue
+		}
+		fail := req.Kind != envelope.KindPing && !redeliversOnLapse(to.Kind) &&
+			(l.Lapses >= 2 || l.Progress || onboard.IsWebChatKind(to.Kind))
+		if fail {
+			s.failLapsed(ctx, l)
+			continue
+		}
+		ok, err := s.store.RequeueLapsed(ctx, req.ID)
+		if err != nil {
+			log.Printf("lapse sweep %s: %v", req.ID, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if req.Kind == envelope.KindAsk && s.isAgent(ctx, req.From) {
+			s.noteAndTell(ctx, req, store.NoteStaleClaim, l.ClaimedAt.UnixMilli(), req.To+" claimed this but did not answer; requeued", s.cfg.Now())
+		}
+		s.hub.notify(inboxKey(req.To))
+		// An agent woken by the relay has no poller to see the requeue,
+		// so wake it again; pollers are skipped by the waker itself.
+		s.wakeRequeued(ctx, req)
+	}
+}
+
+// redeliversOnLapse is true of the relay-side services (notes, council,
+// history, pass), which post progress notes while they work and let a claim
+// lapse on purpose so the request is redelivered and retried; their lapsed
+// claims are always requeued.
+func redeliversOnLapse(kind string) bool {
+	switch kind {
+	case onboard.KindNotes, onboard.KindCouncil, onboard.KindHistory, onboard.KindPass:
+		return true
+	}
+	return false
+}
+
+// failLapsed closes l's request, whose claim ran out of lease again or may
+// have been sent, as failed with a typed reply. The reply goes through the
+// one reply path, as the request's target, so the asker's waiters and
+// reply wake hear of it like any other reply.
+func (s *Server) failLapsed(ctx context.Context, l store.Lapse) {
+	req := l.Request
+	lease := s.cfg.ClaimLease
+	if req.Urgent {
+		lease = s.cfg.urgentLease()
+	}
+	body := fmt.Sprintf("failed: claim_lapsed (%s claimed at %s, no reply by %s)", req.To,
+		l.ClaimedAt.UTC().Format(time.RFC3339), l.ClaimedAt.Add(lease).UTC().Format(time.RFC3339))
+	rep := envelope.Reply{Status: envelope.StatusFailed, Body: body}
+	if _, err := s.recordReplyWith(ctx, req.ID, req.To, rep, false, func(rep envelope.Reply) (envelope.Reply, error) {
+		return s.store.FailLapsed(ctx, req.ID, req.To, rep)
+	}); err != nil {
+		if !errors.Is(err, store.ErrWrongState) {
+			log.Printf("lapse sweep %s: %v", req.ID, err)
+		}
+		return
+	}
+	s.record(ctx, "claim_lapsed", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"agent": req.To, "lapses": l.Lapses}))
 }

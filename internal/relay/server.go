@@ -594,7 +594,9 @@ func (s *Server) Sweep(ctx context.Context) {
 		s.record(ctx, event, t.ID, t.TraceID, "relay", "")
 		s.hub.notify(requestKey(t.ID))
 		s.tellSwept(ctx, t)
-		if t.Status == envelope.StatusQueued {
+		// A lapsed claim is wound up by resolveLapses below, which wakes the
+		// target only if the request goes back to it.
+		if t.Status == envelope.StatusQueued && t.Prev != envelope.StatusClaimed {
 			s.hub.notify(inboxKey(t.To))
 			// An agent woken by the relay has no poller to see the requeue,
 			// so wake it again; pollers are skipped by the waker itself.
@@ -603,6 +605,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	}
 	s.wakeFallenBack(ctx)
 	s.sweepGuests(ctx)
+	s.resolveLapses(ctx)
 	s.failoverSweep(ctx)
 	s.sweepFollowOns(ctx)
 	if err := s.store.ExpireWatches(ctx); err != nil {
@@ -1926,6 +1929,11 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		// one a teammate may see.
 		if !admin && guestAsker(agents, info.BusyFor) {
 			info.BusyFor = ""
+		}
+		// Request ids are an operator's view: only an admin device sees which
+		// request holds an agent up.
+		if !admin {
+			info.StatusRequest = ""
 		}
 		out = append(out, info)
 	}

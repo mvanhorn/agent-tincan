@@ -22,14 +22,18 @@ import (
 // chain), deliver_after, before which a held-back request is not
 // delivered (Unix ms, 0 for none), and claim_lapsed, 1 once any claim on
 // the request ran out of lease (that claimant may have typed it into a
-// site, so it never moves). claim_lapsed is never cleared; when it is
-// added, requests whose claim already lapsed get it. It is a no-op on a
-// current table.
+// site, so it never moves) until ResolveLapse requeues it fresh, lapses,
+// how many claims on it ran out of lease, and lapse_progress, 1 once a
+// claim that lapsed had reported progress. When claim_lapsed is added,
+// requests whose claim already lapsed get it. It is a no-op on a current
+// table.
 func (s *Store) migrateFailover() error {
 	for _, col := range []struct{ name, definition, backfill string }{
 		{"moved_from", "TEXT NOT NULL DEFAULT ''", ""},
 		{"deliver_after", "INTEGER NOT NULL DEFAULT 0", ""},
 		{"claim_lapsed", "INTEGER NOT NULL DEFAULT 0", `UPDATE requests SET claim_lapsed = 1 WHERE lease_lapsed_at IS NOT NULL OR (status = 'queued' AND claimed_at > 0)`},
+		{"lapses", "INTEGER NOT NULL DEFAULT 0", ""},
+		{"lapse_progress", "INTEGER NOT NULL DEFAULT 0", ""},
 	} {
 		var has bool
 		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, col.name).Scan(&has); err != nil {
@@ -285,4 +289,71 @@ func (s *Store) ReleaseHolds(ctx context.Context, limited map[string]time.Time) 
 		}
 	}
 	return released, nil
+}
+
+// Lapse is a queued request whose claim ran out of lease and that Sweep has
+// not yet resolved (ResolveLapse), with what the decision needs: how many
+// claims ran out, whether one had reported progress before it did (Sweep
+// clears the progress itself), and when the last claim began.
+type Lapse struct {
+	Request   envelope.Request
+	Lapses    int
+	Progress  bool
+	ClaimedAt time.Time
+}
+
+// Lapsed returns the live queued requests whose claim ran out of lease
+// and has not been claimed again since, oldest first. A request whose claim
+// lapsed before lapses were counted reports one lapse.
+func (s *Store) Lapsed(ctx context.Context) ([]Lapse, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+`, MAX(lapses, 1), lapse_progress, claimed_at FROM requests
+		WHERE status = 'queued' AND lease_lapsed_at IS NOT NULL AND expires_at > ? ORDER BY created_at, rowid`, s.now().UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Lapse
+	for rows.Next() {
+		var l Lapse
+		var claimed int64
+		var err error
+		if l.Request, _, err = scanRequest(extraCols{rows, []any{&l.Lapses, &l.Progress, &claimed}}); err != nil {
+			return nil, err
+		}
+		l.ClaimedAt = time.UnixMilli(claimed)
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// RequeueLapsed gives a request whose only claim ran out of lease a fresh
+// start: the lapse mark and claim_lapsed are cleared, and its id, sender
+// and chain are kept. It reports false when the request is no longer a
+// lapsed queued one, such as when its target claimed it again.
+func (s *Store) RequeueLapsed(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET lease_lapsed_at = NULL, claim_lapsed = 0, lapses = MAX(lapses, 1), claimed_at = 0, updated_at = ?
+		WHERE id = ? AND status = 'queued' AND lease_lapsed_at IS NOT NULL`, s.now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// FailLapsed closes request id, whose claim ran out of lease, with agent's
+// terminal reply rep, but only while it is still a lapsed queued request;
+// it returns ErrWrongState when it was claimed or answered in the meantime.
+func (s *Store) FailLapsed(ctx context.Context, id, agent string, rep envelope.Reply) (envelope.Reply, error) {
+	if !rep.Status.Terminal() {
+		return envelope.Reply{}, ErrWrongState
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Reply{}, err
+	}
+	defer tx.Rollback()
+	if rep, err = s.replyTx(ctx, tx, id, agent, rep, `status = 'queued' AND lease_lapsed_at IS NOT NULL`); err != nil {
+		return envelope.Reply{}, err
+	}
+	return rep, tx.Commit()
 }

@@ -1094,6 +1094,10 @@ type QueueStat struct {
 	OldestClaim  time.Time
 	ClaimAsker   string
 	Lapsed       int
+	// OldestQueuedID and OldestClaimID are the ids of the requests
+	// OldestQueued and OldestClaim time.
+	OldestQueuedID string
+	OldestClaimID  string
 }
 
 // QueueStats returns every agent's backlog in one grouped query. Expired and
@@ -1104,7 +1108,7 @@ func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	// Each group has exactly one MIN, so SQLite takes the bare from_agent
 	// from the row holding it: for claims, the asker of the oldest claim.
 	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, status, COUNT(*),
-		MIN(CASE WHEN status = 'claimed' THEN claimed_at ELSE created_at END), from_agent, SUM(lease_lapsed_at IS NOT NULL)
+		MIN(CASE WHEN status = 'claimed' THEN claimed_at ELSE created_at END), from_agent, SUM(lease_lapsed_at IS NOT NULL), id
 		FROM requests WHERE status IN ('queued', 'delivered', 'claimed') AND expires_at > ?
 		AND (status != 'claimed' OR lease_until > ?) AND kind != 'ping' GROUP BY to_agent, status`, now, now)
 	if err != nil {
@@ -1113,24 +1117,24 @@ func (s *Store) QueueStats(ctx context.Context) (map[string]QueueStat, error) {
 	defer rows.Close()
 	out := make(map[string]QueueStat)
 	for rows.Next() {
-		var agent, status, asker string
+		var agent, status, asker, id string
 		var count, lapsed int
 		var oldest int64
-		if err := rows.Scan(&agent, &status, &count, &oldest, &asker, &lapsed); err != nil {
+		if err := rows.Scan(&agent, &status, &count, &oldest, &asker, &lapsed, &id); err != nil {
 			return nil, err
 		}
 		stat := out[agent]
 		if status == string(envelope.StatusClaimed) {
 			stat.Claimed += count
 			if oldest > 0 {
-				stat.OldestClaim, stat.ClaimAsker = time.UnixMilli(oldest), asker
+				stat.OldestClaim, stat.ClaimAsker, stat.OldestClaimID = time.UnixMilli(oldest), asker, id
 			}
 		} else {
 			stat.Lapsed += lapsed
 			stat.Queued += count
 			at := time.UnixMilli(oldest)
 			if stat.OldestQueued.IsZero() || at.Before(stat.OldestQueued) {
-				stat.OldestQueued = at
+				stat.OldestQueued, stat.OldestQueuedID = at, id
 			}
 		}
 		out[agent] = stat
@@ -1397,7 +1401,7 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 // cancelling here would stop that claim from ever coming back while the
 // teammate may still be acting on what it read.
 func (s *Store) CancelUntaken(ctx context.Context, id, agent string) error {
-	return s.cancel(ctx, id, agent, ` AND resumed = 0 AND claim_lapsed = 0`)
+	return s.cancel(ctx, id, agent, ` AND resumed = 0 AND claim_lapsed = 0 AND lapses = 0`)
 }
 
 func (s *Store) cancel(ctx context.Context, id, agent, cond string) error {
@@ -1513,9 +1517,11 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	for _, prev := range []envelope.Status{envelope.StatusDelivered, envelope.StatusClaimed} {
 		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0,
 		lease_lapsed_at = CASE WHEN status = ? THEN ? ELSE lease_lapsed_at END,
-		claim_lapsed = CASE WHEN status = ? THEN 1 ELSE claim_lapsed END
+		claim_lapsed = CASE WHEN status = ? THEN 1 ELSE claim_lapsed END,
+		lapses = lapses + CASE WHEN status = ? THEN 1 ELSE 0 END,
+		lapse_progress = CASE WHEN status = ? AND progress_at != 0 THEN 1 ELSE lapse_progress END
 		WHERE status = ? AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ?`,
-			string(envelope.StatusQueued), now, string(envelope.StatusClaimed), now, string(envelope.StatusClaimed), string(prev), now); err != nil {
+			string(envelope.StatusQueued), now, string(envelope.StatusClaimed), now, string(envelope.StatusClaimed), string(envelope.StatusClaimed), string(envelope.StatusClaimed), string(prev), now); err != nil {
 			return nil, err
 		}
 	}

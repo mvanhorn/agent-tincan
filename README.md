@@ -667,7 +667,7 @@ Several Claude Code windows on one machine can share one agent. Each `tincan mcp
 Right after the online state, each agent shows the relay's status, the same on `tincan agents`, `list_agents` and `tincan top`:
 
 - `status=busy (codex's request, 12m)`: it holds a live claim on that teammate's request, claimed that long ago. A Claude Code session also shows `status=busy` while you are chatting with it: `tincan mcp` passes on Claude Code's own idle or busy state for the session (never anything from the conversation).
-- `status=stuck (claim lapsed)`: work waits on it and nothing is moving. The reason is one of `claim lapsed` (it claimed a request and its lease ran out with no progress note; this stays until it claims or answers that request), `woken, silent 15m`, `overdue check`, `3 queued while offline`, or `oldest queued 2h`. Right after the relay restarts it waits one claim lease (30 minutes) before calling anything stuck.
+- `status=stuck (claim lapsed)`: work waits on it and nothing is moving. The reason is one of `claim lapsed` (it claimed a request and its lease ran out; the relay requeues the request fresh once, or fails it to the sender as `failed: claim_lapsed`, in the same sweep, so this is rarely seen), `woken, silent 15m`, `overdue check`, `3 queued while offline`, or `oldest queued 2h`. On an admin device the line ends `request=<id>` with the stuck or claimed request. Right after the relay restarts it waits one claim lease (30 minutes) before calling anything stuck.
 - `status=idle` or `status=offline`: nothing waits on it, and it is or is not polling now.
 
 The status says only whose request an agent is on, never what was asked. Agents can use it to pick a free teammate.

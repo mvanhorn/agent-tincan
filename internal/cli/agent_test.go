@@ -366,11 +366,17 @@ func TestStatusParityAcrossSurfaces(t *testing.T) {
 		if !strings.Contains(cliOut, a.Name+strings.Repeat(" ", max(1, 15-len(a.Name)))) || !strings.Contains(cliOut, " "+field+" wake=") {
 			t.Errorf("tincan agents lacks %q for %s:\n%s", field, a.Name, cliOut)
 		}
-		if !strings.Contains(mcpOut, a.Name+": "+a.State()+", "+field+", wake=") {
-			t.Errorf("list_agents lacks %q for %s:\n%s", field, a.Name, mcpOut)
+		// The MCP caller is not an admin, so its roster carries no request id.
+		plain := a
+		plain.StatusRequest = ""
+		if mcpField := plain.StatusField(time.Now()); !strings.Contains(mcpOut, a.Name+": "+a.State()+", "+mcpField+", wake=") {
+			t.Errorf("list_agents lacks %q for %s:\n%s", mcpField, a.Name, mcpOut)
 		}
 		if a.Status == client.StatusBusy {
 			sawBusy = true
+			if a.StatusRequest == "" || !strings.Contains(cliOut, " request="+a.StatusRequest+" ") {
+				t.Errorf("tincan agents lacks the claimed request id for %s (%q):\n%s", a.Name, a.StatusRequest, cliOut)
+			}
 			if a.BusyFor != "muse" || !strings.Contains(topOut, "  BUSY ("+a.StatusDetail(time.Now())+")") {
 				t.Errorf("top lacks the busy detail for %s:\n%s", a.Name, topOut)
 			}

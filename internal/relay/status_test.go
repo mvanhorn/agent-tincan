@@ -90,15 +90,16 @@ func TestRosterBusyNamesAsker(t *testing.T) {
 	}
 }
 
-// AE4: a claim whose lease lapses with no progress is requeued by Sweep,
-// and the agent shows stuck (claim lapsed) until it claims that ask again.
+// AE4: a claim whose lease lapses with no progress is requeued fresh by
+// Sweep, and an agent that is not polling shows stuck with that request's
+// id until it claims the ask again.
 func TestRosterStuckClaimLapsed(t *testing.T) {
 	h, clk, _ := statusHarness(t)
 	sent := h.send(grokAddr, "muse", "summarize this paper")
 	h.do(museAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
 	clk.advance(DefaultClaimLease + time.Second)
 	h.srv.Sweep(t.Context())
-	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusStuck || a.StatusReason != "claim lapsed" {
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusStuck || a.StatusRequest != sent.ID {
 		t.Fatalf("after the lapse: %+v", a)
 	}
 	h.do(museAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
@@ -193,7 +194,7 @@ func TestRosterQuietAfterRestart(t *testing.T) {
 		t.Fatalf("just restarted: %+v", a)
 	}
 	clk.advance(DefaultClaimLease + time.Second)
-	if a := roster(); a.Status != client.StatusStuck || a.StatusReason != "claim lapsed" {
+	if a := roster(); a.Status != client.StatusStuck {
 		t.Fatalf("a lease window after the restart: %+v", a)
 	}
 }

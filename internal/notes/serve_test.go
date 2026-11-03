@@ -96,6 +96,10 @@ func newRig(t *testing.T, rc relay.Config) *rig {
 	m := testrelay.New(t, rc)
 	m.JoinOnMachineOf(t, "instinct", "notes")
 	m.JoinOnMachineOf(t, "instinct", "codex")
+	// The relay requeues a service's lapsed claim every time; it retries by redelivery.
+	if ok, err := m.Store.SetAgentKind(t.Context(), "notes", "notes"); !ok || err != nil {
+		t.Fatalf("set kind: %v %v", ok, err)
+	}
 	r := &rig{mesh: m, ext: &fakeExtractor{}, log: &testLog{t: t}}
 	target, err := url.Parse(m.URL("notes"))
 	if err != nil {
@@ -595,7 +599,7 @@ func TestPermanentAddFailuresReplyFailedAndClearSpool(t *testing.T) {
 // expired, the note is still created and the failed reply is logged, not
 // retried forever.
 func TestStartupDrainOfExpiredRequestCreatesNoteOnce(t *testing.T) {
-	r := newRig(t, relay.Config{RequestTTL: 400 * time.Millisecond, ClaimLease: 100 * time.Millisecond})
+	r := newRig(t, relay.Config{RequestTTL: 400 * time.Millisecond, NotesRequestTTL: 400 * time.Millisecond, ClaimLease: 100 * time.Millisecond})
 	r.helper.failCreates(t, "operation_failed")
 	req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
 	r.poll(t, 1)

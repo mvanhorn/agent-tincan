@@ -299,7 +299,8 @@ func (a AgentInfo) StatusDetail(now time.Time) string {
 }
 
 // StatusField is the relay's status as a roster field, status=busy or
-// status=stuck (claim lapsed), with StatusDetail in parentheses. It is
+// status=stuck (claim lapsed), with StatusDetail in parentheses and the
+// id of the request behind it as request=<id>. It is
 // empty from a relay that sends no status.
 func (a AgentInfo) StatusField(now time.Time) string {
 	if a.Status == "" {
@@ -308,6 +309,9 @@ func (a AgentInfo) StatusField(now time.Time) string {
 	field := "status=" + a.Status
 	if detail := a.StatusDetail(now); detail != "" {
 		field += " (" + detail + ")"
+	}
+	if a.StatusRequest != "" {
+		field += " request=" + a.StatusRequest
 	}
 	return field
 }

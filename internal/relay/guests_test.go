@@ -1296,8 +1296,8 @@ func reportWeb(t *testing.T, c *client.Relay, in map[string]any) {
 	}
 }
 
-// A stale claim's note to a guest suggests only teammates it may ask, and a
-// teammate's note never suggests a guest.
+// A lapsed claim's note to a guest names no teammate beyond the claimant, and
+// a teammate's note never names a guest.
 func TestStaleClaimNoteNamesOnlyListedTeammates(t *testing.T) {
 	var mu sync.Mutex
 	now := time.Now()
@@ -1323,7 +1323,7 @@ func TestStaleClaimNoteNamesOnlyListedTeammates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RelayNote == nil || !strings.Contains(res.RelayNote.Note, "grokbot") || strings.Contains(res.RelayNote.Note, "instinct") {
+	if res.RelayNote == nil || res.RelayNote.Note != "muse claimed this but did not answer; requeued" {
 		t.Fatalf("note = %+v", res.RelayNote)
 	}
 

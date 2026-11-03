@@ -89,7 +89,12 @@ type AgentInfo struct {
 	StatusReason string    `json:"status_reason,omitempty"`
 	BusyFor      string    `json:"busy_for,omitempty"`
 	BusySince    time.Time `json:"busy_since,omitzero"`
-	LastPoll     time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
+	// StatusRequest is the id of the oldest queued request a stuck agent is
+	// holding up, or of the oldest request a busy agent has claimed. Only
+	// admin callers get it; it is empty for others, for other statuses, and
+	// from relays that predate it.
+	StatusRequest string    `json:"status_request,omitempty"`
+	LastPoll      time.Time `json:"last_poll,omitzero"` // last long-poll since the relay started
 	// LastActive is the agent's last call of any kind (send, reply, get,
 	// poll), kept across relay restarts.
 	LastActive time.Time `json:"last_active,omitzero"`
