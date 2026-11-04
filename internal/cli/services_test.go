@@ -670,3 +670,63 @@ func TestRefreshRevertRestartRestartsUnwrappedJob(t *testing.T) {
 		t.Fatalf("launchctl calls = %q, want %q", f.ld.calls, want)
 	}
 }
+
+// A relay plist written by hand under a label of its own is still found
+// when it runs this tincan, wrapped in place and restarted by its label.
+func TestRefreshWrapsHandNamedPlistThatRunsTincan(t *testing.T) {
+	f := newServicesFixture(t)
+	p := f.writePlist(t, "tincan-relay", map[string]any{
+		"ProgramArguments": []string{f.exe, "relay", "--admin", "macbook"},
+		"KeepAlive":        true,
+	})
+	// Named apart from its label, which launchd allows.
+	if out, err := exec.Command("/usr/bin/plutil", "-replace", "Label", "-string", "com.example.relay", p).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	f.ld.loaded["com.example.relay"] = true
+	if err := f.refresher(false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strs(readPlist(t, p)["ProgramArguments"]); !slices.Equal(got, []string{f.launcher, f.exe, "relay", "--admin", "macbook"}) {
+		t.Fatalf("ProgramArguments = %q", got)
+	}
+	if !slices.Contains(f.ld.calls, "bootout com.example.relay") {
+		t.Fatalf("not restarted by its label: %q", f.ld.calls)
+	}
+	if !strings.Contains(f.out.String(), "tincan-relay: updated, restarted") {
+		t.Fatalf("output: %s", f.out.String())
+	}
+}
+
+// Plists outside the com.agenttincan. prefix that do not run this tincan
+// are neither touched nor reported.
+func TestRefreshIgnoresOtherSoftwaresPlists(t *testing.T) {
+	f := newServicesFixture(t)
+	p := f.writePlist(t, "com.example.backup", map[string]any{"ProgramArguments": []string{"/usr/bin/true"}})
+	before, _ := os.ReadFile(p)
+	if err := os.WriteFile(filepath.Join(f.agents, "broken.plist"), []byte("not a plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.refresher(false).run(); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(p); string(after) != string(before) {
+		t.Fatal("another program's plist was changed")
+	}
+	if out := f.out.String(); strings.Contains(out, "com.example.backup") || strings.Contains(out, "broken") {
+		t.Fatalf("refresh reported plists that are not tincan's:\n%s", out)
+	}
+	if c := loginItemsCheck(f.loginItems()); c.Status != "ok" {
+		t.Fatalf("doctor flagged another program's plist: %+v", c)
+	}
+}
+
+func TestLoginItemsCheckNamesHandNamedRelayPlist(t *testing.T) {
+	f := newServicesFixture(t)
+	f.installLauncher(t)
+	f.writePlist(t, "com.example.tincan-relay", map[string]any{"ProgramArguments": []string{f.exe, "relay"}})
+	c := loginItemsCheck(f.loginItems())
+	if c.Status != "warn" || !strings.Contains(c.Detail, "com.example.tincan-relay") || !strings.Contains(c.Fix, "tincan services refresh") {
+		t.Fatalf("check = %+v", c)
+	}
+}
