@@ -547,6 +547,10 @@ func launchAgentPlists(home, exe string) []string {
 	if exe == "" {
 		return out
 	}
+	type cand struct {
+		path, label string
+	}
+	var named, other []cand
 	for _, p := range paths {
 		base := filepath.Base(p)
 		if strings.HasPrefix(base, launchAgentPrefix) || strings.HasPrefix(base, ".") {
@@ -560,12 +564,24 @@ func launchAgentPlists(home, exe string) []string {
 			continue
 		}
 		label, _ := m["Label"].(string)
-		if label == "" || strings.HasPrefix(label, launchAgentPrefix) || seen[label] {
+		if label == "" || strings.HasPrefix(label, launchAgentPrefix) {
 			continue
 		}
 		if j, ok := parseJob(m); ok && j.runs(exe) {
-			out = append(out, p)
-			seen[label] = true
+			if plistLabel(p) == label {
+				named = append(named, cand{p, label})
+			} else {
+				other = append(other, cand{p, label})
+			}
+		}
+	}
+	// A file named for its label is the real service; a copy such as
+	// "<label> copy.plist" sorts before it, so it is only taken when no
+	// file carries the label's own name.
+	for _, c := range append(named, other...) {
+		if !seen[c.label] {
+			out = append(out, c.path)
+			seen[c.label] = true
 		}
 	}
 	return out
