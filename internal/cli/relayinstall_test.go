@@ -58,6 +58,9 @@ func TestRelayHasInstallSubcommand(t *testing.T) {
 // The plist runs tincan relay with the flags, through the launcher, and
 // keeps the relay alive.
 func TestRelayServiceDefDarwin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a service binary path must be absolute, and /opt/... is not on Windows; the relay does not run there")
+	}
 	home := t.TempDir()
 	res, err := history.InstallServiceDef(history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin can/tincan", UID: 501, Launcher: "/A/agent-tincan"},
 		relayServiceDef([]string{"--admin=macbook", "--state-dir=/Users/o/Library/Application Support/tincan-relay"}))
