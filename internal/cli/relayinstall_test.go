@@ -152,6 +152,12 @@ func TestRelayInstallLinux(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(state, "tsnet"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if out := run(); !strings.Contains(out, "has not joined") {
+		t.Fatalf("a tsnet dir with no node state has not joined:\n%s", out)
+	}
+	if err := os.WriteFile(filepath.Join(state, "tsnet", "tailscaled.state"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if out := run(); strings.Contains(out, "has not joined") {
 		t.Fatalf("join hint for a node that has state:\n%s", out)
 	}
@@ -168,6 +174,12 @@ func TestRelayNeedsJoin(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "tsnet"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if !relayNeedsJoin(relayFlags{stateDir: dir}) {
+		t.Fatal("a tsnet dir left by a start that never logged in has not joined")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tsnet", "tailscaled.state"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if relayNeedsJoin(relayFlags{stateDir: dir}) {
 		t.Fatal("a relay with tsnet state has joined")
 	}
@@ -181,5 +193,58 @@ func TestShellJoinQuotes(t *testing.T) {
 	want := `/opt/tincan relay '--state-dir=/Users/o/Library/Application Support/x' '--admin=it'\''s'`
 	if got != want {
 		t.Fatalf("got %s", got)
+	}
+}
+
+// Without --state-dir the service still names the state dir install
+// resolved, so systemd or launchd cannot pick another.
+func TestRelayInstallAlwaysWritesStateDir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("writes a systemd user unit")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := filepath.Join(home, "elsewhere")
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("PATH", t.TempDir())
+	cmd := relayInstallCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--binary", "/opt/tincan"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".config", "systemd", "user", "tincan-relay.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `relay "--state-dir=` + filepath.Join(cfg, "tincan-relay") + `"` + "\n"; !strings.Contains(string(b), want) {
+		t.Fatalf("unit missing %q:\n%s", want, b)
+	}
+}
+
+// A slice value holding a comma or a quote stays one element when the
+// relay reads the argument back.
+func TestRelayServiceArgsQuoteSliceValues(t *testing.T) {
+	cmd := relayInstallCmd()
+	// The command line reads slice flags as CSV.
+	if err := cmd.Flags().Set("admin-login", `"a,b""c",plain`); err != nil {
+		t.Fatal(err)
+	}
+	args := relayServiceArgs(cmd.Flags())
+	back := relayCmd()
+	if err := back.Flags().Parse(args); err != nil {
+		t.Fatalf("parse %q: %v", args, err)
+	}
+	if got, _ := back.Flags().GetStringSlice("admin-login"); !slices.Equal(got, []string{`a,b"c`, "plain"}) {
+		t.Fatalf("read back %q from %q", got, args)
+	}
+}
+
+func TestRelayInstallRefusesNewlines(t *testing.T) {
+	if err := checkServiceArgs([]string{"--admin=a\nb"}); err == nil {
+		t.Fatal("a newline reached the service definition")
+	}
+	if err := checkServiceArgs([]string{"--admin=a b"}); err != nil {
+		t.Fatal(err)
 	}
 }

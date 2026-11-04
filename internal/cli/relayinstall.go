@@ -118,8 +118,14 @@ starting the service.`,
 			if err := relayHostErr(runtime.GOOS); err != nil {
 				return err
 			}
-			// The service runs from /, so directories given as relative
-			// paths are written absolute.
+			// The state dir is the relay's identity, so the service always
+			// names it: under launchd or systemd the default could resolve
+			// elsewhere (systemd --user does not see a shell's
+			// XDG_CONFIG_HOME). The service runs from /, so directories
+			// given as relative paths are written absolute.
+			if err := cmd.Flags().Set("state-dir", f.stateDir); err != nil {
+				return err
+			}
 			for _, name := range []string{"state-dir", "dist"} {
 				fl := cmd.Flags().Lookup(name)
 				if v := fl.Value.String(); fl.Changed && v != "" && !filepath.IsAbs(v) {
@@ -132,7 +138,11 @@ starting the service.`,
 					}
 				}
 			}
-			res, err := history.InstallServiceDef(history.ServiceOptions{Binary: binary}, relayServiceDef(relayServiceArgs(cmd.Flags())))
+			args := relayServiceArgs(cmd.Flags())
+			if err := checkServiceArgs(args); err != nil {
+				return err
+			}
+			res, err := history.InstallServiceDef(history.ServiceOptions{Binary: binary}, relayServiceDef(args))
 			if err != nil {
 				return err
 			}
@@ -149,7 +159,7 @@ starting the service.`,
 				if exe == "" {
 					exe, _ = os.Executable()
 				}
-				fmt.Fprintf(out, "This relay has not joined your tailnet yet, and the service never stores TS_AUTHKEY. Run it once in a terminal first, stop it with Ctrl-C once it is up, then start the service:\n  TS_AUTHKEY=tskey-auth-... %s\n", shellJoin(append([]string{exe, "relay"}, relayServiceArgs(cmd.Flags())...)))
+				fmt.Fprintf(out, "This relay has not joined your tailnet yet, and the service never stores TS_AUTHKEY. Run it once in a terminal first, stop it with Ctrl-C once it is up, then start the service:\n  TS_AUTHKEY=tskey-auth-... %s\n", shellJoin(append([]string{exe, "relay"}, args...)))
 			}
 			fmt.Fprintf(out, "start it with:\n  %s\n", res.Next)
 			return nil
@@ -171,7 +181,7 @@ func relayServiceArgs(fs *pflag.FlagSet) []string {
 		}
 		if sv, ok := fl.Value.(pflag.SliceValue); ok {
 			for _, v := range sv.GetSlice() {
-				args = append(args, "--"+fl.Name+"="+v)
+				args = append(args, "--"+fl.Name+"="+csvField(v))
 			}
 			return
 		}
@@ -180,11 +190,31 @@ func relayServiceArgs(fs *pflag.FlagSet) []string {
 	return args
 }
 
+// csvField quotes v the way pflag's slice flags read it back, so a value
+// holding a comma or a quote stays one element.
+func csvField(v string) string {
+	if !strings.ContainsAny(v, ",\"\r\n") && strings.TrimSpace(v) == v {
+		return v
+	}
+	return `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
+}
+
+// checkServiceArgs refuses arguments a service definition cannot carry.
+func checkServiceArgs(args []string) error {
+	for _, a := range args {
+		if strings.ContainsAny(a, "\n\r\x00") {
+			return fmt.Errorf("%q: a service argument cannot hold a newline or NUL", a)
+		}
+	}
+	return nil
+}
+
 // relayNeedsJoin reports whether a tsnet node the relay starts has no
 // state yet, so its first start needs TS_AUTHKEY or an interactive login.
 func relayNeedsJoin(f relayFlags) bool {
 	missing := func(dir string) bool {
-		_, err := os.Stat(filepath.Join(f.stateDir, dir))
+		// tsnet keeps the node's key in tailscaled.state once it has logged in.
+		_, err := os.Stat(filepath.Join(f.stateDir, dir, "tailscaled.state"))
 		return err != nil
 	}
 	if f.listen == "" && missing("tsnet") {
@@ -211,12 +241,12 @@ func warnOtherRelayAgents(out io.Writer, binary string) {
 		exe = resolved
 	}
 	for _, p := range launchAgentPlists(home, exe) {
-		label := plistLabel(p)
-		if label == relayServiceLabel {
-			continue
-		}
 		m, err := readPlistJSON(p)
 		if err != nil {
+			continue
+		}
+		label, _ := m["Label"].(string)
+		if label == "" || label == relayServiceLabel {
 			continue
 		}
 		if j, ok := parseJob(m); ok && j.runs(exe) && len(j.args) > 0 && j.args[0] == "relay" {

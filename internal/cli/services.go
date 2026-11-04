@@ -232,7 +232,7 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 	if !j.runs(r.exe) {
 		return fmt.Sprintf("skipped (runs %s, not this tincan %s)", j.target, r.exe), nil
 	}
-	if label == notes.ServiceLabel && !r.revert {
+	if j.isNotes(label) && !r.revert {
 		return r.restartUnchanged(label, path, "skipped (the notes service keeps running tincan directly so its Files and Folders grant stays its own)")
 	}
 	if r.revert && j.launcher == "" {
@@ -420,6 +420,13 @@ func parseJob(m map[string]any) (launchJob, bool) {
 	return j, true
 }
 
+// isNotes reports whether the job is the notes service, by its label or,
+// for a plist written by hand, by the tincan command it runs. Notes keeps
+// running tincan directly so its Files and Folders grant stays its own.
+func (j launchJob) isNotes(label string) bool {
+	return label == notes.ServiceLabel || (len(j.args) > 0 && j.args[0] == "notes")
+}
+
 // runs reports whether the job's binary is exe (symlinks resolved).
 func (j launchJob) runs(exe string) bool {
 	resolved, err := filepath.EvalSymlinks(j.target)
@@ -521,25 +528,44 @@ func stageTemp(path string, data []byte, mode os.FileMode) (string, error) {
 const launchAgentPrefix = "com.agenttincan."
 
 // launchAgentPlists lists tincan's LaunchAgent plists under home: every
-// com.agenttincan.* plist, and any other plist whose program is exe (with or
-// without the Agent Tincan launcher in front), such as a relay service an
-// operator wrote by hand under a label of their own. Other plists are left
-// out, so refresh never touches or reports them.
+// com.agenttincan.* plist, and any other regular plist whose program is exe
+// (with or without the Agent Tincan launcher in front), such as a relay
+// service an operator wrote by hand under a label of their own. Other
+// plists are left out, so refresh never touches or reports them, and so are
+// hidden files (refresh's own staging files), copies that reuse a tincan
+// label, and a second plist for a label already listed.
 func launchAgentPlists(home, exe string) []string {
 	paths, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "*.plist"))
 	var out []string
+	seen := map[string]bool{}
 	for _, p := range paths {
 		if strings.HasPrefix(filepath.Base(p), launchAgentPrefix) {
 			out = append(out, p)
+			seen[plistLabel(p)] = true
+		}
+	}
+	if exe == "" {
+		return out
+	}
+	for _, p := range paths {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, launchAgentPrefix) || strings.HasPrefix(base, ".") {
 			continue
 		}
-		if exe == "" {
+		if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		if m, err := readPlistJSON(p); err == nil {
-			if j, ok := parseJob(m); ok && j.runs(exe) {
-				out = append(out, p)
-			}
+		m, err := readPlistJSON(p)
+		if err != nil {
+			continue
+		}
+		label, _ := m["Label"].(string)
+		if label == "" || strings.HasPrefix(label, launchAgentPrefix) || seen[label] {
+			continue
+		}
+		if j, ok := parseJob(m); ok && j.runs(exe) {
+			out = append(out, p)
+			seen[label] = true
 		}
 	}
 	return out
@@ -604,7 +630,7 @@ func loginItemsCheck(e loginItemsEnv) check {
 			if live := e.liveProgram(label); live != "" && live != j.launcher {
 				pending = append(pending, label)
 			}
-		case label != notes.ServiceLabel:
+		case !j.isNotes(label):
 			plain = append(plain, label)
 		}
 	}

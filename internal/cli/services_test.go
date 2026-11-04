@@ -730,3 +730,42 @@ func TestLoginItemsCheckNamesHandNamedRelayPlist(t *testing.T) {
 		t.Fatalf("check = %+v", c)
 	}
 }
+
+// Refresh leaves alone a hidden staging file, a copy that reuses a tincan
+// label, a second plist for a label already listed, and a notes job under
+// a label of its own; it wraps the one real hand-named relay plist once.
+func TestRefreshSkipsStraysAroundHandNamedPlists(t *testing.T) {
+	f := newServicesFixture(t)
+	relay := f.writePlist(t, "com.example.relay", map[string]any{"ProgramArguments": []string{f.exe, "relay"}})
+	b, _ := os.ReadFile(relay)
+	strays := map[string][]byte{}
+	for _, name := range []string{".tincan-refresh-123.plist", "com.example.relay copy.plist"} {
+		p := filepath.Join(f.agents, name)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		strays[p] = b
+	}
+	hist := f.writePlist(t, "my-history", map[string]any{"ProgramArguments": []string{f.exe, "history", "serve"}})
+	if out, err := exec.Command("/usr/bin/plutil", "-replace", "Label", "-string", "com.agenttincan.history", hist).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	notesP := f.writePlist(t, "com.example.notes", map[string]any{"ProgramArguments": []string{f.exe, "notes", "serve"}})
+	for _, p := range []string{hist, notesP} {
+		strays[p], _ = os.ReadFile(p)
+	}
+	if err := f.refresher(false).run(); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range strays {
+		if got, _ := os.ReadFile(p); string(got) != string(want) {
+			t.Errorf("%s was changed", p)
+		}
+	}
+	if got := strs(readPlist(t, relay)["ProgramArguments"]); !slices.Equal(got, []string{f.launcher, f.exe, "relay"}) {
+		t.Fatalf("relay ProgramArguments = %q", got)
+	}
+	if c := loginItemsCheck(f.loginItems()); strings.Contains(c.Detail, "notes") {
+		t.Fatalf("doctor flagged the notes job: %+v", c)
+	}
+}
