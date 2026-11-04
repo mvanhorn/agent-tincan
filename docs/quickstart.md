@@ -70,7 +70,13 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 - `--admin-login you@example.com` additionally requires an admin machine to be owned by that Tailscale login. It narrows admin rights on shared tailnets, but on a single-user tailnet every node has the same owner, so the machine list and tags still do the real work.
 - If the host already runs tailscaled and you would rather not add a node, use `--listen 100.x.y.z --port 8787` with the host's tailnet IP. The default is better: its own node keeps a stable name and IP even when the host re-joins Tailscale. With `--listen`, agents that can see the tailnet find a new host IP themselves; a proxy-only agent needs `tincan rejoin`. Back up the state dir either way.
 
-Run it under your service manager (systemd, launchd) so it restarts.
+Once it is up, stop it with Ctrl-C and make it a service that restarts on its own. Pass `tincan relay install` the same flags (not `TS_AUTHKEY`: the node has already joined, and the service never stores the key):
+
+```bash
+tincan relay install --admin my-laptop
+```
+
+It writes a launchd agent on macOS (`~/Library/LaunchAgents/com.agenttincan.relay.plist`) or a systemd user unit on Linux, and prints the command that starts it. On macOS, Login Items lists it as "Agent Tincan". Don't write the plist by hand: one that runs `tincan` directly is listed under the maintainer's personal name. If you already did, run `tincan services refresh` once to move it onto Agent Tincan.app, or replace it with `tincan relay install` (boot the old one out first so two relays never share a state dir). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 ## 4. Join agents one at a time
 
