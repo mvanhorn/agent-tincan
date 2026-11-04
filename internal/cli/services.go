@@ -172,7 +172,7 @@ func (r *serviceRefresher) run() error {
 		launcher = l
 	}
 	var failed []string
-	for _, p := range launchAgentPlists(r.home) {
+	for _, p := range launchAgentPlists(r.home, r.exe) {
 		label := plistLabel(p)
 		msg, err := r.refreshOne(p, label, launcher)
 		if err != nil {
@@ -190,7 +190,7 @@ func (r *serviceRefresher) run() error {
 // wrappedPlists names the plists that start this tincan through the launcher.
 func (r *serviceRefresher) wrappedPlists() []string {
 	var out []string
-	for _, p := range launchAgentPlists(r.home) {
+	for _, p := range launchAgentPlists(r.home, r.exe) {
 		if m, err := readPlistJSON(p); err == nil {
 			if j, ok := parseJob(m); ok && j.launcher != "" && j.runs(r.exe) {
 				out = append(out, plistLabel(p))
@@ -215,7 +215,12 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 		return "", fmt.Errorf("read failed: %w", err)
 	}
 	if l, _ := m["Label"].(string); l != label {
-		return fmt.Sprintf("skipped (its Label %q does not match the file name)", l), nil
+		if strings.HasPrefix(label, launchAgentPrefix) || l == "" {
+			return fmt.Sprintf("skipped (its Label %q does not match the file name)", l), nil
+		}
+		// A plist written by hand may be named apart from its label;
+		// launchd knows the job by the label.
+		label = l
 	}
 	if _, ok := m["BundleProgram"]; ok {
 		return "skipped (uses BundleProgram)", nil
@@ -227,7 +232,7 @@ func (r *serviceRefresher) refreshOne(path, label, launcher string) (string, err
 	if !j.runs(r.exe) {
 		return fmt.Sprintf("skipped (runs %s, not this tincan %s)", j.target, r.exe), nil
 	}
-	if label == notes.ServiceLabel && !r.revert {
+	if j.isNotes(label) && !r.revert {
 		return r.restartUnchanged(label, path, "skipped (the notes service keeps running tincan directly so its Files and Folders grant stays its own)")
 	}
 	if r.revert && j.launcher == "" {
@@ -415,6 +420,13 @@ func parseJob(m map[string]any) (launchJob, bool) {
 	return j, true
 }
 
+// isNotes reports whether the job is the notes service, by its label or,
+// for a plist written by hand, by the tincan command it runs. Notes keeps
+// running tincan directly so its Files and Folders grant stays its own.
+func (j launchJob) isNotes(label string) bool {
+	return label == notes.ServiceLabel || (len(j.args) > 0 && j.args[0] == "notes")
+}
+
 // runs reports whether the job's binary is exe (symlinks resolved).
 func (j launchJob) runs(exe string) bool {
 	resolved, err := filepath.EvalSymlinks(j.target)
@@ -512,10 +524,67 @@ func stageTemp(path string, data []byte, mode os.FileMode) (string, error) {
 	return f.Name(), nil
 }
 
-// launchAgentPlists lists tincan's LaunchAgent plists under home.
-func launchAgentPlists(home string) []string {
-	paths, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "com.agenttincan.*.plist"))
-	return paths
+// launchAgentPrefix starts the file name of every LaunchAgent tincan writes.
+const launchAgentPrefix = "com.agenttincan."
+
+// launchAgentPlists lists tincan's LaunchAgent plists under home: every
+// com.agenttincan.* plist, and any other regular plist whose program is exe
+// (with or without the Agent Tincan launcher in front), such as a relay
+// service an operator wrote by hand under a label of their own. Other
+// plists are left out, so refresh never touches or reports them, and so are
+// hidden files (refresh's own staging files), copies that reuse a tincan
+// label, and a second plist for a label already listed.
+func launchAgentPlists(home, exe string) []string {
+	paths, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "*.plist"))
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if strings.HasPrefix(filepath.Base(p), launchAgentPrefix) {
+			out = append(out, p)
+			seen[plistLabel(p)] = true
+		}
+	}
+	if exe == "" {
+		return out
+	}
+	type cand struct {
+		path, label string
+	}
+	var named, other []cand
+	for _, p := range paths {
+		base := filepath.Base(p)
+		if strings.HasPrefix(base, launchAgentPrefix) || strings.HasPrefix(base, ".") {
+			continue
+		}
+		if fi, err := os.Lstat(p); err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		m, err := readPlistJSON(p)
+		if err != nil {
+			continue
+		}
+		label, _ := m["Label"].(string)
+		if label == "" || strings.HasPrefix(label, launchAgentPrefix) {
+			continue
+		}
+		if j, ok := parseJob(m); ok && j.runs(exe) {
+			if plistLabel(p) == label {
+				named = append(named, cand{p, label})
+			} else {
+				other = append(other, cand{p, label})
+			}
+		}
+	}
+	// A file named for its label is the real service; a copy such as
+	// "<label> copy.plist" sorts before it, so it is only taken when no
+	// file carries the label's own name.
+	for _, c := range append(named, other...) {
+		if !seen[c.label] {
+			out = append(out, c.path)
+			seen[c.label] = true
+		}
+	}
+	return out
 }
 
 func plistLabel(path string) string { return strings.TrimSuffix(filepath.Base(path), ".plist") }
@@ -552,12 +621,17 @@ func defaultLoginItemsEnv(exe string) (loginItemsEnv, error) {
 func loginItemsCheck(e loginItemsEnv) check {
 	const name = "login items"
 	var wrapped, plain, pending, unreadable, missing []string
-	for _, p := range launchAgentPlists(e.home) {
+	for _, p := range launchAgentPlists(e.home, e.exe) {
 		label := plistLabel(p)
 		m, err := readPlistJSON(p)
 		if err != nil {
-			unreadable = append(unreadable, label)
+			if strings.HasPrefix(label, launchAgentPrefix) {
+				unreadable = append(unreadable, label)
+			}
 			continue
+		}
+		if l, _ := m["Label"].(string); l != "" && !strings.HasPrefix(label, launchAgentPrefix) {
+			label = l // launchd knows a hand-named plist's job by its label
 		}
 		j, ok := parseJob(m)
 		if !ok || !j.runs(e.exe) {
@@ -572,7 +646,7 @@ func loginItemsCheck(e loginItemsEnv) check {
 			if live := e.liveProgram(label); live != "" && live != j.launcher {
 				pending = append(pending, label)
 			}
-		case label != notes.ServiceLabel:
+		case !j.isNotes(label):
 			plain = append(plain, label)
 		}
 	}
