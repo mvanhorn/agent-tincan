@@ -67,6 +67,9 @@ func notesServeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if libraryRoot == "" {
 				libraryRoot = notes.DiscoverLibraryRoot()
+				if libraryRoot != "" {
+					cmd.PrintErrf("tincan notes: using the Agent Notes library at %s (pass --library-root to choose another)\n", libraryRoot)
+				}
 			}
 			if libraryRoot == "" {
 				return errors.New("no Agent Notes library found: open Agent Notes once, or pass --library-root with the library folder the notes agent saves into")
@@ -156,6 +159,9 @@ func notesInstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if libraryRoot == "" {
 				libraryRoot = notes.DiscoverLibraryRoot()
+				if libraryRoot != "" {
+					cmd.PrintErrf("tincan notes: using the Agent Notes library at %s (pass --library-root to choose another)\n", libraryRoot)
+				}
 			}
 			if libraryRoot == "" {
 				return errors.New("no Agent Notes library found: open Agent Notes once, or pass --library-root with the library folder the notes agent saves into")
