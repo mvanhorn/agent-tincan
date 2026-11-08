@@ -284,10 +284,32 @@ func TestNotesInstallPrintsBootstrap(t *testing.T) {
 	}
 }
 
-func TestNotesInstallRequiresLibraryRoot(t *testing.T) {
+func TestNotesInstallRequiresALibraryWhenNoneIsFound(t *testing.T) {
 	skipOnWindows(t, "the notes service is a macOS service")
+	// A fresh home holds no Agent Notes library, so there is nothing to discover.
+	setHome(t, t.TempDir())
 	_, _, err := runSplit(t, notesCmd(), "install", "--binary", "/usr/local/bin/tincan")
 	if err == nil || !strings.Contains(err.Error(), "library-root") {
-		t.Fatalf("install without --library-root: %v", err)
+		t.Fatalf("install with no library to find: %v", err)
+	}
+}
+
+func TestNotesInstallUsesTheDiscoveredLibrary(t *testing.T) {
+	skipOnWindows(t, "the notes service is a macOS service")
+	home := t.TempDir()
+	setHome(t, home)
+	lib := filepath.Join(home, "Documents", "Agent Notes")
+	if err := os.MkdirAll(filepath.Join(lib, ".agentnotes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lib, ".agentnotes", "config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runSplit(t, notesCmd(), "install", "--binary", "/usr/local/bin/tincan")
+	if err != nil {
+		if strings.Contains(err.Error(), "no notes service definition") {
+			t.Skip(err)
+		}
+		t.Fatalf("install: %v\n%s", err, out)
 	}
 }
