@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -332,6 +333,10 @@ func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, kind, no
 		n.NoticeFor, n.NoticeKind = req.ID, kind
 	}
 	n, err := s.store.Enqueue(ctx, n, s.requestTTL(ctx, n.To))
+	if errors.Is(err, store.ErrNoticeSuperseded) {
+		log.Printf("wake notice %s: not sent to %s, the request closed first", req.ID, req.From)
+		return
+	}
 	if err != nil {
 		log.Printf("wake notice %s: tell %s: %v", req.ID, req.From, err)
 		s.record(ctx, "wake_notice_failed", req.ID, req.TraceID, "relay", "")

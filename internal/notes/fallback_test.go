@@ -157,3 +157,20 @@ func TestRankFallbackTieBreaks(t *testing.T) {
 		t.Fatalf("order = %q", ids)
 	}
 }
+
+// When no word could be searched on its own, the reply says so and the
+// request fails: nothing is known about the library.
+func TestFallbackThatSearchedNothingFails(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.svc.fallbackBudget = time.Nanosecond
+	res := r.ask(t, "grokbot", `note: {"op":"search","query":"stove lantern"}`)
+	if res.Status != envelope.StatusFailed {
+		t.Fatalf("status %s, want failed", res.Status)
+	}
+	body := res.Reply.Body
+	if !strings.HasPrefix(body, `No note contains every word of "stove lantern", and the search for each word on its own could not run.`) ||
+		!strings.Contains(body, "Not searched (out of time): stove, lantern.") {
+		t.Fatalf("reply %q", body)
+	}
+}

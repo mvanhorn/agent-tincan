@@ -157,6 +157,8 @@ func fallbackReply(query string, res fallbackResult, count int) string {
 	q := oneLine(query)
 	var b strings.Builder
 	switch {
+	case len(res.Searched) == 0:
+		fmt.Fprintf(&b, "No note contains every word of %q, and the search for each word on its own could not run.", q)
 	case len(res.Hits) == 0:
 		fmt.Fprintf(&b, "No notes match %q, and no note contains any of its words on its own.", q)
 	default:

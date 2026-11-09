@@ -247,6 +247,9 @@ func (s *Service) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		s.RetrySpooled(ctx)
+		// Replace whatever list an earlier run left, even when nothing is
+		// stored now and the pass above had nothing to record.
+		s.recordPending()
 		slow := time.NewTicker(s.retryEvery)
 		defer slow.Stop()
 		fast := time.NewTicker(s.tick)
@@ -521,10 +524,18 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 			s.logf("request %s: redelivered while a retry is sending its reply", req.ID)
 			return
 		}
-		defer s.end(req.ID)
-		if !s.purgeIfStale(e) {
+		// A reply past the limit is purged and the request handled afresh,
+		// which takes the in-flight mark again when it stores the new reply.
+		resent := func() bool {
+			defer s.end(req.ID)
+			if s.purgeIfStale(e) {
+				return false
+			}
 			s.logf("request %s from %s: redelivered, its %s reply is stored", req.ID, req.From, e.Op)
 			s.resendStored(ctx, e)
+			return true
+		}()
+		if resent {
 			return
 		}
 	}
@@ -862,6 +873,7 @@ func (s *Service) spoolOf(e SpoolEntry) *Spool {
 // off than before replies were stored.
 func (s *Service) store(ctx context.Context, req envelope.Request, op Op, o Outcome, body string) {
 	if !s.begin(req.ID) {
+		s.logf("request %s: a retry is already sending this request's reply, so the new %s reply is not stored", req.ID, op)
 		return
 	}
 	defer s.end(req.ID)
@@ -990,7 +1002,11 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 			res := s.searchFallback(ctx, r.Query)
 			s.logf("request %s from %s: search fallback finished in %s (%d words searched, %d skipped, %d out of time, %d failed; %d notes match some)",
 				req.ID, req.From, since(fstart), len(res.Searched), len(res.Skipped), len(res.TimedOut), len(res.Failed), len(res.Hits))
-			s.store(ctx, req, OpSearch, OutcomeAnswered, fallbackReply(r.Query, res, r.Count))
+			o := OutcomeAnswered
+			if len(res.Searched) == 0 {
+				o = OutcomeFailed // no word could be searched: nothing is known
+			}
+			s.store(ctx, req, OpSearch, o, fallbackReply(r.Query, res, r.Count))
 			return
 		}
 	}
@@ -1167,6 +1183,10 @@ func (s *Service) writeHealth(h Health) {
 // every stored reply and decided add still on disk, with its retry state.
 // The last helper result in the file is left as it was.
 func (s *Service) recordPending() {
+	// The list is built under healthMu too, so a list read earlier can
+	// never be written over a newer one.
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
 	var list []PendingReply
 	for _, sp := range []*Spool{s.replies, s.spool} {
 		entries, _ := sp.List()
@@ -1183,8 +1203,6 @@ func (s *Service) recordPending() {
 			list = append(list, pr)
 		}
 	}
-	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
 	if slices.Equal(list, s.lastPending) && !s.stalePending {
 		return
 	}

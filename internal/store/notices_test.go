@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -105,6 +106,38 @@ func TestCancelClosesQueuedStaleClaimNotice(t *testing.T) {
 	statusIs(t, s, n.ID, envelope.StatusCancelled)
 }
 
+// A stale-claim notice for a request that has already closed, by a
+// terminal reply or a cancel, is not queued: the sweep that decided to send
+// it read the request before the reply landed.
+func TestStaleClaimNoticeAfterCloseIsNotQueued(t *testing.T) {
+	ctx := context.Background()
+	for _, close := range []string{"reply", "cancel"} {
+		t.Run(close, func(t *testing.T) {
+			s, _ := open(t, ":memory:")
+			req := ask(t, s, "instinct", "grokbot", "find it")
+			if close == "reply" {
+				if _, err := s.Claim(ctx, req.ID, "grokbot", time.Minute); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.Reply(ctx, req.ID, "grokbot", envelope.Reply{Status: envelope.StatusAnswered, Body: "found"}); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := s.Cancel(ctx, req.ID, "instinct"); err != nil {
+				t.Fatal(err)
+			}
+			n := envelope.Request{From: "relay", To: req.From, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: "about " + req.ID, NoticeFor: req.ID, NoticeKind: NoteStaleClaim}
+			if _, err := s.Enqueue(ctx, n, time.Hour); !errors.Is(err, ErrNoticeSuperseded) {
+				t.Fatalf("enqueue err = %v, want ErrNoticeSuperseded", err)
+			}
+			relayNotice(t, s, req, "") // an unlinked notice still goes out
+			got, err := s.Deliver(ctx, "instinct", 10, time.Minute)
+			if err != nil || len(got) != 1 || got[0].NoticeFor != "" {
+				t.Fatalf("delivered %+v %v, want only the unlinked notice", got, err)
+			}
+		})
+	}
+}
+
 // The notice link columns migrate in place: a database from before them
 // opens, opening it again is a no-op, and a notice queued before the
 // upgrade, which has no link, is still delivered after a reply.
@@ -152,8 +185,9 @@ func TestNoticeLinkMigration(t *testing.T) {
 	if got, err := s.Deliver(ctx, "instinct", 10, time.Minute); err != nil || len(got) != 1 || got[0].ID != old.ID {
 		t.Fatalf("delivered %+v %v", got, err)
 	}
-	linked := relayNotice(t, s, req, NoteStaleClaim)
-	if got, _, err := s.Request(ctx, linked.ID); err != nil || got.NoticeFor != req.ID || got.NoticeKind != NoteStaleClaim {
+	other := ask(t, s, "instinct", "grokbot", "find another")
+	linked := relayNotice(t, s, other, NoteStaleClaim)
+	if got, _, err := s.Request(ctx, linked.ID); err != nil || got.NoticeFor != other.ID || got.NoticeKind != NoteStaleClaim {
 		t.Fatalf("link not stored: %+v %v", got, err)
 	}
 }

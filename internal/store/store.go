@@ -31,6 +31,9 @@ var (
 	ErrGroupFull = errors.New("group already has 8 requests from this sender")
 	// ErrWrongState means the request is not in a state that allows this.
 	ErrWrongState = errors.New("request is not in a state that allows this")
+	// ErrNoticeSuperseded means a stale-claim notice was not queued: the
+	// request it is about had already closed.
+	ErrNoticeSuperseded = errors.New("the request this notice is about has already closed")
 )
 
 const schema = `
@@ -828,6 +831,19 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		ttl = req.HoldTTL
 	}
 	req.WasHeld, req.Approved = status == envelope.StatusHeld, false
+	if req.NoticeFor != "" && req.NoticeKind == NoteStaleClaim {
+		// Checked in the transaction that inserts the notice, so a reply or
+		// cancel commits either before it (no notice) or after it (which
+		// closes the notice): the asker never gets it after the answer.
+		var st string
+		err := tx.QueryRowContext(ctx, `SELECT status FROM requests WHERE id = ?`, req.NoticeFor).Scan(&st)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return envelope.Request{}, err
+		}
+		if closed := envelope.Status(st); closed.Terminal() || closed == envelope.StatusCancelled {
+			return envelope.Request{}, ErrNoticeSuperseded
+		}
+	}
 	req.ID = randomID()
 	req.CreatedAt = now.UTC().Truncate(time.Millisecond)
 	if req.TraceID == "" {

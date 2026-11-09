@@ -1958,3 +1958,40 @@ func TestOldUndecidedAddIsStillApplied(t *testing.T) {
 	}
 	r.assertSpoolEmpty(t)
 }
+
+// A redelivered search whose stored reply is past the limit is purged and
+// searched afresh, and the new reply is delivered, not dropped.
+func TestRedeliveryAfterStalePurgeAnswersAfresh(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	if err := r.svc.replies.Put(SpoolEntry{Request: req, Op: OpSearch, SpooledAt: time.Now().Add(-25 * time.Hour), Outcome: OutcomeAnswered, Reply: "No notes match."}); err != nil {
+		t.Fatal(err)
+	}
+	r.poll(t, 1)
+	r.lineWith(t, req.ID, "purged the stored search reply undelivered")
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || !strings.Contains(res.Reply.Body, n.ID) {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	if c := len(r.helper.callsOf(t, "search")); c != 1 {
+		t.Fatalf("searches = %d, want one fresh search", c)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// A pending list an earlier run left in the health file is cleared when
+// the service starts with nothing stored.
+func TestStartupClearsPendingAnEarlierRunLeft(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	writeFile(t, r.cfg.HealthPath, `{"pending":[{"request_id":"gone","op":"search","attempts":3,"last_error":"403"}]}`)
+	r.restart(t)
+	r.runService(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(readHealth(t, r.cfg.HealthPath).Pending) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("pending = %+v, want the earlier run's list cleared", readHealth(t, r.cfg.HealthPath).Pending)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
