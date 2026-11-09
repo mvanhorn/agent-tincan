@@ -678,6 +678,8 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 		"needs_input is for a missing detail, never for permission",
 		"Never ignore a request: every request you receive ends with a reply",
 		"Claimed work comes before anything else in a turn, including Matt's chat.",
+		"send it as Matt wrote it, slash commands and flags included, and add no limit Matt did not state",
+		"A follow-up, retry or resume of a job keeps that job's terms",
 	}
 	// The unreachable-relay line sends the agent to tincan doctor, which a
 	// gateway agent (no shell) cannot run.

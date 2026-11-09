@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -656,4 +657,138 @@ func TestWindowSessionAsksContinueTheRequestsChain(t *testing.T) {
 	if got.Request.ParentID != req.id || !slices.Contains(got.Request.Chain, "grokbot") {
 		t.Errorf("sub-ask parent %q chain %v, want parent %s with grokbot in the chain", got.Request.ParentID, got.Request.Chain, req.id)
 	}
+}
+
+// A window request leaves a record beside its task file: who sent it and the
+// exact text typed into the window, so a later message in that window can be
+// told apart from the request that opened it. Each request gets its own.
+func TestWindowRequestRecordsWhoSentItAndWhatWasTyped(t *testing.T) {
+	w, req := windowRigAsking(t, false, "/osc-newfeature --bulk simple")
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "both lines are typed", func() bool { return len(f.typedLines()) == 2 })
+	dir := filepath.Join(filepath.Dir(req.config), "window-runs", safeRunName(req.id))
+	raw, err := os.ReadFile(filepath.Join(dir, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		RequestID string   `json:"request_id"`
+		From      string   `json:"from"`
+		Guest     bool     `json:"guest"`
+		Typed     []string `json:"typed"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("request.json = %s: %v", raw, err)
+	}
+	if got.RequestID != req.id || got.From != "grokbot" || got.Guest {
+		t.Errorf("record = %+v", got)
+	}
+	if typed := f.typedLines(); !slices.Equal(got.Typed, typed) {
+		t.Errorf("record typed %q, window got %q", got.Typed, typed)
+	}
+	if typed := f.typedLines(); !strings.Contains(typed[len(typed)-1], "A follow-up on a job keeps that job's terms") {
+		t.Errorf("a typed request's last line %q lacks the follow-up rule", typed[len(typed)-1])
+	}
+	f.mu.Lock()
+	env := strings.Join(f.env, " ")
+	f.mu.Unlock()
+	if want := "TINCAN_REQUEST_FILE=" + filepath.Join(dir, "request.json"); !strings.Contains(env, want) {
+		t.Errorf("window env %q lacks %q", env, want)
+	}
+	task, _ := os.ReadFile(filepath.Join(dir, "task.md"))
+	if !strings.Contains(string(task), "A follow-up on a job keeps that job's terms") {
+		t.Errorf("task.md lacks the follow-up rule:\n%s", task)
+	}
+	f.close()
+	_ = waitDone(t, done)
+}
+
+// Two requests to the same window agent leave two records, not one file
+// the second overwrote.
+func TestWindowRequestsEachKeepTheirOwnRecord(t *testing.T) {
+	w, first := windowRigAsking(t, false, "/ce-plan first")
+	wr, err := w.client(first.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.id = w.ask("/ce-plan second")
+	second.body = "/ce-plan second"
+	if _, err := wr.Claim(t.Context(), second.id); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]string{}
+	for _, req := range []windowRequest{first, second} {
+		f := &fakeTermWindow{screens: []string{claudeScreen}}
+		done := runRequestAsync(t, w, f, req)
+		eventually(t, "both lines are typed", func() bool { return len(f.typedLines()) == 2 })
+		f.close()
+		_ = waitDone(t, done)
+	}
+	for _, req := range []windowRequest{first, second} {
+		path := filepath.Join(filepath.Dir(req.config), "window-runs", safeRunName(req.id), "request.json")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			RequestID string   `json:"request_id"`
+			Typed     []string `json:"typed"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.RequestID != req.id || len(got.Typed) == 0 || got.Typed[0] != req.body {
+			t.Errorf("%s record = %+v, want request %s typed %q", path, got, req.id, req.body)
+		}
+		ids[path] = got.RequestID
+	}
+	if len(ids) != 2 {
+		t.Errorf("records %v, want two files", ids)
+	}
+}
+
+// A question answered opens a fresh window for the same request. The first
+// window's record stays as it was, and the new window gets its own.
+func TestReopenedWindowRequestKeepsTheEarlierRecord(t *testing.T) {
+	w, req := windowRig(t, false)
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "the ask is typed", func() bool { return len(f.typedLines()) == 2 })
+	wr, err := w.client(req.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wr.Reply(t.Context(), req.id, "Which README?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.grokbot.Answer(t.Context(), req.id, "the root one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitDone(t, done); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(filepath.Dir(req.config), "window-runs", safeRunName(req.id))
+	first, err := os.ReadFile(filepath.Join(dir, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wr.Claim(t.Context(), req.id); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeTermWindow{screens: []string{claudeScreen}}
+	done = runRequestAsync(t, w, g, req)
+	eventually(t, "the second window opens", func() bool { return len(g.typedLines()) > 0 })
+	g.mu.Lock()
+	env := strings.Join(g.env, " ")
+	g.mu.Unlock()
+	if strings.Contains(env, "TINCAN_REQUEST_FILE="+filepath.Join(dir, "request.json")+" ") || strings.HasSuffix(env, "TINCAN_REQUEST_FILE="+filepath.Join(dir, "request.json")) {
+		t.Errorf("the second window shares the first window's record: %q", env)
+	}
+	if again, _ := os.ReadFile(filepath.Join(dir, "request.json")); string(again) != string(first) {
+		t.Errorf("the first window's record changed:\n%s\nwas\n%s", again, first)
+	}
+	g.close()
+	_ = waitDone(t, done)
 }

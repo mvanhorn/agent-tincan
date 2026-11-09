@@ -552,3 +552,21 @@ type claimAny struct{}
 func (claimAny) Claim(context.Context, string) (envelope.Request, error) {
 	return envelope.Request{}, nil
 }
+
+// A teammate's request tells the receiver that a follow-up keeps the job's
+// terms; a guest's request never gets that owner framing.
+func TestFormatRequestSaysAFollowUpKeepsTheJobsTerms(t *testing.T) {
+	const keeps = "A follow-up on a job keeps that job's terms"
+	teammate := client.FormatRequest(envelope.Request{ID: "r1", From: "instinct", Kind: envelope.KindAsk, Body: "do not open a PR"})
+	if !strings.Contains(teammate, keeps) {
+		t.Fatalf("teammate = %q", teammate)
+	}
+	for _, req := range []envelope.Request{
+		{ID: "r2", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true},
+		{ID: "r3", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true, GuestApproved: true},
+	} {
+		if got := client.FormatRequest(req); strings.Contains(got, keeps) {
+			t.Fatalf("guest request %s = %q", req.ID, got)
+		}
+	}
+}
