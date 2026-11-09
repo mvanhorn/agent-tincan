@@ -208,6 +208,11 @@ type ServiceDef struct {
 	Launchd, Systemd string
 	Vars             []string
 	Unsupported      string
+	// Args are arguments of any number, written at the __ARGS__ placeholder:
+	// in the plist, on a line of its own inside ProgramArguments, one
+	// escaped <string> each; in the unit, right after the fixed ExecStart
+	// words, one quoted word each.
+	Args []string
 	// NoLauncher keeps the plist running the tincan binary directly. The
 	// notes service sets it: macOS may attribute a privacy grant to the
 	// app, which would let every wrapped service share notes' folder access.
@@ -242,6 +247,7 @@ func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
 		launchd:     d.Launchd,
 		systemd:     d.Systemd,
 		vars:        append([]string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path}, d.Vars...),
+		args:        d.Args,
 		unsupported: d.Unsupported,
 	})
 }
@@ -254,6 +260,7 @@ type serviceDef struct {
 	label, unit      string
 	launchd, systemd string
 	vars             []string
+	args             []string
 	unsupported      string
 }
 
@@ -272,6 +279,11 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 			esc[i] = v
 		}
 		body := strings.NewReplacer(esc...).Replace(d.launchd)
+		var lines strings.Builder
+		for _, a := range d.args {
+			lines.WriteString("    <string>" + xmlEscape(a) + "</string>\n")
+		}
+		body = strings.Replace(body, "    __ARGS__\n", lines.String(), 1)
 		if d.launcher != "" {
 			var err error
 			if body, err = wrapLaunchd(body, d.launcher); err != nil {
@@ -295,6 +307,12 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 			esc[i] = v
 		}
 		body := strings.NewReplacer(esc...).Replace(d.systemd)
+		var words strings.Builder
+		for _, a := range d.args {
+			// systemd expands $ in ExecStart; $$ is a literal $.
+			words.WriteString(` "` + strings.ReplaceAll(systemdEscape(a), "$", "$$") + `"`)
+		}
+		body = strings.Replace(body, "__ARGS__", words.String(), 1)
 		if err := writeService(dst, body); err != nil {
 			return ServiceResult{}, err
 		}

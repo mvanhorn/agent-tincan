@@ -359,3 +359,60 @@ func TestInstallServiceAppInstallFailureWritesPlainPlist(t *testing.T) {
 		t.Fatalf("wrapped without an app:\n%s", b)
 	}
 }
+
+// Args land as their own escaped elements after the fixed arguments, behind
+// the launcher, and as quoted, escaped words in the systemd ExecStart.
+func TestInstallServiceDefArgs(t *testing.T) {
+	const launchd = "<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n  <key>ProgramArguments</key>\n  <array>\n    <string>__TINCAN_BINARY__</string>\n    <string>relay</string>\n    __ARGS__\n  </array>\n</dict>\n</plist>\n"
+	const systemd = "[Service]\nExecStart=\"__TINCAN_BINARY__\" relay__ARGS__\nEnvironment=\"PATH=__PATH__\"\n"
+	args := []string{"--admin=a&b", `--state-dir=/s "q" $HOME 100%`}
+	def := ServiceDef{Label: "com.agenttincan.x", Unit: "x.service", Launchd: launchd, Systemd: systemd, Args: args}
+
+	home := t.TempDir()
+	res, err := InstallServiceDef(ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan"}, def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if strings.Contains(string(b), "__") {
+		t.Fatalf("placeholder left:\n%s", b)
+	}
+	dec := xml.NewDecoder(strings.NewReader(string(b)))
+	var strs []string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if cd, ok := tok.(xml.CharData); ok && strings.TrimSpace(string(cd)) != "" {
+			strs = append(strs, string(cd))
+		}
+	}
+	if got, want := strings.Join(strs, "|"), "ProgramArguments|/A/agent-tincan|/opt/tincan|relay|"+strings.Join(args, "|")+"|AssociatedBundleIdentifiers"; !strings.HasPrefix(got, want) {
+		t.Fatalf("plist strings = %s\nwant prefix %s", got, want)
+	}
+
+	t.Setenv("PATH", t.TempDir())
+	res, err = InstallServiceDef(ServiceOptions{GOOS: "linux", Home: t.TempDir(), Binary: "/opt/tincan"}, def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(res.Path)
+	want := `ExecStart="/opt/tincan" relay "--admin=a&b" "--state-dir=/s \"q\" $$HOME 100%%"` + "\n"
+	if !strings.Contains(string(b), want) {
+		t.Fatalf("unit missing %q:\n%s", want, b)
+	}
+}
+
+// With no Args the placeholder line disappears.
+func TestInstallServiceDefNoArgs(t *testing.T) {
+	const launchd = "<plist>\n  <array>\n    <string>__TINCAN_BINARY__</string>\n    __ARGS__\n  </array>\n</plist>\n"
+	res, err := InstallServiceDef(ServiceOptions{GOOS: "darwin", Home: t.TempDir(), Binary: "/opt/tincan", UID: 501}, ServiceDef{Label: "com.agenttincan.x", Launchd: launchd, NoLauncher: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(res.Path)
+	if want := "<plist>\n  <array>\n    <string>/opt/tincan</string>\n  </array>\n</plist>\n"; string(b) != want {
+		t.Fatalf("plist = %q", b)
+	}
+}
