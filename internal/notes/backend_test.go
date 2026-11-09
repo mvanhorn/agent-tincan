@@ -122,14 +122,14 @@ func TestServiceRecordsItsAccessCheck(t *testing.T) {
 	if h := r.svc.readHealth(); h.Backend != "Bear" || h.Probe == nil || h.Probe.Count != 3 || h.Probe.Code != "" {
 		t.Fatalf("health after a good check = %+v %+v", h, h.Probe)
 	}
-	denied := &HelperError{Code: codePermissionDenied, Message: "macOS refused access"}
+	denied := &HelperError{Code: CodePermissionDenied, Message: "macOS refused access"}
 	b.searchErr, b.probeErr = denied, denied
 	r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
 	h := r.svc.readHealth()
-	if h.Probe == nil || h.Probe.Code != codePermissionDenied || h.Probe.Count != 0 {
+	if h.Probe == nil || h.Probe.Code != CodePermissionDenied || h.Probe.Count != 0 {
 		t.Fatalf("probe after a refused search = %+v", h.Probe)
 	}
-	if h.Command != "search" || h.Code != codePermissionDenied {
+	if h.Command != "search" || h.Code != CodePermissionDenied {
 		t.Fatalf("the access check overwrote the last result: %+v", h)
 	}
 }

@@ -257,10 +257,10 @@ func TestAppleNotesPermissionDenied(t *testing.T) {
 	a, app := newAppleNotes(t)
 	app.fail = &osascriptError{err: errors.New("exit status 1"), stderr: "execution error: Not authorized to send Apple events to Notes. (-1743)"}
 	_, err := a.Probe(t.Context())
-	if errorCode(err) != codePermissionDenied || IsPermanent(err) {
+	if errorCode(err) != CodePermissionDenied || IsPermanent(err) {
 		t.Fatalf("probe = %v, want a transient permission_denied", err)
 	}
-	if _, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); errorCode(err) != codePermissionDenied {
+	if _, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); errorCode(err) != CodePermissionDenied {
 		t.Fatalf("create = %v", err)
 	}
 	// Notes was never asked, so once access is granted the add goes ahead.

@@ -1212,7 +1212,7 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 	h.Pending, h.Backend, h.Probe = prev.Pending, prev.Backend, prev.Probe
 	s.writeHealth(h)
 	s.healthMu.Unlock()
-	if errorCode(err) == codePermissionDenied {
+	if errorCode(err) == CodePermissionDenied {
 		// Access was taken away or never given: record it for doctor.
 		s.recordProbe(context.Background())
 	}
@@ -1324,9 +1324,9 @@ func addedReply(res CreateResult) string {
 	where := ""
 	switch n.State {
 	case StateActive:
-	case "trashed":
+	case StateTrashed:
 		where = ", which has since been moved to the trash"
-	case "archived":
+	case StateArchived:
 		where = ", which has since been archived"
 	default:
 		where = fmt.Sprintf(", which is now %s", n.State)
@@ -1338,9 +1338,9 @@ func addedReply(res CreateResult) string {
 // without naming anything else about it.
 func laterStateNote(state string) string {
 	switch state {
-	case "trashed":
+	case StateTrashed:
 		return "The note has since been moved to the trash."
-	case "archived":
+	case StateArchived:
 		return "The note has since been archived."
 	}
 	return fmt.Sprintf("The note is now %s.", oneLine(state))

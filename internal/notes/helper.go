@@ -47,8 +47,14 @@ type Note struct {
 	Body    string      `json:"body"`
 }
 
-// StateActive is the only state search and read expose.
-const StateActive = "active"
+// Note states. StateActive is the only state search and read expose.
+const (
+	StateActive   = "active"
+	StateTrashed  = "trashed"
+	StateArchived = "archived"
+	// StateDeleted is a note an earlier add made that is now gone for good.
+	StateDeleted = "deleted"
+)
 
 // helperResponse is the helper's CLIResponse, only the fields used here.
 type helperResponse struct {
@@ -161,7 +167,7 @@ func (h *Helper) run(ctx context.Context, args ...string) (helperResponse, error
 		if runErr != nil {
 			msg = strings.TrimSpace(runErr.Error() + " " + msg)
 		}
-		return helperResponse{}, &HelperError{Code: "helper_bad_output", Message: msg}
+		return helperResponse{}, &HelperError{Code: codeBadOutput, Message: msg}
 	}
 	if !resp.OK {
 		he := &HelperError{Code: "operation_failed"}
@@ -192,7 +198,7 @@ func startFailureCode(ctx context.Context, err error) string {
 }
 
 // Name is the app the helper belongs to.
-func (h *Helper) Name() string { return "Agent Notes" }
+func (h *Helper) Name() string { return AgentNotesName }
 
 // Probe checks that the helper is installed and executable. The helper has
 // no count command, so the count is -1 (unknown).
@@ -243,7 +249,7 @@ func (h *Helper) Create(ctx context.Context, title, body string, tags []string, 
 		return CreateResult{}, err
 	}
 	if resp.Note == nil || resp.Note.Summary.ID == "" {
-		return CreateResult{}, &HelperError{Code: "helper_bad_output", Message: "create returned no note id"}
+		return CreateResult{}, &HelperError{Code: codeBadOutput, Message: "create returned no note id"}
 	}
 	res := CreateResult{Note: *resp.Note}
 	if resp.Existed != nil {
@@ -277,7 +283,7 @@ func (h *Helper) Read(ctx context.Context, id string) (Note, error) {
 		return Note{}, err
 	}
 	if resp.Note == nil {
-		return Note{}, &HelperError{Code: "helper_bad_output", Message: "read returned no note"}
+		return Note{}, &HelperError{Code: codeBadOutput, Message: "read returned no note"}
 	}
 	return *resp.Note, nil
 }

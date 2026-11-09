@@ -2,6 +2,8 @@ package notes
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -51,11 +53,35 @@ func CheckBackendName(name string) error {
 	return fmt.Errorf("unknown notes backend %q: use one of %s", name, strings.Join(BackendNames, ", "))
 }
 
-// codePermissionDenied is a backend macOS will not let this process use
+// CodePermissionDenied is a backend macOS will not let this process use
 // until the owner grants it access. It is transient: the add is kept and
 // retried once access is granted.
-const codePermissionDenied = "permission_denied"
+const CodePermissionDenied = "permission_denied"
+
+// codeBadOutput is an answer from the notes app that did not parse.
+const codeBadOutput = "helper_bad_output"
+
+// AgentNotesName is the Agent Notes helper's Name.
+const AgentNotesName = "Agent Notes"
 
 // codeUnavailable is a backend that is not installed or cannot be reached
 // right now. It is transient.
 const codeUnavailable = "helper_unavailable"
+
+// NewBackend builds the Bear or Apple Notes backend; nil for agent-notes,
+// which the service builds from its library root.
+func NewBackend(name, appSupport string, logf func(string, ...any)) Backend {
+	switch name {
+	case BackendBear:
+		return NewBear(appSupport, logf)
+	case BackendAppleNotes:
+		return NewAppleNotes(appSupport, logf)
+	}
+	return nil
+}
+
+// textHash is a note text's NoteSummary.Hash.
+func textHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:8])
+}

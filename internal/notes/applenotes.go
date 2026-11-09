@@ -3,8 +3,6 @@ package notes
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,7 +74,7 @@ func (a *AppleNotes) script(ctx context.Context, script string, in any, out any)
 		return classifyOsascript(ctx, err)
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(raw), out); err != nil {
-		return &HelperError{Code: "helper_bad_output", Message: "Apple Notes script output did not parse"}
+		return &HelperError{Code: codeBadOutput, Message: "Apple Notes script output did not parse"}
 	}
 	return nil
 }
@@ -107,7 +105,7 @@ func classifyOsascript(ctx context.Context, err error) error {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "-1743") || strings.Contains(msg, "Not authorized to send Apple events"):
-		return &HelperError{Code: codePermissionDenied, Message: "macOS does not let this process control Notes (Automation permission)"}
+		return &HelperError{Code: CodePermissionDenied, Message: "macOS does not let this process control Notes (Automation permission)"}
 	case ctx.Err() != nil:
 		return &HelperError{Code: codeUnavailable, Message: "Apple Notes did not answer in time"}
 	case errors.Is(err, exec.ErrNotFound):
@@ -142,10 +140,10 @@ func (a *AppleNotes) Search(ctx context.Context, query string) ([]NoteSummary, e
 	for _, f := range l.Folders {
 		state := StateActive
 		if IsDeletedFolder(f.Folder) {
-			state = "trashed"
+			state = StateTrashed
 		}
 		if len(f.Names) != len(f.IDs) || len(f.Texts) != len(f.IDs) || len(f.Locked) != len(f.IDs) {
-			return nil, &HelperError{Code: "helper_bad_output", Message: "Apple Notes listed a folder with mismatched fields"}
+			return nil, &HelperError{Code: codeBadOutput, Message: "Apple Notes listed a folder with mismatched fields"}
 		}
 		for i, id := range f.IDs {
 			if seen[id] {
@@ -176,8 +174,7 @@ func appleSummary(id, name, text, state string, locked bool, words []string) Not
 	s := NoteSummary{ID: id, Title: name, State: state}
 	if !locked {
 		s.Snippet = snippetAround(text, words)
-		sum := sha256.Sum256([]byte(text))
-		s.Hash = hex.EncodeToString(sum[:8])
+		s.Hash = textHash(text)
 	}
 	return s
 }
@@ -205,7 +202,7 @@ func (a *AppleNotes) Read(ctx context.Context, id string) (Note, error) {
 	}
 	state := StateActive
 	if IsDeletedFolder(r.Folder) {
-		state = "trashed"
+		state = StateTrashed
 	}
 	n := Note{Summary: appleSummary(r.ID, r.Name, r.Text, state, r.Locked, nil)}
 	n.Summary.Snippet = ""
@@ -257,14 +254,14 @@ func (a *AppleNotes) Create(ctx context.Context, title, body string, tags []stri
 		ID string `json:"id"`
 	}
 	if err := a.script(ctx, jxaCreate, map[string]string{"html": appleNoteHTML(title, body, tags)}, &made); err != nil {
-		if errorCode(err) == codePermissionDenied {
+		if errorCode(err) == CodePermissionDenied {
 			// macOS refused before Notes was asked: nothing was made.
 			_ = a.ledger.Forget(key)
 		}
 		return CreateResult{}, err
 	}
 	if made.ID == "" {
-		return CreateResult{}, &HelperError{Code: "helper_bad_output", Message: "Apple Notes returned no note id"}
+		return CreateResult{}, &HelperError{Code: codeBadOutput, Message: "Apple Notes returned no note id"}
 	}
 	if err := a.ledger.Done(key, made.ID); err != nil {
 		return CreateResult{}, &HelperError{Code: codeUnavailable, Message: err.Error()}
@@ -278,7 +275,7 @@ func (a *AppleNotes) existing(ctx context.Context, id string) (CreateResult, err
 	n, err := a.Read(ctx, id)
 	switch {
 	case errors.Is(err, ErrNoteNotFound):
-		return CreateResult{Note: Note{Summary: NoteSummary{ID: id, State: "deleted"}}, Existed: true}, nil
+		return CreateResult{Note: Note{Summary: NoteSummary{ID: id, State: StateDeleted}}, Existed: true}, nil
 	case errors.Is(err, ErrNoteLocked):
 	case err != nil:
 		return CreateResult{}, err

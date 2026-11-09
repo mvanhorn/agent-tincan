@@ -130,13 +130,7 @@ func notesServeCmd() *cobra.Command {
 				return err
 			}
 			logf := func(format string, args ...any) { cmd.PrintErrf("tincan notes: "+format+"\n", args...) }
-			var backend notes.Backend
-			switch backendName {
-			case notes.BackendBear:
-				backend = notes.NewBear(appSupport, logf)
-			case notes.BackendAppleNotes:
-				backend = notes.NewAppleNotes(appSupport, logf)
-			}
+			backend := notes.NewBackend(backendName, appSupport, logf)
 			svc, err := notes.New(notes.Config{
 				Relay:             r,
 				Backend:           backend,
@@ -371,12 +365,7 @@ func terminalAccessCheck(ctx context.Context, o notesDoctorOptions) check {
 	const name = "access from this terminal"
 	probe := o.probe
 	if probe == nil {
-		switch o.backend {
-		case notes.BackendBear:
-			probe = notes.NewBear(o.appSupport, func(string, ...any) {}).Probe
-		case notes.BackendAppleNotes:
-			probe = notes.NewAppleNotes(o.appSupport, func(string, ...any) {}).Probe
-		}
+		probe = notes.NewBackend(o.backend, o.appSupport, func(string, ...any) {}).Probe
 	}
 	cctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
@@ -395,9 +384,9 @@ func backendFix(backend, code, exe string) string {
 	}
 	restart := ", then restart the service: launchctl kickstart -k gui/$(id -u)/" + notes.ServiceLabel
 	switch {
-	case backend == notes.BackendAppleNotes && code == "permission_denied":
+	case backend == notes.BackendAppleNotes && code == notes.CodePermissionDenied:
 		return "In System Settings > Privacy & Security > Automation, allow " + who + " to control Notes" + restart
-	case backend == notes.BackendBear && code == "permission_denied":
+	case backend == notes.BackendBear && code == notes.CodePermissionDenied:
 		return "In System Settings > Privacy & Security, grant " + who + " Full Disk Access or access to Bear's data" + restart
 	case backend == notes.BackendBear:
 		return "Install Bear and open it once, so its database exists."
@@ -514,7 +503,7 @@ func healthCheck(path, exe string) check {
 		return check{name, "fail", fmt.Sprintf("%s: the helper ignored an add's idempotency key, so a redelivered add could be saved twice (last helper call: %s at %s)", "helper_too_old", h.Command, when),
 			helperFix("helper_too_old", exe)}
 	}
-	ledgered := h.Backend != "" && h.Backend != "Agent Notes"
+	ledgered := h.Backend != "" && h.Backend != notes.AgentNotesName
 	if h.OK && !h.IdempotencyVerified && !ledgered {
 		// Only a create shows whether the helper honors idempotency keys:
 		// a successful search or read says nothing about duplicate adds.

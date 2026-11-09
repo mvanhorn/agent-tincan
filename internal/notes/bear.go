@@ -2,10 +2,8 @@ package notes
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -117,7 +115,7 @@ func (b *Bear) open() (*sql.DB, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, &HelperError{Code: codeUnavailable, Message: "no Bear database at " + path + "; is Bear installed and opened once?"}
 	case errors.Is(err, fs.ErrPermission):
-		return nil, &HelperError{Code: codePermissionDenied, Message: "macOS does not let this process read Bear's database at " + path}
+		return nil, &HelperError{Code: CodePermissionDenied, Message: "macOS does not let this process read Bear's database at " + path}
 	case err != nil:
 		return nil, &HelperError{Code: codeUnavailable, Message: err.Error()}
 	}
@@ -169,9 +167,9 @@ func scanBear(rows *sql.Rows) (bearRow, error) {
 func (r bearRow) state() string {
 	switch {
 	case r.trashed:
-		return "trashed"
+		return StateTrashed
 	case r.archived:
-		return "archived"
+		return StateArchived
 	}
 	return StateActive
 }
@@ -179,8 +177,7 @@ func (r bearRow) state() string {
 func (r bearRow) summary(tags []string, snippet string) NoteSummary {
 	s := NoteSummary{ID: r.id, Title: r.title, State: r.state(), Pinned: r.pinned, Tags: tags, Snippet: snippet}
 	if !r.locked {
-		sum := sha256.Sum256([]byte(r.text))
-		s.Hash = hex.EncodeToString(sum[:8])
+		s.Hash = textHash(r.text)
 	}
 	return s
 }
@@ -487,7 +484,7 @@ func (b *Bear) existing(ctx context.Context, id string) (CreateResult, error) {
 	res, err := b.found(ctx, id)
 	if errors.Is(err, ErrNoteNotFound) {
 		// The owner deleted it for good; the add still happened once.
-		return CreateResult{Note: Note{Summary: NoteSummary{ID: id, State: "deleted"}}, Existed: true}, nil
+		return CreateResult{Note: Note{Summary: NoteSummary{ID: id, State: StateDeleted}}, Existed: true}, nil
 	}
 	return res, err
 }
@@ -527,8 +524,13 @@ func (b *Bear) awaitNote(ctx context.Context, title string, start time.Time) (st
 	want := normTitle(title)
 	since := start.Sub(coreDataEpoch).Seconds()
 	deadline := b.clock().Add(bearCreatePoll)
+	db, err := b.open()
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
 	for {
-		ids, err := b.createdSince(ctx, since, want)
+		ids, err := createdSince(ctx, db, since, want)
 		if err != nil {
 			return "", err
 		}
@@ -549,12 +551,7 @@ func (b *Bear) awaitNote(ctx context.Context, title string, start time.Time) (st
 	}
 }
 
-func (b *Bear) createdSince(ctx context.Context, since float64, title string) ([]string, error) {
-	db, err := b.open()
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
+func createdSince(ctx context.Context, db *sql.DB, since float64, title string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `SELECT ZUNIQUEIDENTIFIER, COALESCE(ZTITLE, '') FROM ZSFNOTE WHERE ZCREATIONDATE >= ? AND COALESCE(ZPERMANENTLYDELETED, 0) = 0`, since)
 	if err != nil {
 		return nil, dbError(err)

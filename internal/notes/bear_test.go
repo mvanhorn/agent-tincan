@@ -257,7 +257,7 @@ func TestBearMissingOrUnreadableDatabase(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(f.path, 0o600) })
 	_, err = f.bear().Probe(t.Context())
-	if he, ok := errors.AsType[*HelperError](err); !ok || he.Code != codePermissionDenied {
+	if he, ok := errors.AsType[*HelperError](err); !ok || he.Code != CodePermissionDenied {
 		t.Fatalf("unreadable database: %v, want permission_denied", err)
 	}
 }
