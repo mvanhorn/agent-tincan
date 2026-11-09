@@ -320,6 +320,11 @@ type Reply struct {
 	Body        string       `json:"body"`
 	Attachments []Attachment `json:"attachments,omitempty"`
 	CreatedAt   time.Time    `json:"created_at,omitzero"`
+	// KeptOpen is set by the relay when it stored an answered reply that
+	// only acknowledged the work (LooksLikeAck) as a progress note instead,
+	// leaving the request claimed for the real answer. Final on the reply
+	// call skips that.
+	KeptOpen bool `json:"kept_open,omitempty"`
 	// NoMirror keeps a reply to a mention out of the room: the relay sets
 	// it when the replier is no longer allowed in rooms. Relay-only.
 	NoMirror bool `json:"-"`

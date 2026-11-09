@@ -957,6 +957,56 @@ func TestProgressAuthorizationAndPrivacy(t *testing.T) {
 	h.do(museAddr, "POST", path+"/progress", `{"note":"late"}`, 409, nil)
 }
 
+func TestAckReplyKeepsRequestOpen(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := h.send(grokAddr, "muse", "study @boardyai and send the full report")
+	path := "/v1/requests/" + req.ID
+	h.do(museAddr, "POST", path+"/claim", "", 200, nil)
+
+	ack := "Working on it: pulling posts via X search now. Full report will follow."
+	var kept envelope.Reply
+	h.do(museAddr, "POST", path+"/reply", `{"body":"`+ack+`"}`, 200, &kept)
+	if !kept.KeptOpen || kept.Status != envelope.StatusClaimed {
+		t.Fatalf("ack reply: %+v", kept)
+	}
+	var res envelope.Result
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Status != envelope.StatusClaimed || res.Reply != nil || res.Progress == nil || res.Progress.Note != ack {
+		t.Fatalf("after ack: %+v", res)
+	}
+
+	var final envelope.Reply
+	h.do(museAddr, "POST", path+"/reply", `{"body":"Read 214 posts. Report: ..."}`, 200, &final)
+	if final.KeptOpen || final.Status != envelope.StatusAnswered {
+		t.Fatalf("real reply: %+v", final)
+	}
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || !strings.HasPrefix(res.Reply.Body, "Read 214") {
+		t.Fatalf("after answer: %+v", res)
+	}
+}
+
+func TestAckReplyFinalOrUnclaimedCloses(t *testing.T) {
+	h := newHarness(t, Config{})
+	ack := "On it, will follow up."
+
+	// final: true is the replier saying this short note is the whole answer.
+	req := h.send(grokAddr, "muse", "can you take this?")
+	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", 200, nil)
+	var rep envelope.Reply
+	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"`+ack+`","final":true}`, 200, &rep)
+	if rep.KeptOpen || rep.Status != envelope.StatusAnswered {
+		t.Fatalf("final ack: %+v", rep)
+	}
+
+	// With no claim to keep open, the reply goes through as before.
+	req = h.send(grokAddr, "muse", "and this one?")
+	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"`+ack+`"}`, 200, &rep)
+	if rep.KeptOpen || rep.Status != envelope.StatusAnswered {
+		t.Fatalf("unclaimed ack: %+v", rep)
+	}
+}
+
 func TestSweepUrgentLeaseExpiryWakesWithoutDebounce(t *testing.T) {
 	for _, claimed := range []bool{false, true} {
 		name := "delivery"

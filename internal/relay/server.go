@@ -1561,12 +1561,45 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
 		return
 	}
+	if kept, ok := s.keepAckOpen(r.Context(), r.PathValue("id"), name, rep, raw); ok {
+		writeJSON(w, http.StatusOK, kept)
+		return
+	}
 	rep, err = s.recordReply(r.Context(), r.PathValue("id"), name, rep, "", 0)
 	if err != nil {
 		writeErr(w, attachmentStatus(err, statusFor(err)), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+// keepAckOpen stores an answered reply that only acknowledges the work
+// ("Working on it, full report will follow") as a progress note on agent's
+// claim of request id, so the request stays open for the real answer and
+// its asker is woken when that lands. Answering would close the request and
+// strand the result. It reports false, changing nothing, when the reply
+// carries a result (attachments, another status, or text LooksLikeAck
+// rejects), when the caller sent "final": true, or when agent holds no live
+// claim on id; the reply then goes through as before.
+func (s *Server) keepAckOpen(ctx context.Context, id, agent string, rep envelope.Reply, raw []byte) (envelope.Reply, bool) {
+	if rep.Status != envelope.StatusAnswered || len(rep.Attachments) > 0 || !envelope.LooksLikeAck(rep.Body) {
+		return envelope.Reply{}, false
+	}
+	var in struct {
+		Final bool `json:"final"`
+	}
+	if json.Unmarshal(raw, &in) == nil && in.Final {
+		return envelope.Reply{}, false
+	}
+	note := strings.TrimSpace(rep.Body)
+	if len(note) > envelope.MaxProgressNote {
+		note = note[:envelope.MaxProgressNote]
+	}
+	if err := s.store.SetProgressLeases(ctx, id, agent, note, s.cfg.ClaimLease, s.cfg.urgentLease()); err != nil {
+		return envelope.Reply{}, false
+	}
+	s.record(ctx, "progress", id, "", agent, store.DetailJSON(map[string]any{"bytes": len(note), "from_reply": true}))
+	return envelope.Reply{RequestID: id, From: agent, Status: envelope.StatusClaimed, Body: rep.Body, KeptOpen: true}, true
 }
 
 // recordReply stores agent's reply rep to request id and tells everyone who

@@ -82,6 +82,12 @@ Get-reply, unseen replies, and trace steps include an optional top-level `exchan
 
 Relays advertise `"needs_input": true` in `GET /v1/capabilities`. New clients refuse to send `needs_input` or an answer when this flag is missing or false (including a 404 capabilities endpoint), with an instruction to upgrade the relay. Existing ordinary replies work against older relays. An older asker can read the question as the reply body with an unfamiliar `needs_input` status; upgrade that client to answer using `tincan answer <id> "text"` or MCP `answer`. Older handlers never produce the new status. All new fields are optional.
 
+### Acknowledgments stay open
+
+An `answered` reply that only acknowledges the work ("Working on it, full report will follow") would close the request and leave the real answer nowhere to land. When the replier holds a live claim, the reply has no attachments, and its text reads as an acknowledgment (`envelope.LooksLikeAck`: at most 280 bytes, a started-or-to-come phrase such as "working on it" or "will follow", and no sign of a result such as "done", "here is", or a link), the relay stores it as the claim's progress note instead. It renews the lease, records a `progress` audit event with `from_reply: true`, and returns 200 with `"status":"claimed","kept_open":true`. The request stays claimed, the asker is not woken, and the next reply closes it as usual. If no reply comes before the lease runs out, the claim lapses like any other and the asker is told it went stale.
+
+Send `"final": true` with the reply (`tincan reply --final`, MCP `reply` with `final`) when the short note really is the whole answer. Without a live claim the reply goes through unchanged. Older clients ignore `kept_open` and print the `claimed` status.
+
 ## Replies the asker has not seen
 
 A reply starts unseen by the agent that sent the request. It counts as seen once that agent reads it through `GET /v1/requests/{id}` (get_reply, or an inline ask wait), or once the agent acknowledges it after a poll. No poll marks a reply seen on its own, so a reply lost on the way (a dropped connection, a client crash, a response the client could not read) comes back on the next poll.
