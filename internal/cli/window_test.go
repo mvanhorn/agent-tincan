@@ -70,10 +70,10 @@ func (f *fakeTermWindow) typedLines() []string {
 
 func fastWindow(t *testing.T) {
 	t.Helper()
-	old := []time.Duration{windowStartTimeout, windowShellSettle, windowPoll, windowWatchEvery}
-	windowStartTimeout, windowShellSettle, windowPoll, windowWatchEvery = time.Second, 50*time.Millisecond, 5*time.Millisecond, 10*time.Millisecond
+	old := []time.Duration{windowStartTimeout, windowShellSettle, windowPoll, windowWatchEvery, windowFollowUpPause}
+	windowStartTimeout, windowShellSettle, windowPoll, windowWatchEvery, windowFollowUpPause = time.Second, 50*time.Millisecond, 5*time.Millisecond, 10*time.Millisecond, time.Millisecond
 	t.Cleanup(func() {
-		windowStartTimeout, windowShellSettle, windowPoll, windowWatchEvery = old[0], old[1], old[2], old[3]
+		windowStartTimeout, windowShellSettle, windowPoll, windowWatchEvery, windowFollowUpPause = old[0], old[1], old[2], old[3], old[4]
 	})
 }
 
@@ -177,9 +177,14 @@ func TestOpenLocalWindowPutsALongOrMultiLineTaskInAFile(t *testing.T) {
 // listener does before it starts window open --request.
 func windowRig(t *testing.T, guest bool) (*workerRig, windowRequest) {
 	t.Helper()
+	return windowRigAsking(t, guest, "summarize the README")
+}
+
+func windowRigAsking(t *testing.T, guest bool, body string) (*workerRig, windowRequest) {
+	t.Helper()
 	fastWindow(t)
 	w := newWorkerRig(t, relay.Config{})
-	id := w.ask("summarize the README")
+	id := w.ask(body)
 	sess := "worker-test"
 	wr, err := w.client(sess)
 	if err != nil {
@@ -188,7 +193,7 @@ func windowRig(t *testing.T, guest bool) (*workerRig, windowRequest) {
 	if _, err := wr.Claim(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
-	return w, windowRequest{id: id, from: "grokbot", session: sess, config: filepath.Join(t.TempDir(), "window.json"), tincan: "/usr/local/bin/tincan", guest: guest, body: "summarize the README"}
+	return w, windowRequest{id: id, from: "grokbot", session: sess, config: filepath.Join(t.TempDir(), "window.json"), tincan: "/usr/local/bin/tincan", guest: guest, body: body}
 }
 
 func runRequestAsync(t *testing.T, w *workerRig, f *fakeTermWindow, req windowRequest) chan error {
@@ -219,9 +224,9 @@ func TestWindowRequestReturnsOnceTheWindowReplies(t *testing.T) {
 	w, req := windowRig(t, false)
 	f := &fakeTermWindow{screens: []string{claudeScreen}}
 	done := runRequestAsync(t, w, f, req)
-	eventually(t, "the prompt is typed", func() bool { return len(f.typedLines()) == 1 })
-	typed := f.typedLines()[0]
-	if !strings.Contains(typed, req.id) || !strings.Contains(typed, "task.md") || strings.Contains(typed, "\n") {
+	eventually(t, "the ask and how to reply are typed", func() bool { return len(f.typedLines()) == 2 })
+	typed := f.typedLines()
+	if typed[0] != "summarize the README" || !strings.Contains(typed[1], req.id) || !strings.Contains(typed[1], "task.md") {
 		t.Fatalf("typed %q", typed)
 	}
 	task, err := os.ReadFile(filepath.Join(filepath.Dir(req.config), "window-runs", req.id, "task.md"))
@@ -250,7 +255,7 @@ func TestWindowRequestFailsWhenTheWindowIsClosedFirst(t *testing.T) {
 	w, req := windowRig(t, false)
 	f := &fakeTermWindow{screens: []string{claudeScreen}}
 	done := runRequestAsync(t, w, f, req)
-	eventually(t, "the prompt is typed", func() bool { return len(f.typedLines()) == 1 })
+	eventually(t, "the prompt is typed", func() bool { return len(f.typedLines()) == 2 })
 	f.close()
 	if err := waitDone(t, done); err == nil {
 		t.Fatal("want an error once the window closed")
@@ -264,7 +269,7 @@ func TestWindowRequestReturnsWhenTheWindowAsksAQuestion(t *testing.T) {
 	w, req := windowRig(t, false)
 	f := &fakeTermWindow{screens: []string{claudeScreen}}
 	done := runRequestAsync(t, w, f, req)
-	eventually(t, "the prompt is typed", func() bool { return len(f.typedLines()) == 1 })
+	eventually(t, "the prompt is typed", func() bool { return len(f.typedLines()) == 2 })
 	wr, _ := w.client(req.session)
 	if _, err := wr.Reply(t.Context(), req.id, "Which README?", envelope.StatusNeedsInput); err != nil {
 		t.Fatal(err)
@@ -421,4 +426,65 @@ func replyBody(r envelope.Result) string {
 		return ""
 	}
 	return r.Reply.Body
+}
+
+func TestWindowRequestTypesASlashCommandAsItIs(t *testing.T) {
+	w, req := windowRigAsking(t, false, "/ce-plan make a donkey plan")
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "both lines are typed", func() bool { return len(f.typedLines()) == 2 })
+	if got := f.typedLines()[0]; got != "/ce-plan make a donkey plan" {
+		t.Errorf("first line %q, want the slash command as it is", got)
+	}
+	wr, _ := w.client(req.session)
+	if _, err := wr.Reply(t.Context(), req.id, "plan written", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitDone(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowRequestPointsAMultiLineAskAtItsFile(t *testing.T) {
+	w, req := windowRigAsking(t, false, "first line\nsecond line")
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "the pointer is typed", func() bool { return len(f.typedLines()) == 1 })
+	if got := f.typedLines()[0]; !strings.Contains(got, "task.md") || strings.Contains(got, "first line") {
+		t.Errorf("typed %q, want only a pointer to task.md", got)
+	}
+	f.close()
+	_ = waitDone(t, done)
+}
+
+func TestOpenWindowTypesFollowUpsIntoClaudeAfterAShellStartsIt(t *testing.T) {
+	fastWindow(t)
+	f := &fakeTermWindow{screens: []string{"% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", claudeScreen}}
+	if _, err := openWindow(t.Context(), f, windowLaunch{claude: "/c/claude", starts: "auto"}, "n", "/ce-plan x", "then reply"); err != nil {
+		t.Fatal(err)
+	}
+	got := f.typedLines()
+	if len(got) != 2 || got[0] != "'/c/claude' '/ce-plan x'" || got[1] != "then reply" {
+		t.Errorf("typed %q", got)
+	}
+}
+
+func TestCmuxTypeLineWaitsForTheInputBoxToClear(t *testing.T) {
+	old := cmuxSendRetry
+	cmuxSendRetry = time.Millisecond
+	t.Cleanup(func() { cmuxSendRetry = old })
+	dir := t.TempDir()
+	count := filepath.Join(dir, "n")
+	c, _ := fakeCmux(t, "true")
+	// Replace the fake: send refuses twice, then works.
+	script := "#!/bin/sh\ncase \"$1\" in\nsend) n=$(cat '" + count + "' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '" + count + "'; if [ $n -le 2 ]; then echo 'Error: send: the agent prompt holds text someone is typing'; exit 1; fi; echo OK ;;\n*) echo OK ;;\nesac\n"
+	if err := os.WriteFile(c.bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.typeLine(t.Context(), "workspace:1", "hi"); err != nil {
+		t.Fatalf("typeLine = %v", err)
+	}
+	if got, _ := os.ReadFile(count); strings.TrimSpace(string(got)) != "3" {
+		t.Errorf("send ran %s times, want 3", got)
+	}
 }

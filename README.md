@@ -1049,7 +1049,7 @@ Socket. A server added without `--channel` (`claude mcp add --scope user agent-t
 
 Fallback when no session is open, or with socket wake off: copy [examples/claude-code/cmux-wake.sh](examples/claude-code/cmux-wake.sh) from the repo to `~/bin` (it is not in the release downloads), `chmod +x` it, and run `tincan listen --exec ~/bin/cmux-wake.sh`. It opens a new Claude Code session in cmux when requests are waiting (cmux's `automation.socketControlMode` must allow it). Set the wake to `command` for this.
 
-New window per ask: `tincan window open "<task>"` opens a Claude Code window in cmux, in the background, working on a task. Join a second agent such as `claude-window` and run `tincan window install --start`, and every ask to it opens its own window that works on that request and replies to the asker. See [docs/adapters/claude-code.md](docs/adapters/claude-code.md#open-a-new-window-for-each-ask).
+New window per ask: `tincan window open "<task>"` opens a Claude Code window in cmux, in the background, working on a task. Join a second agent such as `claude-window` and run `tincan window install --start`, and every ask to it opens its own window that works on that request and replies to the asker. A one-line ask is typed as it is, so `/ce-plan make a plan` runs the slash command. See [docs/adapters/claude-code.md](docs/adapters/claude-code.md#open-a-new-window-for-each-ask).
 
 #### How it sends and receives
 

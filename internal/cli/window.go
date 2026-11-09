@@ -184,7 +184,7 @@ and the command waits until the request is answered or the window is closed.`,
 // else goes in a file.
 func openLocalWindow(ctx context.Context, term windowTerminal, w windowLaunch, task string) (string, error) {
 	prompt := task
-	if len(task) > maxTypedTask || strings.ContainsAny(task, "\r\n") {
+	if !typable(task) {
 		dir, err := newWindowRunDir(client.ConfigPath(), "local-"+time.Now().Format("20060102-150405"))
 		if err != nil {
 			return "", err
@@ -198,6 +198,12 @@ func openLocalWindow(ctx context.Context, term windowTerminal, w windowLaunch, t
 	return openWindow(ctx, term, w, windowName(task), prompt)
 }
 
+// typable reports whether task can be typed into Claude Code as it is, so a
+// slash command such as "/ce-plan make a plan" runs as one.
+func typable(task string) bool {
+	return task != "" && len(task) <= maxTypedTask && !strings.ContainsAny(task, "\r\n")
+}
+
 // windowName is the workspace title: "tincan: " and the start of the task.
 func windowName(task string) string {
 	first, _, _ := strings.Cut(strings.TrimSpace(task), "\n")
@@ -207,9 +213,15 @@ func windowName(task string) string {
 	return "tincan: " + first
 }
 
+// windowFollowUpPause is the wait before a follow-up message is typed, so the
+// first one is submitted on its own and the follow-up queues behind it.
+var windowFollowUpPause = 1500 * time.Millisecond
+
 // openWindow opens a window, waits for what it starts, and types prompt into
 // Claude Code, or the claude command line with prompt when it is a shell.
-func openWindow(ctx context.Context, term windowTerminal, w windowLaunch, name, prompt string) (string, error) {
+// Each of more is then typed as a message of its own, which Claude Code
+// queues while it works on the first.
+func openWindow(ctx context.Context, term windowTerminal, w windowLaunch, name, prompt string, more ...string) (string, error) {
 	handle, err := term.open(ctx, name, w.dir)
 	if err != nil {
 		return "", err
@@ -222,7 +234,26 @@ func openWindow(ctx context.Context, term windowTerminal, w windowLaunch, name, 
 	if started == "shell" {
 		line = shellQuote(w.claude) + " " + shellQuote(prompt)
 	}
-	return handle, term.typeLine(ctx, handle, line)
+	if err := term.typeLine(ctx, handle, line); err != nil {
+		return handle, err
+	}
+	if len(more) > 0 && started == "shell" {
+		// The follow-ups are for Claude Code, not the shell that started it.
+		if _, err := waitForWindowStart(ctx, term, handle, "claude"); err != nil {
+			return handle, err
+		}
+	}
+	for _, m := range more {
+		select {
+		case <-ctx.Done():
+			return handle, ctx.Err()
+		case <-time.After(windowFollowUpPause):
+		}
+		if err := term.typeLine(ctx, handle, m); err != nil {
+			return handle, err
+		}
+	}
+	return handle, nil
 }
 
 // waitForWindowStart reads the new window until it shows Claude Code ready
@@ -393,7 +424,14 @@ func runWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal,
 		from = "a teammate"
 	}
 	prompt := fmt.Sprintf("Agent Tincan request %s from %s: read %s, do the task in it, and reply with the command at the end of that file.", req.id, from, file)
-	handle, err := openWindow(ctx, term, w, windowName(from+" asks: "+firstLine(req.body)), prompt)
+	var more []string
+	if task := strings.TrimSpace(req.body); typable(task) {
+		// A one-line ask is typed as it is, so "/ce-plan make a plan" runs
+		// the slash command, and how to reply follows as its own message.
+		prompt = task
+		more = []string{fmt.Sprintf("That was Agent Tincan request %s from %s. When you have finished it, send your answer with the reply command at the end of %s.", req.id, from, file)}
+	}
+	handle, err := openWindow(ctx, term, w, windowName(from+" asks: "+firstLine(req.body)), prompt, more...)
 	if err != nil {
 		return failWindowRequest(ctx, r, req, "tincan window could not open a Claude Code window: "+err.Error())
 	}

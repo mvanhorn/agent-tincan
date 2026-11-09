@@ -105,16 +105,26 @@ TINCAN_CONFIG=~/.config/tincan/window.json tincan join <code> --relay http://tin
 tincan window install --start
 ```
 
+Give it a good-at line so teammates know when to use it, for example so `cc <task>` to any teammate means "open a window":
+
+```bash
+tincan good-at claude-window "cc <task>: send <task> as the ask; opens a new Claude Code window on the Mac and types it in"
+```
+
 `install` writes the LaunchAgent `com.agenttincan.window`, which runs `tincan window serve` at login and keeps it running; `--start` loads it now. It logs to `~/Library/Logs/tincan-window.log`. Then from any teammate:
 
 ```bash
 tincan ask claude-window "summarize what changed on main this week"
+tincan ask claude-window "/ce-plan make a donkey plan"
 ```
+
+With the good-at line above, telling a teammate such as instinct `cc /ce-plan make a donkey plan` does the same.
 
 How it works:
 
 - Each window opens as a new cmux workspace with focus left where it is, in `--dir` (default: your home directory). A teammate cannot choose the directory.
 - If your terminal starts Claude Code in every new window by itself (a Ghostty `command` set to a Claude launcher), the task is typed into it. If it starts a shell, tincan types the `claude` command line. `--starts auto` looks at the new window to tell which; `--starts claude` or `--starts shell` says so outright.
+- A one-line ask is typed into Claude Code as it is, so `/ce-plan make a donkey plan` runs the slash command, and a second message (which Claude Code queues behind the first) says how to reply. A longer or multi-line ask is not typed; the window is pointed at its file.
 - A request's task goes in a private file beside the window agent's config (`window-runs/<request id>/task.md`), and the window is told to read it. That file also holds the exact `tincan reply` command for that request, which replies as `claude-window` under the session holding the claim. The window's own tincan MCP server keeps running as your usual Claude Code agent, so it never takes other `claude-window` asks.
 - The asker sees a progress note when the window opens. A request whose window is closed before it replies is failed with a message saying so. A clarifying question from the window ends that window's hold on the request, and the asker's answer opens a fresh window with the exchange.
 - A request a guest's ask led to opens no window and is failed.

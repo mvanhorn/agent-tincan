@@ -34,6 +34,11 @@ const defaultCmuxBin = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 // cannot hold a worker forever.
 const cmuxCallTimeout = 15 * time.Second
 
+// How long typeLine waits for Claude Code's input box to clear.
+const cmuxSendAttempts = 20
+
+var cmuxSendRetry = 500 * time.Millisecond
+
 // resolveCmux returns the cmux CLI to drive: flag, then CMUX_BIN, then the
 // app bundle's, then PATH.
 func resolveCmux(flag string) (string, error) {
@@ -109,8 +114,22 @@ func (c cmuxTerminal) typeLine(ctx context.Context, ws, line string) error {
 	if strings.ContainsAny(line, "\r\n") {
 		return errors.New("a typed line cannot hold a newline: the terminal would press Enter early")
 	}
-	if _, err := c.run(ctx, "send", "--workspace", ws, line); err != nil {
-		return err
+	// cmux refuses to send while Claude Code's input box still holds text,
+	// such as a message that has not been submitted yet, so wait for it to
+	// clear rather than fail the request.
+	for attempt := 1; ; attempt++ {
+		out, err := c.run(ctx, "send", "--workspace", ws, line)
+		if err == nil {
+			break
+		}
+		if !strings.Contains(out, "holds text") || attempt == cmuxSendAttempts {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cmuxSendRetry):
+		}
 	}
 	// Claude Code's input box takes a burst of text as a paste; a short
 	// pause lets it settle before Enter submits it.
