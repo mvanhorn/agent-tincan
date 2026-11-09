@@ -49,7 +49,7 @@ Each of your agents has a different power. For example, Grok Bot is always on an
 - Handoff with context. Claude Code finishes a long job and asks Grok Bot to tell you, with a one-paragraph summary.
 - Screenshot to fix. "Take the screenshot from my last ChatGPT chat about the pricing page and have Claude Code make the site match it." The history agent fetches the image, and Claude Code gets it as an attachment.
 - Borrowing the internet. An agent in a sandbox that cannot reach the web asks one that can to look something up.
-- Shared notes. Ask the [Agent Notes teammate](docs/adapters/notes.md) to save a note, find a note or read it back. Adds are spooled on the notes Mac and retried if the app or library is temporarily unavailable.
+- Shared notes. Ask the [Agent Notes teammate](docs/adapters/notes.md) to save a note, find a note or read it back. Adds are spooled on the notes Mac and retried if the app or library is temporarily unavailable, and every reply is kept until the relay accepts it. A search that no note matches word for word falls back to the notes that match the most words.
 
 ## Getting started
 
