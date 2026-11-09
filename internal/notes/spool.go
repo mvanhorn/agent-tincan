@@ -29,7 +29,11 @@ type SpoolEntry struct {
 	Request envelope.Request `json:"request"`
 	// Op is the operation a stored reply answers; empty for an add, as in
 	// entries written before stored replies.
-	Op        Op        `json:"op,omitempty"`
+	Op Op `json:"op,omitempty"`
+	// Backend is the notes app the add was taken for (Agent Notes when
+	// empty, as in entries written before other apps). A switch to another
+	// app never moves a waiting add there.
+	Backend   string    `json:"backend,omitempty"`
 	Note      Request   `json:"note"`
 	SpooledAt time.Time `json:"spooled_at"`
 	Attempts  int       `json:"attempts,omitempty"`

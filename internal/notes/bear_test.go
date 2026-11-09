@@ -462,3 +462,29 @@ func TestBearSearchCapKeepsActiveNotesFirst(t *testing.T) {
 		t.Fatalf("the active note was cut by the row cap (%d results)", len(got))
 	}
 }
+
+// Bear's database is read from a private copy that is gone after each
+// read, and the copy carries writes still only in Bear's WAL.
+func TestBearReadsAPrivateCopyIncludingTheWAL(t *testing.T) {
+	f := newBearFixture(t)
+	if _, err := f.db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	n := f.put(bearNote{Title: "Tent", Text: "stakes"}) // only in the WAL while f.db is open
+	b := f.bear()
+	b.TempDir = t.TempDir()
+	got, err := b.Search(t.Context(), "tent")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("search = %v, %v; want the note still in the WAL", ids(got), err)
+	}
+	if _, err := b.Read(t.Context(), n.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Probe(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	left, err := os.ReadDir(b.TempDir)
+	if err != nil || len(left) != 0 {
+		t.Fatalf("copies left behind: %v %v", left, err)
+	}
+}

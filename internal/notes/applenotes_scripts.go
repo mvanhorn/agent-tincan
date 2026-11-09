@@ -30,9 +30,12 @@ function folderNotes(f) {
     var ns = f.notes();
     for (var i = 0; i < ns.length; i++) {
       try {
+        // Read every field before keeping any, so a note that fails
+        // part-way is skipped whole and the arrays stay the same length.
         var lk = ns[i].passwordProtected();
-        out.ids.push(ns[i].id()); out.names.push(ns[i].name()); out.locked.push(lk);
-        out.texts.push(lk ? '' : ns[i].plaintext());
+        var id = ns[i].id(), name = ns[i].name();
+        var text = lk ? '' : ns[i].plaintext();
+        out.ids.push(id); out.names.push(name); out.locked.push(lk); out.texts.push(text);
       } catch (e2) {}
     }
   }
@@ -70,7 +73,8 @@ function folderFlags(f) {
     for (var i = 0; i < ns.length; i++) {
       try {
         var lk = ns[i].passwordProtected();
-        out.ids.push(ns[i].id()); out.locked.push(lk);
+        var id = ns[i].id();
+        out.ids.push(id); out.locked.push(lk);
       } catch (e2) {}
     }
   }

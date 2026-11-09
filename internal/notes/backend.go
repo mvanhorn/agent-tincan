@@ -64,6 +64,24 @@ const codeBadOutput = "helper_bad_output"
 // AgentNotesName is the Agent Notes helper's Name.
 const AgentNotesName = "Agent Notes"
 
+// The Bear and Apple Notes backends' names, as the health file records
+// them.
+const (
+	BearName       = "Bear"
+	AppleNotesName = "Apple Notes"
+)
+
+// BackendDisplayName is the name a --backend value's service records.
+func BackendDisplayName(name string) string {
+	switch name {
+	case BackendBear:
+		return BearName
+	case BackendAppleNotes:
+		return AppleNotesName
+	}
+	return AgentNotesName
+}
+
 // codeUnavailable is a backend that is not installed or cannot be reached
 // right now. It is transient.
 const codeUnavailable = "helper_unavailable"

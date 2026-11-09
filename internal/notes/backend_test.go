@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
@@ -18,11 +19,13 @@ type stubBackend struct {
 	createErr error
 	probeN    int
 	probeErr  error
+	creates   int
 }
 
 func (b *stubBackend) Name() string { return b.name }
 
 func (b *stubBackend) Create(context.Context, string, string, []string, map[string]string, string) (CreateResult, error) {
+	b.creates++
 	return CreateResult{}, b.createErr
 }
 
@@ -131,5 +134,57 @@ func TestServiceRecordsItsAccessCheck(t *testing.T) {
 	}
 	if h.Command != "search" || h.Code != CodePermissionDenied {
 		t.Fatalf("the access check overwrote the last result: %+v", h)
+	}
+}
+
+// An add waiting in the spool when the owner switched apps is not saved to
+// the new app: the old app may already hold it.
+func TestWaitingAddIsNotMovedToAnotherApp(t *testing.T) {
+	b := &stubBackend{name: AppleNotesName}
+	r := rigWith(t, b)
+	req := r.send(t, "grokbot", addBody("Tent", "stakes"))
+	claimed, err := r.cfg.Relay.Claim(t.Context(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := SpoolEntry{Request: claimed, Backend: BearName, Note: Request{Op: OpAdd, Title: "Tent", Body: "stakes"}, SpooledAt: time.Now().UTC()}
+	if err := r.svc.spool.Put(e); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.svc.RetrySpooled(t.Context()); n != 1 {
+		t.Fatalf("RetrySpooled tried %d", n)
+	}
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "saved to Bear") || !strings.Contains(res.Reply.Body, `check there for a note titled "Tent"`) {
+		t.Fatalf("reply = %s %q", res.Status, res.Reply.Body)
+	}
+	if b.creates != 0 {
+		t.Fatalf("the add was saved to the new app %d times", b.creates)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// A failed access check is replaced once the app answers again, so doctor
+// does not keep reporting a problem that is gone.
+func TestRecoveredAccessIsRecorded(t *testing.T) {
+	denied := &HelperError{Code: CodePermissionDenied, Message: "macOS refused access"}
+	b := &stubBackend{name: BearName, probeErr: denied}
+	r := rigWith(t, b)
+	r.svc.recordProbe(t.Context())
+	h := r.svc.readHealth()
+	if h.Probe == nil || h.Probe.Code != CodePermissionDenied {
+		t.Fatalf("probe = %+v", h.Probe)
+	}
+	b.probeErr, b.probeN = nil, 5
+	r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	if p := r.svc.readHealth().Probe; p.Code != CodePermissionDenied {
+		t.Fatalf("a failed check was retried within the minute: %+v", p)
+	}
+	h = r.svc.readHealth()
+	h.Probe.At = h.Probe.At.Add(-2 * time.Minute)
+	r.svc.writeHealth(h)
+	r.ask(t, "grokbot", `note: {"op":"search","query":"lamp"}`)
+	if p := r.svc.readHealth().Probe; p.Code != "" || p.Count != 5 {
+		t.Fatalf("probe after a working search = %+v, want the recovery recorded", p)
 	}
 }

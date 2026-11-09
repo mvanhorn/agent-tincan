@@ -64,7 +64,7 @@ func NewAppleNotes(appSupport string, logf func(string, ...any)) *AppleNotes {
 
 var _ Backend = (*AppleNotes)(nil)
 
-func (a *AppleNotes) Name() string { return "Apple Notes" }
+func (a *AppleNotes) Name() string { return AppleNotesName }
 
 // script runs one of the fixed scripts with in as its JSON input.
 func (a *AppleNotes) script(ctx context.Context, script string, in any, out any) error {

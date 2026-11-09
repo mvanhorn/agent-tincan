@@ -7,6 +7,7 @@
 package notes
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -731,7 +732,7 @@ func (s *Service) add(ctx context.Context, req envelope.Request, r Request) {
 		return
 	}
 	defer s.end(req.ID)
-	e := SpoolEntry{Request: req, Note: r, SpooledAt: time.Now().UTC()}
+	e := SpoolEntry{Request: req, Backend: s.backend.Name(), Note: r, SpooledAt: time.Now().UTC()}
 	if err := s.spool.Put(e); err != nil {
 		// Without a durable entry the library is not touched; the relay
 		// redelivers once the claim lease runs out.
@@ -753,8 +754,9 @@ func (s *Service) add(ctx context.Context, req envelope.Request, r Request) {
 // access.
 func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	req := e.Request
+	app := cmp.Or(e.Backend, AgentNotesName)
 	if _, decided := e.Outcome.status(); decided {
-		if e.Outcome == OutcomeSaved && e.NoteID != "" {
+		if e.Outcome == OutcomeSaved && e.NoteID != "" && app == s.backend.Name() {
 			if n, err := s.backend.Read(ctx, e.NoteID); err == nil && n.Summary.State != StateActive {
 				e.Reply += " " + laterStateNote(n.Summary.State)
 			}
@@ -764,6 +766,13 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 		return
 	}
 	if !fresh && (!s.stillWanted(ctx, e) || !s.stillAllowed(ctx, e)) {
+		return
+	}
+	if app != s.backend.Name() {
+		// The owner switched apps while this add waited. It may already be
+		// saved in the old app, and the new app's ledger cannot know.
+		s.logf("request %s from %s: add was taken for %s, the service now saves to %s; not saving it", req.ID, req.From, app, s.backend.Name())
+		s.decide(ctx, e, OutcomeFailed, "", fmt.Sprintf("The note was not saved: this add was taken while the notes agent saved to %s, and it now saves to %s. It may already be in %s; check there for a note titled %q before asking again.", app, s.backend.Name(), app, oneLine(e.Note.Title)))
 		return
 	}
 	tags := slices.Clone(e.Note.Tags)
@@ -1215,8 +1224,16 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 	h.Pending, h.Backend, h.Probe = prev.Pending, prev.Backend, prev.Probe
 	s.writeHealth(h)
 	s.healthMu.Unlock()
-	if errorCode(err) == CodePermissionDenied {
+	// A failed check is retried at most once a minute, so an app that
+	// answers requests but still fails its check is not probed on each.
+	failedProbe := prev.Probe != nil && (prev.Probe.Code != "" || prev.Probe.Message != "") &&
+		time.Since(prev.Probe.At) > time.Minute
+	switch {
+	case errorCode(err) == CodePermissionDenied:
 		// Access was taken away or never given: record it for doctor.
+		s.recordProbe(context.Background())
+	case h.OK && failedProbe:
+		// The app answered after a failed check: record the recovery.
 		s.recordProbe(context.Background())
 	}
 }

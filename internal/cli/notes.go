@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -342,9 +343,12 @@ func serviceAccessCheck(healthPath, backend, exe string) check {
 	if err == nil {
 		err = json.Unmarshal(b, &h)
 	}
+	start := "Start the service (tincan notes install --backend " + backend + " prints the command), then run tincan notes doctor --backend " + backend + " again."
 	if err != nil || h.Probe == nil {
-		return check{name, "warn", "the service has not recorded an access check yet",
-			"Start the service (tincan notes install --backend " + backend + " prints the command), then run tincan notes doctor --backend " + backend + " again."}
+		return check{name, "warn", "the service has not recorded an access check yet", start}
+	}
+	if want := notes.BackendDisplayName(backend); h.Backend != want {
+		return check{name, "warn", fmt.Sprintf("the service's last access check was for %s, not %s", cmp.Or(h.Backend, "another app"), want), start}
 	}
 	when := h.Probe.At.Local().Format(time.DateTime)
 	if h.Probe.Code == "" && h.Probe.Message == "" {

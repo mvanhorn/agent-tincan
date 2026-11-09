@@ -424,6 +424,13 @@ func TestNotesDoctorReportsTheServiceAccessCheck(t *testing.T) {
 	rep = runNotesDoctor(t.Context(), o)
 	printDoctor(&b, rep)
 	wantLine(t, b.String(), "[OK] service access", "42 notes")
+
+	// A check made for another app does not count for this one.
+	e.writeHealth(t, notes.Health{Backend: "Bear", Probe: &notes.ProbeResult{At: at, Count: 42}, Command: "search", OK: true, UpdatedAt: at})
+	b.Reset()
+	printDoctor(&b, runNotesDoctor(t.Context(), o))
+	wantLine(t, b.String(), "[WARN] service access", "for Bear, not Apple Notes")
+	e.writeHealth(t, notes.Health{Backend: "Apple Notes", Probe: &notes.ProbeResult{At: at, Count: 42}, Command: "search", OK: true, UpdatedAt: at})
 	// The add ledger dedupes, so no add is needed to verify it.
 	wantLine(t, b.String(), "[OK] last helper result", "search succeeded")
 }
