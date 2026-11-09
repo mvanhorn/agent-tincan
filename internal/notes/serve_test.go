@@ -87,6 +87,35 @@ type rig struct {
 	replyFail atomic.Bool
 	replyLose atomic.Bool
 	getFail   atomic.Bool
+	pollFail  atomic.Bool
+
+	// faults holds, per request id, the HTTP statuses its next reply posts
+	// get instead of reaching the relay; 0 hangs the post until release is
+	// closed, as a dial timeout does.
+	faultMu sync.Mutex
+	faults  map[string][]int
+	release chan struct{}
+	unhang  func()
+	hanging atomic.Bool
+}
+
+// failReplies queues HTTP statuses for id's next reply posts.
+func (r *rig) failReplies(id string, codes ...int) {
+	r.faultMu.Lock()
+	defer r.faultMu.Unlock()
+	r.faults[id] = append(r.faults[id], codes...)
+}
+
+func (r *rig) nextFault(path string) (int, bool) {
+	r.faultMu.Lock()
+	defer r.faultMu.Unlock()
+	for id, q := range r.faults {
+		if len(q) > 0 && path == "/v1/requests/"+id+"/reply" {
+			r.faults[id] = q[1:]
+			return q[0], true
+		}
+	}
+	return 0, false
 }
 
 // newRig joins notes and codex to a test mesh and builds a notes service
@@ -97,13 +126,37 @@ func newRig(t *testing.T, rc relay.Config) *rig {
 	m := testrelay.New(t, rc)
 	m.JoinOnMachineOf(t, "instinct", "notes")
 	m.JoinOnMachineOf(t, "instinct", "codex")
-	r := &rig{mesh: m, ext: &fakeExtractor{}, log: &testLog{t: t}}
+	r := &rig{mesh: m, ext: &fakeExtractor{}, log: &testLog{t: t}, faults: map[string][]int{}, release: make(chan struct{})}
+	r.unhang = sync.OnceFunc(func() { close(r.release) })
 	target, err := url.Parse(m.URL("notes"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	ps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if code, ok := r.nextFault(req.URL.Path); ok {
+			if code == 0 {
+				r.hanging.Store(true)
+				select {
+				case <-r.release:
+				case <-req.Context().Done():
+				}
+				r.hanging.Store(false)
+				code = http.StatusServiceUnavailable
+			}
+			http.Error(w, `{"error":"injected reply fault"}`, code)
+			return
+		}
+		if r.pollFail.Load() && strings.HasPrefix(req.URL.Path, "/v1/poll") {
+			if hj, ok := w.(http.Hijacker); ok {
+				if c, _, err := hj.Hijack(); err == nil {
+					_ = c.Close()
+					return
+				}
+			}
+			http.Error(w, "unreachable", http.StatusBadGateway)
+			return
+		}
 		if r.replyFail.Load() && strings.HasSuffix(req.URL.Path, "/reply") {
 			http.Error(w, `{"error":"injected reply failure"}`, http.StatusServiceUnavailable)
 			return
@@ -128,6 +181,7 @@ func newRig(t *testing.T, rc relay.Config) *rig {
 		proxy.ServeHTTP(w, req)
 	}))
 	t.Cleanup(ps.Close)
+	t.Cleanup(r.unhang) // runs first: a hanging post must end before the proxy closes
 	rel, err := client.NewRelayForFile(client.Config{Relay: ps.URL, Agent: "notes"}, "")
 	if err != nil {
 		t.Fatal(err)
@@ -634,7 +688,7 @@ func TestStartupDrainOfExpiredRequestCreatesNoteOnce(t *testing.T) {
 		t.Fatalf("notes = %+v", r.helper.notes())
 	}
 	r.assertSpoolEmpty(t)
-	if !strings.Contains(r.log.String(), "reply failed") {
+	if !strings.Contains(r.log.String(), "reply attempt 1 failed") {
 		t.Fatalf("the failed reply was not logged:\n%s", r.log.String())
 	}
 	before := len(r.helper.callsOf(t, "create"))
@@ -1686,4 +1740,221 @@ func TestStoredRepliesAreInvisibleToTheTopLevelSpool(t *testing.T) {
 	if err != nil || len(top) != 0 {
 		t.Fatalf("top-level spool = %v, %v; want nothing", top, err)
 	}
+}
+
+func TestRetryDelayBacksOffAndCaps(t *testing.T) {
+	want := []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second}
+	for i, w := range want {
+		if got := retryDelay(retryDelays, i+1); got != w {
+			t.Errorf("delay after %d failures = %s, want %s", i+1, got, w)
+		}
+	}
+}
+
+// Covers R13: each failed attempt logs when it is retried, on the
+// backoff schedule.
+func TestFailedReplyLogsNextRetryTime(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
+	r.cfg.Now = func() time.Time { return at }
+	r.restart(t)
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	r.lineWith(t, req.ID, "next retry at 2026-11-08T21:55:09.137-08:00 (in 2s)")
+	r.svc.RetrySpooled(t.Context())
+	r.lineWith(t, req.ID, "reply attempt 2 failed (5xx)")
+	r.lineWith(t, req.ID, "next retry at 2026-11-08T21:55:12.137-08:00 (in 5s)")
+}
+
+// runService runs the service until the test ends.
+func (r *rig) runService(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.svc.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+// waitStatus waits for id to reach want, failing after d.
+func (r *rig) waitStatus(t *testing.T, id string, want envelope.Status, d time.Duration) client.Result {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		res := r.get(t, "grokbot", id)
+		if res.Status == want {
+			return res
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("request %s is %s after %s, want %s", id, res.Status, d, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Covers AE1 (R3): with polls and replies both failing, the stored reply
+// goes out as soon as a poll gets through, not when its backoff ends.
+func TestStoredReplyDeliveredWhenPollingRecovers(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.cfg.RetryEvery = time.Hour
+	r.restart(t)
+	r.svc.delays = []time.Duration{time.Hour}
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	r.pollFail.Store(true)
+	r.runService(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(r.log.String(), "poll failed") {
+		if time.Now().After(deadline) {
+			t.Fatal("no failed poll")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r.replyFail.Store(false)
+	r.pollFail.Store(false)
+	res := r.waitStatus(t, req.ID, envelope.StatusAnswered, 10*time.Second)
+	if !strings.Contains(res.Reply.Body, n.ID) {
+		t.Fatalf("reply %q", res.Reply.Body)
+	}
+	if c := len(r.helper.callsOf(t, "search")); c != 1 {
+		t.Fatalf("searches = %d", c)
+	}
+	if !strings.Contains(r.log.String(), "the relay answers polls again") {
+		t.Fatal("delivered without the recovery trigger")
+	}
+}
+
+// Covers R3: a retry stuck on an unreachable relay never holds up
+// polling: a second request is claimed and answered meanwhile.
+func TestPollingNotHeldByAStuckRetry(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.restart(t)
+	r.svc.delays = []time.Duration{10 * time.Millisecond}
+	r.svc.tick = 10 * time.Millisecond
+	a := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.failReplies(a.ID, 503, 0)
+	r.runService(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for !r.hanging.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the retry never reached the hanging relay")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	b := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.waitStatus(t, b.ID, envelope.StatusAnswered, 5*time.Second)
+	if !r.hanging.Load() {
+		t.Fatal("the stuck retry ended before the second request was answered")
+	}
+	// Once the relay answers again, the stuck reply goes out too.
+	r.unhang()
+	r.waitStatus(t, a.ID, envelope.StatusAnswered, 5*time.Second)
+}
+
+// Covers KTD3: a reply the relay refuses as too large is replaced with a
+// short failed reply, and that replacement is retried through an outage.
+func TestRefusedReplyIsReplacedAndRetried(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.failReplies(req.ID, 413, 503)
+	r.poll(t, 1)
+	if len(r.replyFiles(t)) != 1 {
+		t.Fatalf("stored replies = %v", r.replyFiles(t))
+	}
+	r.svc.RetrySpooled(t.Context())
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "refused its reply (HTTP 413)") || strings.Contains(res.Reply.Body, n.ID) {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Covers R4: a reply the relay refuses with 403 is kept at the longest
+// delay and listed in the health file by id and error class, without its
+// text.
+func TestForbiddenReplyIsHeldAndShownInHealth(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.helper.put(t, fakeNote{Title: "Tent", Body: "the blue tent MP-000-111-2222"})
+	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
+	r.cfg.Now = func() time.Time { return at }
+	r.restart(t)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.failReplies(req.ID, 403, 403)
+	r.poll(t, 1)
+	r.lineWith(t, req.ID, "next retry at 2026-11-08T21:56:07.137-08:00 (in 1m0s)")
+	b, err := os.ReadFile(r.cfg.HealthPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h Health
+	if err := json.Unmarshal(b, &h); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Pending) != 1 || h.Pending[0].RequestID != req.ID || h.Pending[0].LastError != "403" || h.Pending[0].Op != "search" || h.Pending[0].Attempts != 1 {
+		t.Fatalf("pending = %+v", h.Pending)
+	}
+	if strings.Contains(string(b), "MP-000-111-2222") || strings.Contains(string(b), "blue tent") {
+		t.Fatal("the health file carries reply text")
+	}
+	if len(r.replyFiles(t)) != 1 {
+		t.Fatalf("stored replies = %v, want it kept", r.replyFiles(t))
+	}
+	// Delivered later: the list is cleared.
+	r.svc.RetrySpooled(t.Context())
+	r.svc.RetrySpooled(t.Context())
+	r.waitStatus(t, req.ID, envelope.StatusAnswered, time.Second)
+	b, _ = os.ReadFile(r.cfg.HealthPath)
+	h = Health{}
+	_ = json.Unmarshal(b, &h)
+	if len(h.Pending) != 0 {
+		t.Fatalf("pending after delivery = %+v", h.Pending)
+	}
+}
+
+// Covers R6: a stored reply older than 24 hours is purged unsent.
+func TestStaleStoredReplyIsPurgedUnsent(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	claimed, err := r.cfg.Relay.Claim(t.Context(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.replies.Put(SpoolEntry{Request: claimed, Op: OpSearch, SpooledAt: time.Now().Add(-25 * time.Hour), Outcome: OutcomeAnswered, Reply: "No notes match."}); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.RetrySpooled(t.Context())
+	r.lineWith(t, req.ID, "purged the stored search reply undelivered")
+	if res := r.get(t, "grokbot", req.ID); res.Reply != nil {
+		t.Fatalf("a purged reply was sent: %+v", res.Reply)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Covers KTD3: the 24-hour purge never touches an undecided add.
+func TestOldUndecidedAddIsStillApplied(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))
+	claimed, err := r.cfg.Relay.Claim(t.Context(), req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.spool.Put(SpoolEntry{Request: claimed, Note: Request{Op: OpAdd, Title: "Tent", Body: "buy the blue tent"}, SpooledAt: time.Now().Add(-48 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.RetrySpooled(t.Context())
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusAnswered || len(r.helper.notes()) != 1 {
+		t.Fatalf("status %s notes %d", res.Status, len(r.helper.notes()))
+	}
+	r.assertSpoolEmpty(t)
 }

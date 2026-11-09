@@ -37,6 +37,10 @@ type SpoolEntry struct {
 	Outcome   Outcome   `json:"outcome,omitempty"`
 	NoteID    string    `json:"note_id,omitempty"`
 	Reply     string    `json:"reply,omitempty"`
+	// Refused marks a reply the relay refused as malformed or too large
+	// and that was replaced with a short failed reply, so a second refusal
+	// is not replaced again.
+	Refused bool `json:"refused,omitempty"`
 }
 
 // Outcome is the final decision on a spooled add.

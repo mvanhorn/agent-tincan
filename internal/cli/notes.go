@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -259,6 +260,7 @@ func runNotesDoctor(ctx context.Context, o notesDoctorOptions) doctorReport {
 		add(c)
 	}
 	add(healthCheck(notes.HealthPathIn(o.appSupport), o.exe))
+	add(pendingRepliesCheck(notes.HealthPathIn(o.appSupport), time.Now()))
 
 	rep.OK = true
 	for _, c := range rep.Checks {
@@ -366,6 +368,10 @@ func healthCheck(path, exe string) check {
 	if err := json.Unmarshal(b, &h); err != nil {
 		return check{name, "warn", path + " is not a health file: " + err.Error(), ""}
 	}
+	if h.Command == "" {
+		// Only the undelivered-replies list has been written so far.
+		return check{name, "warn", "no helper result yet in " + path, "Send notes a request, then run tincan notes doctor again."}
+	}
 	when := h.UpdatedAt.Local().Format(time.DateTime)
 	// Whatever ran last, a helper that ignores idempotency keys stays a
 	// failure until a create shows it honors them: a successful search
@@ -394,6 +400,46 @@ func healthCheck(path, exe string) check {
 		detail += ": " + h.Message
 	}
 	return check{name, "fail", detail, helperFix(h.Code, exe)}
+}
+
+// pendingRepliesCheck reports replies the service computed but has not
+// delivered, from the health file: request ids, ages, attempts and error
+// classes, never reply text. A refused credential fails: retrying will
+// not fix it.
+func pendingRepliesCheck(path string, now time.Time) check {
+	const name = "undelivered replies"
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return check{name, "ok", "none recorded", ""}
+	}
+	var h notes.Health
+	if json.Unmarshal(b, &h) != nil || len(h.Pending) == 0 {
+		return check{name, "ok", "none", ""}
+	}
+	const shown = 5
+	var parts []string
+	refused := false
+	for i, p := range h.Pending {
+		if p.LastError == "401" || p.LastError == "403" {
+			refused = true
+		}
+		if i >= shown {
+			continue
+		}
+		d := fmt.Sprintf("%s (%s, stored %s ago", p.RequestID, p.Op, now.Sub(p.StoredAt).Round(time.Second))
+		if p.Attempts > 0 {
+			d += fmt.Sprintf(", %d failed attempts, last error %s", p.Attempts, p.LastError)
+		}
+		parts = append(parts, d+")")
+	}
+	detail := fmt.Sprintf("%d waiting: %s", len(h.Pending), strings.Join(parts, "; "))
+	if len(h.Pending) > shown {
+		detail += fmt.Sprintf("; and %d more", len(h.Pending)-shown)
+	}
+	if refused {
+		return check{name, "fail", detail, "The relay refuses this agent's replies. Check the notes agent's join (tincan notes doctor --config) and rejoin it if it was removed; stored replies are kept for 24 hours."}
+	}
+	return check{name, "warn", detail, "The service keeps retrying. Check that the relay is reachable from this Mac; each stored reply is kept for at most 24 hours."}
 }
 
 // helperFix is what to do about a failed helper result with code.
