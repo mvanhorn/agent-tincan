@@ -47,12 +47,18 @@ for a in "$@"; do case "$a" in --statedir=*) statedir=${a#--statedir=};; esac; d
 if [ -s "$statedir/tailscaled.state" ]; then echo Stopped; else echo NeedsLogin; fi > "$FAKE_DIR/ts.state"
 `
 
-// fakeTincanUp is tincan: doctor records its TINCAN_CONFIG and passes, and relay records its argv and its
-// Tailscale keys (or <unset>), then stays up until it is killed. It records
-// nothing under FAKE_NO_RECORD, for a relay the test starts itself.
+// fakeTincanUp is tincan: doctor records its TINCAN_CONFIG and argv and passes,
+// or prints $FAKE_DIR/doctor.json and fails when that file exists. relay
+// records its argv and its Tailscale keys (or <unset>), then stays up until it
+// is killed. It records nothing under FAKE_NO_RECORD, for a relay the test
+// starts itself.
 const fakeTincanUp = `#!/bin/sh
 case "${1:-}" in
-doctor) printf '%s' "${TINCAN_CONFIG-<unset>}" > "$FAKE_DIR/doctor.config"; exit 0;;
+doctor)
+  printf '%s' "${TINCAN_CONFIG-<unset>}" > "$FAKE_DIR/doctor.config"
+  for a in "$@"; do printf '%s\0' "$a"; done > "$FAKE_DIR/doctor.argv"
+  if [ -f "$FAKE_DIR/doctor.json" ]; then cat "$FAKE_DIR/doctor.json"; exit 1; fi
+  exit 0;;
 relay)
   if [ -z "${FAKE_NO_RECORD:-}" ]; then
     printf '%s\n%s\n' "${TS_AUTHKEY-<unset>}" "${RELAY_TS_AUTHKEY-<unset>}" > "$FAKE_DIR/relay.env.tmp"
@@ -517,4 +523,118 @@ func TestTincanUpRefusesSocketDaemonWithStateElsewhere(t *testing.T) {
 			t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
 		}
 	})
+}
+
+// doctorReport is tincan doctor --json output with one check failing.
+func doctorReport(failing string) string {
+	return `{
+  "version": "test",
+  "checks": [
+    {
+      "name": "` + failing + `",
+      "status": "fail",
+      "detail": "cannot reach it"
+    },
+    {
+      "name": "relay moves",
+      "status": "warn",
+      "detail": "cannot list the tailnet"
+    }
+  ],
+  "ok": false
+}`
+}
+
+// With TS_MODE=managed (Grok Bot's managed Tailscale connector) the script
+// installs, starts and logs in to nothing, even with a key in the
+// environment, and still starts the relay and runs tincan doctor.
+func TestTincanUpManagedModeTouchesNoTailscale(t *testing.T) {
+	h := newTincanUpHarness(t)
+	r := h.run("TS_MODE=managed", "TS_AUTHKEY=tskey-auth-box")
+	if r.code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
+	}
+	if h.exists("tailscaled.argv") || h.exists("up.argv") || h.exists("up.stdin") {
+		t.Fatalf("managed mode started or logged in a tailscaled\n%s", r.out)
+	}
+	for _, p := range []string{filepath.Join(h.home, ".config", "tailscale"), filepath.Join(h.home, ".local", "bin", "tailscale")} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("managed mode created %s", p)
+		}
+	}
+	if tsKey, _ := h.relayEnv(); tsKey != "<unset>" {
+		t.Errorf("relay got TS_AUTHKEY %q, want it unset", tsKey)
+	}
+	if got := h.argv("doctor.argv"); !slices.Equal(got, []string{"doctor", "--json"}) {
+		t.Errorf("doctor argv = %q, want [doctor --json]", got)
+	}
+	if !strings.Contains(r.out, "relay ok through the managed Tailscale connector") {
+		t.Errorf("output does not report the relay as reachable:\n%s", r.out)
+	}
+}
+
+// A relay that does not answer in managed mode exits 5, and a config that
+// still saves the userspace proxy is named as the likely cause, without
+// printing the saved proxy itself.
+func TestTincanUpManagedModeRelayUnreachable(t *testing.T) {
+	h := newTincanUpHarness(t)
+	config := filepath.Join(h.home, ".config", "tincan", "client.json")
+	h.write(config, `{
+  "relay": "http://tincan-relay",
+  "proxy": "http://user:secret@localhost:1055",
+  "agent": "grokbot"
+}`, 0o600)
+	h.write(filepath.Join(h.fake, "doctor.json"), doctorReport("relay"), 0o644)
+	r := h.run("TS_MODE=managed", "START_RELAY=0", "TINCAN_CONFIG="+config)
+	if r.code != 5 {
+		t.Fatalf("exit %d, want 5\n%s", r.code, r.out)
+	}
+	for _, want := range []string{"the relay did not answer through the managed Tailscale connector", "through localhost:1055", "--proxy="} {
+		if !strings.Contains(r.out, want) {
+			t.Errorf("output lacks %q:\n%s", want, r.out)
+		}
+	}
+	if strings.Contains(r.out, "secret") {
+		t.Errorf("output prints the saved proxy:\n%s", r.out)
+	}
+	if h.exists("tailscaled.argv") {
+		t.Fatalf("managed mode started a tailscaled\n%s", r.out)
+	}
+}
+
+// Any other failed doctor check in managed mode is an ordinary exit 1, and a
+// config with no saved proxy gets no proxy advice.
+func TestTincanUpManagedModeOtherDoctorFailure(t *testing.T) {
+	h := newTincanUpHarness(t)
+	h.write(filepath.Join(h.fake, "doctor.json"), doctorReport("version"), 0o644)
+	r := h.run("TS_MODE=managed", "START_RELAY=0")
+	if r.code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", r.code, r.out)
+	}
+	if !strings.Contains(r.out, "tincan doctor reported a problem") || strings.Contains(r.out, "--proxy=") {
+		t.Errorf("unexpected output:\n%s", r.out)
+	}
+}
+
+func TestTincanUpManagedModeNotesLeftoverDaemon(t *testing.T) {
+	h := newTincanUpHarness(t)
+	h.setProcs("/bin/bash -l", h.home+"/.local/lib/tailscale/tailscaled --tun=userspace-networking --statedir="+filepath.Dir(h.tsState))
+	r := h.run("TS_MODE=managed", "START_RELAY=0")
+	if r.code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", r.code, r.out)
+	}
+	if !strings.Contains(r.out, "with TS_MODE=managed it is not needed") {
+		t.Errorf("output does not note the leftover tailscaled:\n%s", r.out)
+	}
+}
+
+func TestTincanUpRejectsUnknownMode(t *testing.T) {
+	h := newTincanUpHarness(t)
+	r := h.run("TS_MODE=kernel")
+	if r.code != 1 || !strings.Contains(r.out, "TS_MODE must be userspace or managed") {
+		t.Fatalf("exit %d, want 1 with a TS_MODE error\n%s", r.code, r.out)
+	}
+	if h.exists("tailscaled.argv") {
+		t.Fatal("started a tailscaled with an unknown mode")
+	}
 }

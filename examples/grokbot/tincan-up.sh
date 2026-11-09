@@ -5,10 +5,22 @@
 # See docs/adapters/grokbot.md. Hosts that keep only one folder other than the home folder
 # (Hark keeps /workspace) set TAILSCALE_LIB, TAILSCALE_BIN, TAILSCALE_STATEDIR, TAILSCALE_CACHE
 # and TS_SOCKET: see docs/adapters/hark.md. Unset, every path is the Grok Bot layout below.
+#
+# TS_MODE=managed is for a host whose platform puts it on the tailnet itself, such as Grok Bot's
+# managed Tailscale connector. The script then installs, starts and logs in to nothing: it
+# checks tincan, starts the relay if asked, and checks that the relay answers. The default,
+# TS_MODE=userspace, runs its own userspace tailscaled as below.
 # Exit codes: 0 healthy | 1 unhealthy | 2 device needs approval in the Tailscale admin
 #             3 auth key missing, wrong type, expired, used or rejected
 #             4 legacy layout: a relay with --listen or a system tailscaled is running
+#             5 managed mode: the relay did not answer
 set -euo pipefail
+
+TS_MODE="${TS_MODE:-userspace}"              # userspace, or managed (the platform runs Tailscale)
+case "$TS_MODE" in
+  userspace|managed) ;;
+  *) echo "TS_MODE must be userspace or managed, not $TS_MODE"; exit 1;;
+esac
 
 TS_HOSTNAME="${TS_HOSTNAME:-grokbot}"        # the machine name the relay knows
 TS_TAGS="${TS_TAGS:-tag:grokbot}"            # must match the tag on the auth key
@@ -29,11 +41,18 @@ SOCK="${TS_SOCKET:-$CACHE/tailscaled.sock}"              # the same TS_SOCKET ti
 LOG="$CACHE/tailscaled.log"
 TINCAN="${TINCAN:-$BIN/tincan}"
 
-mkdir -p "$LIB" "$BIN" "$STATEDIR" "$CACHE" "$(dirname "$SOCK")"
-chmod 700 "$STATEDIR" "$CACHE"
+if [ "$TS_MODE" = managed ]; then
+  mkdir -p "$CACHE"; chmod 700 "$CACHE"
+else
+  mkdir -p "$LIB" "$BIN" "$STATEDIR" "$CACHE" "$(dirname "$SOCK")"
+  chmod 700 "$STATEDIR" "$CACHE"
+fi
 
 exec 9>"$CACHE/tincan-up.lock"
 if command -v flock >/dev/null && ! flock -n 9; then echo "already running"; exit 0; fi
+
+# Steps 0 to 3 run this host's own userspace tailscaled. TS_MODE=managed skips them.
+if [ "$TS_MODE" = userspace ]; then
 
 # 0. Refuse to run next to the old layout: a relay bound to the system Tailscale with --listen, or
 #    a system tailscaled keeping its state in /var/lib/tailscale (its default). Starting a second
@@ -165,6 +184,14 @@ case "$state" in
   NeedsMachineAuth) echo "device needs approval in the Tailscale admin"; rc=2;;
   *) echo "tailscaled not ready (${state:-no answer}); see $LOG"; exit 1;;
 esac
+else
+  # Managed: the platform's connector carries this host's tailnet traffic, so there is nothing
+  # to install, start or log in. A tailscaled left over from the userspace layout is not needed.
+  rc=0; state=managed
+  if ps -eo args= 2>/dev/null | awk '{ n = split($1, p, "/") } p[n] == "tailscaled" { f = 1 } END { exit !f }'; then
+    echo "note: a tailscaled is running here; with TS_MODE=managed it is not needed, so stop it"
+  fi
+fi
 
 # 4. Tincan must be installed for the box to be useful.
 if [ ! -x "$TINCAN" ]; then
@@ -219,7 +246,25 @@ if [ "$START_RELAY" = 1 ] && ! relay_running; then
 fi
 
 # 6. Tincan client check.
-if [ "$state" = Running ]; then
+if [ "$state" = managed ]; then
+  # tincan doctor fails its "relay" check when the relay does not answer. Through the managed
+  # connector that usually means the connector is off or this run is not one the connector
+  # serves, or the saved config still sends relay traffic through the userspace proxy.
+  if ! report=$("$TINCAN" doctor --json 2>/dev/null); then
+    if printf '%s\n' "$report" | awk '/"name": *"relay",/ { r = 1; next } r && /"status":/ { if ($0 ~ /"fail"/) f = 1; r = 0 } END { exit !f }'; then
+      echo "the relay did not answer through the managed Tailscale connector: check that the connector is connected and that the relay URL uses the full MagicDNS name (name.tailnet.ts.net)"
+      config="${TINCAN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/tincan/client.json}"
+      saved=$(sed -n 's/.*"proxy": *"\([^"]*\)".*/\1/p' "$config" 2>/dev/null | head -n1 || true)
+      case "$saved" in *"$PROXY_ADDR"*)
+        echo "the tincan config still sends relay traffic through $PROXY_ADDR, the userspace proxy: join again with --proxy= to clear it (docs/adapters/grokbot.md, section 4)";;
+      esac
+      exit 5
+    fi
+    echo "tincan doctor reported a problem: run tincan doctor"; [ "$rc" -eq 0 ] && rc=1
+  else
+    echo "relay ok through the managed Tailscale connector"
+  fi
+elif [ "$state" = Running ]; then
   echo "tailscale ok: $(tsc ip -4 2>/dev/null || true)"
   if ! "$TINCAN" doctor >/dev/null 2>&1; then
     echo "tincan doctor reported a problem: run tincan doctor"; [ "$rc" -eq 0 ] && rc=1
