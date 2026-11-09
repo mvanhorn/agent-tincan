@@ -318,7 +318,7 @@ func (a *AppleNotes) findCreated(ctx context.Context, title string, start time.T
 func appleNoteHTML(title, body string, tags []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<div><h1>%s</h1></div>", html.EscapeString(oneLine(title)))
-	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		if line == "" {
 			b.WriteString("<div><br></div>")
 			continue

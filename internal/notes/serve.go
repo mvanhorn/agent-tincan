@@ -250,6 +250,7 @@ const logStamp = "2006-01-02T15:04:05.000Z07:00"
 // and handles requests until ctx is cancelled. Retries never hold up
 // polling.
 func (s *Service) Run(ctx context.Context) error {
+	s.recordProbe(ctx)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		s.RetrySpooled(ctx)
@@ -1152,6 +1153,21 @@ type Health struct {
 	// classes, never reply text. It is kept across helper calls and
 	// rewritten after every reply attempt.
 	Pending []PendingReply `json:"pending,omitempty"`
+	// Backend is the notes app the service drives, and Probe what the
+	// service itself saw when it last checked access to it. macOS grants
+	// access to the service, not to Terminal, so doctor trusts this over
+	// its own check.
+	Backend string       `json:"backend,omitempty"`
+	Probe   *ProbeResult `json:"probe,omitempty"`
+}
+
+// ProbeResult is one access check of the backend: a note count, or the
+// error code and message it failed with. Never note contents.
+type ProbeResult struct {
+	At      time.Time `json:"at"`
+	Count   int       `json:"count"`
+	Code    string    `json:"code,omitempty"`
+	Message string    `json:"message,omitempty"`
 }
 
 // PendingReply is one undelivered reply in the health file.
@@ -1184,7 +1200,6 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 		}
 	}
 	s.healthMu.Lock()
-	defer s.healthMu.Unlock()
 	if idemUnsupported != nil {
 		h.IdempotencyUnsupported = *idemUnsupported
 		h.IdempotencyVerified = !*idemUnsupported
@@ -1194,7 +1209,35 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 		h.IdempotencyUnsupported = prev.IdempotencyUnsupported
 		h.IdempotencyVerified = prev.IdempotencyVerified
 	}
-	h.Pending = prev.Pending
+	h.Pending, h.Backend, h.Probe = prev.Pending, prev.Backend, prev.Probe
+	s.writeHealth(h)
+	s.healthMu.Unlock()
+	if errorCode(err) == codePermissionDenied {
+		// Access was taken away or never given: record it for doctor.
+		s.recordProbe(context.Background())
+	}
+}
+
+// recordProbe checks access to the backend and writes the result to the
+// health file, leaving the rest of it as it was.
+func (s *Service) recordProbe(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	n, err := s.backend.Probe(ctx)
+	p := &ProbeResult{At: time.Now().UTC(), Count: n}
+	if err != nil {
+		p.Count = 0
+		if he, ok := errors.AsType[*HelperError](err); ok {
+			p.Code, p.Message = he.Code, he.Message
+		} else {
+			p.Message = err.Error()
+		}
+		s.logf("%s access check failed: %v", s.backend.Name(), err)
+	}
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	h := s.readHealth()
+	h.Backend, h.Probe = s.backend.Name(), p
 	s.writeHealth(h)
 }
 

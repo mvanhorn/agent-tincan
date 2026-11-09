@@ -16,6 +16,8 @@ type stubBackend struct {
 	readErr   error
 	searchErr error
 	createErr error
+	probeN    int
+	probeErr  error
 }
 
 func (b *stubBackend) Name() string { return b.name }
@@ -30,7 +32,7 @@ func (b *stubBackend) Search(context.Context, string) ([]NoteSummary, error) {
 
 func (b *stubBackend) Read(context.Context, string) (Note, error) { return b.readNote, b.readErr }
 
-func (b *stubBackend) Probe(context.Context) (int, error) { return 0, nil }
+func (b *stubBackend) Probe(context.Context) (int, error) { return b.probeN, b.probeErr }
 
 // rigWith builds the usual test rig with backend in place of the helper.
 func rigWith(t *testing.T, backend Backend) *rig {
@@ -106,4 +108,25 @@ func TestUnconfirmedAddTellsTheAskerToCheckFirst(t *testing.T) {
 		t.Fatalf("reply = %s %q", res.Status, res.Reply.Body)
 	}
 	r.assertSpoolEmpty(t)
+}
+
+// The service records its own access check for doctor, and checks again
+// when a request is refused for lack of permission.
+func TestServiceRecordsItsAccessCheck(t *testing.T) {
+	b := &stubBackend{name: "Bear", probeN: 3}
+	r := rigWith(t, b)
+	r.svc.recordProbe(t.Context())
+	if h := r.svc.readHealth(); h.Backend != "Bear" || h.Probe == nil || h.Probe.Count != 3 || h.Probe.Code != "" {
+		t.Fatalf("health after a good check = %+v %+v", h, h.Probe)
+	}
+	denied := &HelperError{Code: codePermissionDenied, Message: "macOS refused access"}
+	b.searchErr, b.probeErr = denied, denied
+	r.ask(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	h := r.svc.readHealth()
+	if h.Probe == nil || h.Probe.Code != codePermissionDenied || h.Probe.Count != 0 {
+		t.Fatalf("probe after a refused search = %+v", h.Probe)
+	}
+	if h.Command != "search" || h.Code != codePermissionDenied {
+		t.Fatalf("the access check overwrote the last result: %+v", h)
+	}
 }
