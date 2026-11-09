@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -426,5 +429,40 @@ func TestAppleNotesCachedSearchHonorsNotesLockedSince(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Title != "Lake map" {
 		t.Fatalf("results = %v, want only the trashed note", titles(got))
+	}
+}
+
+// Every language Notes ships in names Recently Deleted differently; a name
+// left out would let a deleted note read as active.
+func TestAppleNotesKnowsRecentlyDeletedInEveryLanguage(t *testing.T) {
+	for _, n := range []string{"Recently Deleted", "Suppr. récentes", "Senast raderade", "Slettet for nylig", "Eliminate", "Recién eliminado", "最近削除した項目", " zuletzt GELÖSCHT "} {
+		if !IsDeletedFolder(n) {
+			t.Errorf("IsDeletedFolder(%q) = false", n)
+		}
+	}
+	if IsDeletedFolder("Notes") || IsDeletedFolder("Recipes") {
+		t.Error("an ordinary folder read as Recently Deleted")
+	}
+	added := addDeletedNames([]byte(`{"xx": {"Recently Deleted": "Papierkorb Neu", "Other": "x"}, "yy": {"Other": "y"}, "zz": "not a table"}`))
+	if added != 1 || !IsDeletedFolder("papierkorb neu") {
+		t.Fatalf("added %d; a name from the system table was not learned", added)
+	}
+}
+
+// On a Mac the system's own Notes strings are read, so every installed
+// language is covered.
+func TestAppleNotesLoadsTheSystemsFolderNames(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS only")
+	}
+	if _, err := os.Stat(notesStrings); err != nil {
+		t.Skip("this Mac has no Notes strings table")
+	}
+	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", notesStrings).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := addDeletedNames(out); n < 30 {
+		t.Fatalf("read %d Recently Deleted names from the system table, want one per language", n)
 	}
 }

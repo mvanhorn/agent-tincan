@@ -18,24 +18,84 @@ import (
 // note's text, so it is larger than the helper's bound.
 const maxAppleNotesOutput = 256 << 20
 
-// deletedFolderNames are the Recently Deleted folder's names in the
-// languages macOS ships, folded. Notes there are reported as trashed.
-var deletedFolderNames = map[string]bool{}
+// deletedFolderNames are the Recently Deleted folder's names, folded. The
+// built-in list is every localization of Notes on the macOS release
+// this was written on, plus names older releases used; on macOS the system's own Notes strings are added
+// at start (loadSystemDeletedNames), so a rename in a later release is
+// still recognized. Notes there are reported as trashed. A folder of the
+// owner's that happens to share one of these names is treated as deleted:
+// that hides notes, it never exposes them.
+var (
+	deletedNamesMu     sync.RWMutex
+	deletedFolderNames = map[string]bool{}
+)
 
 func init() {
 	for _, n := range []string{
-		"Recently Deleted", "Zuletzt gelöscht", "Supprimés récemment", "Eliminados recientemente",
-		"Eliminati di recente", "Apagados Recentemente", "Apagadas recentemente", "Recent verwijderd",
-		"Nyligen raderade", "Nyligt slettet", "Nylig slettet", "Äskettäin poistetut", "Недавно удаленные",
-		"Ostatnio usunięte", "Son Silinenler", "最近削除した項目", "最近删除", "最近刪除", "최근 삭제된 항목",
+		"Apagadas", "Apagadas recentemente", "Apagados Recentemente", "Baru Dihapus", "Eliminadas",
+		"Eliminades fa poc", "Eliminados recientemente", "Eliminate", "Eliminati di recente",
+		"Nedavno izbrisano", "Nedavno obrisano", "Nedávno smazané", "Nedávno vymazané", "Nemrég törölt",
+		"Nylig slettet", "Nyligen raderade", "Nyligt slettet", "Ostatnio usunięte", "Recent verwijderd",
+		"Recently Deleted", "Recién eliminado", "Senast raderade", "Slettet for nylig", "Son Silinenler",
+		"Suppr. récentes", "Supprimés récemment", "Terbaru Dipadam", "Zuletzt gelöscht",
+		"Äskettäin poistetut", "Đã xóa gần đây", "Șterse recent", "Πρόσφατες διαγραφές",
+		"Недавно видалені", "Недавно удаленные", "נמחקו לאחרונה", "المحذوفة مؤخرًا",
+		"हालिया डिलीट किए गए", "ที่ลบล่าสุด", "最近删除", "最近刪除", "最近削除した項目", "최근 삭제된 항목",
 	} {
 		deletedFolderNames[fold(n)] = true
 	}
 }
 
+// notesStrings is the system table holding Notes' folder names.
+const notesStrings = "/System/Library/PrivateFrameworks/NotesShared.framework/Versions/A/Resources/Localizable.loctable"
+
+var loadSystemNamesOnce sync.Once
+
+// loadSystemDeletedNames adds the Recently Deleted names from this Mac's
+// own Notes strings, once. Failures leave the built-in list.
+func loadSystemDeletedNames() {
+	loadSystemNamesOnce.Do(func() {
+		if runtime.GOOS != "darwin" {
+			return
+		}
+		out, err := exec.Command("plutil", "-convert", "json", "-o", "-", notesStrings).Output()
+		if err != nil {
+			return
+		}
+		addDeletedNames(out)
+	})
+}
+
+// addDeletedNames adds every language's "Recently Deleted" string from a
+// loctable converted to JSON ({"lang": {"key": "value"}}).
+func addDeletedNames(table []byte) int {
+	var langs map[string]json.RawMessage
+	if json.Unmarshal(table, &langs) != nil {
+		return 0
+	}
+	deletedNamesMu.Lock()
+	defer deletedNamesMu.Unlock()
+	n := 0
+	for _, raw := range langs {
+		var strs map[string]any
+		if json.Unmarshal(raw, &strs) != nil {
+			continue
+		}
+		if v, ok := strs["Recently Deleted"].(string); ok && strings.TrimSpace(v) != "" {
+			deletedFolderNames[fold(strings.TrimSpace(v))] = true
+			n++
+		}
+	}
+	return n
+}
+
 // IsDeletedFolder reports whether a folder name is Apple Notes' Recently
 // Deleted folder.
-func IsDeletedFolder(name string) bool { return deletedFolderNames[fold(strings.TrimSpace(name))] }
+func IsDeletedFolder(name string) bool {
+	deletedNamesMu.RLock()
+	defer deletedNamesMu.RUnlock()
+	return deletedFolderNames[fold(strings.TrimSpace(name))]
+}
 
 // AppleNotes drives Apple Notes through osascript.
 type AppleNotes struct {
@@ -59,6 +119,7 @@ var appleListTTL = 30 * time.Second
 // NewAppleNotes builds the Apple Notes backend, keeping its add ledger in
 // appSupport.
 func NewAppleNotes(appSupport string, logf func(string, ...any)) *AppleNotes {
+	loadSystemDeletedNames()
 	return &AppleNotes{ledger: newLedger(ledgerPath(appSupport, BackendAppleNotes), logf), now: time.Now}
 }
 
