@@ -66,7 +66,13 @@ func notesServeCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if libraryRoot == "" {
-				return errors.New("--library-root is required: the Agent Notes library folder the notes agent saves into")
+				libraryRoot = notes.DiscoverLibraryRoot()
+				if libraryRoot != "" {
+					cmd.PrintErrf("tincan notes: using the Agent Notes library at %s (pass --library-root to choose another)\n", libraryRoot)
+				}
+			}
+			if libraryRoot == "" {
+				return errors.New("no Agent Notes library found: open Agent Notes once, or pass --library-root with the library folder the notes agent saves into")
 			}
 			if configPath == "" {
 				configPath = serviceConfigPath(notes.DefaultAgentName)
@@ -131,7 +137,7 @@ func notesServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "the notes agent's client config (default: $TINCAN_CONFIG, else ~/.config/tincan/notes.json)")
-	cmd.Flags().StringVar(&libraryRoot, "library-root", "", "the Agent Notes library folder notes are saved into and read from (required)")
+	cmd.Flags().StringVar(&libraryRoot, "library-root", "", "the Agent Notes library folder notes are saved into and read from (default: the library Agent Notes has open)")
 	cmd.Flags().StringVar(&helperPath, "helper", notes.DefaultHelperPath, "the agent-notes helper")
 	cmd.Flags().StringVar(&appSupport, "app-support", "", "the service's own Application Support root (default: ~/Library/Application Support/tincan-notes)")
 	cmd.Flags().StringVar(&spoolDir, "spool-dir", "", "where adds not yet applied are kept (default: <app-support>/spool)")
@@ -152,7 +158,13 @@ func notesInstallCmd() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if libraryRoot == "" {
-				return errors.New("--library-root is required: the Agent Notes library folder the notes agent saves into")
+				libraryRoot = notes.DiscoverLibraryRoot()
+				if libraryRoot != "" {
+					cmd.PrintErrf("tincan notes: using the Agent Notes library at %s (pass --library-root to choose another)\n", libraryRoot)
+				}
+			}
+			if libraryRoot == "" {
+				return errors.New("no Agent Notes library found: open Agent Notes once, or pass --library-root with the library folder the notes agent saves into")
 			}
 			root, err := filepath.Abs(expandHome(libraryRoot))
 			if err != nil {
@@ -177,7 +189,7 @@ func notesInstallCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&libraryRoot, "library-root", "", "the Agent Notes library folder notes are saved into and read from (required)")
+	cmd.Flags().StringVar(&libraryRoot, "library-root", "", "the Agent Notes library folder notes are saved into and read from (default: the library Agent Notes has open)")
 	cmd.Flags().StringVar(&helperPath, "helper", notes.DefaultHelperPath, "the agent-notes helper the service runs")
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
 	return cmd
