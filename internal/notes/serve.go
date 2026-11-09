@@ -69,6 +69,9 @@ type Config struct {
 	// Agent is the service's agent name, used in replies (DefaultAgentName
 	// when empty).
 	Agent string
+	// Backend is the notes app the service uses. When nil it is the
+	// agent-notes helper at HelperPath, run against LibraryRoot.
+	Backend Backend
 	// HelperPath is the agent-notes helper (DefaultHelperPath when empty).
 	HelperPath string
 	// LibraryRoot is the Agent Notes library the helper is run against.
@@ -111,7 +114,7 @@ type Config struct {
 type Service struct {
 	relay      *client.Relay
 	agent      string
-	helper     *Helper
+	backend    Backend
 	spool      *Spool
 	replies    *Spool // stored search and read replies
 	healthPath string
@@ -159,7 +162,7 @@ func New(cfg Config) (*Service, error) {
 	switch {
 	case cfg.Relay == nil:
 		return nil, errors.New("notes: no relay client")
-	case cfg.LibraryRoot == "":
+	case cfg.Backend == nil && cfg.LibraryRoot == "":
 		return nil, errors.New("notes: no library root")
 	case cfg.AppSupportRoot == "":
 		return nil, errors.New("notes: no Application Support root")
@@ -174,7 +177,7 @@ func New(cfg Config) (*Service, error) {
 	s := &Service{
 		relay:      cfg.Relay,
 		agent:      orDefault(cfg.Agent, DefaultAgentName),
-		helper:     &Helper{Path: orDefault(cfg.HelperPath, DefaultHelperPath), LibraryRoot: cfg.LibraryRoot, AppSupportRoot: cfg.AppSupportRoot},
+		backend:    cfg.Backend,
 		spool:      &Spool{Dir: cfg.SpoolDir},
 		replies:    (&Spool{Dir: cfg.SpoolDir}).Replies(),
 		healthPath: orDefault(cfg.HealthPath, HealthPathIn(cfg.AppSupportRoot)),
@@ -197,6 +200,9 @@ func New(cfg Config) (*Service, error) {
 		fallbackBudget: fallbackBudget,
 		recovered:      make(chan struct{}, 1),
 		stalePending:   true,
+	}
+	if s.backend == nil {
+		s.backend = &Helper{Path: orDefault(cfg.HelperPath, DefaultHelperPath), LibraryRoot: cfg.LibraryRoot, AppSupportRoot: cfg.AppSupportRoot}
 	}
 	if s.retryEvery <= 0 {
 		s.retryEvery = DefaultRetryEvery
@@ -748,7 +754,7 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 	req := e.Request
 	if _, decided := e.Outcome.status(); decided {
 		if e.Outcome == OutcomeSaved && e.NoteID != "" {
-			if n, err := s.helper.Read(ctx, e.NoteID); err == nil && n.Summary.State != StateActive {
+			if n, err := s.backend.Read(ctx, e.NoteID); err == nil && n.Summary.State != StateActive {
 				e.Reply += " " + laterStateNote(n.Summary.State)
 			}
 		}
@@ -769,7 +775,7 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 		"remote.via":      "tincan",
 	}
 	s.createMu.Lock()
-	res, err := s.helper.Create(ctx, e.Note.Title, e.Note.Body, tags, props, "tincan:"+req.ID)
+	res, err := s.backend.Create(ctx, e.Note.Title, e.Note.Body, tags, props, "tincan:"+req.ID)
 	s.createMu.Unlock()
 	if err == nil && res.NoIdempotency {
 		// The note was written, so the asker gets its id, but this helper
@@ -785,9 +791,14 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 		s.recordHealth("create", req.ID, err)
 	}
 	if err != nil {
+		if errorCode(err) == codeCreateUnconfirmed {
+			s.logf("request %s from %s: add unconfirmed: %v", req.ID, req.From, err)
+			s.decide(ctx, e, OutcomeFailed, "", fmt.Sprintf("%s was asked to save the note, but the notes agent could not confirm which note it is (%s). Check %s for a note titled %q before asking again, so it is not saved twice.", s.backend.Name(), helperReason(err), s.backend.Name(), oneLine(e.Note.Title)))
+			return
+		}
 		if IsPermanent(err) {
 			s.logf("request %s from %s: add rejected by the helper: %v", req.ID, req.From, err)
-			s.decide(ctx, e, OutcomeFailed, "", fmt.Sprintf("The note was not saved: the Agent Notes helper rejected it (%s). Nothing was written.", helperReason(err)))
+			s.decide(ctx, e, OutcomeFailed, "", fmt.Sprintf("The note was not saved: %s rejected it (%s). Nothing was written.", s.backend.Name(), helperReason(err)))
 			return
 		}
 		e.Attempts++
@@ -798,7 +809,7 @@ func (s *Service) applyAdd(ctx context.Context, e SpoolEntry, fresh bool) {
 		s.logf("request %s from %s: add not applied yet (attempt %d), kept for retry: %v", req.ID, req.From, e.Attempts, err)
 		if fresh {
 			code := errorCode(err)
-			s.progress(ctx, req, fmt.Sprintf("Not saved to Agent Notes yet (helper error %s). The add is kept on the notes Mac and will be retried; the reply will carry the note id.", code))
+			s.progress(ctx, req, fmt.Sprintf("Not saved to %s yet (error %s). The add is kept on the notes Mac and will be retried; the reply will carry the note id.", s.backend.Name(), code))
 		}
 		return
 	}
@@ -994,11 +1005,11 @@ func refusedEntry(e SpoolEntry, code int) SpoolEntry {
 
 func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 	start := time.Now()
-	found, err := s.helper.Search(ctx, r.Query)
+	found, err := s.backend.Search(ctx, r.Query)
 	s.recordHealth("search", req.ID, err)
 	if err != nil {
 		s.logf("request %s: search: %v", req.ID, err)
-		s.store(ctx, req, OpSearch, OutcomeFailed, helperFailedReply(err))
+		s.store(ctx, req, OpSearch, OutcomeFailed, s.failedReply(err))
 		return
 	}
 	var active []NoteSummary
@@ -1017,6 +1028,9 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 		if words, _ := fallbackWords(r.Query); len(words) > 0 {
 			fstart := time.Now()
 			res := s.searchFallback(ctx, r.Query)
+			if _, ok := s.backend.(*Helper); !ok {
+				res.Source = s.backend.Name()
+			}
 			if res.Err != nil {
 				s.recordHealth("search", req.ID, res.Err) // doctor shows what stopped the fallback
 			}
@@ -1035,16 +1049,21 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 
 func (s *Service) read(ctx context.Context, req envelope.Request, r Request) {
 	start := time.Now()
-	n, err := s.helper.Read(ctx, r.ID)
+	n, err := s.backend.Read(ctx, r.ID)
 	s.recordHealth("read", req.ID, err)
-	if errors.Is(err, ErrNoteNotFound) || (err == nil && n.Summary.State != StateActive) {
+	if errors.Is(err, ErrNoteLocked) && (n.Summary.State == "" || n.Summary.State == StateActive) {
+		s.logf("request %s from %s: read %s: locked", req.ID, req.From, r.ID)
+		s.store(ctx, req, OpRead, OutcomeFailed, lockedReply(r.ID))
+		return
+	}
+	if errors.Is(err, ErrNoteNotFound) || (err == nil && n.Summary.State != StateActive) || (errors.Is(err, ErrNoteLocked) && n.Summary.State != StateActive) {
 		s.logf("request %s from %s: read %s: not found", req.ID, req.From, r.ID)
 		s.store(ctx, req, OpRead, OutcomeFailed, notFoundReply(r.ID))
 		return
 	}
 	if err != nil {
 		s.logf("request %s: read: %v", req.ID, err)
-		s.store(ctx, req, OpRead, OutcomeFailed, helperFailedReply(err))
+		s.store(ctx, req, OpRead, OutcomeFailed, s.failedReply(err))
 		return
 	}
 	s.logf("request %s from %s: read %s finished in %s", req.ID, req.From, r.ID, since(start))
@@ -1158,10 +1177,10 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 	if err != nil {
 		if he, ok := errors.AsType[*HelperError](err); ok {
 			h.Code, h.Message = he.Code, he.Message
-		} else if !errors.Is(err, ErrNoteNotFound) {
+		} else if !errors.Is(err, ErrNoteNotFound) && !errors.Is(err, ErrNoteLocked) {
 			h.Message = err.Error()
 		} else {
-			h.OK = true // a clean "no such note" is a working helper
+			h.OK = true // a clean "no such note" or "locked" is a working backend
 		}
 	}
 	s.healthMu.Lock()
@@ -1286,8 +1305,21 @@ func laterStateNote(state string) string {
 
 func notFoundReply(id string) string { return fmt.Sprintf("No note with id %s was found.", id) }
 
-func helperFailedReply(err error) string {
-	return fmt.Sprintf("The notes agent could not reach the Agent Notes library right now (%s). Try again later.", helperReason(err))
+func (s *Service) failedReply(err error) string {
+	return fmt.Sprintf("The notes agent could not reach %s right now (%s). Try again later.", s.libraryName(), helperReason(err))
+}
+
+// libraryName is how replies name the notes the service reaches: "the
+// Agent Notes library" for the helper, else the app's name.
+func (s *Service) libraryName() string {
+	if _, ok := s.backend.(*Helper); ok {
+		return "the Agent Notes library"
+	}
+	return s.backend.Name()
+}
+
+func lockedReply(id string) string {
+	return fmt.Sprintf("Note %s is locked, so the notes agent cannot read it.", id)
 }
 
 // helperReason is err's helper code and message for a reply.

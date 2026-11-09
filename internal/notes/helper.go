@@ -96,6 +96,9 @@ var permanentCodes = map[string]bool{
 	"invalid_request":    true,
 	"missing_input":      true,
 	"unsafe_path":        true,
+	// The app may have saved the note but it cannot be identified, so
+	// creating again could save it twice.
+	codeCreateUnconfirmed: true,
 }
 
 // IsPermanent reports whether err is a helper failure that retrying cannot
@@ -187,6 +190,24 @@ func startFailureCode(ctx context.Context, err error) string {
 	}
 	return "helper_unavailable"
 }
+
+// Name is the app the helper belongs to.
+func (h *Helper) Name() string { return "Agent Notes" }
+
+// Probe checks that the helper is installed and executable. The helper has
+// no count command, so the count is -1 (unknown).
+func (h *Helper) Probe(context.Context) (int, error) {
+	st, err := os.Stat(h.Path)
+	if err != nil {
+		return -1, &HelperError{Code: codeUnavailable, Message: err.Error()}
+	}
+	if st.IsDir() || st.Mode()&0o111 == 0 {
+		return -1, &HelperError{Code: codeUnavailable, Message: h.Path + " is not an executable"}
+	}
+	return -1, nil
+}
+
+var _ Backend = (*Helper)(nil)
 
 // CreateResult is the note an add made or found.
 type CreateResult struct {

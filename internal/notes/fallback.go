@@ -121,6 +121,9 @@ type fallbackResult struct {
 	TimedOut []string // not searched before the budget ran out
 	Failed   []string // the helper failed on them
 	Err      error    // the last helper failure, if any
+	// Source names the backend in the reply; empty is the Agent Notes
+	// helper.
+	Source string
 }
 
 // searchFallback searches each word of query alone within the service's
@@ -136,7 +139,7 @@ func (s *Service) searchFallback(ctx context.Context, query string) fallbackResu
 			res.TimedOut = append(res.TimedOut, words[i:]...)
 			break
 		}
-		notes, err := s.helper.Search(bctx, w)
+		notes, err := s.backend.Search(bctx, w)
 		if err != nil {
 			if bctx.Err() != nil {
 				res.TimedOut = append(res.TimedOut, words[i:]...)
@@ -193,7 +196,7 @@ func fallbackReply(query string, res fallbackResult, count int) string {
 	}{
 		{fmt.Sprintf("past the %d-word limit", fallbackMaxWords), res.Skipped},
 		{"out of time", res.TimedOut},
-		{"the Agent Notes helper failed", res.Failed},
+		{failedWhy(res.Source), res.Failed},
 	} {
 		if len(ns.words) > 0 {
 			out += fmt.Sprintf("%s\nNot searched (%s): %s.", sep, ns.why, strings.Join(ns.words, ", "))
@@ -205,4 +208,13 @@ func fallbackReply(query string, res fallbackResult, count int) string {
 		out = capBytes(out, maxReplyBytes-len(notice)) + notice
 	}
 	return out
+}
+
+// failedWhy says why a fallback word went unsearched because the backend
+// failed on it.
+func failedWhy(source string) string {
+	if source == "" {
+		return "the Agent Notes helper failed"
+	}
+	return source + " failed"
 }

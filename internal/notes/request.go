@@ -192,6 +192,13 @@ func strictFields(b []byte) error {
 
 var uuidRE = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 
+// appleNoteIDRE is an Apple Notes note id: the note's Core Data URI.
+var appleNoteIDRE = regexp.MustCompile(`^x-coredata://[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/ICNote/p[0-9]{1,18}$`)
+
+// isNoteID reports whether id has the shape of a note id in one of the
+// supported apps: a UUID (Agent Notes, Bear) or an Apple Notes URI.
+func isNoteID(id string) bool { return uuidRE.MatchString(id) || appleNoteIDRE.MatchString(id) }
+
 // Validate checks r against the helper's metadata rules and the service's
 // limits. Its error text is safe to show the asker.
 func Validate(r Request) error {
@@ -246,8 +253,8 @@ func Validate(r Request) error {
 			return fmt.Errorf("count must be 1 to %d", MaxSearchCount)
 		}
 	case OpRead:
-		if !uuidRE.MatchString(r.ID) {
-			return errors.New("the id is not a note id (a UUID)")
+		if !isNoteID(r.ID) {
+			return errors.New("the id is not a note id")
 		}
 	default:
 		return fmt.Errorf("op %q is not add, search, or read", r.Op)
