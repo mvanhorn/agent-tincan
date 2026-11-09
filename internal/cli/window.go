@@ -322,7 +322,7 @@ func waitForClaudeInput(ctx context.Context, term windowTerminal, handle string)
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("Claude Code did not start in the new window within %s", windowStartTimeout)
+			return fmt.Errorf("the new window did not start Claude Code within %s", windowStartTimeout)
 		}
 		select {
 		case <-ctx.Done():
