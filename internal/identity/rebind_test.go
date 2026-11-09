@@ -222,6 +222,35 @@ func TestNamelessCallIgnoresAgentOnLiveMachine(t *testing.T) {
 	if got, err := f.dir.Resolve(ctx, rebuiltAddr, ""); err != nil || got != "codex" {
 		t.Fatalf("resolve = %q, %v", got, err)
 	}
+	if got := f.dir.BoundAgent(ctx, rebuiltAddr, ""); got != "codex" {
+		t.Fatalf("nameless BoundAgent = %q, want codex", got)
+	}
+}
+
+// BoundAgent names no one for a nameless caller while a sibling from the same
+// rebuilt machine still waits, as ResolveAgent refuses that caller: it could
+// be the sibling. A caller that names itself is still answered, and the
+// lookup moves nobody.
+func TestBoundAgentNamesNoOneWhileSiblingAwaitsReadmit(t *testing.T) {
+	f := newRebindFixture(t, identity.Config{}, newBox)
+	ctx := context.Background()
+	f.store.PutAgent(ctx, identity.Agent{Name: "muse", NodeID: "nBOX", NodeName: "instinct", NodeUser: matt})
+	if res, err := f.dir.ResolveAgent(ctx, rebuiltAddr, "muse"); err != nil || res.Rebind == nil {
+		t.Fatalf("header muse = %+v, %v", res, err)
+	}
+
+	if got := f.dir.BoundAgent(ctx, rebuiltAddr, ""); got != "" {
+		t.Fatalf("nameless BoundAgent = %q, want none while instinct waits", got)
+	}
+	if got := f.dir.BoundAgent(ctx, rebuiltAddr, "muse"); got != "muse" {
+		t.Fatalf("BoundAgent muse = %q, want muse", got)
+	}
+	if got := f.dir.BoundAgent(ctx, rebuiltAddr, "instinct"); got != "" {
+		t.Fatalf("BoundAgent instinct = %q, want none before it is re-admitted", got)
+	}
+	if a := agentNamed(t, f.dir, "instinct"); a.NodeID != "nBOX" {
+		t.Fatalf("instinct moved to %s, want it still on nBOX", a.NodeID)
+	}
 }
 
 // The recorded machine name is compared without its dedup suffix, so a
@@ -360,5 +389,45 @@ func TestReadmitRechecksBindingAfterNodeCheck(t *testing.T) {
 				t.Fatalf("instinct on %s, want %s", a.NodeID, tc.wantNode)
 			}
 		})
+	}
+}
+
+// joinAtStatusCheck lands a join while a rebind waits on its old node's
+// status, the gap between choosing the rebind and committing it.
+type joinAtStatusCheck struct {
+	*identitytest.Resolver
+	land func()
+}
+
+func (j *joinAtStatusCheck) NodeOnline(ctx context.Context, id string) (online, found bool, err error) {
+	if land := j.land; land != nil {
+		j.land = nil
+		land()
+	}
+	return j.Resolver.NodeOnline(ctx, id)
+}
+
+// A rebind must not put a teammate on a machine that took a guest while the
+// rebind was checking, which the join lock's check keeps from happening on
+// the join side.
+func TestRebindRefusedOnceTheMachineCarriesAGuest(t *testing.T) {
+	ctx := context.Background()
+	f := newRebindFixture(t, identity.Config{}, newBox)
+	race := &joinAtStatusCheck{Resolver: f.who}
+	dir := identity.NewDirectory(f.store, race, identity.Config{Admins: []string{"macbook-pro-44"}, AdminLogins: []string{matt}})
+	code, err := dir.InviteGuest(ctx, identity.LocalAdmin, "friend", identity.GuestTerms{Until: time.Now().Add(time.Hour), Asks: []string{"muse"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	race.land = func() {
+		if _, err := dir.Join(ctx, rebuiltAddr, code); err != nil {
+			t.Errorf("guest join: %v", err)
+		}
+	}
+	if got, err := dir.Resolve(ctx, rebuiltAddr, "instinct"); !errors.Is(err, identity.ErrNotJoined) {
+		t.Fatalf("resolve = %q, %v", got, err)
+	}
+	if a := agentNamed(t, dir, "instinct"); a.NodeID != "nBOX" {
+		t.Fatalf("instinct moved to %s", a.NodeID)
 	}
 }

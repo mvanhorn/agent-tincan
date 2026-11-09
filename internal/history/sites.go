@@ -347,7 +347,7 @@ var webSites = []*webSite{
 		grantAs:     SourceClaudeAI,
 		oneThread:   true,
 		kind:        "duet-web",
-		threadName:  "the Duet channel's id (chan_..., or its https://claude.ai/messages/<id> address)",
+		threadName:  "the Duet channel's id (chan_..., or its https://claude.ai/duet/<id> address)",
 		feed:        duetWords,
 	},
 }

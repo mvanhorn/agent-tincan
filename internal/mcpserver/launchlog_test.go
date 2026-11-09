@@ -3,7 +3,7 @@ package mcpserver
 import (
 	"fmt"
 	"os"
-	"runtime"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +31,27 @@ func TestRecorderNotesTheHandshake(t *testing.T) {
 
 	l := ReadLaunches(dir)[0]
 	if l.Client != "host 7" || l.Initialized.IsZero() || l.ToolsListed.IsZero() || l.Framing != "content-length" || l.Ended.IsZero() || l.Error != "stdin closed" {
+		t.Fatalf("record %+v", l)
+	}
+}
+
+// MCP 2026-07-28 has no initialize. These are the lines Claude Code 2.1.309
+// sent when it negotiated that revision, trimmed to the fields that matter.
+func TestRecorderNotesServerDiscover(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(ProbeEnv, "")
+	rec := StartRecorder(dir, "1.2.3", false)
+	if rec == nil {
+		t.Fatal("no recorder")
+	}
+	meta := `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"claude-code","title":"Claude Code","version":"2.1.309"}}`
+	rec.Write([]byte(`{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{` + meta + `}}` + "\n" +
+		`{"jsonrpc":"2.0","id":"listen:0","method":"subscriptions/listen","params":{` + meta + `,"notifications":{"toolsListChanged":true}}}` + "\n" +
+		`{"method":"server/discover","jsonrpc":"2.0","id":0,"params":{` + meta + `}}` + "\n" +
+		`{"method":"tools/list","jsonrpc":"2.0","id":1,"params":{` + meta + `}}` + "\n"))
+
+	l := ReadLaunches(dir)[0]
+	if l.Client != "claude-code 2.1.309" || l.Initialized.IsZero() || l.ToolsListed.IsZero() {
 		t.Fatalf("record %+v", l)
 	}
 }
@@ -77,8 +98,20 @@ func TestLaunchRunning(t *testing.T) {
 	if LaunchRunning(Launch{PID: os.Getpid(), Started: now, Ended: now}) {
 		t.Fatal("an ended record counts as running")
 	}
-	if runtime.GOOS != "windows" && LaunchRunning(Launch{PID: os.Getpid(), Started: now.Add(-24 * time.Hour)}) {
+	if LaunchRunning(Launch{PID: os.Getpid(), Started: now.Add(-24 * time.Hour)}) {
 		t.Fatal("a pid reused by a later process counts as running")
+	}
+}
+
+// A process killed before it could note its end leaves a record with no end
+// time, and that record stops counting once the process is gone.
+func TestLaunchRunningSeesAGoneProcess(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if LaunchRunning(Launch{PID: cmd.Process.Pid, Started: time.Now()}) {
+		t.Fatal("a process that is gone counts as running")
 	}
 }
 

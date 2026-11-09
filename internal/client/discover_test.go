@@ -8,19 +8,24 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/paths"
 	"tailscale.com/types/key"
+	"tailscale.com/types/views"
 )
 
 // fakeRelay answers hello with a proof under key, and agents.
@@ -835,6 +840,9 @@ func waitJoined(t *testing.T, r *Relay, n int) {
 // unixSocket listens on a short-path unix socket and returns its path.
 func unixSocket(t *testing.T, dir, name string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("tailscaled socket discovery is for Linux sandboxes; Windows talks to Tailscale over its LocalAPI pipe")
+	}
 	p := filepath.Join(dir, name)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
@@ -1070,6 +1078,9 @@ func TestFindRelayNetmapDoesNotWaitOnStaleAdvertised(t *testing.T) {
 // connection, as a tailscaled restart would.
 func fakeLocalAPI(t *testing.T, sock string) (conns *atomic.Int32, stop func()) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("tailscaled socket discovery is for Linux sandboxes; Windows talks to Tailscale over its LocalAPI pipe")
+	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -1179,11 +1190,260 @@ func TestLocalAPINetmapConcurrentLookups(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	after := conns.Load()
 	for range 20 {
 		wantLocalAPINetmap(t)
 	}
-	if n := conns.Load(); n != after || n > 20 {
-		t.Fatalf("connections: %d after 20 concurrent lookups, %d after 20 more sequential; want no growth", after, n)
+	// A count taken after wg.Wait could be low: a lookup that got a freed
+	// connection leaves its own dial to finish in the background.
+	if n := conns.Load(); n > 20 {
+		t.Fatalf("connections: %d after 20 concurrent and 20 sequential lookups, want at most 20", n)
+	}
+}
+
+func swapTailnetSources(t *testing.T, status func() (*ipnstate.Status, error), prefs func() (*ipn.Prefs, error), cli func(args []string) ([]byte, error)) {
+	t.Helper()
+	oldGOOS, oldStatus, oldPrefs, oldCLI := goos, localStatus, localPrefs, tailscaleOutput
+	goos = "darwin" // one default socket, whatever runs the test
+	t.Setenv("TS_SOCKET", "")
+	localStatus = func(context.Context, *local.Client) (*ipnstate.Status, error) { return status() }
+	localPrefs = func(context.Context, *local.Client) (*ipn.Prefs, error) { return prefs() }
+	tailscaleOutput = func(_ context.Context, args ...string) ([]byte, error) { return cli(args) }
+	t.Cleanup(func() { goos, localStatus, localPrefs, tailscaleOutput = oldGOOS, oldStatus, oldPrefs, oldCLI })
+}
+
+func TestTailnetSelvesLocalAPI(t *testing.T) {
+	tags := views.SliceOf([]string{"tag:agent"})
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) {
+			return &ipnstate.Status{Version: "1.104.4-tabc1234-gdef5678", BackendState: "Running", Self: &ipnstate.PeerStatus{Tags: &tags}}, nil
+		},
+		func() (*ipn.Prefs, error) { return &ipn.Prefs{RunSSH: true}, nil },
+		func([]string) ([]byte, error) {
+			t.Error("the CLI ran although LocalAPI answered")
+			return nil, errors.New("no")
+		})
+	got := TailnetSelves(t.Context())
+	if len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	s := got[0]
+	if s.Version != "1.104.4-tabc1234-gdef5678" || !s.Running || !slices.Equal(s.Tags, []string{"tag:agent"}) || s.SSH == nil || !*s.SSH {
+		t.Fatalf("got %+v", s)
+	}
+}
+
+// Prefs are a separate call that can be refused; the rest still reports.
+func TestTailnetSelvesPrefsRefused(t *testing.T) {
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) {
+			return &ipnstate.Status{Version: "1.104.4", BackendState: "NeedsLogin"}, nil
+		},
+		func() (*ipn.Prefs, error) { return nil, errors.New("prefs access denied") },
+		nil)
+	got := TailnetSelves(t.Context())
+	if len(got) != 1 || got[0].SSH != nil || got[0].Running || len(got[0].Tags) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTailnetSelvesCLIFallback(t *testing.T) {
+	var ran []string
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) { return nil, errors.New("no LocalAPI") },
+		func() (*ipn.Prefs, error) { t.Error("prefs read after status failed"); return nil, errors.New("no") },
+		func(args []string) ([]byte, error) {
+			ran = append(ran, strings.Join(args, " "))
+			if slices.Contains(args, "status") {
+				return []byte(`{"Version":"1.104.3-tabc1234","BackendState":"Running","Self":{"Tags":["tag:agent"]}}`), nil
+			}
+			return []byte(`{"RunSSH":true}`), nil
+		})
+	got := TailnetSelves(t.Context())
+	if len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	s := got[0]
+	if s.Version != "1.104.3-tabc1234" || !s.Running || !slices.Equal(s.Tags, []string{"tag:agent"}) || s.SSH == nil || !*s.SSH {
+		t.Fatalf("got %+v", s)
+	}
+	if !slices.Equal(ran, []string{"status --json", "debug prefs"}) {
+		t.Fatalf("ran %q", ran)
+	}
+}
+
+func TestTailnetSelvesCLIWithoutPrefs(t *testing.T) {
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) { return nil, errors.New("no LocalAPI") },
+		nil,
+		func(args []string) ([]byte, error) {
+			if slices.Contains(args, "debug") {
+				return nil, errors.New("unknown subcommand")
+			}
+			return []byte(`{"Version":"1.104.4","BackendState":"Stopped"}`), nil
+		})
+	got := TailnetSelves(t.Context())
+	if len(got) != 1 || got[0].SSH != nil || got[0].Running {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTailnetSelvesNone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  []byte
+		err  error
+	}{
+		{"no CLI", nil, errors.New("tailscale CLI not found")},
+		{"bad output", []byte("not json"), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			swapTailnetSources(t,
+				func() (*ipnstate.Status, error) { return nil, errors.New("no LocalAPI") },
+				nil,
+				func([]string) ([]byte, error) { return tc.out, tc.err })
+			if got := TailnetSelves(t.Context()); len(got) != 0 {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+// With no socket at all, LocalAPI is not dialed and the CLI still gets a turn.
+func TestTailnetSelvesMissingSocket(t *testing.T) {
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) {
+			t.Error("LocalAPI asked with no socket")
+			return nil, errors.New("no")
+		},
+		nil,
+		func(args []string) ([]byte, error) {
+			if slices.Contains(args, "--socket") {
+				t.Errorf("args %q", args)
+			}
+			if slices.Contains(args, "debug") {
+				return nil, errors.New("no")
+			}
+			return []byte(`{"Version":"1.104.4"}`), nil
+		})
+	t.Setenv("TS_SOCKET", filepath.Join(t.TempDir(), "gone.sock"))
+	if got := TailnetSelves(t.Context()); len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+// linuxHost makes this a Linux host with the given default socket, running
+// tailscaleds with the given command lines.
+func linuxHost(t *testing.T, dir, def string, cmdlines ...string) {
+	t.Helper()
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) {
+			return &ipnstate.Status{Version: "1.104.4", BackendState: "Running"}, nil
+		},
+		func() (*ipn.Prefs, error) { return &ipn.Prefs{}, nil },
+		nil)
+	goos = "linux" // swapTailnetSources puts it back
+	proc := filepath.Join(dir, "proc")
+	for i, cmd := range cmdlines {
+		pid := filepath.Join(proc, strconv.Itoa(i+1))
+		if err := os.MkdirAll(pid, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pid, "cmdline"), []byte(cmd), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldProc, oldHome, oldDef := procRoot, userHome, defaultSocket
+	procRoot, userHome = proc, func() (string, error) { return filepath.Join(dir, "nohome"), nil }
+	defaultSocket = func() string { return def }
+	t.Cleanup(func() { procRoot, userHome, defaultSocket = oldProc, oldHome, oldDef })
+}
+
+// A userspace tailscaled beside the one on the default socket reports too,
+// though the search for a moved relay stops at the default socket.
+func TestTailnetSelvesUserspaceBesideDefault(t *testing.T) {
+	dir := shortTemp(t)
+	def := unixSocket(t, dir, "default.sock")
+	user := unixSocket(t, dir, "ts/tailscaled.sock")
+	linuxHost(t, dir, def, "/usr/sbin/tailscaled\x00--tun=userspace-networking\x00--socket="+user+"\x00")
+	got := TailnetSelves(t.Context())
+	if len(got) != 2 || got[0].Socket != def || got[1].Socket != user || !got[0].Running || !got[1].Running {
+		t.Fatalf("got %+v, want %q then %q", got, def, user)
+	}
+	if socks, err := tailscaledSockets(t.Context()); err != nil || !slices.Equal(socks, []string{def}) {
+		t.Fatalf("tailscaledSockets = %q, %v; want only %q", socks, err, def)
+	}
+}
+
+// The stock service names the default socket through /run where the default
+// path says /var/run. That is one tailscaled, not a second one to count.
+func TestTailnetSelvesDefaultSocketBySecondPath(t *testing.T) {
+	dir := shortTemp(t)
+	actual := unixSocket(t, dir, "run/ts.sock")
+	if err := os.Symlink(filepath.Join(dir, "run"), filepath.Join(dir, "varrun")); err != nil {
+		t.Fatal(err)
+	}
+	def := filepath.Join(dir, "varrun", "ts.sock")
+	linuxHost(t, dir, def, "/usr/sbin/tailscaled\x00--socket="+actual+"\x00")
+	if got := TailnetSelves(t.Context()); len(got) != 1 || got[0].Socket != def {
+		t.Fatalf("got %+v, want one tailscaled on %q", got, def)
+	}
+}
+
+// A proxy on another host is what the relay sees. One on loopback, or none,
+// leaves it seeing this machine, and a proxy from the environment counts.
+func TestThroughRemoteProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name, saved, env string
+		want             bool
+	}{
+		{name: "no proxy"},
+		{name: "saved remote", saved: "http://hatch-egress-proxy:3130", want: true},
+		{name: "saved remote address", saved: "http://100.64.0.9:3130", want: true},
+		{name: "saved localhost", saved: "http://localhost:1055"},
+		{name: "saved loopback", saved: "http://127.0.0.1:1055"},
+		{name: "saved loopback v6", saved: "http://[::1]:1055"},
+		{name: "env remote", env: "http://proxy.corp:3128", want: true},
+		{name: "env loopback", env: "http://localhost:1055"},
+		{name: "saved beats env", saved: "http://localhost:1055", env: "http://proxy.corp:3128"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := envProxy
+			envProxy = func(*http.Request) (*url.URL, error) {
+				if tc.env == "" {
+					return nil, nil
+				}
+				return url.Parse(tc.env)
+			}
+			t.Cleanup(func() { envProxy = old })
+			r, err := NewRelay("http://tincan-relay", tc.saved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.ThroughRemoteProxy(); got != tc.want {
+				t.Fatalf("ThroughRemoteProxy = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every tailscaled on the host reports, each named by its socket.
+func TestTailnetSelvesCLISocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "tailscaled.sock")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	swapTailnetSources(t,
+		func() (*ipnstate.Status, error) { return nil, errors.New("no LocalAPI") },
+		nil,
+		func(args []string) ([]byte, error) {
+			if len(args) < 2 || args[0] != "--socket" || args[1] != sock {
+				t.Errorf("args %q", args)
+			}
+			return []byte(`{"Version":"1.104.4"}`), nil
+		})
+	t.Setenv("TS_SOCKET", sock)
+	got := TailnetSelves(t.Context())
+	if len(got) != 1 || got[0].Socket != sock {
+		t.Fatalf("got %+v", got)
 	}
 }

@@ -59,11 +59,10 @@ func completedCouncil() Finished {
 func resultBlock(t *testing.T, reply string) map[string]any {
 	t.Helper()
 	const open = "```council-result\n"
-	i := strings.LastIndex(reply, open)
-	if i < 0 {
+	_, rest, found := strings.CutLast(reply, open)
+	if !found {
 		t.Fatalf("no council-result block in reply:\n%s", reply)
 	}
-	rest := reply[i+len(open):]
 	raw, _, ok := strings.Cut(rest, "\n```")
 	if !ok {
 		t.Fatalf("council-result block is not closed:\n%s", reply)

@@ -21,7 +21,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
 
-var platformFile = "tincan_" + runtime.GOOS + "_" + runtime.GOARCH
+var platformFile = releaseAsset(runtime.GOOS, runtime.GOARCH)
 
 func sha(b []byte) string {
 	s := sha256.Sum256(b)
@@ -89,19 +89,165 @@ func TestUpgradeReplacesExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.SameFile(before, after) {
+	// Windows loads a FileInfo's file id from its path on first use, so
+	// before would read the new binary; the moved-aside count below covers it.
+	if runtime.GOOS != "windows" && os.SameFile(before, after) {
 		t.Fatal("binary was overwritten in place; want a new inode renamed over it")
 	}
-	if after.Mode().Perm() != 0o755 {
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0o755 { // Windows has no mode bits
 		t.Fatalf("mode = %v, want 0755", after.Mode().Perm())
 	}
-	if entries, _ := os.ReadDir(filepath.Dir(exe)); len(entries) != 1 {
+	want := 1
+	if runtime.GOOS == "windows" {
+		want = 2 // the running exe, moved aside
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(exe)); len(entries) != want {
 		t.Fatalf("leftover temp files: %v", entries)
 	}
 	for _, want := range []string{"0.4.0", "Restart any long-running tincan processes"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestReleaseAsset(t *testing.T) {
+	for _, tc := range []struct{ goos, goarch, want string }{
+		{"windows", "amd64", "tincan_windows_amd64.exe"},
+		{"windows", "arm64", "tincan_windows_arm64.exe"},
+		{"linux", "amd64", "tincan_linux_amd64"},
+		{"darwin", "arm64", "tincan_darwin_arm64"},
+	} {
+		if got := releaseAsset(tc.goos, tc.goarch); got != tc.want {
+			t.Errorf("releaseAsset(%s, %s) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+		}
+	}
+}
+
+// oldBinaries lists the moved-aside binaries in dir, oldest first.
+func oldBinaries(t *testing.T, dir string) []string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(dir, "tincan.old-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
+// installBuild runs replaceBinary as an upgrade would, from a new file next
+// to exe.
+func installBuild(t *testing.T, goos, exe, body string) {
+	t.Helper()
+	tmp := exe + ".new"
+	if err := os.WriteFile(tmp, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceBinary(goos, tmp, exe); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Windows will not replace a running exe but will rename it. A tincan mcp
+// can keep an old file open for days, so a second upgrade must not need the
+// first aside file gone, and that file goes once it is free. The held file
+// only stays put on Windows, where an open file cannot be deleted.
+func TestReplaceBinaryWithFirstAsideFileHeldOpen(t *testing.T) {
+	exe, _ := fakeExe(t)
+	dir := filepath.Dir(exe)
+
+	installBuild(t, "windows", exe, "second build")
+	first := oldBinaries(t, dir)
+	if len(first) != 1 {
+		t.Fatalf("moved aside: %v, want one file", first)
+	}
+	if raw, _ := os.ReadFile(first[0]); string(raw) != "old binary" {
+		t.Fatalf("aside file holds %q", raw)
+	}
+	held, err := os.Open(first[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	installBuild(t, "windows", exe, "third build")
+	if raw, _ := os.ReadFile(exe); string(raw) != "third build" {
+		t.Fatalf("exe holds %q", raw)
+	}
+	if got := oldBinaries(t, dir); len(got) != 2 {
+		t.Fatalf("moved aside: %v, want both builds", got)
+	}
+
+	removeOldBinaries(dir)
+	want := 0
+	if runtime.GOOS == "windows" {
+		want = 1 // still held open
+	}
+	if got := oldBinaries(t, dir); len(got) != want {
+		t.Fatalf("after a run with one held open: %v, want %d left", got, want)
+	}
+	held.Close()
+	removeOldBinaries(dir)
+	if got := oldBinaries(t, dir); len(got) != 0 {
+		t.Fatalf("after the held file was freed: %v", got)
+	}
+	if raw, _ := os.ReadFile(exe); string(raw) != "third build" {
+		t.Fatalf("cleanup touched the exe: %q", raw)
+	}
+}
+
+// Moving the new file in can fail after the old exe has moved aside. The old
+// exe goes back, so the machine is never left without a tincan.
+func TestReplaceBinaryRestoresExeWhenMoveFails(t *testing.T) {
+	exe, _ := fakeExe(t)
+	err := replaceBinary("windows", filepath.Join(filepath.Dir(exe), "no-such-file"), exe)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if raw, rerr := os.ReadFile(exe); rerr != nil || string(raw) != "old binary" {
+		t.Fatalf("exe = %q, %v; want the old binary back", raw, rerr)
+	}
+	if got := oldBinaries(t, filepath.Dir(exe)); len(got) != 0 {
+		t.Fatalf("left aside: %v", got)
+	}
+}
+
+// Other platforms rename straight over the running binary and leave nothing.
+func TestReplaceBinaryLeavesNoAsideFileOffWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a rename over a file only models unix here; Windows always moves the exe aside")
+	}
+	exe, _ := fakeExe(t)
+	installBuild(t, "linux", exe, "second build")
+	if raw, _ := os.ReadFile(exe); string(raw) != "second build" {
+		t.Fatalf("exe holds %q", raw)
+	}
+	if got := oldBinaries(t, filepath.Dir(exe)); len(got) != 0 {
+		t.Fatalf("left aside: %v", got)
+	}
+}
+
+// Only moved-aside binaries go; anything else near the exe stays.
+func TestRemoveOldBinariesKeepsOtherFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"tincan.exe", "tincan.older", "notes.old-1", "tincan.old-1"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "tincan.old-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	removeOldBinaries(dir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if want := "notes.old-1 tincan.exe tincan.old-dir tincan.older"; strings.Join(left, " ") != want {
+		t.Fatalf("left %v, want %s", left, want)
 	}
 }
 

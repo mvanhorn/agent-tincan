@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
 // plistStrings is every non-blank text node of a plist, in order, joined
@@ -31,8 +29,8 @@ func plistStrings(t *testing.T, s string) string {
 func TestInstallServiceDarwin(t *testing.T) {
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tin & can/tincan", CodexDir: "/opt/homebrew/bin", UID: 501},
-		LibraryRoot:    "/Users/me/Documents/My <Notes>",
+		GOOS: "darwin", Home: home, Binary: "/opt/tin & can/tincan", CodexDir: "/opt/homebrew/bin", UID: 501,
+		LibraryRoot: "/Users/me/Documents/My <Notes>",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,9 +72,9 @@ func TestInstallServiceDarwin(t *testing.T) {
 func TestInstallServiceCustomHelper(t *testing.T) {
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/usr/local/bin/tincan", UID: 501},
-		LibraryRoot:    "/lib",
-		HelperPath:     "/opt/agent-notes",
+		GOOS: "darwin", Home: home, Binary: "/usr/local/bin/tincan", UID: 501,
+		LibraryRoot: "/lib",
+		HelperPath:  "/opt/agent-notes",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,8 +89,8 @@ func TestInstallServiceLinux(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "linux", Home: home, Binary: "/opt/tin can/tincan"},
-		LibraryRoot:    `/srv/my "notes"`,
+		GOOS: "linux", Home: home, Binary: "/opt/tin can/tincan",
+		LibraryRoot: `/srv/my "notes"`,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,8 +117,8 @@ func TestInstallServiceLinux(t *testing.T) {
 func TestInstallServiceRejectsBadLibraryRoot(t *testing.T) {
 	for _, root := range []string{"", "relative/notes", "/a\nb", "/a\x00b"} {
 		_, err := InstallService(ServiceOptions{
-			ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: t.TempDir(), Binary: "/usr/local/bin/tincan", UID: 501},
-			LibraryRoot:    root,
+			GOOS: "darwin", Home: t.TempDir(), Binary: "/usr/local/bin/tincan", UID: 501,
+			LibraryRoot: root,
 		})
 		if err == nil {
 			t.Errorf("library root %q accepted", root)
@@ -129,8 +127,8 @@ func TestInstallServiceRejectsBadLibraryRoot(t *testing.T) {
 	// $ is a systemd expansion; refuse it rather than write a unit that
 	// runs against another folder.
 	_, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "linux", Home: t.TempDir(), Binary: "/usr/local/bin/tincan"},
-		LibraryRoot:    "/srv/$HOME/notes",
+		GOOS: "linux", Home: t.TempDir(), Binary: "/usr/local/bin/tincan",
+		LibraryRoot: "/srv/$HOME/notes",
 	})
 	if err == nil {
 		t.Error("linux library root with $ accepted")
@@ -155,8 +153,8 @@ func TestDefaultPaths(t *testing.T) {
 func TestInstallServiceNeverUsesLauncher(t *testing.T) {
 	home := t.TempDir()
 	res, err := InstallService(ServiceOptions{
-		ServiceOptions: history.ServiceOptions{GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan"},
-		LibraryRoot:    "/Users/me/Notes",
+		GOOS: "darwin", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan",
+		LibraryRoot: "/Users/me/Notes",
 	})
 	if err != nil {
 		t.Fatal(err)

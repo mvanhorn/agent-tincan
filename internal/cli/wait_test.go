@@ -58,6 +58,7 @@ func TestWaitStopsWhenNotJoined(t *testing.T) {
 }
 
 func TestListenRunsCommandWithoutTakingRequests(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	m := testrelay.New(t, relay.Config{PollHold: 2 * time.Second})
 	muse := m.Client(t, "muse")
 	out := filepath.Join(t.TempDir(), "nudged")

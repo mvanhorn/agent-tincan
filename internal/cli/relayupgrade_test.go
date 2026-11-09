@@ -36,6 +36,7 @@ type selfUpgradeRig struct {
 
 func newSelfUpgradeRig(t *testing.T, files map[string]string) *selfUpgradeRig {
 	t.Helper()
+	skipOnWindows(t, skipRelayHost)
 	rig := &selfUpgradeRig{m: testrelay.New(t, relay.Config{Version: "0.7.0"}), dist: t.TempDir()}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(rig.dist, name), []byte(body), 0o644); err != nil {

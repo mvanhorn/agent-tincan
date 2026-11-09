@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,11 +28,18 @@ type env struct {
 	gw    *httptest.Server
 	oauth *gateway.OAuth
 	conn  gateway.Connector
+	g     *gateway.Gateway
+	a2a   string // where this relay's a2a.json would go
 }
 
 func setup(t *testing.T) *env {
 	t.Helper()
-	m := testrelay.New(t, relay.Config{MaxWait: 3 * time.Second})
+	return setupWith(t, relay.Config{MaxWait: 3 * time.Second})
+}
+
+func setupWith(t *testing.T, cfg relay.Config) *env {
+	t.Helper()
+	m := testrelay.New(t, cfg)
 	oauth, err := gateway.NewOAuth(m.Store.DB(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -40,8 +48,11 @@ func setup(t *testing.T) *env {
 	var gwHandler http.Handler
 	e.gw = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gwHandler.ServeHTTP(w, r) }))
 	t.Cleanup(e.gw.Close)
-	gwHandler = gateway.New(e.gw.URL, oauth, m.Server.Handler(), "test").Handler()
-	e.conn = gateway.Connector{Dir: m.Dir, OAuth: oauth, Base: e.gw.URL}
+	e.a2a = filepath.Join(t.TempDir(), "a2a.json")
+	e.g = gateway.New(e.gw.URL, oauth, m.Server.Handler(), "test")
+	e.g.SetA2AFile(e.a2a)
+	gwHandler = e.g.Handler()
+	e.conn = gateway.Connector{Dir: m.Dir, OAuth: oauth, Base: e.gw.URL, A2AFile: e.a2a}
 	m.Server.SetConnector(e.conn)
 	return e
 }
@@ -202,7 +213,7 @@ func TestRemoveRevokesAccess(t *testing.T) {
 // The public side serves only MCP and OAuth; the agent API is not there.
 func TestAgentAPINotExposed(t *testing.T) {
 	e := setup(t)
-	for _, p := range []string{"/v1/poll", "/v1/send", "/v1/agents", "/v1/admin/invite", "/v1/join"} {
+	for _, p := range []string{"/v1/poll", "/v1/send", "/v1/agents", "/v1/admin/invite", "/v1/join", "/v1/hello?nonce=0123456789abcdef"} {
 		resp, _ := http.Get(e.gw.URL + p)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
@@ -520,5 +531,12 @@ func TestGatewayRoomTools(t *testing.T) {
 	}
 	if _, isErr := callText("room_post", map[string]any{"room": "private", "message": "hi"}); !isErr {
 		t.Fatal("posted to a room chatgpt is not in")
+	}
+	// A lease over the gateway is held by the token's agent.
+	if out, isErr := callText("lease", map[string]any{"action": "acquire", "resource": "launch/copy"}); isErr || !strings.Contains(out, "Leased") {
+		t.Fatalf("lease = %q", out)
+	}
+	if out, isErr := callText("list_leases", nil); isErr || !strings.Contains(out, "chatgpt") {
+		t.Fatalf("list_leases = %q", out)
 	}
 }

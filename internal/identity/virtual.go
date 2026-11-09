@@ -50,10 +50,35 @@ func (d *Directory) BindVirtual(ctx context.Context, name string, replace bool) 
 	if err != nil {
 		return err
 	}
+	// A bind carries no guest terms, so even --replace cannot go over a guest.
+	if ok && prev.Guest.Set() {
+		return fmt.Errorf("%s: %w", name, ErrGuestTier)
+	}
 	if ok && !replace && !strings.HasPrefix(prev.NodeID, VirtualPrefix) {
 		return fmt.Errorf("%q is a tailnet agent on %s: %w", name, prev.NodeName, ErrRealNodeBound)
 	}
 	return d.store.PutAgent(ctx, Agent{Name: name, NodeID: VirtualAddr(name), NodeName: VirtualAddr(name), JoinedAt: d.cfg.Now(), Kind: prev.Kind})
+}
+
+// BindVirtualGuest joins a guest through the gateway. Like a guest invite it
+// is new-only, whatever holds the name and on whichever machine: a guest
+// cannot take a name, and a live guest's terms are not rewritten here. Its
+// virtual node carries nothing else, so no machine name or login is involved,
+// and adminCaller refuses it whatever the --admin list says.
+func (d *Directory) BindVirtualGuest(ctx context.Context, name string, terms GuestTerms) error {
+	if !nameRE.MatchString(name) {
+		return ErrUnknownAgent
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok, err := d.Agent(ctx, name)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return fmt.Errorf("%s: %w", name, ErrNameTaken)
+	}
+	return d.store.PutAgent(ctx, Agent{Name: name, NodeID: VirtualAddr(name), NodeName: VirtualAddr(name), JoinedAt: d.cfg.Now(), Guest: terms})
 }
 
 // NodeOnline forwards to the wrapped resolver when it implements NodeStatus,

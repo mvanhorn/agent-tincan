@@ -128,3 +128,23 @@ func TestOpenAsksLeaveOutMentions(t *testing.T) {
 		t.Fatalf("open asks = %+v %v", got, err)
 	}
 }
+
+// A marked ask never reaches a request email: an email carries none of its
+// framing, and a mail reader holds no claim for the mark to follow.
+func TestOpenAsksLeaveOutGuestMarked(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	for _, req := range []envelope.Request{
+		{From: "friend", To: "instinct", Kind: envelope.KindAsk, Body: "marked", FromGuest: true, GuestApproved: true},
+		{From: "codex", To: "instinct", Kind: envelope.KindAsk, Body: "plain ask"},
+	} {
+		req.Hop, req.Chain = 1, []string{req.From}
+		if _, err := s.Enqueue(ctx, req, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asks, err := s.OpenAsks(ctx, "instinct")
+	if err != nil || len(asks) != 1 || asks[0].Body != "plain ask" {
+		t.Fatalf("asks = %+v, %v", asks, err)
+	}
+}

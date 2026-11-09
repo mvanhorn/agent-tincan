@@ -248,7 +248,7 @@ func renderTopFrame(f topFrame, width, height int) string {
 	if f.refreshError != "" {
 		line(f.refreshError)
 	}
-	line("AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS VERSION")
+	line("AGENT            STATE   WAKE         QUEUED OLDEST CLAIMS   ANS MEDIAN VERSION")
 	agents := slices.Clone(f.roster.Agents)
 	slices.SortStableFunc(agents, func(a, b client.AgentInfo) int {
 		sa, _ := attention(a, f.roster.RelayVersion, f.at)
@@ -318,7 +318,11 @@ func renderTopFrame(f topFrame, width, height int) string {
 		if a.Status != "" {
 			state = a.Status
 		}
-		line(fmt.Sprintf("%s %s %s %6d %6s %6d %s", topPad(a.Name, 16), topPad(state, 7), topPad(a.Wake, 12), a.Queued, age, a.Claimed, a.Version))
+		answered := "-"
+		if a.Stats.Finished() > 0 {
+			answered = fmt.Sprintf("%d/%d", a.Stats.Answered, a.Stats.Finished())
+		}
+		line(fmt.Sprintf("%s %s %s %6d %6s %6d %5s %6s %s", topPad(a.Name, 16), topPad(state, 7), topPad(a.Wake, 12), a.Queued, age, a.Claimed, answered, dash(a.Stats.MedianReply()), a.Version))
 		if len(flags) > 0 {
 			line("  " + strings.Join(flags, " | "))
 		}
@@ -347,12 +351,7 @@ func renderTopFrame(f topFrame, width, height int) string {
 
 // Relay text is data, including when it contains terminal control sequences.
 func topText(s string, width int) string {
-	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
-			return ' '
-		}
-		return r
-	}, s)
+	s = client.TerminalSafe(s)
 	cells := 0
 	for _, r := range s {
 		cells += topRuneWidth(r)

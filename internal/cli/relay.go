@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"tailscale.com/tsnet"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -62,6 +64,14 @@ type relayFlags struct {
 	gatewayURL      string
 }
 
+// relayHostErr refuses to run the relay where it is not supported.
+func relayHostErr(goos string) error {
+	if goos == "windows" {
+		return errors.New("tincan relay runs on Linux and macOS; on Windows, tincan is a client only (experimental, CI tested only)")
+	}
+	return nil
+}
+
 func relayCmd() *cobra.Command {
 	var f relayFlags
 	cmd := &cobra.Command{
@@ -70,6 +80,10 @@ func relayCmd() *cobra.Command {
 		Long: `Run the relay. By default it joins the tailnet as its own node with tsnet
 (set TS_AUTHKEY, or follow the login URL it prints). With --listen it binds
 this host's tailnet IP and uses the host's tailscaled instead.
+
+tincan relay install, with the same flags, writes a launchd agent (macOS) or
+systemd user unit (Linux) that keeps the relay running; write no plist by
+hand, or macOS lists it under the signing certificate's name.
 
 Admin commands (invite, remove) are accepted from the local admin socket in
 the state dir and from machines named in --admin that carry no Tailscale tags
@@ -110,31 +124,17 @@ off with --no-auto-rebind.
 With --dist <dir>, the relay serves tincan release binaries from dir to joined
 agents and admins, so tincan upgrade works on machines without GitHub access.
 Put the raw binaries there as tincan_<os>_<arch> (linux or darwin, amd64 or
-arm64), plus checksums.txt and a VERSION file naming the release. An admin can
+arm64) and tincan_windows_<arch>.exe, plus checksums.txt and a VERSION file
+naming the release. An admin can
 then upgrade the relay itself with tincan relay-upgrade: it installs the dist
 build over this binary (which the relay user must own) and re-executes, or
 with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if f.urgentPerHour < 1 {
-				return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
+			if err := f.validate(); err != nil {
+				return err
 			}
-			if f.notesTTL <= 0 {
-				return fmt.Errorf("--notes-ttl must be positive, got %s", f.notesTTL)
-			}
-			if f.wakeGrace <= 0 {
-				return fmt.Errorf("--wake-grace must be positive, got %s", f.wakeGrace)
-			}
-			if f.urgentGrace <= 0 {
-				return fmt.Errorf("--urgent-wake-grace must be positive, got %s", f.urgentGrace)
-			}
-			if f.ownerNotice < 1 {
-				return fmt.Errorf("--owner-notice-after must be at least 1, got %d", f.ownerNotice)
-			}
-			if f.urgentLease <= 0 {
-				return fmt.Errorf("--urgent-claim-lease must be positive, got %s", f.urgentLease)
-			}
-			if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
-				return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
+			if err := relayHostErr(runtime.GOOS); err != nil {
+				return err
 			}
 			err := runRelay(cmd.Context(), f)
 			if rs, ok := errors.AsType[*errRelayRestart](err); ok {
@@ -143,28 +143,62 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
-	cmd.Flags().StringVar(&f.hostname, "hostname", "tincan-relay", "tsnet node name")
-	cmd.Flags().StringVar(&f.stateDir, "state-dir", defaultStateDir(), "relay state: database, tsnet state, admin socket")
-	cmd.Flags().IntVar(&f.port, "port", 80, "port to serve the agent API on")
-	cmd.Flags().StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
-	cmd.Flags().StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
-	cmd.Flags().BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
-	cmd.Flags().IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
-	cmd.Flags().DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
-	cmd.Flags().DurationVar(&f.wakeGrace, "wake-grace", relay.DefaultWakeGrace, "how long a webhook or email agent may go without checking in after a wake before it shows as unanswered and the relay sends the same wake again")
-	cmd.Flags().DurationVar(&f.urgentGrace, "urgent-wake-grace", relay.DefaultUrgentWakeGrace, "--wake-grace while an urgent request to the agent is queued, when shorter: how soon a silent webhook or email agent is woken again and the asker is told")
-	cmd.Flags().DurationVar(&f.urgentLease, "urgent-claim-lease", relay.DefaultUrgentClaimLease, "how long a claim on an urgent request lasts without a reply or progress note before it is requeued, the target woken again and the asker told (other requests keep 30m)")
-	cmd.Flags().IntVar(&f.ownerNotice, "owner-notice-after", relay.DefaultOwnerNoticeAfter, "how many wakes in a row a webhook or email agent may leave unanswered before the owner is told, once per silent episode, through the approval policy's notify destination")
-	cmd.Flags().DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
-	cmd.Flags().StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
-	cmd.Flags().BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
-	cmd.Flags().StringVar(&f.releaseURL, "release-url", "", "let tincan relay-upgrade --from-github download releases from <url>/<tag>/<file> (for this project: "+GitHubReleaseURL+"); off when empty")
-	cmd.Flags().BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
-	cmd.Flags().StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
-	cmd.Flags().StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
-	cmd.Flags().StringVar(&f.gatewayURL, "gateway-url", "", "public https URL of the gateway when using --gateway-listen")
+	addRelayFlags(cmd.Flags(), &f)
+	cmd.AddCommand(relayInstallCmd())
 	return cmd
+}
+
+// addRelayFlags defines the relay's flags on fs. tincan relay and tincan
+// relay install share them, so a service runs with exactly the flags the
+// relay takes.
+func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
+	fs.StringVar(&f.listen, "listen", "", "bind this host tailnet IP (100.x.y.z) instead of starting tsnet")
+	fs.StringVar(&f.hostname, "hostname", "tincan-relay", "tsnet node name")
+	fs.StringVar(&f.stateDir, "state-dir", defaultStateDir(), "relay state: database, tsnet state, admin socket")
+	fs.IntVar(&f.port, "port", 80, "port to serve the agent API on")
+	fs.StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
+	fs.StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
+	fs.BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
+	fs.IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
+	fs.DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
+	fs.DurationVar(&f.wakeGrace, "wake-grace", relay.DefaultWakeGrace, "how long a webhook or email agent may go without checking in after a wake before it shows as unanswered and the relay sends the same wake again")
+	fs.DurationVar(&f.urgentGrace, "urgent-wake-grace", relay.DefaultUrgentWakeGrace, "--wake-grace while an urgent request to the agent is queued, when shorter: how soon a silent webhook or email agent is woken again and the asker is told")
+	fs.DurationVar(&f.urgentLease, "urgent-claim-lease", relay.DefaultUrgentClaimLease, "how long a claim on an urgent request lasts without a reply or progress note before it is requeued, the target woken again and the asker told (other requests keep 30m)")
+	fs.IntVar(&f.ownerNotice, "owner-notice-after", relay.DefaultOwnerNoticeAfter, "how many wakes in a row a webhook or email agent may leave unanswered before the owner is told, once per silent episode, through the approval policy's notify destination")
+	fs.DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
+	fs.StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
+	fs.BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
+	fs.StringVar(&f.releaseURL, "release-url", "", "let tincan relay-upgrade --from-github download releases from <url>/<tag>/<file> (for this project: "+GitHubReleaseURL+"); off when empty")
+	fs.BoolVar(&f.gateway, "chatgpt-gateway", false, "serve the public ChatGPT MCP gateway through Tailscale Funnel (OAuth-protected)")
+	fs.StringVar(&f.gatewayHostname, "gateway-hostname", "tincan-gateway", "tsnet node name for the Funnel gateway")
+	fs.StringVar(&f.gatewayListen, "gateway-listen", "", "serve the gateway on this plain-HTTP address instead of Funnel (put your own TLS proxy in front)")
+	fs.StringVar(&f.gatewayURL, "gateway-url", "", "public https URL of the gateway when using --gateway-listen")
+}
+
+// validate checks the flags the way tincan relay does before it starts.
+func (f relayFlags) validate() error {
+	if f.urgentPerHour < 1 {
+		return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
+	}
+	if f.notesTTL <= 0 {
+		return fmt.Errorf("--notes-ttl must be positive, got %s", f.notesTTL)
+	}
+	if f.wakeGrace <= 0 {
+		return fmt.Errorf("--wake-grace must be positive, got %s", f.wakeGrace)
+	}
+	if f.urgentGrace <= 0 {
+		return fmt.Errorf("--urgent-wake-grace must be positive, got %s", f.urgentGrace)
+	}
+	if f.ownerNotice < 1 {
+		return fmt.Errorf("--owner-notice-after must be at least 1, got %d", f.ownerNotice)
+	}
+	if f.urgentLease <= 0 {
+		return fmt.Errorf("--urgent-claim-lease must be positive, got %s", f.urgentLease)
+	}
+	if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
+		return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
+	}
+	return nil
 }
 
 // relayConfig maps the relay flags onto the relay server.
@@ -563,8 +597,11 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		if err != nil {
 			return err
 		}
-		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Base: base})
-		gw := client.Configure(&http.Server{Handler: gateway.New(base, oauth, srv.Handler(), Version).Handler()}, client.RelayAPI)
+		a2aFile := filepath.Join(f.stateDir, "a2a.json")
+		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Base: base, A2AFile: a2aFile})
+		pub := gateway.New(base, oauth, srv.Handler(), Version)
+		pub.SetA2AFile(a2aFile)
+		gw := client.Configure(&http.Server{Handler: pub.Handler()}, client.RelayAPI)
 		go func() { errc <- gw.Serve(gln) }()
 		servers = append(servers, gw)
 		log.Printf("chatgpt gateway serving at %s/mcp", base)

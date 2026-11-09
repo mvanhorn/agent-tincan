@@ -9,6 +9,8 @@ It is a Go service, `tincan notes serve`, that runs under launchd on the Mac whe
 3. Runs the helper: `create` for an add, `search` for a search, `read` for a read.
 4. Fills in a fixed reply template in Go. Note text is never sent to a model.
 
+The helper matches a multi-word search only when a note holds every word. When that finds nothing, the service searches the words one by one (the first 12 distinct words of three or more letters, leaving out common words such as "the" and "and", within 90 seconds) and replies with the notes that hold the most of them. That reply starts "No note contains every word of ..." and gives, for each note, how many of the searched words it holds and which ones, as in `1. "Family Alaska Airlines Numbers" (id ...), matches 8 of 10 words: alaska, airlines, ...`. Ties go to the note with more of the words in its title, then a pinned note. Words left out for the 12-word limit or for time are named at the end of the reply. If no word could be searched on its own (the helper failed or time ran out on every one), the request fails with a reply that says so, rather than claiming nothing matches. A one-word search that finds nothing still replies "No notes match ...".
+
 v1 never edits, retags, archives or deletes a note. Search and read cover active notes only: an archived or trashed note is left out of search results, and a read of one says "No note with id ... was found."
 
 Every note added through Tincan carries the `from-agent` tag and these properties, so you can find and review them in the app:
@@ -19,6 +21,32 @@ Every note added through Tincan carries the `from-agent` tag and these propertie
 - `remote.request-id`: `tincan:<request id>`
 
 It needs an Agent Notes build whose helper supports `create --idempotency-key` (the release after the one current when this service shipped). `tincan notes doctor` reports an older helper as `helper_too_old`.
+
+## Bear and Apple Notes
+
+The notes agent can use Bear or Apple Notes instead of Agent Notes. Pick one with `--backend` on `tincan notes install`, `serve` and `doctor`:
+
+```sh
+tincan notes install --backend bear          # or apple-notes
+tincan notes doctor --backend bear
+```
+
+`--library-root` and `--helper` apply to Agent Notes only. Both other backends run on macOS only. Requests, replies, allowlists, the spool and the reply store work the same way for all three. These are the differences:
+
+| | Bear | Apple Notes |
+|---|---|---|
+| Search and read | Reads Bear's database directly, read only. Bear does not need to be open. | Runs fixed scripts in Notes through `osascript`. Notes opens in the background if it is not running. |
+| Add | Opens a `bear://x-callback-url/create` link in the background (`open -g`), so Bear never comes to the front. | Makes the note in the default account's default folder. |
+| Tags | Bear tags. | A `#tag` line at the end of the note. |
+| Locked notes | Found by title only; a read says the note is locked. | Same, for password-protected notes. |
+| Archived and trashed notes | Left out, as for Agent Notes. | Notes in Recently Deleted count as trashed and are left out. |
+| Permission | Access to Bear's data for the tincan binary (System Settings > Privacy & Security). | Automation access for the tincan binary to control Notes. |
+
+Neither app stores the `remote.*` properties on the note. The service keeps them, with each add's id and request key, in an add ledger on the notes Mac (`tincan-notes-bear-adds.json` or `tincan-notes-apple-notes-adds.json` in the service's Application Support folder, mode 0600). The ledger is also what stops a redelivered add from being saved twice: an add is recorded before the app is asked, and a retry of the same request returns the note the first attempt made instead of asking again. If the service cannot tell which of two new notes with the same title is the one it asked for, the add fails and the reply asks the sender to check the app before asking again.
+
+Bear and Apple Notes hold everything you have ever written, not one library made for agents. `install`, `serve` and `doctor` warn when an allowlist file is missing, since a missing file lets every joined agent search, read and add. Write both files before you start the service.
+
+macOS grants access to the service's process, not to Terminal, so doctor's own check can succeed while the service is refused. The service checks access when it starts and again after any request is refused for lack of permission, and records the note count or the error in its health file. Doctor reports that recorded result as `service access` and its own check as `access from this terminal`. The first is the one that counts.
 
 ## Allowlists
 
@@ -61,6 +89,7 @@ A note an agent asked to save is not silently lost, even when the Mac is asleep 
 
 - On the relay: requests to an agent of kind `notes` wait up to 30 days before they expire (relay flag `--notes-ttl`, default 30 days); other kinds keep 24 hours. This needs a relay from this release or later, and the agent must have kind `notes` (`tincan invite notes --kind notes`, or `tincan kind notes notes` on an admin device for one that joined without it). Until the relay is upgraded, adds keep the 24-hour window.
 - On the Mac: each add the service claims is written to its spool (`~/Library/Application Support/tincan-notes/spool`, or `--spool-dir`) before the library is touched. If the helper fails for a reason that may pass (library missing, no folder access, a timeout), the add stays in the spool, the asker gets a progress note ("Not saved to Agent Notes yet ... The add is kept on the notes Mac and will be retried; the reply will carry the note id."), and the service retries every minute and at every start.
+- Replies: a search or read reply is written to the spool's `replies/` folder before it is sent. If the relay cannot be reached, the reply is kept and resent after 2, 5, 15 and 30 seconds, then every minute, and at once when the service's polls get through again. Retries run beside polling, so other requests are still served meanwhile. If the claim lease runs out first and the relay hands the request back, the stored reply is sent again; the search is not rerun. A reply the relay says is already closed is dropped. A reply it refuses as too large is replaced by a short failed reply. A reply kept more than 24 hours is deleted unsent. The same retry schedule applies to an add's reply once the add is saved.
 - At most once: each add is created with the idempotency key `tincan:<request id>`. Redelivery, restarts and crashes mid-write return the same note instead of a second one, even when you have since archived or trashed it. The reply then says "This request was already saved as note ... No new note was created."
 
 Agents should use `ask`, not `notify`, for an add, so the reply with the note id comes back. A pending add is queued, not lost; they should not resend it.
@@ -74,7 +103,7 @@ Upgrade the relay to this release first (`tincan relay-upgrade`, see the [quick 
 ```bash
 tincan invite notes --kind notes                                           # on an admin device
 TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay http://tincan-relay
-tincan notes install --library-root <Agent Notes library folder>
+tincan notes install
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agenttincan.notes.plist
 tincan notes doctor
 ```
@@ -83,7 +112,7 @@ The agent must be named `notes`: `tincan notes serve` refuses to run unless both
 
 Unlike tincan's other macOS services, the notes service does not start through Agent Tincan.app, so it still appears in Login Items under the signer's name. That keeps its Files and Folders grant from being shared with other services ([trust model](../trust-model.md#agent-tincanapp-on-macos)).
 
-`tincan notes install` writes `~/Library/LaunchAgents/com.agenttincan.notes.plist`, which runs `tincan notes serve --library-root <folder> --helper <helper>` with `TINCAN_CONFIG=~/.config/tincan/notes.json`, keeps it running, and logs to `~/Library/Logs/tincan-notes.log`. It prints the start command and starts nothing itself. Flags: `--library-root` (required), `--helper` (default the helper inside `/Applications/Agent Notes.app`), `--binary` (the tincan binary the service runs, default this one).
+`tincan notes install` writes `~/Library/LaunchAgents/com.agenttincan.notes.plist`, which runs `tincan notes serve --library-root <folder> --helper <helper>` with `TINCAN_CONFIG=~/.config/tincan/notes.json`, keeps it running, and logs to `~/Library/Logs/tincan-notes.log`. It prints the start command and starts nothing itself. Flags: `--library-root` (default: the library Agent Notes has open, found from the app's saved preference, else `~/Documents/Agent Notes`), `--helper` (default the helper inside `/Applications/Agent Notes.app`), `--binary` (the tincan binary the service runs, default this one).
 
 The service reads and writes your library from launchd, not from Terminal, so macOS asks for access separately. In System Settings > Privacy & Security, grant the tincan binary Files and Folders access to the library's folder (not Full Disk Access, which the free-text extractor would inherit), then restart the service:
 
@@ -91,7 +120,7 @@ The service reads and writes your library from launchd, not from Terminal, so ma
 launchctl kickstart -k gui/$(id -u)/com.agenttincan.notes
 ```
 
-To run it by hand instead: `tincan notes serve --library-root <folder>`, with `--helper`, `--app-support` (the service's own Application Support folder, default `~/Library/Application Support/tincan-notes`), `--spool-dir` (default `<app-support>/spool`), `--read-allowlist`, `--add-allowlist`, `--codex-scratch` and `--config` (default `$TINCAN_CONFIG`, else `~/.config/tincan/notes.json`). It stops cleanly on SIGINT or SIGTERM.
+To run it by hand instead: `tincan notes serve`, with `--library-root <folder>` (default as for install), `--helper`, `--app-support` (the service's own Application Support folder, default `~/Library/Application Support/tincan-notes`), `--spool-dir` (default `<app-support>/spool`), `--read-allowlist`, `--add-allowlist`, `--codex-scratch` and `--config` (default `$TINCAN_CONFIG`, else `~/.config/tincan/notes.json`). It stops cleanly on SIGINT or SIGTERM.
 
 Free-text requests need `codex` installed and logged in on the Mac. Structured requests do not.
 
@@ -108,7 +137,8 @@ After install, check it from another agent: `tincan ask notes 'note: {"op":"sear
 - Free-text requests are sent to the `codex exec` request step, which means OpenAI sees the request text. Structured `note:` requests never leave the Mac except as the reply to the asker.
 - Note text is never sent to a model. Replies are filled in from fixed templates in Go, so text inside a note cannot steer the service. Agents are told that note text is data, never instructions.
 - The helper runs with the service's own Application Support folder, so it never picks up an in-app agent session's context.
-- The spool holds the full text of adds not yet saved, in a folder only your user can read (folder 0700, files 0600), and each entry is removed once its reply is sent.
+- The spool holds the full text of adds not yet saved, and in `replies/` the text of search and read replies not yet delivered, note text included, in folders only your user can read (folders 0700, files 0600). Each entry is removed once its reply is sent or the relay says the request is closed, and a stored reply is deleted unsent after 24 hours. Before a stored reply is resent, the asker is checked against the read allowlist again; one removed since gets the declined reply instead.
+- The log (`~/Library/Logs/tincan-notes.log`) and the health file name requests by id, with times, durations, match counts and error classes. They never hold request text, reply text or note text.
 
 ## Troubleshooting
 
@@ -123,6 +153,7 @@ After install, check it from another agent: `tincan ask notes 'note: {"op":"sear
   - `helper_too_old`: this Agent Notes build cannot save notes safely for the notes agent. Install the latest Agent Notes, then restart the service.
   - `helper_unavailable`: check that Agent Notes is installed and that `--helper` names its helper.
   - No result yet: start the service and send notes a request, then run doctor again.
+- undelivered replies: replies the service has computed but could not deliver, by request id, operation, age, failed attempts and last error class (`network`, `timeout`, `5xx`, or the HTTP status). A warning means the service is still retrying: check that the relay is reachable from the Mac. A failure (`401` or `403`) means the relay refuses the agent's replies: check its join.
 
 Replies and what to do:
 
@@ -135,4 +166,7 @@ Replies and what to do:
 - "The note was not saved: the Agent Notes helper rejected it (...)": the helper refused the note itself (bad metadata, too large). Nothing was written; fix the request and send it again.
 - "The notes agent could not reach the Agent Notes library right now": a search or read failed in the helper. Run `tincan notes doctor`.
 - "No note with id ... was found.": the id is wrong, or the note is archived or trashed.
+- "No note contains every word of ...": the search fell back to single words; see [how search works](#notes-agent).
+- "The notes agent finished this search, but the relay refused its reply (HTTP 413)": the reply was too large for the relay. Ask for fewer results.
+- A late reply: run `tincan notes doctor` and look at undelivered replies. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so you can tell time spent searching from time spent waiting to deliver.
 - No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.notes`) and read `~/Library/Logs/tincan-notes.log`.

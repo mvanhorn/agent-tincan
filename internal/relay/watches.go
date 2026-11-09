@@ -40,7 +40,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if !s.isAgent(r.Context(), in.Agent) {
+	if a, ok, err := s.dir.Agent(r.Context(), in.Agent); err != nil || !ok || a.Guest.Set() {
 		writeErr(w, http.StatusNotFound, errors.New("unknown agent"))
 		return
 	}

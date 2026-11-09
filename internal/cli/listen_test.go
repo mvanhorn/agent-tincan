@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,7 @@ func waitForFile(t *testing.T, path string) {
 // the agent showed offline. It now keeps its presence fresh with peeks
 // that claim nothing, so a request queued meanwhile stays queued.
 func TestListenKeepsPresenceWhileCommandRuns(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	fastListen(t, 10*time.Millisecond, time.Minute, time.Second)
 	m := testrelay.New(t, relay.Config{PollHold: 2 * time.Second})
 	muse := m.Client(t, "muse")
@@ -173,7 +175,13 @@ func (f *fakeListenRelay) presencePeeks() []time.Time {
 
 func newFakeListenRelay(t *testing.T, f *fakeListenRelay) *client.Relay {
 	t.Helper()
-	ts := httptest.NewServer(f)
+	return newFakeListenRelayHandler(t, f.ServeHTTP)
+}
+
+// newFakeListenRelayHandler is a client of a relay made of h alone.
+func newFakeListenRelayHandler(t *testing.T, h http.HandlerFunc) *client.Relay {
+	t.Helper()
+	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
 	r, err := client.NewRelay(ts.URL, "")
 	if err != nil {
@@ -185,6 +193,7 @@ func newFakeListenRelay(t *testing.T, f *fakeListenRelay) *client.Relay {
 // With --once, presence stops when listen returns: no refresh goroutine
 // outlives it.
 func TestListenOnceStopsPresence(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	fastListen(t, 10*time.Millisecond, time.Minute, time.Second)
 	f := &fakeListenRelay{}
 	r := newFakeListenRelay(t, f)
@@ -207,6 +216,7 @@ func TestListenOnceStopsPresence(t *testing.T) {
 // The cooldown after a nudge keeps presence too: the agent is still
 // working on what it was nudged about.
 func TestListenKeepsPresenceDuringCooldown(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	fastListen(t, 10*time.Millisecond, time.Minute, 200*time.Millisecond)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -228,6 +238,7 @@ func TestListenKeepsPresenceDuringCooldown(t *testing.T) {
 // A hung command must fall offline again: presence stops at the cap and
 // says so in the log.
 func TestListenPresenceStopsAtCap(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	log := fastListen(t, 10*time.Millisecond, 100*time.Millisecond, time.Second)
 	f := &fakeListenRelay{}
 	r := newFakeListenRelay(t, f)
@@ -250,6 +261,7 @@ func TestListenPresenceStopsAtCap(t *testing.T) {
 // A relay that fails presence peeks is logged and does not touch the
 // command's run.
 func TestListenPresenceErrorsAreLoggedOnly(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	log := fastListen(t, 10*time.Millisecond, time.Minute, time.Second)
 	f := &fakeListenRelay{presenceStatus: http.StatusBadGateway}
 	r := newFakeListenRelay(t, f)
@@ -267,6 +279,7 @@ func TestListenPresenceErrorsAreLoggedOnly(t *testing.T) {
 }
 
 func TestListenContinuesAfterPingFailure(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	for _, phase := range []string{"claim", "reply"} {
 		for _, status := range []int{409, 503} {
 			t.Run(fmt.Sprintf("%s/%d", phase, status), func(t *testing.T) {
@@ -354,6 +367,7 @@ func TestInboxPingFailurePreservesWork(t *testing.T) {
 }
 
 func TestListenDrainsTruncatedPingBatchWithoutNudging(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	var answered, peeks atomic.Int32
@@ -405,6 +419,7 @@ func TestListenDrainsTruncatedPingBatchWithoutNudging(t *testing.T) {
 }
 
 func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	fastListen(t, time.Second, time.Minute, time.Second)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/poll" {
@@ -440,6 +455,7 @@ func TestListenPingFailureDoesNotBlockWaitingWork(t *testing.T) {
 // meanwhile still runs the command at once, and --once waits for the retry
 // before returning instead of dropping it.
 func TestListenPongRetryNeitherDelaysWorkNorIsDropped(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
 	fastListen(t, time.Second, time.Minute, time.Millisecond)
 	oldRetry := client.PongRetry
 	client.PongRetry = []time.Duration{300 * time.Millisecond}
@@ -487,5 +503,51 @@ func TestListenPongRetryNeitherDelaysWorkNorIsDropped(t *testing.T) {
 	}
 	if replies.Load() != 2 {
 		t.Fatalf("pong replies = %d, want the retry to finish before listen returned", replies.Load())
+	}
+}
+
+// Windows has no sh, so a command that runs through it says so and points at
+// what does work there, instead of failing on every nudge.
+func TestNeedsShellRefusesOnWindows(t *testing.T) {
+	err := needsShell("windows", "tincan listen")
+	if err == nil {
+		t.Fatal("want a refusal on Windows")
+	}
+	for _, want := range []string{"tincan listen", "Windows", "sh -c", "tincan wait"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal lacks %q: %v", want, err)
+		}
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if err := needsShell(goos, "tincan listen"); err != nil {
+			t.Fatalf("%s: %v", goos, err)
+		}
+	}
+}
+
+func TestListenAndRelayWatchRefuseOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("exercises the refusal on Windows; TestNeedsShellRefusesOnWindows covers its text everywhere")
+	}
+	useConfig(t, client.Config{})
+	if _, err := run(t, listenCmd(), "--exec", "echo hi"); err == nil || !strings.Contains(err.Error(), "sh -c") {
+		t.Fatalf("listen: %v", err)
+	}
+	if _, err := run(t, relayWatchCmd(), "--alert-cmd", "echo hi"); err == nil || !strings.Contains(err.Error(), "sh -c") {
+		t.Fatalf("relay-watch: %v", err)
+	}
+}
+
+// The relay needs unix file and socket behavior, so Windows stops at a clear
+// message rather than a failure deep in startup.
+func TestRelayRefusesOnWindows(t *testing.T) {
+	err := relayHostErr("windows")
+	if err == nil || !strings.Contains(err.Error(), "Linux and macOS") {
+		t.Fatalf("windows: %v", err)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if err := relayHostErr(goos); err != nil {
+			t.Fatalf("%s: %v", goos, err)
+		}
 	}
 }

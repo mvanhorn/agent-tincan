@@ -669,6 +669,7 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 		Member{Name: "council", Kind: KindCouncil}, Member{Name: "chatgpt-web", Kind: KindChatGPTWeb})})
 	want := []string{
 		"read the good_at lines in the live roster (list_agents, or tincan agents from a shell)",
+		"When several fit, prefer one with a record of answering",
 		"Send a real-world action (a call, a payment, a booking) to one teammate only",
 		"Ask another only after the first declines, fails or hands it back, or after you cancel your request to it.",
 		"If the relay tells you a woken teammate has not checked in and the work can't wait, cancel that request and ask another online teammate whose good_at line fits.",
@@ -677,6 +678,8 @@ func TestRenderedInstructionsIncludeGoodAtGuidance(t *testing.T) {
 		"needs_input is for a missing detail, never for permission",
 		"Never ignore a request: every request you receive ends with a reply",
 		"Claimed work comes before anything else in a turn, including Matt's chat.",
+		"send it as Matt wrote it, slash commands and flags included, and add no limit Matt did not state",
+		"A follow-up, retry or resume of a job keeps that job's terms",
 	}
 	// The unreachable-relay line sends the agent to tincan doctor, which a
 	// gateway agent (no shell) cannot run.

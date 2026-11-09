@@ -80,9 +80,11 @@ func sameMachine(recorded, name string) bool {
 }
 
 // eligible reports whether a, bound to some other node, may be re-admitted
-// by n, before the claim and the old node's status are considered.
+// by n, before the claim and the old node's status are considered. A guest
+// never is: re-admission rests on the owner's login, and a guest's machine
+// is not the owner's to vouch for.
 func eligible(a Agent, n Node) bool {
-	return a.NodeID != n.ID && !strings.HasPrefix(a.NodeID, VirtualPrefix) &&
+	return !a.Guest.Set() && a.NodeID != n.ID && !strings.HasPrefix(a.NodeID, VirtualPrefix) &&
 		a.NodeUser != "" && a.NodeUser == n.User && sameMachine(a.NodeName, n.Name)
 }
 
@@ -136,6 +138,11 @@ func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string
 	var matches []Agent
 	for _, a := range all {
 		if a.NodeID == n.ID {
+			// A guest joined this node after the caller was read, so the
+			// call was not judged as a guest's and cannot become one.
+			if a.Guest.Set() {
+				return nil, Resolved{}, false, nil
+			}
 			// A concurrent request re-admitted this node first.
 			if claimed == "" || a.Name == claimed {
 				return nil, Resolved{Name: a.Name}, true, nil
@@ -165,7 +172,8 @@ func (d *Directory) readmitCandidate(ctx context.Context, n Node, claimed string
 }
 
 // commitRebind moves checked to n under d.mu, provided it is still bound to
-// the node readmitCandidate checked. committed is false when it moved.
+// the node readmitCandidate checked and n has not taken a guest, which shares
+// a machine with no one. committed is false otherwise.
 func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Resolved, bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -174,6 +182,13 @@ func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Re
 		return Resolved{}, false, err
 	}
 	if !found || a.NodeID != checked.NodeID {
+		return Resolved{}, false, nil
+	}
+	others, err := d.store.AgentsByNode(ctx, n.ID)
+	if err != nil {
+		return Resolved{}, false, err
+	}
+	if carriesGuest(others) {
 		return Resolved{}, false, nil
 	}
 	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name}

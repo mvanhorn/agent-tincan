@@ -92,6 +92,7 @@ detect_platform() {
 unsupported() {
 	die "no prebuilt tincan for $1 $2.
 Builds exist for macOS (Apple silicon and Intel) and Linux (x86-64 and ARM64).
+On Windows (experimental, CI tested only), use the PowerShell steps in docs/quickstart.md.
 Build from source instead: clone $REPO_URL and run make build (Go 1.26 or newer)."
 }
 

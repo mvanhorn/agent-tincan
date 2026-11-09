@@ -81,8 +81,22 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 
 // Answer records input from the original sender and queues the same request again.
 func (s *Store) Answer(ctx context.Context, id, agent, body string) (envelope.Request, error) {
+	return s.answer(ctx, id, agent, body, false)
+}
+
+// AnswerAsGuest is Answer for a guest. The owner approved the ask, not this
+// answer, so the answer goes in framed as the guest's text and the request
+// stops being approved: what the teammate does next on it is held again.
+func (s *Store) AnswerAsGuest(ctx context.Context, id, agent, body string) (envelope.Request, error) {
+	return s.answer(ctx, id, agent, body, true)
+}
+
+func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool) (envelope.Request, error) {
 	if err := envelope.ValidateInput(body); err != nil {
 		return envelope.Request{}, err
+	}
+	if guest {
+		body = envelope.GuestText(body)
 	}
 	// Resolve missing ids and authorization before starting the transaction.
 	req, _, err := s.lookup(ctx, id)
@@ -110,9 +124,11 @@ func (s *Store) Answer(ctx context.Context, id, agent, body string) (envelope.Re
 		return envelope.Request{}, err
 	}
 	now := s.now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 0, lease_until = 0, resumed = 1, updated_at = ?, reply_seen_at = ?,
-		progress_note = '', progress_at = 0
-		WHERE id = ? AND status = ? AND expires_at > ?`, envelope.StatusQueued, string(exchanges), now, now, id, envelope.StatusNeedsInput, now)
+	// The asker's answer queues the request afresh, so its project gets the
+	// first look again rather than whichever window polls next.
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 0, lease_until = 0, resumed = 1, updated_at = ?, reply_seen_at = ?, queued_at = ?, fallback_woken = 0,
+		progress_note = '', progress_at = 0, guest_approved = guest_approved AND ?
+		WHERE id = ? AND status = ? AND expires_at > ?`, envelope.StatusQueued, string(exchanges), now, now, now, !guest, id, envelope.StatusNeedsInput, now)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -123,5 +139,6 @@ func (s *Store) Answer(ctx context.Context, id, agent, body string) (envelope.Re
 		return envelope.Request{}, err
 	}
 	req.Resumed = true
+	req.GuestApproved = req.GuestApproved && !guest
 	return req, tx.Commit()
 }

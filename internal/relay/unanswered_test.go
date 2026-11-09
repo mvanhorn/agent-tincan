@@ -60,8 +60,15 @@ func wakeHarness(t *testing.T) (*harness, *fakeClock, *fakeWaker) {
 	h := newHarness(t, Config{Now: clk.Now})
 	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook", "instinct": "email", "muse": "wait"}, wakes: map[string]store.Wake{}}
 	h.srv.SetWakeNamer(fw)
-	clk.advance(time.Second)
+	pastJoins(clk)
 	return h, clk, fw
+}
+
+// pastJoins moves clk past agents' joins, which use the real clock: a wake
+// from before a join is ignored, and a slow setup would otherwise leave clk
+// behind them.
+func pastJoins(clk *fakeClock) {
+	clk.advance(time.Since(clk.Now()) + time.Second)
 }
 
 // AE1, AE2: a webhook agent woken and silent for longer than the grace is
@@ -94,7 +101,7 @@ func TestRosterWakeGraceConfigurable(t *testing.T) {
 	h := newHarness(t, Config{Now: clk.Now, WakeGrace: time.Minute})
 	fw := &fakeWaker{methods: map[string]string{"grokbot": "webhook"}, wakes: map[string]store.Wake{}}
 	h.srv.SetWakeNamer(fw)
-	clk.advance(time.Second)
+	pastJoins(clk)
 	fw.set("grokbot", store.Wake{At: clk.Now(), Result: envelope.WakeOK})
 	clk.advance(2 * time.Minute)
 	if g := agentInfo(t, h, macAddr, "grokbot"); !g.Unanswered {

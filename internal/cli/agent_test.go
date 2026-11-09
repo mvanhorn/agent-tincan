@@ -659,3 +659,66 @@ func TestJoinProxyCredentialsFromEnvReplacesExpiredSavedPassword(t *testing.T) {
 		}
 	}
 }
+
+func TestAskThen(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	out, err := run(t, askCmd(), "muse", "find the receipt", "--then", "instinct", "file the receipt", "--wait", "0s")
+	if err != nil || !strings.Contains(out, "follow-on to instinct") {
+		t.Fatalf("ask: %q %v", out, err)
+	}
+	muse := m.Client(t, "muse")
+	inbox, err := muse.Poll(t.Context(), time.Millisecond)
+	if err != nil || len(inbox.Requests) != 1 || inbox.Requests[0].Body != "find the receipt" {
+		t.Fatalf("first: %+v %v", inbox, err)
+	}
+	id := inbox.Requests[0].ID
+	if _, err := muse.Claim(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := muse.Reply(t.Context(), id, "receipt 42", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err = m.Client(t, "instinct").Poll(t.Context(), time.Millisecond)
+	if err != nil || len(inbox.Requests) != 1 {
+		t.Fatalf("follow-on: %+v %v", inbox, err)
+	}
+	got := inbox.Requests[0]
+	if got.From != "grokbot" || !strings.HasPrefix(got.Body, "file the receipt\n") || !strings.Contains(got.Body, "receipt 42") {
+		t.Fatalf("follow-on = %+v", got)
+	}
+}
+
+func TestAskThenRefusedArgs(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	for name, args := range map[string][]string{
+		"no follow-on":  {"muse", "one", "--then", "instinct"},
+		"unquoted":      {"muse", "one", "two", "three", "--then", "instinct"},
+		"several":       {"muse,instinct", "one", "two", "--then", "grokbot"},
+		"notify":        {"muse", "one", "two", "--then", "instinct", "--notify"},
+		"attach":        {"muse", "one", "two", "--then", "instinct", "--attach", "x.txt"},
+		"several thens": {"muse", "one", "two", "--then", "instinct,grokbot"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := run(t, askCmd(), args...); err == nil {
+				t.Fatal("accepted")
+			}
+			if n, err := m.Store.CountQueued(t.Context(), "muse"); err != nil || n != 0 {
+				t.Fatalf("%d queued, %v", n, err)
+			}
+		})
+	}
+}
+
+func TestAskWithoutThenStillJoinsWords(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if _, err := run(t, askCmd(), "muse", "find", "the", "receipt", "--wait", "0s"); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := m.Client(t, "muse").Poll(t.Context(), time.Millisecond)
+	if err != nil || len(inbox.Requests) != 1 || inbox.Requests[0].Body != "find the receipt" {
+		t.Fatalf("inbox %+v %v", inbox, err)
+	}
+}

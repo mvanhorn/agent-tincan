@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -255,7 +256,7 @@ var convURLPattern = regexp.MustCompile(`^/(?:g/[A-Za-z0-9_-]+/)?(?:c|chat)/([A-
 
 // NewChat is the threading first line that opens a fresh conversation
 // (case-insensitive, with an optional trailing colon).
-const NewChat = "new chat"
+const NewChat = envelope.NewChat
 
 const threadingHelp = `Put "new chat" or "conversation: <id>" on the first line to choose the conversation, and the message after it.`
 
@@ -971,9 +972,9 @@ func (w *WebAgent) anchorFor(ctx context.Context, convID, message string) (reply
 	if err == nil {
 		var nodes []webNode
 		if nodes, err = w.nodes(raw); err == nil {
-			for i := len(nodes) - 1; i >= 0; i-- {
-				if nodes[i].user {
-					a.prevUser = nodes[i].id
+			for _, node := range slices.Backward(nodes) {
+				if node.user {
+					a.prevUser = node.id
 					break
 				}
 			}

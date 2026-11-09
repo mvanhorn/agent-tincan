@@ -28,7 +28,7 @@ Instinct's mail arrives in seconds, but its tailnet path to the relay can be dow
 { "instinct": { "method": "email", "email_to": "<instinct inbox>", "agentmail_inbox": "<dedicated sending inbox>", "agentmail_key": "<AgentMail API key>", "include_requests": true } }
 ```
 
-Each open ask then arrives as its own email, `Agent Tincan: request from <asker> [tincan <id>.<tag>]`, with the request text. Instinct answers by replying in the same thread, keeping the subject. A first line of `failed:` or `declined:` sets that status. The relay polls the inbox, checks the sender and the tag, records the reply as Instinct's answer, and emails back "recorded" or "not recorded: <reason>". Email cannot ask a clarifying question or attach files; Instinct uses tincan for those.
+Each open ask then arrives as its own email, `Agent Tincan: request from <asker> [tincan <id>.<tag>]`, with the request text. Instinct answers by replying in the same thread, keeping the subject. A first line of `failed:` or `declined:` sets that status. The relay polls the inbox, checks the sender and the tag, records the reply as Instinct's answer, and emails back "recorded" or "not recorded: <reason>". Email cannot ask a clarifying question or attach files; Instinct uses tincan for those. An ask marked as a guest's does not go out this way, because a mail reader would see no mark: Instinct gets the usual count-only wake and reads it with `tincan inbox`.
 
 - Use a dedicated AgentMail sending inbox, since Instinct's replies land there.
 - Tell Instinct that inbox's address, and re-paste its standing instructions from `tincan onboard`. Those instructions trust request emails only from that address.

@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -228,5 +231,54 @@ func TestUploadFilesChecksCapabilitiesOnce(t *testing.T) {
 	}
 	if got := uploads.Load(); got != 2 {
 		t.Fatalf("uploaded %d files, want 2", got)
+	}
+}
+
+// An older relay would drop the then field without a word, so the client
+// refuses before it sends anything.
+func TestAskThenRefusedByOldRelay(t *testing.T) {
+	for name, caps := range map[string]string{"no endpoint": "", "no then": `{"attachments":true}`} {
+		t.Run(name, func(t *testing.T) {
+			sends := 0
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v1/capabilities" && caps != "":
+					io.WriteString(w, caps)
+				case r.URL.Path == "/v1/send":
+					sends++
+					io.WriteString(w, `{"id":"r1"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ts.Close()
+			r, err := client.NewRelayFor(client.Config{Relay: ts.URL, Agent: "grokbot"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = r.AskThen(t.Context(), "muse", "b", "", envelope.Then{To: "instinct", Body: "c"}, 0, false)
+			if !errors.Is(err, client.ErrThenUnsupported) || sends != 0 {
+				t.Fatalf("err %v, %d sends", err, sends)
+			}
+		})
+	}
+}
+
+func TestAskThenAgainstRelay(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	res, err := m.Client(t, "grokbot").AskThen(t.Context(), "muse", "find it", "", envelope.Then{To: "instinct", Body: "file it"}, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	muse := m.Client(t, "muse")
+	if _, err := muse.Claim(t.Context(), res.Request.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := muse.Reply(t.Context(), res.Request.ID, "found", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := m.Client(t, "instinct").Poll(t.Context(), time.Millisecond)
+	if err != nil || len(inbox.Requests) != 1 || !strings.HasPrefix(inbox.Requests[0].Body, "file it\n") {
+		t.Fatalf("inbox %+v %v", inbox, err)
 	}
 }

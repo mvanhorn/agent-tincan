@@ -8,6 +8,7 @@ import (
 func TestConfigPathExpandsTilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows reads this for the home dir
 	t.Setenv("TINCAN_CONFIG", "~/.config/tincan/codex.json")
 	if got, want := ConfigPath(), filepath.Join(home, ".config/tincan/codex.json"); got != want {
 		t.Fatalf("ConfigPath() = %q, want %q", got, want)

@@ -66,7 +66,8 @@ func TestUrgentClaimLeaseAndStaleClaimNotice(t *testing.T) {
 	}
 	got := inbox(t, h, instinctAddr)
 	if len(got) != 1 || got[0].From != "relay" || !strings.Contains(got[0].Body, urgent.ID) ||
-		!strings.Contains(got[0].Body, "grokbot claimed this 20m ago and did not reply or post progress before its claim lease ran out; it has been requeued.") {
+		!strings.Contains(got[0].Body, "grokbot claimed this 20m ago and did not reply or post progress before its claim lease ran out; it has been requeued.") ||
+		!strings.HasSuffix(got[0].Body, " Sent by the relay at "+client.UTCClock(clk.Now(), clk.Now())+". No reply needed.") {
 		t.Fatalf("asker inbox = %+v", got)
 	}
 	rec.mu.Lock()
@@ -102,6 +103,12 @@ func TestExpiredRequestNotice(t *testing.T) {
 	clk.advance(61 * time.Minute)
 	h.srv.Sweep(t.Context())
 
+	// Expiry notices are not linked to their request, so nothing closes them.
+	for _, n := range append(relayNotices(h, "instinct"), relayNotices(h, "muse")...) {
+		if n.NoticeFor != "" || n.NoticeKind != "" {
+			t.Fatalf("expiry notice linked: %+v", n)
+		}
+	}
 	got := inbox(t, h, instinctAddr)
 	if len(got) != 1 || !strings.Contains(got[0].Body, ask.ID) || !strings.Contains(got[0].Body, "This request expired after 1h1m with no reply. grokbot never picked it up.") {
 		t.Fatalf("asker inbox = %+v", got)
@@ -148,5 +155,126 @@ func TestHeldHeader(t *testing.T) {
 	}
 	if held := heldOf(t, h.do(grokAddr, "POST", "/v1/requests/"+urgent.ID+"/reply", `{"body":"done"}`, http.StatusOK, nil).Result()); held != nil {
 		t.Fatalf("reply response held %+v, want none", held)
+	}
+}
+
+// lapsedClaim sends instinct's ask to grokbot, has grokbot claim it and
+// lets the claim lease run out, so the sweep requeues it and queues the
+// stale-claim notice for instinct.
+func lapsedClaim(t *testing.T, h *harness, clk *fakeClock) envelope.Request {
+	t.Helper()
+	req := h.send(instinctAddr, "grokbot", "find the code")
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", http.StatusOK, nil)
+	clk.advance(31 * time.Minute)
+	h.srv.Sweep(t.Context())
+	if n := relayNotices(h, "instinct"); len(n) != 1 || !strings.Contains(n[0].Body, "claim lease ran out") {
+		t.Fatalf("queued notices = %+v", n)
+	}
+	return req
+}
+
+// superseded reports whether the audit log shows notice id closed unsent.
+func superseded(t *testing.T, h *harness, id string) bool {
+	t.Helper()
+	events, err := h.st.AuditEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range events {
+		if e.Event == "notice_superseded" && e.RequestID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// The target replies after its claim lapsed and before the asker polls:
+// the asker gets the reply and never the stale-claim notice.
+func TestStaleClaimNoticeSupersededByReply(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	req := lapsedClaim(t, h, clk)
+	notice := relayNotices(h, "instinct")[0]
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"4417"}`, http.StatusOK, nil)
+	if got := inbox(t, h, instinctAddr); len(got) != 0 {
+		t.Fatalf("asker inbox after the reply = %+v", got)
+	}
+	var res envelope.Result
+	h.do(instinctAddr, "GET", "/v1/requests/"+req.ID, "", http.StatusOK, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != "4417" {
+		t.Fatalf("get = %s %+v", res.Status, res.Reply)
+	}
+	if !superseded(t, h, notice.ID) {
+		t.Fatal("no notice_superseded audit event")
+	}
+}
+
+// An asker that polls before the reply reads the notice, which says when
+// the relay made it, and still gets the reply after.
+func TestStaleClaimNoticeDeliveredBeforeReply(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	req := lapsedClaim(t, h, clk)
+	got := inbox(t, h, instinctAddr)
+	if len(got) != 1 {
+		t.Fatalf("asker inbox = %+v", got)
+	}
+	want := " Sent by the relay at " + client.UTCClock(got[0].CreatedAt, got[0].CreatedAt) + ". No reply needed."
+	if !strings.HasSuffix(got[0].Body, want) {
+		t.Fatalf("notice body = %q, want suffix %q", got[0].Body, want)
+	}
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"4417"}`, http.StatusOK, nil)
+	if st := statusOf(t, h, instinctAddr, req.ID); st != envelope.StatusAnswered {
+		t.Fatalf("status %s, want answered", st)
+	}
+	if superseded(t, h, got[0].ID) {
+		t.Fatal("a delivered notice was marked superseded")
+	}
+}
+
+// Cancelling the ask before polling closes its queued notice.
+func TestStaleClaimNoticeClosedByCancel(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	req := lapsedClaim(t, h, clk)
+	notice := relayNotices(h, "instinct")[0]
+	h.do(instinctAddr, "POST", "/v1/requests/"+req.ID+"/cancel", "", http.StatusOK, nil)
+	if got := inbox(t, h, instinctAddr); len(got) != 0 {
+		t.Fatalf("asker inbox after cancel = %+v", got)
+	}
+	if !superseded(t, h, notice.ID) {
+		t.Fatal("no notice_superseded audit event")
+	}
+}
+
+// A reclaim and a progress note after the lapse, with no reply yet, leave
+// the notice to be delivered.
+func TestStaleClaimNoticeSurvivesReclaim(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	req := lapsedClaim(t, h, clk)
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", http.StatusOK, nil)
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/progress", `{"note":"back on it"}`, http.StatusOK, nil)
+	if got := inbox(t, h, instinctAddr); len(got) != 1 || !strings.Contains(got[0].Body, req.ID) {
+		t.Fatalf("asker inbox = %+v", got)
+	}
+}
+
+// A reply that lands between the sweep's requeue and the notice being
+// built means no notice is queued.
+func TestStaleClaimNoticeSkippedWhenReplyRaces(t *testing.T) {
+	h, clk, _ := sweepHarness(t, Config{})
+	req := h.send(instinctAddr, "grokbot", "find the code")
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", http.StatusOK, nil)
+	clk.advance(31 * time.Minute)
+	trs, err := h.st.Sweep(t.Context())
+	if err != nil || len(trs) != 1 {
+		t.Fatalf("sweep %+v %v", trs, err)
+	}
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"4417"}`, http.StatusOK, nil)
+	h.srv.tellSwept(t.Context(), trs[0])
+	if n := relayNotices(h, "instinct"); len(n) != 0 {
+		t.Fatalf("queued notices = %+v", n)
+	}
+	var res envelope.Result
+	h.do(instinctAddr, "GET", "/v1/requests/"+req.ID, "", http.StatusOK, &res)
+	if res.RelayNote != nil {
+		t.Fatalf("relay note = %+v", res.RelayNote)
 	}
 }

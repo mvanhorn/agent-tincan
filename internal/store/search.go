@@ -135,7 +135,7 @@ func (s *Store) SearchAs(ctx context.Context, query, participant string, rooms b
 		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MIN(rowid), 0), COUNT(*) FROM (
  SELECT r.rowid FROM requests r WHERE r.rowid < ? AND r.trace_id IN (
    SELECT trace_id FROM requests WHERE from_agent = ?
-   UNION SELECT trace_id FROM requests WHERE to_agent = ?
+   UNION SELECT trace_id FROM requests WHERE to_agent = ? AND NOT (was_held = 1 AND approved = 0 AND follow_of != '')
  ) ORDER BY r.rowid DESC LIMIT ?)`, below, participant, participant, searchVisibleWindow).Scan(&chunkLow, &chunkRows); err != nil {
 			return nil, err
 		}
@@ -150,7 +150,7 @@ func (s *Store) SearchAs(ctx context.Context, query, participant string, rooms b
      AND (r.room_post_id IS NULL OR ? AND EXISTS (SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ? WHERE p.id = r.room_post_id))
      AND r.trace_id IN (
      SELECT trace_id FROM requests WHERE from_agent = ?
-     UNION SELECT trace_id FROM requests WHERE to_agent = ?
+     UNION SELECT trace_id FROM requests WHERE to_agent = ? AND NOT (was_held = 1 AND approved = 0 AND follow_of != '')
    ))
  ORDER BY rowid DESC LIMIT ?`, limit-len(out), match, chunkLow, below, chunkLow, below, participant,
 			len(envelope.PassGroupPrefix), envelope.PassGroupPrefix, participant, participant, rooms, participant, participant, participant, limit-len(out))

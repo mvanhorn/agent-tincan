@@ -22,6 +22,9 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, err)
 		return
 	}
+	if s.guestTermOver(w, r) {
+		return
+	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -30,7 +33,11 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	req, err := s.store.Answer(r.Context(), r.PathValue("id"), name, in.Body)
+	answer := s.store.Answer
+	if _, guest := guestOf(r.Context()); guest {
+		answer = s.store.AnswerAsGuest
+	}
+	req, err := answer(r.Context(), r.PathValue("id"), name, in.Body)
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return

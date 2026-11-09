@@ -21,7 +21,7 @@ import (
 // distBinary matches the release binaries the relay may serve for
 // tincan upgrade. Nothing else in the dist directory is ever served, apart
 // from checksums.txt.
-var distBinary = regexp.MustCompile(`^tincan_(linux|darwin)_(amd64|arm64)$`)
+var distBinary = regexp.MustCompile(`^tincan_((linux|darwin)_(amd64|arm64)|windows_(amd64|arm64)\.exe)$`)
 
 // distChecksums is the release checksums file, served as-is.
 const distChecksums = "checksums.txt"
@@ -45,7 +45,7 @@ type distSum struct {
 }
 
 // SetDist serves the release files in dir at /v1/dist for tincan upgrade:
-// tincan_<os>_<arch> binaries and checksums.txt, to joined agents and
+// tincan_<os>_<arch> binaries (.exe on Windows) and checksums.txt, to joined agents and
 // admins only. The optional VERSION file in dir names the release. An empty
 // dir turns it off.
 func (s *Server) SetDist(dir string) {
@@ -174,6 +174,9 @@ func (d *dist) release() string {
 // tincan upgrade.
 func (d *dist) installable(platform string) bool {
 	name := "tincan_" + platform
+	if strings.HasPrefix(platform, "windows_") {
+		name += ".exe"
+	}
 	if !distBinary.MatchString(name) {
 		return false
 	}
@@ -185,6 +188,9 @@ func (d *dist) installable(platform string) bool {
 // It needs the caller's build and platform headers, and the platform's
 // binary in the dist; clients that send no platform get no notice.
 func (s *Server) upgradeFor(r *http.Request) string {
+	if _, guest := guestOf(r.Context()); guest {
+		return "" // a guest's machine is not the owner's to upgrade from here
+	}
 	if s.dist != nil {
 		available := s.dist.release()
 		if client.Newer(available, r.Header.Get(client.VersionHeader)) && s.dist.installable(r.Header.Get(client.PlatformHeader)) {

@@ -18,7 +18,7 @@ claude mcp add --scope user agent-tincan -- tincan mcp --channel
 
 `--scope user` registers the server for every project. The default scope is the directory the command runs in, so a session started anywhere else would have no tincan tools and no channel.
 
-That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`) and, with `--channel`, pushes teammate requests straight into the running session. Without `--channel`, it wakes an idle session through the session's own socket instead (below).
+That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`) and, with `--channel`, pushes teammate requests straight into the running session. Without `--channel`, it wakes an idle session through the session's own socket instead (below).
 
 ## Receive requests without typing (channels)
 
@@ -52,12 +52,17 @@ When teammate requests, or replies to this session's own requests, are waiting a
 
 - Each item is sent once, with no re-announce after 10 minutes. It still shows on the next `check_inbox`.
 - A reply to an ask goes only to the window that sent it.
+- An ask that names a project goes only to that project's window for its first 10 minutes.
 - A teammate request starts one turn per agent per machine, however many windows are open. The windows share a lock and a delivery record in `socket-wake/` beside the agent's config, and the first idle window takes the item.
 - Upgrade notices are not sent this way; they show on the next tool call.
 
 While socket wake runs, the session tells the relay so, and a teammate's pending ask says `claude-code is listening now; a session will be prompted when it is idle.` The roster's `wake` stays `channel`. After three failed writes in a row the server stops peeking, so the agent stops looking online, keeps its relay session live for reply routing, and checks the socket again after 5 minutes.
 
 `--wake-socket=false` turns socket wake off. With `--channel` the channel runs and `--wake-socket` is ignored.
+
+## Several sessions on one machine
+
+Every Claude Code window on a machine runs as the same agent. A teammate can [name a project](#send-an-ask-to-one-projects-window) to reach the window on that repo, but one window cannot ask another: an `ask` to the agent's own name fails with `send: an agent cannot send to itself`. To reach another window on the same machine, use Claude Code's own messaging between sessions where it has one. To make a window addressable on the relay, join it as an agent of its own, with its own invite and `TINCAN_CONFIG`.
 
 ## Show what each session is working on
 
@@ -69,9 +74,69 @@ claude mcp add --scope user agent-tincan -- tincan mcp --channel --share-title
 
 Teammates then see `working_on="Fix flaky relay test"` on this agent's `list_agents` and `tincan agents` line: the session's custom title, else the title Claude Code wrote for it. Only title records are read, not your prompts, but a title can still say what you asked: Claude Code's generated titles summarize the conversation, and a hook that names sessions from their first prompt turns that prompt into the custom title. It works with or without `--channel`. Each server re-sends its title every 2 minutes and removes it when it exits; a window that stops without a clean exit drops off within 10 minutes. With several windows open the line shows the most recently refreshed title and a count of the others, such as `(+2)`. It is off by default, and every joined agent can read it, so leave it off if your session titles name things the team should not see.
 
+## Send an ask to one project's window
+
+With several windows open as one agent, an ask goes to whichever window checks first, which may be on the wrong repo. Name the project to reach the right one:
+
+```bash
+tincan ask claude-code --project agent-tincan "why does the relay test flake?"
+```
+
+The `ask` tool takes `project` the same way. Each `tincan mcp` tells the relay its project: the name of the git repository around its working directory, lowercased, with a linked worktree counting as its main repository. Use `--project <label>` on the server command to set another name, or `--no-project` to send none.
+
+Only a window on that project is told about the ask and can take it. A window that stays open but never checks does not strand it: after 10 minutes in the queue any window can take it. When no window on that project is live, the ask says so at once. An older `tincan` client takes such an ask only after the 10 minutes, and an older relay ignores the project and delivers as before.
+
+The label is routing only, like the session id. See the [trust model](../trust-model.md).
+
+## Open a new window for each ask
+
+`tincan window` opens a new Claude Code window in cmux, in the background, for a task. Run it yourself on the Mac:
+
+```bash
+tincan window open "fix the flaky relay test"
+```
+
+Or let teammates do it: join a second agent, for example `claude-window`, and keep `tincan window serve` running as it. Each ask to that agent opens its own window, which works on that one request where you can watch or take over and replies to the asker. Asks to your usual `claude-code` agent still go to the windows you already have open.
+
+On an admin device, `tincan invite claude-window --kind claude-code`. On the Mac:
+
+```bash
+TINCAN_CONFIG=~/.config/tincan/window.json tincan join <code> --relay http://tincan-relay
+tincan window install --start
+```
+
+Give it a good-at line so teammates know when to use it, for example so `cc <task>` to any teammate means "open a window":
+
+```bash
+tincan good-at claude-window "cc <task>: send <task> as the ask; opens a new Claude Code window on the Mac and types it in"
+```
+
+`install` writes the LaunchAgent `com.agenttincan.window`, which runs `tincan window serve` at login and keeps it running; `--start` loads it now. It logs to `~/Library/Logs/tincan-window.log`. Then from any teammate:
+
+```bash
+tincan ask claude-window "summarize what changed on main this week"
+tincan ask claude-window "/ce-plan make a donkey plan"
+```
+
+With the good-at line above, `cc` is a shortcut: a good-at line that opens with a word and a placeholder (`cc <task>:`) tells every teammate to send a message starting with that word to this agent, word for word. `check_inbox` and `tincan inbox` point it out under a request that starts with it, so a teammate sent `cc /ce-plan make a donkey plan` asks `claude-window` with `/ce-plan make a donkey plan`. When you chat with a teammate in its own app (Instinct, say), tincan is not in the loop, so tell it once to remember the shortcut. Every agent's standing instructions also say to pass your request on as you wrote it, flags included, with no limit you did not state, and that a follow-up keeps the original job's terms; an agent whose instructions you pasted by hand gets that line when you paste a fresh `tincan onboard --section agents` block.
+
+How it works:
+
+- Each window opens as a new cmux workspace with focus left where it is, in `--dir` (default: your home directory). A teammate cannot choose the directory.
+- If your terminal starts Claude Code in every new window by itself (a Ghostty `command` set to a Claude launcher), the task is typed into it. If it starts a shell, tincan types the `claude` command line. `--starts auto` looks at the new window to tell which: it waits for Claude Code, and counts the window as a shell only once a shell prompt has sat still for a few seconds, so a launcher that is slow to start Claude is not mistaken for one. `--starts claude` or `--starts shell` says so outright.
+- A one-line ask is typed into Claude Code as it is, so `/ce-plan make a donkey plan` runs the slash command, and a second message (which Claude Code queues behind the first) says how to reply. A longer or multi-line ask is not typed; the window is pointed at its file. So is an ask starting with `-` (a `claude` startup option when a shell starts it), `!` (a shell command in Claude Code's input box) or `#` (a memory).
+- A request's task goes in a private file beside the window agent's config (`window-runs/<request id>/task.md`), with the exact `tincan reply` command for that request. The window opens with `TINCAN_CONFIG`, `TINCAN_SESSION` and `TINCAN_WORKER_REQUEST` set, so its tincan tools run as `claude-window` under the session that holds the claim: the reply tool answers the request, and an ask the window sends continues the request's chain, so approval rules and chain limits keyed on the first asker still apply. In that mode `tincan mcp` runs no channel or socket wake, `check_inbox` takes no new requests, and `claim` takes no other request, so a window never pulls other `claude-window` asks out of the queue.
+- Beside the task file, `request.json` records the request id, the sender, whether it came from a guest, its parent request, and the exact lines typed into the window; `TINCAN_REQUEST_FILE` points at it. A window reopened after a clarifying question gets its own record (`request-<n>.json`), so the first window's record is kept. A later message in the window that matches none of those lines came from you at the keyboard, not from the teammate. The record only locates the request: a tool deciding what a teammate may authorize reads the request itself from the relay by its id.
+- `task.md`, and the line typed after a one-line ask, tell the window that a follow-up on a job keeps that job's terms: a limit a teammate adds later, such as do not open a PR, is reported in the reply rather than obeyed, unless you gave it directly.
+- The asker sees a progress note when the window opens. A request whose window is closed before it replies is failed with a message saying so. A clarifying question from the window ends that window's hold on the request, and the asker's answer opens a fresh window with the exchange.
+- A request a guest's ask led to opens no window and is failed.
+- `--max-windows` (default 3) caps windows working at once, and later asks wait. `--timeout` (default 12h) fails a request whose window holds it longer.
+
+The window runs Claude Code with your own settings and permission mode; tincan never adds `--dangerously-skip-permissions`. If your launcher starts Claude with permissions skipped, an ask to `claude-window` can run anything on this Mac without a prompt, so hold asks to it with the [owner approval gate](../../README.md#owner-approval) if any teammate reads untrusted content. cmux's `automation.socketControlMode` must let a process started outside cmux connect (`allowAll` or `password`; agentmail-to-claude-code's `setup_cmux.py` sets it), and cmux must be restarted after changing it.
+
 ## Fallback: open a session in cmux
 
-If no session is open to wake, or socket wake is off, run a listener that opens a new Claude Code session in cmux whenever requests are waiting. The script, `examples/claude-code/cmux-wake.sh`, lives in the agent-tincan repo (it is not in the release downloads); copy it to `~/bin` and `chmod +x` it first:
+`tincan window` (above) is the built-in way to open windows. If you want a new window only to drain the inbox when no session is open to wake, or socket wake is off, run a listener that opens a new Claude Code session in cmux whenever requests are waiting. The script, `examples/claude-code/cmux-wake.sh`, lives in the agent-tincan repo (it is not in the release downloads); copy it to `~/bin` and `chmod +x` it first:
 
 ```bash
 tincan listen --exec ~/bin/cmux-wake.sh

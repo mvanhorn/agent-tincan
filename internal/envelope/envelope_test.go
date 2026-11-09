@@ -61,6 +61,20 @@ func TestParseSendDiscardsClientFrom(t *testing.T) {
 	}
 }
 
+// A send to yourself is refused, and the error says why: other sessions of
+// the same agent share its name, so the relay cannot pick one of them.
+func TestParseSendToSelfNamesSharedSessions(t *testing.T) {
+	_, err := ParseSend([]byte(`{"to":"claude-mini","body":"hi"}`), "claude-mini", DefaultMaxBody)
+	if err == nil {
+		t.Fatal("send to self accepted")
+	}
+	for _, want := range []string{"cannot send to itself", "share its name", "session messaging"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
 // Relay-owned fields are never taken from the client.
 func TestParseSendIgnoresRelayOwnedFields(t *testing.T) {
 	raw := []byte(`{"id":"forged","to":"instinct","body":"hi","trace_id":"t9","hop":0,"chain":["x"],"created_at":"2001-01-01T00:00:00Z"}`)
@@ -287,5 +301,32 @@ func TestWakeAccepted(t *testing.T) {
 		if got := WakeAccepted(result); got != want {
 			t.Errorf("WakeAccepted(%q) = %v, want %v", result, got, want)
 		}
+	}
+}
+
+func TestParseSendThen(t *testing.T) {
+	req, err := ParseSend([]byte(`{"to":"muse","body":"b","then":{"to":" instinct ","body":"file it"}}`), "grokbot", DefaultMaxBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Then == nil || req.Then.To != "instinct" || req.Then.Body != "file it" {
+		t.Fatalf("then = %+v", req.Then)
+	}
+	if req, err := ParseSend([]byte(`{"to":"muse","body":"b"}`), "grokbot", DefaultMaxBody); err != nil || req.Then != nil {
+		t.Fatalf("no then: %+v %v", req.Then, err)
+	}
+}
+
+func TestParseSendIgnoresFollowOf(t *testing.T) {
+	req, err := ParseSend([]byte(`{"to":"muse","body":"b","follow_of":"abc","FollowOf":"abc"}`), "grokbot", DefaultMaxBody)
+	if err != nil || req.FollowOf != "" {
+		t.Fatalf("follow_of = %q, %v", req.FollowOf, err)
+	}
+}
+
+func TestFollowOfStaysOffTheWire(t *testing.T) {
+	raw, err := json.Marshal(Request{To: "muse", FollowOf: "abc"})
+	if err != nil || strings.Contains(string(raw), "abc") {
+		t.Fatalf("%s %v", raw, err)
 	}
 }

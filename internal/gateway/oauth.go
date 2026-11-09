@@ -6,8 +6,9 @@
 // login page that takes a one-time code Matt mints with `tincan connect
 // <name>`, bound to that agent name.
 //
-// Only the MCP endpoint and the OAuth endpoints are served. The relay's agent
-// API is never reachable from the public side.
+// Only the MCP endpoint, the OAuth endpoints and, when a2a.json publishes
+// someone, the A2A cards and endpoints are served. The relay's agent API is
+// never reachable from the public side.
 package gateway
 
 import (

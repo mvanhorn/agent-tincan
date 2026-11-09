@@ -380,6 +380,6 @@ func webInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "invited agent name (default: site web agent name)")
 	cmd.Flags().StringVar(&configPath, "config", "", "client config saved into the service (default: TINCAN_CONFIG or ~/.config/tincan/<name>.json)")
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
-	cmd.Flags().StringVar(&thread, "thread", "", "--site dots or duet only: the dot's thread id (default: the thread of the account's primary dot, from the Chrome extension), or the Duet channel's id or https://claude.ai/messages/<id> address (required); kept in the service definition")
+	cmd.Flags().StringVar(&thread, "thread", "", "--site dots or duet only: the dot's thread id (default: the thread of the account's primary dot, from the Chrome extension), or the Duet channel's id or https://claude.ai/duet/<id> address (required); kept in the service definition")
 	return cmd
 }

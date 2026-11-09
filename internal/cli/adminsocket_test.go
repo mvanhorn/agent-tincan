@@ -10,8 +10,9 @@ import (
 // On the relay machine, admin commands need no flags: the local admin
 // socket in the default state dir makes this machine the admin.
 func TestAdminRelayUsesLocalSocket(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	if r, err := adminRelay("", "http://tincan-relay"); err != nil || r.Base() != "http://tincan-relay" {
 		t.Fatalf("explicit relay: %v %v", r, err)

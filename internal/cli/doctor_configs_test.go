@@ -77,10 +77,7 @@ mcp_servers:   # MCP servers
 // not judged as broken JSON.
 func TestFindMCPConfigsReadsYAML(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	cfg := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(cfg, []byte("mcp_servers:\n  agent-tincan:\n    command: "+exe+"\n    args: [\"mcp\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -105,10 +102,7 @@ func TestFindMCPConfigsReadsYAML(t *testing.T) {
 // a project's map is.
 func TestConfigDuplicatesCountPerScope(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	entry := `{"command":"` + exe + `","args":["mcp","--channel"]}`
 	twoProjects := filepath.Join(dir, "two-projects.json")
 	if err := os.WriteFile(twoProjects, []byte(`{"projects":{"/a":{"mcpServers":{"agent-tincan":`+entry+`}},"/b":{"mcpServers":{"agent-tincan":`+entry+`}}}}`), 0o600); err != nil {
@@ -154,7 +148,7 @@ func TestConfigDuplicatesCountPerScope(t *testing.T) {
 func TestDoctorRelayMovesUnderTincanRelayOverride(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	relayMoves := func() check {
 		t.Helper()
@@ -185,9 +179,10 @@ func TestDoctorRelayMovesUnderTincanRelayOverride(t *testing.T) {
 // The other two reasons a relay key is missing: a relay too old to hand it
 // out, and a config file the key could not be written to.
 func TestDoctorRelayMovesOldRelayAndSaveFailure(t *testing.T) {
+	skipOnWindows(t, "a read-only directory does not stop a save on Windows")
 	m := testrelay.New(t, relay.Config{})
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	relayMoves := func() check {
 		t.Helper()
@@ -245,10 +240,7 @@ func TestDoctorRelayMovesOldRelayAndSaveFailure(t *testing.T) {
 // duplicate. A differently named pair still loads together.
 func TestConfigSameNameUserAndProjectIsAnOverride(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	entry := `{"command":"` + exe + `","args":["mcp","--channel"]}`
 	same := filepath.Join(dir, "same.json")
 	diff := filepath.Join(dir, "diff.json")
@@ -301,10 +293,7 @@ func TestYamlServersBooleansAndUnreadEntries(t *testing.T) {
 // set), in the same [mcp_servers.<name>] shape as Codex's config.toml.
 func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	toml := "[mcp_servers.agent-tincan]\ncommand = \"" + exe + "\"\nargs = [\"mcp\"]\n\n[mcp_servers.agent-tincan.env]\nTINCAN_CONFIG = \"/Users/x/.config/tincan/grok-cli.json\"\n"
 	grokFile := func(home string) string {
 		if err := os.MkdirAll(home, 0o755); err != nil {
@@ -327,7 +316,7 @@ func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
 	}
 
 	home := filepath.Join(dir, "home")
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("GROK_HOME", "")
 	f := grokFile(filepath.Join(home, ".grok"))
 	es := entriesIn(f)
@@ -353,12 +342,9 @@ func TestFindMCPConfigsReadsGrokConfig(t *testing.T) {
 // ~/.gemini/config/mcp_config.json.
 func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	home := filepath.Join(dir, "home")
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	write := func(f, body string) string {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
@@ -413,7 +399,7 @@ func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
 func TestFindMCPConfigsReadsGeminiWakeLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("TINCAN_AGY_MCP_CONFIG", "")
 	t.Setenv("TINCAN_GEMINI_SETTINGS", "")
 	t.Setenv("TINCAN_GEMINI_WORKDIR", "")
@@ -472,7 +458,7 @@ func TestFindMCPConfigsReadsGeminiWakeLocations(t *testing.T) {
 // with GROK_HOME pointed at the wake home (as it is inside a wake run) too.
 func TestFindMCPConfigsReadsGrokWakeHome(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", filepath.Join(dir, "home"))
+	setHome(t, filepath.Join(dir, "home"))
 	t.Setenv("GROK_HOME", "")
 	cfgDir := filepath.Join(dir, "home", ".config", "tincan")
 	grokHome := filepath.Join(cfgDir, "grok-cli.wake", ".grok")
@@ -511,10 +497,7 @@ func TestFindMCPConfigsReadsGrokWakeHome(t *testing.T) {
 // ($COPILOT_HOME when set).
 func TestFindMCPConfigsReadsCopilotConfig(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "tincan")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	exe := fakeTincan(t, dir)
 	body := []byte(`{"mcpServers":{"agent-tincan":{"type":"local","command":"` + exe + `","args":["mcp"],"env":{"TINCAN_CONFIG":"/Users/x/.config/tincan/copilot-cli.json"},"tools":["*"]}}}`)
 	write := func(home string) string {
 		t.Helper()
@@ -537,7 +520,7 @@ func TestFindMCPConfigsReadsCopilotConfig(t *testing.T) {
 		return out
 	}
 	home := filepath.Join(dir, "home")
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("COPILOT_HOME", "")
 	f := write(filepath.Join(home, ".copilot"))
 	es := entriesIn(f)

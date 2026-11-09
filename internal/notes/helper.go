@@ -47,8 +47,14 @@ type Note struct {
 	Body    string      `json:"body"`
 }
 
-// StateActive is the only state search and read expose.
-const StateActive = "active"
+// Note states. StateActive is the only state search and read expose.
+const (
+	StateActive   = "active"
+	StateTrashed  = "trashed"
+	StateArchived = "archived"
+	// StateDeleted is a note an earlier add made that is now gone for good.
+	StateDeleted = "deleted"
+)
 
 // helperResponse is the helper's CLIResponse, only the fields used here.
 type helperResponse struct {
@@ -96,6 +102,9 @@ var permanentCodes = map[string]bool{
 	"invalid_request":    true,
 	"missing_input":      true,
 	"unsafe_path":        true,
+	// The app may have saved the note but it cannot be identified, so
+	// creating again could save it twice.
+	codeCreateUnconfirmed: true,
 }
 
 // IsPermanent reports whether err is a helper failure that retrying cannot
@@ -158,7 +167,7 @@ func (h *Helper) run(ctx context.Context, args ...string) (helperResponse, error
 		if runErr != nil {
 			msg = strings.TrimSpace(runErr.Error() + " " + msg)
 		}
-		return helperResponse{}, &HelperError{Code: "helper_bad_output", Message: msg}
+		return helperResponse{}, &HelperError{Code: codeBadOutput, Message: msg}
 	}
 	if !resp.OK {
 		he := &HelperError{Code: "operation_failed"}
@@ -187,6 +196,24 @@ func startFailureCode(ctx context.Context, err error) string {
 	}
 	return "helper_unavailable"
 }
+
+// Name is the app the helper belongs to.
+func (h *Helper) Name() string { return AgentNotesName }
+
+// Probe checks that the helper is installed and executable. The helper has
+// no count command, so the count is -1 (unknown).
+func (h *Helper) Probe(context.Context) (int, error) {
+	st, err := os.Stat(h.Path)
+	if err != nil {
+		return -1, &HelperError{Code: codeUnavailable, Message: err.Error()}
+	}
+	if st.IsDir() || st.Mode()&0o111 == 0 {
+		return -1, &HelperError{Code: codeUnavailable, Message: h.Path + " is not an executable"}
+	}
+	return -1, nil
+}
+
+var _ Backend = (*Helper)(nil)
 
 // CreateResult is the note an add made or found.
 type CreateResult struct {
@@ -222,7 +249,7 @@ func (h *Helper) Create(ctx context.Context, title, body string, tags []string, 
 		return CreateResult{}, err
 	}
 	if resp.Note == nil || resp.Note.Summary.ID == "" {
-		return CreateResult{}, &HelperError{Code: "helper_bad_output", Message: "create returned no note id"}
+		return CreateResult{}, &HelperError{Code: codeBadOutput, Message: "create returned no note id"}
 	}
 	res := CreateResult{Note: *resp.Note}
 	if resp.Existed != nil {
@@ -256,7 +283,7 @@ func (h *Helper) Read(ctx context.Context, id string) (Note, error) {
 		return Note{}, err
 	}
 	if resp.Note == nil {
-		return Note{}, &HelperError{Code: "helper_bad_output", Message: "read returned no note"}
+		return Note{}, &HelperError{Code: codeBadOutput, Message: "read returned no note"}
 	}
 	return *resp.Note, nil
 }

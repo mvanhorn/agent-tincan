@@ -218,10 +218,10 @@ func TestAgentInfoScheduleLabels(t *testing.T) {
 		wake, overdue string
 	}{
 		{"webhook", client.AgentInfo{Wake: "webhook"}, "webhook", ""},
-		{"on time", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300}, LastPoll: now.Add(-3 * time.Minute)}, "schedule (every 5m)", ""},
-		{"overdue", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, Overdue: true}, LastPoll: now.Add(-25 * time.Minute)}, "schedule (every 5m)", "overdue: last check 25m ago"},
-		{"overdue hours", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 3600, Overdue: true}, LastPoll: now.Add(-3 * time.Hour), LastActive: now}, "schedule (every 1h)", "overdue: last check 3h ago"},
-		{"never checked", client.AgentInfo{Wake: "schedule", Target: envelope.Target{CheckEverySeconds: 300, Overdue: true}}, "schedule (every 5m)", "overdue: no check recorded since it joined or the relay restarted"},
+		{"on time", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 300, LastPoll: now.Add(-3 * time.Minute)}, "schedule (every 5m)", ""},
+		{"overdue", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 300, Overdue: true, LastPoll: now.Add(-25 * time.Minute)}, "schedule (every 5m)", "overdue: last check 25m ago"},
+		{"overdue hours", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 3600, Overdue: true, LastPoll: now.Add(-3 * time.Hour), LastActive: now}, "schedule (every 1h)", "overdue: last check 3h ago"},
+		{"never checked", client.AgentInfo{Wake: "schedule", CheckEverySeconds: 300, Overdue: true}, "schedule (every 5m)", "overdue: no check recorded since it joined or the relay restarted"},
 		{"old relay", client.AgentInfo{Wake: "schedule"}, "schedule", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,15 +283,15 @@ func TestUnansweredField(t *testing.T) {
 		info client.AgentInfo
 		want string
 	}{
-		{"answered", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok"}}, ""},
+		{"answered", client.AgentInfo{Wake: "webhook", WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok"}, ""},
 		{"old relay", client.AgentInfo{Wake: "webhook"}, ""},
-		{"ok", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true}},
+		{"ok", client.AgentInfo{Wake: "webhook", WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok", Unanswered: true},
 			`unanswered="woken 12m ago, no check-in (webhook ok)"`},
-		{"failed", client.AgentInfo{Wake: "email", Target: envelope.Target{WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway", Unanswered: true}},
+		{"failed", client.AgentInfo{Wake: "email", WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway", Unanswered: true},
 			`unanswered="woken just now, no check-in (email failed: api.agentmail.to returned 502 Bad Gateway)"`},
-		{"fallback ok", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok (fallback 1: email)", Unanswered: true}},
+		{"fallback ok", client.AgentInfo{Wake: "webhook", WokenAt: now.Add(-12 * time.Minute), WakeResult: "ok (fallback 1: email)", Unanswered: true},
 			`unanswered="woken 12m ago, no check-in (webhook ok (fallback 1: email))"`},
-		{"fallback failed", client.AgentInfo{Wake: "webhook", Target: envelope.Target{WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway (fallback 1: email)", Unanswered: true}},
+		{"fallback failed", client.AgentInfo{Wake: "webhook", WokenAt: now, WakeResult: "api.agentmail.to returned 502 Bad Gateway (fallback 1: email)", Unanswered: true},
 			`unanswered="woken just now, no check-in (webhook failed: api.agentmail.to returned 502 Bad Gateway (fallback 1: email))"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -408,6 +408,11 @@ func TestFormatRequestRelayNotice(t *testing.T) {
 	if !strings.Contains(got, "Notice n1 from the Agent Tincan relay (not a teammate). No reply needed.") || !strings.Contains(got, "About your request r1") || strings.Contains(got, "your teammate") {
 		t.Fatalf("notice = %q", got)
 	}
+	at := time.Date(2026, 11, 8, 22, 16, 25, 0, time.UTC)
+	dated := client.FormatRequest(envelope.Request{ID: "n2", From: client.RelaySender, To: "instinct", Kind: envelope.KindNotify, Body: "About your request r1", CreatedAt: at})
+	if want := "Notice n2 from the Agent Tincan relay (not a teammate), sent " + client.UTCClock(at, time.Now()) + ". No reply needed."; !strings.Contains(dated, want) {
+		t.Fatalf("dated notice = %q, want %q", dated, want)
+	}
 	ask := client.FormatRequest(envelope.Request{ID: "r2", From: "muse", To: "instinct", Kind: envelope.KindNotify, Body: "fyi"})
 	if !strings.Contains(ask, "Request r2 from muse (your teammate)") {
 		t.Fatalf("teammate notify = %q", ask)
@@ -484,6 +489,84 @@ func TestFormatRoomPostResponse(t *testing.T) {
 	for _, want := range []string{"Posted #5 to launch.", "Asked claude-code (request r9)", "@phone not sent"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+}
+
+// A guest's request never reads as owner-authorized work. Once the owner
+// approved it, it says so, and it is still not a teammate's.
+func TestFormatRequestMarksAGuest(t *testing.T) {
+	unapproved := client.FormatRequest(envelope.Request{ID: "r1", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true})
+	if strings.Contains(unapproved, "your teammate") || strings.Contains(unapproved, "as you would a request from the owner") || !strings.Contains(unapproved, "not owner-authorized") {
+		t.Fatalf("unapproved = %q", unapproved)
+	}
+	approved := client.FormatRequest(envelope.Request{ID: "r2", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true, GuestApproved: true})
+	if strings.Contains(approved, "your teammate") || !strings.Contains(approved, "the owner approved") {
+		t.Fatalf("approved = %q", approved)
+	}
+	// A teammate carrying a guest's work is still that teammate, marked.
+	carried := client.FormatRequest(envelope.Request{ID: "r3", From: "muse", Kind: envelope.KindAsk, Body: "x", FromGuest: true, Chain: []string{"friend", "muse"}, Hop: 2})
+	if !strings.Contains(carried, "guest") || strings.Contains(carried, "as you would a request from the owner") {
+		t.Fatalf("carried = %q", carried)
+	}
+}
+
+// A teammate's marked ask can have a chain of one, when the relay could not
+// pick a parent, so the sender is never called a guest.
+func TestFormatRequestDoesNotCallATeammateAGuest(t *testing.T) {
+	out := client.FormatRequest(envelope.Request{ID: "r", From: "muse", To: "instinct", Chain: []string{"muse"}, Hop: 1, FromGuest: true, Body: "x"})
+	if strings.Contains(out, "muse (a guest") {
+		t.Fatalf("out = %q", out)
+	}
+	if !strings.Contains(out, "outside input") {
+		t.Fatalf("out = %q", out)
+	}
+}
+
+// The held-work line does not call an unapproved guest ask owner-authorized.
+func TestFormatHeldMarksAGuest(t *testing.T) {
+	now := time.Now()
+	teammate := envelope.Held{ID: "a", From: "muse"}
+	approved := envelope.Held{ID: "b", From: "friend", FromGuest: true, GuestApproved: true}
+	outside := envelope.Held{ID: "c", From: "friend", FromGuest: true}
+	if got := client.FormatHeld([]envelope.Held{teammate, approved}, now); !strings.Contains(got, "This is owner-authorized work.") || !strings.Contains(got, "a guest's, approved by the owner") {
+		t.Fatalf("held = %q", got)
+	}
+	got := client.FormatHeld([]envelope.Held{teammate, outside}, now)
+	if strings.Contains(got, "This is owner-authorized work.") || !strings.Contains(got, "a guest's, not approved") || !strings.Contains(got, "outside input") {
+		t.Fatalf("held = %q", got)
+	}
+}
+
+// With a guest's request in it, the inbox does not head the list as teammates'.
+func TestInboxHeaderWithAGuest(t *testing.T) {
+	in := client.Inbox{Replies: []client.Result{{Request: envelope.Request{ID: "r", To: "muse"}, Status: envelope.StatusAnswered, Reply: &envelope.Reply{From: "muse", Status: envelope.StatusAnswered, Body: "ok"}}},
+		Requests: []envelope.Request{{ID: "q", From: "friend", To: "muse", Kind: envelope.KindAsk, Body: "hi", FromGuest: true}}}
+	if out := client.FormatInbox(context.Background(), claimAny{}, in); !strings.Contains(out, "Requests:\n") || strings.Contains(out, "Requests from teammates") {
+		t.Fatalf("inbox = %q", out)
+	}
+}
+
+type claimAny struct{}
+
+func (claimAny) Claim(context.Context, string) (envelope.Request, error) {
+	return envelope.Request{}, nil
+}
+
+// A teammate's request tells the receiver that a follow-up keeps the job's
+// terms; a guest's request never gets that owner framing.
+func TestFormatRequestSaysAFollowUpKeepsTheJobsTerms(t *testing.T) {
+	const keeps = "A follow-up on a job keeps that job's terms"
+	teammate := client.FormatRequest(envelope.Request{ID: "r1", From: "instinct", Kind: envelope.KindAsk, Body: "do not open a PR"})
+	if !strings.Contains(teammate, keeps) {
+		t.Fatalf("teammate = %q", teammate)
+	}
+	for _, req := range []envelope.Request{
+		{ID: "r2", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true},
+		{ID: "r3", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true, GuestApproved: true},
+	} {
+		if got := client.FormatRequest(req); strings.Contains(got, keeps) {
+			t.Fatalf("guest request %s = %q", req.ID, got)
 		}
 	}
 }

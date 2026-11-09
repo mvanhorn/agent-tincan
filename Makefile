@@ -10,7 +10,8 @@
 #   make store   - Chrome Web Store upload zip (no manifest "key") in
 #                  dist/tincan-history-extension-store.zip, with its sha256
 #   make dist    - every release asset in dist/: tincan_<os>_<arch> for the
-#                  four release targets, checksums.txt, and the extension zip
+#                  six release targets (.exe on Windows), checksums.txt, and
+#                  the extension zip
 #   make sign-mac     - codesign dist/tincan_darwin_* with the Developer ID
 #                       identity (hardened runtime, timestamp), then rewrite
 #                       checksums.txt
@@ -76,7 +77,7 @@ extension-test:
 # Release targets: the raw binaries the release page and the relay's --dist
 # directory carry, stripped (-s -w) like the published releases.
 # checksums.txt covers the binaries and unpacked extension zip.
-RELEASE_TARGETS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
+RELEASE_TARGETS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
 # MACAPP=1 builds the darwin binaries with the Agent Tincan.app zip that
 # `make mac-app` wrote (build tag macapp); release sets it when signing.
@@ -86,7 +87,8 @@ dist: extension
 	rm -f dist/tincan_* dist/checksums.txt
 	for t in $(RELEASE_TARGETS); do \
 		tags=; if [ "$(MACAPP)" = 1 ] && [ "$${t%/*}" = darwin ]; then tags="-tags macapp"; fi; \
-		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} go build $$tags -ldflags "-s -w $(LDFLAGS)" -o dist/tincan_$${t%/*}_$${t#*/} ./cmd/tincan || exit 1; \
+		ext=; if [ "$${t%/*}" = windows ]; then ext=.exe; fi; \
+		CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} go build $$tags -ldflags "-s -w $(LDFLAGS)" -o dist/tincan_$${t%/*}_$${t#*/}$$ext ./cmd/tincan || exit 1; \
 	done
 	$(MAKE) checksums
 
@@ -204,7 +206,7 @@ RELEASE_REMOTE ?= origin
 RELEASE_BRANCH ?= main
 RELEASE_REPO ?= mvanhorn/agent-tincan
 RELEASE_TINCAN ?= go run ./cmd/tincan
-RELEASE_ASSETS := dist/checksums.txt dist/tincan-history-extension.zip dist/tincan_darwin_amd64 dist/tincan_darwin_arm64 dist/tincan_linux_amd64 dist/tincan_linux_arm64
+RELEASE_ASSETS := dist/checksums.txt dist/tincan-history-extension.zip dist/tincan_darwin_amd64 dist/tincan_darwin_arm64 dist/tincan_linux_amd64 dist/tincan_linux_arm64 dist/tincan_windows_amd64.exe dist/tincan_windows_arm64.exe
 SIGN ?= 1
 CWS ?= 1
 DRY_RUN ?=

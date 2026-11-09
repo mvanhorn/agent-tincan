@@ -42,7 +42,7 @@
 // it names the new owner message. A dots send needs its thread id, which
 // stays its conversation id, and never types over text already in the
 // composer (keepDraft). A Claude Duet channel works the same way: its page
-// is https://claude.ai/messages/<channel id>, the channel id is the
+// is https://claude.ai/duet/<channel id>, the channel id is the
 // conversation id, and the timeline confirms the send.
 //
 // While that tab is still open, capture fetches one of Gemini's images
@@ -229,7 +229,7 @@ export const SELECTORS = Object.freeze({
     loginPaths: ['/auth/login', '/log-in'],
     keepDraft: true,
   }),
-  // A Claude Duet channel on claude.ai/messages: a plain textarea whose
+  // A Claude Duet channel on claude.ai/duet: a plain textarea whose
   // placeholder names a named channel ("Message #<name>"), or, in the main
   // Duet chat, whose aria-label is "Message Claude Duet", and a Send button
   //. As in a dot's DM, the owner may be typing there too
@@ -305,12 +305,13 @@ export const SITES = Object.freeze({
     needsConversation: true,
     confirmByFeed: true,
   }),
-  // A Duet channel is /messages/<channel id>; there is no new chat, and
-  // the timeline confirms the send, as for a dot.
+  // A Duet channel is /duet/<channel id> (claude.ai redirects the older
+  // /messages/<channel id> there, so both are read as the channel); there
+  // is no new chat, and the timeline confirms the send, as for a dot.
   duet: Object.freeze({
-    newURL: 'https://claude.ai/messages',
-    convURL: (id) => `https://claude.ai/messages/${encodeURIComponent(id)}`,
-    idFrom: /^https:\/\/claude\.ai\/messages\/(chan_[A-Za-z0-9]{8,64})(?:[/?#]|$)/,
+    newURL: 'https://claude.ai/duet',
+    convURL: (id) => `https://claude.ai/duet/${encodeURIComponent(id)}`,
+    idFrom: /^https:\/\/claude\.ai\/(?:duet|messages)\/(chan_[A-Za-z0-9]{8,64})(?:[/?#]|$)/,
     needsConversation: true,
     confirmByFeed: true,
   }),

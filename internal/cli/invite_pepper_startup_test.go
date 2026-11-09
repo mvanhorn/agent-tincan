@@ -15,6 +15,7 @@ import (
 
 // Only disposable test state is used; never print the fixture contents.
 func TestInvitePepperConcurrentFirstStart(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	old := runtime.GOMAXPROCS(8)
 	defer runtime.GOMAXPROCS(old)
 	const workers = 32
@@ -62,6 +63,7 @@ func TestInvitePepperConcurrentFirstStart(t *testing.T) {
 }
 
 func TestInvitePepperRestartPreservesFile(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	dir := t.TempDir()
 	a, err := loadOrCreateInvitePepper(dir)
 	if err != nil {
@@ -83,12 +85,13 @@ func TestInvitePepperRestartPreservesFile(t *testing.T) {
 	if len(a) != 32 || !bytes.Equal(a, b) || !os.SameFile(before, after) {
 		t.Fatal("restart changed the existing file or value")
 	}
-	if runtime.GOOS != "windows" && after.Mode().Perm() != 0600 {
+	if after.Mode().Perm() != 0600 {
 		t.Fatal("unexpected file permissions")
 	}
 }
 
 func TestInvitePepperIncompleteFileRemainsRejected(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "invite-pepper")
 	fixture := []byte("incomplete-test-fixture")
@@ -126,6 +129,7 @@ func (r fileBackedInviteResolver) WhoIs(context.Context, string) (identity.Node,
 // the SQLite store and persisted pepper, close both, reopen them, and redeem
 // the raw code through a fresh Directory.
 func TestFileBackedInviteRoundTripAcrossRelayRestart(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	ctx := context.Background()
 	stateDir := t.TempDir()
 	dbPath := filepath.Join(stateDir, "relay.db")

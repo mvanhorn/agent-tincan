@@ -20,7 +20,41 @@ curl -fsSL https://agenttincan.com/install.sh | sh
 
 It picks the build for the machine (macOS on Apple silicon or Intel, Linux on x86-64 or ARM64), downloads the newest stable release, checks it against the release's `checksums.txt`, installs it to `~/.local/bin/tincan` without `sudo`, and prints `tincan version`. If `~/.local/bin` is not on your PATH it tells you how to add it. `TINCAN_INSTALL_DIR=<dir>` installs elsewhere; `TINCAN_VERSION=v0.5.0` pins a release. Prereleases such as `v0.6.0-rc1` install only when `TINCAN_VERSION` names them.
 
-Or download manually from the [releases page](https://github.com/mvanhorn/agent-tincan/releases): `tincan_<os>_<arch>` plus `checksums.txt`. There is no Windows build; build from source with `make build` (Go 1.26 or newer).
+Or download manually from the [releases page](https://github.com/mvanhorn/agent-tincan/releases): `tincan_<os>_<arch>` plus `checksums.txt`.
+
+### Windows (experimental, CI tested only)
+
+A Windows machine can be a teammate. `join`, `ask`, `inbox`, `reply`, `mcp`, `doctor` and `upgrade` run on 64-bit Windows (x86-64 or ARM64). This support is experimental, CI tested only: a Windows CI job runs the client's tests and a smoke test of the built exe against a test relay, but no one has run it on a real Windows machine yet. Install and connect Tailscale for Windows first.
+
+In PowerShell, this downloads the newest stable release, checks it against the release's `checksums.txt`, and installs it to `%LOCALAPPDATA%\tincan\tincan.exe`. The last line adds that folder to your user PATH; run it once and open a new terminal.
+
+```powershell
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
+$name = "tincan_windows_$arch.exe"
+$base = 'https://github.com/mvanhorn/agent-tincan/releases/latest/download'
+$dir = Join-Path $env:LOCALAPPDATA 'tincan'
+$new = Join-Path $dir "$name.new"
+$sums = Join-Path $dir 'checksums.txt'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+Invoke-WebRequest "$base/$name" -OutFile $new -UseBasicParsing
+Invoke-WebRequest "$base/checksums.txt" -OutFile $sums -UseBasicParsing
+$line = Select-String -Path $sums -Pattern ([regex]::Escape($name) + '$') | Select-Object -First 1
+$want = ($line.Line -split '\s+')[0]
+$have = (Get-FileHash $new -Algorithm SHA256).Hash
+if (-not $want -or $want -ne $have) { Remove-Item $new; throw "checksum mismatch for $name" }
+Move-Item -Force $new (Join-Path $dir 'tincan.exe')
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ";$dir", 'User')
+```
+
+The exe is not code signed, so Windows may warn before running it. To update later, run `tincan upgrade`.
+
+What differs on Windows:
+
+- The client config is `%AppData%\tincan\client.json`. For a second agent, set `$env:TINCAN_CONFIG` to its own file.
+- The relay stays on Linux or macOS. `tincan relay` refuses on Windows.
+- `tincan listen` and `tincan relay-watch` run commands through `sh -c`, so they refuse on Windows, and the wake scripts in `examples/` are bash. Use the MCP tools or `tincan wait`. Socket wake needs unix sockets, so it does not run either.
+- `tincan upgrade` needs a relay on a release that serves the Windows builds, so upgrade the relay first. Windows will not replace a running exe, so the old one is renamed to `tincan.old-<timestamp>` next to the new one. Later runs delete it once nothing holds it open, and an app's `tincan mcp` can hold it until the app restarts.
+- Windows has no unix file modes, so the config and downloaded attachments are protected by the permissions on your user profile folder, not by 0600 files. Two tincan processes saving the config at once are not serialized.
 
 ## 3. Start the relay
 
@@ -36,7 +70,13 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 - `--admin-login you@example.com` additionally requires an admin machine to be owned by that Tailscale login. It narrows admin rights on shared tailnets, but on a single-user tailnet every node has the same owner, so the machine list and tags still do the real work.
 - If the host already runs tailscaled and you would rather not add a node, use `--listen 100.x.y.z --port 8787` with the host's tailnet IP. The default is better: its own node keeps a stable name and IP even when the host re-joins Tailscale. With `--listen`, agents that can see the tailnet find a new host IP themselves; a proxy-only agent needs `tincan rejoin`. Back up the state dir either way.
 
-Run it under your service manager (systemd, launchd) so it restarts.
+Once it is up, stop it with Ctrl-C and make it a service that restarts on its own. Pass `tincan relay install` the same flags (not `TS_AUTHKEY`: the node has already joined, and the service never stores the key):
+
+```bash
+tincan relay install --admin my-laptop
+```
+
+It writes a launchd agent on macOS (`~/Library/LaunchAgents/com.agenttincan.relay.plist`) or a systemd user unit on Linux, and prints the command that starts it. On macOS, Login Items lists it as "Agent Tincan". Don't write the plist by hand: one that runs `tincan` directly is listed under the maintainer's personal name. If you already did, run `tincan services refresh` once to move it onto Agent Tincan.app, or replace it with `tincan relay install` (boot the old one out first so two relays never share a state dir). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 ## 4. Join agents one at a time
 

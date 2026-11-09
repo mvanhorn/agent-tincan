@@ -7,14 +7,13 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
-	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
 // AgentInfo embeds Target with its fields at the top level, so the wake
 // facts a send carries must not share a JSON name with the roster's own
 // wake and online fields. A round trip keeps all four apart.
 func TestAgentInfoJSONKeepsWakeAndOnline(t *testing.T) {
-	in := client.AgentInfo{Name: "muse", Wake: "channel", Online: true, Target: envelope.Target{WakeVia: "socket", Listening: false}}
+	in := client.AgentInfo{Name: "muse", Wake: "channel", Online: true, WakeVia: "socket", Listening: false}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +38,7 @@ func TestAgentInfoJSONKeepsWakeAndOnline(t *testing.T) {
 // an entry without them (an older relay's) carries none of their keys.
 func TestAgentInfoJSONStatusFields(t *testing.T) {
 	since := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
-	in := client.AgentInfo{Name: "codex", Status: client.StatusBusy, BusyFor: "claude-code", BusySince: since, Target: envelope.Target{Unanswered: true}}
+	in := client.AgentInfo{Name: "codex", Status: client.StatusBusy, BusyFor: "claude-code", BusySince: since, Unanswered: true}
 	b, err := json.Marshal(in)
 	if err != nil {
 		t.Fatal(err)

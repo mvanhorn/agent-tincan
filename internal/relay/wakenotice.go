@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -68,7 +69,14 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 				return
 			}
 		}
-		note := s.wakeNote(agent, wk, s.onlineTeammates(roster, now, req.From, agent), now)
+		online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, agent)
+		var note string
+		if guestAsker(roster, req.From) {
+			// How a teammate wakes and how that went are not a guest's to read.
+			note = fmt.Sprintf("%s has not picked this up yet. The request is still queued.", agent) + suggest(online, "If it can't wait, cancel it and ask")
+		} else {
+			note = s.wakeNote(agent, wk, online, now)
+		}
 		s.noteAndTell(ctx, req, store.NoteWake, 0, note, now)
 	}
 }
@@ -178,7 +186,7 @@ func (s *Server) noteAndTell(ctx context.Context, req envelope.Request, kind str
 		return
 	}
 	s.record(ctx, "relay_note", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"kind": kind, "to": req.From, "agent": req.To}))
-	s.noticeAsker(ctx, req, note)
+	s.noticeAsker(ctx, req, kind, note, now)
 }
 
 // tellSwept tells askers about what a sweep did to their asks: a claim
@@ -193,17 +201,20 @@ func (s *Server) tellSwept(ctx context.Context, t store.Transition) {
 	if !staleClaim && t.Status != envelope.StatusExpired {
 		return
 	}
-	req, _, err := s.store.Request(ctx, t.ID)
+	req, status, err := s.store.Request(ctx, t.ID)
 	if err != nil {
 		log.Printf("relay note %s: %v", t.ID, err)
 		return
+	}
+	if staleClaim && requestClosed(status) {
+		return // a reply or cancel landed after the requeue; the lapse is old news
 	}
 	now := s.cfg.Now()
 	roster, err := s.dir.Agents(ctx)
 	if err != nil {
 		log.Printf("relay note %s: roster: %v", t.ID, err)
 	}
-	online := s.onlineTeammates(roster, now, req.From, req.To)
+	online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, req.To)
 	if staleClaim {
 		note := fmt.Sprintf("%s claimed this %s ago and did not reply or post progress before its claim lease ran out; it has been requeued", req.To, ageText(now.Sub(t.ClaimedAt)))
 		if s.wake != nil && relayWoken(s.wake.WakeMethod(req.To)) {
@@ -226,6 +237,20 @@ func (s *Server) tellSwept(ctx context.Context, t store.Transition) {
 	}
 	note := fmt.Sprintf("This request expired after %s with no reply. %s", ageText(now.Sub(req.CreatedAt)), held) + suggest(online, "If you still need it, ask again or ask")
 	s.noteAndTell(ctx, req, store.NoteExpired, 0, note, now)
+}
+
+// requestClosed reports a request the asker needs no stale-claim notice
+// for: it was answered, declined, failed or cancelled.
+func requestClosed(st envelope.Status) bool {
+	return st.Terminal() || st == envelope.StatusCancelled
+}
+
+// recordSuperseded audits each of the relay's queued notices about request
+// id that its reply or cancel (why) closed without delivery.
+func (s *Server) recordSuperseded(ctx context.Context, id, why string, closed []string) {
+	for _, n := range closed {
+		s.record(ctx, "notice_superseded", n, "", "relay", store.DetailJSON(map[string]any{"notice_for": id, "by": why}))
+	}
 }
 
 // suggest is " <lead> a teammate who is online and good at this: a, b." or,
@@ -300,12 +325,18 @@ func (s *Server) polledRecently(last, now time.Time) bool {
 // approval notice goes out: check_inbox shows it, a held poll returns it,
 // and the waker wakes a webhook or email asker for it. It carries the
 // asker's own request id and a preview of what they asked, so a fresh
-// session knows which request it is about.
-func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, note string) {
-	body := fmt.Sprintf("About your request %s to %s (you asked: %s): %s No reply needed.",
-		req.ID, req.To, strings.Join(strings.Fields(approvalPreview(req.Body)), " "), note)
-	n := envelope.Request{From: "relay", To: req.From, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: body}
+// session knows which request it is about. A stale-claim notice is linked
+// to req, so a reply or cancel that closes req first closes it unsent.
+func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, kind, note string, now time.Time) {
+	n := askerNotice(req, note, now)
+	if kind == store.NoteStaleClaim {
+		n.NoticeFor, n.NoticeKind = req.ID, kind
+	}
 	n, err := s.store.Enqueue(ctx, n, s.requestTTL(ctx, n.To))
+	if errors.Is(err, store.ErrNoticeSuperseded) {
+		log.Printf("wake notice %s: not sent to %s, the request closed first", req.ID, req.From)
+		return
+	}
 	if err != nil {
 		log.Printf("wake notice %s: tell %s: %v", req.ID, req.From, err)
 		s.record(ctx, "wake_notice_failed", req.ID, req.TraceID, "relay", "")
@@ -313,4 +344,12 @@ func (s *Server) noticeAsker(ctx context.Context, req envelope.Request, note str
 	}
 	s.record(ctx, "queued", n.ID, n.TraceID, "relay", store.DetailJSON(map[string]any{"wake_notice_for": req.ID, "to": n.To}))
 	s.noticeQueued(ctx, n)
+}
+
+// askerNotice is the notify noticeAsker sends. It says when the relay made
+// it, so an asker reading it late can tell it from news.
+func askerNotice(req envelope.Request, note string, now time.Time) envelope.Request {
+	body := fmt.Sprintf("About your request %s to %s (you asked: %s): %s Sent by the relay at %s. No reply needed.",
+		req.ID, req.To, strings.Join(strings.Fields(approvalPreview(req.Body)), " "), note, client.UTCClock(now, now))
+	return envelope.Request{From: "relay", To: req.From, Kind: envelope.KindNotify, Hop: 1, Chain: []string{"relay"}, Body: body}
 }

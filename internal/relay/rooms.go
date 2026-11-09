@@ -56,6 +56,8 @@ func roomVendor(a identity.Agent) bool {
 // approval.json starts holding is shut out at once.
 func (s *Server) roomRefusal(a identity.Agent) error {
 	switch {
+	case a.Guest.Set():
+		return errors.New(a.Name + " is a guest")
 	case roomHeldKinds[a.Kind]:
 		return errors.New("asks to a " + a.Kind + " agent are held for the owner's approval")
 	case roomServiceKinds[a.Kind]:

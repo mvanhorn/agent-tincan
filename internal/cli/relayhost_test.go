@@ -18,12 +18,13 @@ import (
 // rather than in the test's own temp dir.
 func serveAdminSocket(t *testing.T, m *testrelay.Mesh) {
 	t.Helper()
+	skipOnWindows(t, skipRelayHost)
 	home, err := os.MkdirTemp("/tmp", "tincan-host-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	dir := defaultStateDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -72,7 +73,7 @@ func TestAgentsAndOnboardWorkOnRelayHostWithoutFlags(t *testing.T) {
 // what to do instead of guessing.
 func TestAgentsAndOnboardWithoutRelaySayHow(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	useConfig(t, client.Config{})
 	if _, err := run(t, agentsCmd()); err == nil || !strings.Contains(err.Error(), "no relay configured") {

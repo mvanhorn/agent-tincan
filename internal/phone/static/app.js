@@ -245,6 +245,10 @@ function heldCard(entry) {
     li.append(el("p", "meta", "chain: " + item.chain.join(" > ")));
   }
   li.append(el("p", "body", item.body));
+  if (item.then) {
+    li.append(el("p", "meta", "Then, once answered, asks " + item.then.to + ":"));
+    li.append(el("p", "body", item.then.body));
+  }
   const files = item.attachments || [];
   if (files.length) {
     li.append(el("p", "meta", plural(files.length, "attachment") + ":"));
@@ -951,13 +955,22 @@ async function refresh() {
   }
 }
 
+// heldText is what a held card shows the owner before they decide.
+function heldText(item) {
+  return JSON.stringify([item.body, item.then && item.then.body]);
+}
+
 function mergeHeld(items) {
   const seen = new Set();
   for (const item of items) {
     seen.add(item.id);
     const entry = state.held.get(item.id);
     if (entry) {
-      entry.item = item; // fresh nonces; the request itself does not change
+      // Fresh nonces, and text the relay cut can come back whole, so a card
+      // never offers a fresh nonce for text it no longer matches.
+      const old = entry.item;
+      entry.item = item;
+      if (entry.li && heldText(old) !== heldText(item)) entry.li.replaceWith(heldCard(entry));
     } else {
       state.held.set(item.id, { item, li: null, deciding: false, note: "", noteAt: 0 });
     }

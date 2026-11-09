@@ -117,6 +117,7 @@ type relayProcess struct {
 // unix socket paths are length-limited, so it sits directly under /tmp.
 func relayStateDir(t *testing.T) string {
 	t.Helper()
+	skipOnWindows(t, skipRelayHost)
 	dir, err := os.MkdirTemp("/tmp", "tincan-relay-")
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +146,7 @@ func startRelayProcessIn(t *testing.T, dir string, extra ...string) *relayProces
 // caller can retry a relay that exited at startup.
 func tryRelayProcessIn(t *testing.T, dir string, extra ...string) (*relayProcess, error) {
 	t.Helper()
+	skipOnWindows(t, skipRelayHost)
 	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 	os.Remove(filepath.Join(dir, "url"))
 	p := &relayProcess{dir: dir, out: &lockedBuffer{}, done: make(chan error, 1)}

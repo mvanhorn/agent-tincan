@@ -14,6 +14,7 @@ import (
 // restart, kept apart from invite-pepper, and refused when it is unsafe,
 // exactly like invite-pepper. Never print the key.
 func TestEmailTagKeyCreatedPrivateAndReused(t *testing.T) {
+	skipOnWindows(t, skipRelayHost)
 	dir := t.TempDir()
 	a, err := loadOrCreateEmailTagKey(dir)
 	if err != nil {

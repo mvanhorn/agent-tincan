@@ -15,6 +15,7 @@ var Version = "0.0.1-dev"
 
 func main() {
 	cli.Version = Version
+	cli.RemoveOldBinaries()
 	if err := cli.Root().ExecuteContext(context.Background()); err != nil {
 		code, silent := cli.ExitStatus(err)
 		if !silent {

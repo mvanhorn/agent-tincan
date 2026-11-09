@@ -80,8 +80,10 @@ const requeueClaim = `status = 'queued', lease_until = 0, claimed_at = 0, claim_
 // handback). Either way it ends queued for to, with the claim, lease,
 // progress and hold-back cleared as a lease requeue clears them, from added
 // to moved_from, and its pending wake note deleted so to's silence is
-// reported in turn. A request never moves to an agent it moved from, nor
-// once a claim on it lapsed (ClaimLapsed). It returns ErrWrongState when the request is no longer in that state for
+// reported in turn. Its project is dropped: the label named a session of
+// from, and waiting on it would only delay the new target. A request never
+// moves to an agent it moved from, nor once a claim on it lapsed
+// (ClaimLapsed). It returns ErrWrongState when the request is no longer in that state for
 // from (a Deliver or Claim won), and the moved request otherwise.
 func (s *Store) Move(ctx context.Context, id, from, to string, claimed bool) (envelope.Request, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -109,7 +111,7 @@ func (s *Store) Move(ctx context.Context, id, from, to string, claimed bool) (en
 	if claimed {
 		args = append(args, now)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET to_agent = ?, moved_from = ?, `+requeueClaim+`, deliver_after = 0, updated_at = ?
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET to_agent = ?, moved_from = ?, to_project = '', `+requeueClaim+`, deliver_after = 0, updated_at = ?
 		WHERE id = ? AND to_agent = ? AND expires_at > ? AND claim_lapsed = 0 AND `+cond, args...)
 	if err != nil {
 		return envelope.Request{}, err

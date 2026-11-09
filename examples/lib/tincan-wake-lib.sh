@@ -764,7 +764,7 @@ tincan_wake_json_tool() {
 # tincan_wake_tools lists the Agent Tincan tools (internal/mcpserver), the
 # only ones a wake that allowlists tools lets a run use.
 # shellcheck disable=SC2034 # read by the wake scripts
-tincan_wake_tools="ask get_reply check_inbox claim progress reply answer cancel list_agents onboard get_attachment trace search watch list_rooms room_read room_post"
+tincan_wake_tools="ask get_reply check_inbox claim progress reply answer cancel list_agents onboard get_attachment trace search watch list_rooms room_read room_post lease list_leases list_schedules cancel_schedule"
 
 # tincan_wake_config_path CONFIG prints CONFIG with a leading ~/ expanded
 # (as tincan does) and made absolute against the current directory, for a

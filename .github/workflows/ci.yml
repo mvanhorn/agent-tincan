@@ -26,6 +26,33 @@ jobs:
       - name: go test
         run: go test -race ./...
 
+  # The Windows client has no real-machine test, so this job is its acceptance
+  # check. It covers the client packages, without -race, and the smoke test
+  # drives the built exe. Tests that cannot hold on Windows skip one by one,
+  # each with its reason. The relay does not run on Windows.
+  windows:
+    name: vet + test (windows-latest, client)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      CLIENT_PACKAGES: ./internal/cli ./internal/client ./internal/mcpserver ./internal/envelope ./internal/onboard ./internal/textfit
+    steps:
+      # Embedded templates and fixtures must keep their LF line endings.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet $CLIENT_PACKAGES ./cmd/tincan
+      - name: go test
+        run: go test -timeout 20m $CLIENT_PACKAGES
+      - name: smoke test the built exe
+        run: go test -v -run TestBuiltBinarySmoke ./cmd/tincan
+
   static-build:
     name: static build (CGO_ENABLED=0)
     runs-on: ubuntu-latest
@@ -39,6 +66,6 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
-          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64; do
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64 windows/amd64 windows/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/tincan
           done

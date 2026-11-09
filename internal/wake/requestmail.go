@@ -30,7 +30,8 @@ import (
 // new ask that arrives while a follow-up is due gets its first email on the
 // debounce (armMail), and the follow-up keeps its time.
 //
-// Held requests, pings and notifies never reach a request email: they and
+// Held requests, a guest's marked asks, pings and notifies never reach a
+// request email: they and
 // unseen replies are still told by the count-only email, as is everything
 // on a fallback path, which never carries request text. Request text, tags
 // and the AgentMail key never go to the relay log or the audit log.

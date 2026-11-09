@@ -51,7 +51,8 @@ const selfUpgradeTimeout = distDownloadTimeout
 func (s *Server) SetSelfUpgrader(u SelfUpgrader) { s.upgrader = u }
 
 // IsDistBinary reports whether name is a release binary name the dist
-// serves: tincan_<linux|darwin>_<amd64|arm64>.
+// serves: tincan_<linux|darwin>_<amd64|arm64> or
+// tincan_windows_<amd64|arm64>.exe.
 func IsDistBinary(name string) bool { return distBinary.MatchString(name) }
 
 // handleSelfUpgrade installs a release over the relay's own binary (admin

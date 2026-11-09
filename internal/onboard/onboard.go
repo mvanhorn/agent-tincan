@@ -140,7 +140,7 @@ var defaultWake = map[string]string{
 // OpenClaw do not, because the owner decides what runs there.
 var stockGoodAt = map[string]string{
 	KindHistory:       "chats, images: ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Cursor, OpenCode, Gemini/Copilot/Grok CLI",
-	KindNotes:         "saves, searches and reads the owner's Agent Notes on their Mac; never edits or deletes one",
+	KindNotes:         "saves, finds, reads owner's Agent Notes (family names, birthdays, loyalty numbers); search before asking the owner",
 	KindCouncil:       "asks web, CLI and webhook agents (not Claude Code) one question, ranks answers blind; slow, held for approval by default",
 	KindPass:          "moves one of the owner's chats (by URL or id) into a new chat on a web chat teammate; held for approval by default",
 	KindChatGPTWeb:    "asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any images ChatGPT made",
@@ -150,7 +150,7 @@ var stockGoodAt = map[string]string{
 	KindPerplexityWeb: "asks Perplexity (www.perplexity.ai) in the owner's browser and replies with the answer and its source links",
 	KindCopilotWeb:    "asks Microsoft Copilot (copilot.com) in the owner's browser and replies with the answer and its source links",
 	KindDotWeb:        "asks the owner's OpenAI dot (chatgpt.com/dots), which acts in their connected apps; held for approval by default",
-	KindDuetWeb:       "asks Claude in the owner's Duet channel (claude.ai/messages), which uses their apps; held for approval by default",
+	KindDuetWeb:       "asks Claude in the owner's Duet channel (claude.ai/duet), which uses their apps; held for approval by default",
 	KindClaudeCode:    "Claude Code in a terminal on the owner's machine: reads, edits and runs code; answers only while a session is open",
 	KindCodex:         "OpenAI Codex run unattended on the owner's machine: reads code anywhere, edits and runs it in its own work folder",
 	KindGeminiCLI:     "a Gemini coding agent run unattended on the owner's machine: reads, edits and runs code",

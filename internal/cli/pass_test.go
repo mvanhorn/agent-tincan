@@ -64,7 +64,7 @@ func passMeshAt(t *testing.T, version string, convs ...history.Conversation) (m 
 	t.Cleanup(func() { client.Version = oldVersion })
 	t.Setenv("TINCAN_RELAY", "")
 	t.Setenv("TINCAN_PROXY", "")
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	m = testrelay.New(t, relay.Config{})
 	web = m.JoinOnMachineOf(t, "muse", "chatgpt-web")
 	if err := m.Client(t, "admin").SetKind(t.Context(), "chatgpt-web", "chatgpt-web"); err != nil {

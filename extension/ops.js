@@ -53,7 +53,7 @@
 // polling the feed for it (dotHooks), since the DM page's address never
 // changes.
 //
-// Claude Duet (claude.ai/messages, under claude.ai's grant): a channel is
+// Claude Duet (claude.ai/duet, under claude.ai's grant): a channel is
 // read from claude.ai's channels API with the owner's cookies, the
 // organization header claudeOrgId reads and the API version header the
 // page sends: the channel record (the owner, and whether it is a 1:1
@@ -204,7 +204,7 @@ const DOT_ROOM_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const DOT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}~[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 // DOT_THREAD_RE is a dot thread id as tincan takes it (hex and hyphens).
 const DOT_THREAD_RE = /^[0-9A-Fa-f-]{8,64}$/;
-// DUET_CHANNEL_RE is a Duet channel id, as claude.ai/messages/<id> shows it.
+// DUET_CHANNEL_RE is a Duet channel id, as claude.ai/duet/<id> shows it.
 const DUET_CHANNEL_RE = /^chan_[A-Za-z0-9]{8,64}$/;
 // DUET_API_VERSION is the anthropic-version header the channels API wants;
 // without it the API answers 400.

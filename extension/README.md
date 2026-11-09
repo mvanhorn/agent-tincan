@@ -171,7 +171,7 @@ the same bearer `chatgptAuth` reads, which never leaves the worker.
 | `dots.close` | `conversation_id` | Closes the tab a dots send left open. |
 | `dots.primary` | none | `GET /backend-api/tbo/primary`. Returns the account's primary dot as `{thread, dot, name}` (its current thread, its id and its name), for `tincan web install --site dots` without `--thread`. An unexpected shape is `endpoint_changed`. |
 
-## Claude Duet (claude.ai/messages)
+## Claude Duet (claude.ai/duet)
 
 The `duet.*` operations front the `duet-web` agent. They run under the
 existing claude.ai grant (`SITE_ALIASES` maps `duet` to `claudeai`), so there
@@ -188,7 +188,7 @@ member or guest (`members` and `guests` empty, `members_truncated` false).
 | Operation | Arguments | What it does |
 | --- | --- | --- |
 | `duet.detail` | `id` (the channel id, `chan_...`) | Checks the channel on every read, reads the channel's event stream (`GET .../messages/stream?from=tail`) for at most 4 seconds, only its opening `session_activity` snapshot, to learn whether Claude is working, and then reads `GET .../timeline?limit=32`. Returns `{thread, room, owner, paused: false, working, items: [{id, at, from, role, text, attachments}]}`, oldest first, where `role` is `owner`, `claude` (the channel's agent) or `other`, and `working` is true, false or null (no snapshot). Server notices and thread replies are left out. A message's `thread_status` is not read: it stays `idle` while Claude works. An unexpected shape is `endpoint_changed`. |
-| `duet.send` | `message`, `conversation_id` (the channel id; required, no new chat) | Checks the channel, then opens `https://claude.ai/messages/<id>` in a background tab. Before typing it waits, up to 2 minutes and never past the send's deadline, until the stream confirms Claude is not working; otherwise it fails `busy` with nothing typed (detail `working state unknown` when no read could tell). A send past its deadline types and clicks nothing. It types into the channel's textarea (`placeholder` "Message #<name>" in a named channel, `aria-label` "Message Claude Duet" in the main chat) and clicks `button[aria-label="Send"]`. A message box that already holds text is left alone (`send_failed`). The channel is checked again just before the click. The send is confirmed by polling the timeline for a new owner message with the same text, and returns its id. |
+| `duet.send` | `message`, `conversation_id` (the channel id; required, no new chat) | Checks the channel, then opens `https://claude.ai/duet/<id>` in a background tab. Before typing it waits, up to 2 minutes and never past the send's deadline, until the stream confirms Claude is not working; otherwise it fails `busy` with nothing typed (detail `working state unknown` when no read could tell). A send past its deadline types and clicks nothing. It types into the channel's textarea (`placeholder` "Message #<name>" in a named channel, `aria-label` "Message Claude Duet" in the main chat) and clicks `button[aria-label="Send"]`. A message box that already holds text is left alone (`send_failed`). The channel is checked again just before the click. The send is confirmed by polling the timeline for a new owner message with the same text, and returns its id. |
 | `duet.close` | `conversation_id` | Closes the tab a duet send left open. |
 | `duet.session` | none | The claude.ai session check (`claudeai.session`); reads no channel. |
 
