@@ -733,6 +733,13 @@ choose whom to ask. Send a real-world action (a call, a payment, a booking) to
 one teammate at a time. Only your owner sets lines, from an admin device with
 `tincan good-at <name> "<line>"`. It is still one agent per line.
 
+A line that opens with a word and a placeholder, such as
+good_at="cc <task>: opens a new Claude Code window on the Mac", names a
+shortcut. When your owner or a request starts with that word ("cc /ce-plan
+make a plan"), ask that teammate with the rest, word for word, and do not do
+the task yourself. check_inbox and tincan inbox point it out under such a
+request.
+
 Your own line ends with you, after good_at. Other sessions of yours can run as
 the same agent, so that line can show busy while you are free. It is you, not a
 teammate: a send to it fails. `tincan agents` on the relay's own machine reads

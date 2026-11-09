@@ -102,6 +102,50 @@ func TestWindowStartSeesASettledShell(t *testing.T) {
 	}
 }
 
+func TestWindowStartWaitsOutASlowLauncher(t *testing.T) {
+	fastWindow(t)
+	// A launcher that takes a while to start Claude Code leaves the login
+	// line alone on screen, quiet for longer than a shell takes to settle.
+	// That is not a shell prompt, so auto keeps waiting for Claude.
+	screens := []string{}
+	for range 40 {
+		screens = append(screens, "Last login: Sat Nov  8 13:02:11 on ttys004")
+	}
+	f := &fakeTermWindow{screens: append(screens, claudeScreen)}
+	got, err := waitForWindowStart(t.Context(), f, "w", "auto")
+	if err != nil || got != "claude" {
+		t.Fatalf("got %q, %v; want claude", got, err)
+	}
+}
+
+func TestWindowStartFailsWhenItSeesNeitherClaudeNorAPrompt(t *testing.T) {
+	fastWindow(t)
+	f := &fakeTermWindow{screens: []string{"Last login: today"}}
+	if got, err := waitForWindowStart(t.Context(), f, "w", "auto"); err == nil || !strings.Contains(err.Error(), "--starts") {
+		t.Fatalf("got %q, %v; want an error naming --starts", got, err)
+	}
+	// Told it starts a shell, it trusts that.
+	got, err := waitForWindowStart(t.Context(), &fakeTermWindow{screens: []string{"Last login: today"}}, "w", "shell")
+	if err != nil || got != "shell" {
+		t.Fatalf("starts shell: got %q, %v; want shell", got, err)
+	}
+}
+
+func TestShellPromptOnScreen(t *testing.T) {
+	for s, want := range map[string]bool{
+		"Last login: today\nmatt@mac ~ % ": true,
+		"bash-5.2$ \n\n":                   true,
+		"root@box:/# ":                     true,
+		"~ ❯ ":                             true,
+		"Last login: today on ttys004":     false,
+		"Last login: today\n\n":            false,
+	} {
+		if got := shellPromptOnScreen(s); got != want {
+			t.Errorf("%q: got %v, want %v", s, got, want)
+		}
+	}
+}
+
 func TestWindowStartWaitsForClaudeWhenToldItStartsClaude(t *testing.T) {
 	fastWindow(t)
 	// A long quiet login line would look like a shell under auto.
