@@ -129,13 +129,16 @@ func (l *ledger) load() (map[string]ledgerEntry, error) {
 	return m, nil
 }
 
-// ledgerKeep is how long an entry is kept. A request is redelivered for
-// days at most, so older entries can no longer stop a duplicate.
-const ledgerKeep = 30 * 24 * time.Hour
+// ledgerKeep is how long a done entry is kept. A pending entry is never
+// dropped: its add may still be waiting in the spool, after any outage,
+// and the entry is what stops a retry from saving the note twice. A done
+// entry is kept far longer than a request is redelivered, which also
+// covers a crash between recording the save and replying.
+const ledgerKeep = 365 * 24 * time.Hour
 
 func (l *ledger) save(m map[string]ledgerEntry) error {
 	for k, e := range m {
-		if time.Since(e.Start) > ledgerKeep {
+		if e.State == ledgerDone && time.Since(e.Start) > ledgerKeep {
 			delete(m, k)
 		}
 	}

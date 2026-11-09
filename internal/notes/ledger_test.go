@@ -56,3 +56,29 @@ func TestCorruptLedgerIsMovedAsideAndStartsEmpty(t *testing.T) {
 		t.Fatalf("Begin after recovery: %v", err)
 	}
 }
+
+// A pending add is never pruned, however old: its add may still be in the
+// spool after a long outage, and the entry is what stops a second note. Only
+// done entries past ledgerKeep go.
+func TestLedgerNeverPrunesAPendingAdd(t *testing.T) {
+	l := newLedger(filepath.Join(t.TempDir(), "adds.json"), nil)
+	old := time.Now().Add(-2 * ledgerKeep)
+	if err := l.Begin("tincan:waiting", "Tent", old, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Begin("tincan:saved", "Lamp", old, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Done("tincan:saved", "N-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Begin("tincan:new", "Map", time.Now(), nil); err != nil { // any write prunes
+		t.Fatal(err)
+	}
+	if e, ok, err := l.Lookup("tincan:waiting"); err != nil || !ok || e.State != ledgerPending {
+		t.Fatalf("an old pending add was pruned: %+v %v %v", e, ok, err)
+	}
+	if _, ok, _ := l.Lookup("tincan:saved"); ok {
+		t.Fatal("a done entry past ledgerKeep was kept")
+	}
+}
