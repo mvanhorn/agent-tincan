@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"tailscale.com/client/local"
@@ -411,6 +412,16 @@ func unreachable(err error) bool {
 func socksConnectFailed(err error) bool {
 	var op *net.OpError
 	return errors.As(err, &op) && op.Op == "socks connect"
+}
+
+// dialBlipped reports a call whose direct connection to the relay never
+// opened because the dial timed out or found no route, as happens while a
+// tailnet path to the relay settles. Nothing was sent, so the call can be
+// made again. A refused dial is not a blip: a host answered and turned it
+// away.
+func dialBlipped(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial" && !errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // netmapIPv4s lists IPv4 addresses on the local tailnet: LocalAPI first,
