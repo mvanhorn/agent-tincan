@@ -20,21 +20,30 @@ import (
 // failed), Outcome and Reply record that decision before the reply is
 // sent, and a retry only resends it. An entry without an Outcome,
 // including one written before the field existed, is undecided.
+//
+// A computed search or read reply is a SpoolEntry too, kept in the
+// replies subdirectory with its Op set and an answered, failed or
+// declined Outcome. Its Reply holds the reply text, note text included,
+// until it is delivered or purged.
 type SpoolEntry struct {
-	Request   envelope.Request `json:"request"`
-	Note      Request          `json:"note"`
-	SpooledAt time.Time        `json:"spooled_at"`
-	Attempts  int              `json:"attempts,omitempty"`
-	LastError string           `json:"last_error,omitempty"`
-	Outcome   Outcome          `json:"outcome,omitempty"`
-	NoteID    string           `json:"note_id,omitempty"`
-	Reply     string           `json:"reply,omitempty"`
+	Request envelope.Request `json:"request"`
+	// Op is the operation a stored reply answers; empty for an add, as in
+	// entries written before stored replies.
+	Op        Op        `json:"op,omitempty"`
+	Note      Request   `json:"note"`
+	SpooledAt time.Time `json:"spooled_at"`
+	Attempts  int       `json:"attempts,omitempty"`
+	LastError string    `json:"last_error,omitempty"`
+	Outcome   Outcome   `json:"outcome,omitempty"`
+	NoteID    string    `json:"note_id,omitempty"`
+	Reply     string    `json:"reply,omitempty"`
 }
 
 // Outcome is the final decision on a spooled add.
 type Outcome string
 
 const (
+	OutcomeAnswered Outcome = "answered" // a stored search or read reply
 	OutcomeSaved    Outcome = "saved"
 	OutcomeDeclined Outcome = "declined"
 	OutcomeFailed   Outcome = "failed"
@@ -44,7 +53,7 @@ const (
 // outcome.
 func (o Outcome) status() (envelope.Status, bool) {
 	switch o {
-	case OutcomeSaved:
+	case OutcomeSaved, OutcomeAnswered:
 		return envelope.StatusAnswered, true
 	case OutcomeDeclined:
 		return envelope.StatusDeclined, true
@@ -64,6 +73,14 @@ type Spool struct {
 var spoolIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 const spoolExt = ".json"
+
+// repliesDir is the spool subdirectory for stored search and read
+// replies. A build that predates it lists only top-level files, so it
+// never mistakes a stored reply for an add.
+const repliesDir = "replies"
+
+// Replies is the spool of stored search and read replies under s.
+func (s *Spool) Replies() *Spool { return &Spool{Dir: filepath.Join(s.Dir, repliesDir)} }
 
 func (s *Spool) path(id string) (string, error) {
 	if !spoolIDRE.MatchString(id) {

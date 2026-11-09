@@ -214,6 +214,8 @@ func (r *rig) ask(t *testing.T, from, body string) client.Result {
 	return res
 }
 
+// spoolFiles lists the spool: adds by name, stored replies as
+// replies/<name>.
 func (r *rig) spoolFiles(t *testing.T) []string {
 	t.Helper()
 	ents, err := os.ReadDir(r.cfg.SpoolDir)
@@ -222,7 +224,25 @@ func (r *rig) spoolFiles(t *testing.T) []string {
 	}
 	var out []string
 	for _, e := range ents {
+		if e.IsDir() && e.Name() == repliesDir {
+			out = append(out, r.replyFiles(t)...)
+			continue
+		}
 		out = append(out, e.Name())
+	}
+	return out
+}
+
+// replyFiles lists the stored replies, as replies/<name>.
+func (r *rig) replyFiles(t *testing.T) []string {
+	t.Helper()
+	ents, err := os.ReadDir(filepath.Join(r.cfg.SpoolDir, repliesDir))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range ents {
+		out = append(out, repliesDir+"/"+e.Name())
 	}
 	return out
 }
@@ -1537,5 +1557,133 @@ func TestLogsNeverCarryNoteText(t *testing.T) {
 	r.poll(t, 1)
 	if strings.Contains(r.log.String(), secret) {
 		t.Fatal("a log line carries note text")
+	}
+}
+
+// Covers R1: a search whose reply fails is stored, and the next retry
+// delivers the same reply without searching again.
+func TestSearchReplyFailureIsStoredAndRetried(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	if got := r.replyFiles(t); len(got) != 1 {
+		t.Fatalf("stored replies = %v, want the computed search kept", got)
+	}
+	r.replyFail.Store(false)
+	if n := r.svc.RetrySpooled(t.Context()); n != 1 {
+		t.Fatalf("RetrySpooled tried %d", n)
+	}
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, n.ID) {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	if c := len(r.helper.callsOf(t, "search")); c != 1 {
+		t.Fatalf("searches = %d, want 1", c)
+	}
+	r.lineWith(t, req.ID, "resending the stored search reply")
+	r.assertSpoolEmpty(t)
+}
+
+// Covers R7 and the incident: the reply fails, the claim lease lapses,
+// and the redelivered request gets the stored reply without a second
+// search.
+func TestSearchRedeliveredAfterLeaseLapseResendsStoredReply(t *testing.T) {
+	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	r.replyFail.Store(false)
+	r.redeliver(t)
+	r.poll(t, 1)
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, n.ID) {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	if c := len(r.helper.callsOf(t, "search")); c != 1 {
+		t.Fatalf("searches = %d, want the redelivery to resend the stored reply", c)
+	}
+	if c := len(r.helper.callsOf(t, "create")); c != 0 {
+		t.Fatalf("creates = %d: a stored search reached the add path", c)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Covers R1: a read reply stored before a restart is sent by the
+// restarted service.
+func TestStoredReadReplySurvivesRestart(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "buy the blue one"})
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"read","id":"`+n.ID+`"}`)
+	r.poll(t, 1)
+	r.replyFail.Store(false)
+	r.restart(t)
+	if got := r.svc.RetrySpooled(t.Context()); got != 1 {
+		t.Fatalf("RetrySpooled tried %d", got)
+	}
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "buy the blue one") {
+		t.Fatalf("status %s reply %+v", res.Status, res.Reply)
+	}
+	if c := len(r.helper.callsOf(t, "read")); c != 1 {
+		t.Fatalf("reads = %d, want 1", c)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Covers R2: a reply that landed but whose response was lost is resent,
+// refused as already closed, and dropped; the relay holds one reply.
+func TestLostReplyResponseIsDroppedAsAlreadyClosed(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.replyLose.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	if got := r.replyFiles(t); len(got) != 1 {
+		t.Fatalf("stored replies = %v", got)
+	}
+	r.replyLose.Store(false)
+	r.svc.RetrySpooled(t.Context())
+	r.lineWith(t, req.ID, "no longer open")
+	if res := r.get(t, "grokbot", req.ID); res.Status != envelope.StatusAnswered {
+		t.Fatalf("status %s", res.Status)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// Covers AE4 (R5): a stored search reply for an asker since removed from
+// the read allowlist is answered declined and deleted.
+func TestStoredSearchReplyDeclinedWhenReadAccessRevoked(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	writeFile(t, r.cfg.ReadAllowlistPath, "muse\n")
+	r.replyFail.Store(false)
+	r.svc.RetrySpooled(t.Context())
+	res := r.get(t, "grokbot", req.ID)
+	if res.Status != envelope.StatusDeclined || strings.Contains(res.Reply.Body, n.ID) || !strings.Contains(res.Reply.Body, "grokbot") {
+		t.Fatalf("status %s body %q", res.Status, res.Reply.Body)
+	}
+	r.assertSpoolEmpty(t)
+}
+
+// A binary from before stored replies lists only top-level files, so it
+// never sees a stored search reply and cannot take it for an add.
+func TestStoredRepliesAreInvisibleToTheTopLevelSpool(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.replyFail.Store(true)
+	r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	if len(r.replyFiles(t)) != 1 {
+		t.Fatalf("stored replies = %v", r.replyFiles(t))
+	}
+	top, err := (&Spool{Dir: r.cfg.SpoolDir}).List()
+	if err != nil || len(top) != 0 {
+		t.Fatalf("top-level spool = %v, %v; want nothing", top, err)
 	}
 }

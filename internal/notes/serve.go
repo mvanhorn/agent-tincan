@@ -100,6 +100,7 @@ type Service struct {
 	agent      string
 	helper     *Helper
 	spool      *Spool
+	replies    *Spool // stored search and read replies
 	healthPath string
 	readAllow  func() ([]string, error)
 	addAllow   func() ([]string, error)
@@ -146,6 +147,7 @@ func New(cfg Config) (*Service, error) {
 		agent:      orDefault(cfg.Agent, DefaultAgentName),
 		helper:     &Helper{Path: orDefault(cfg.HelperPath, DefaultHelperPath), LibraryRoot: cfg.LibraryRoot, AppSupportRoot: cfg.AppSupportRoot},
 		spool:      &Spool{Dir: cfg.SpoolDir},
+		replies:    (&Spool{Dir: cfg.SpoolDir}).Replies(),
 		healthPath: orDefault(cfg.HealthPath, HealthPathIn(cfg.AppSupportRoot)),
 		readAllow:  allowlistAt(cfg.ReadAllowlistPath),
 		addAllow:   allowlistAt(cfg.AddAllowlistPath),
@@ -228,14 +230,29 @@ func (s *Service) PollOnce(ctx context.Context) (int, error) {
 	return history.PollAndHandle(ctx, s.relay, s.hold, "notes-serve", s.handleSafely)
 }
 
-// RetrySpooled makes one attempt at every spooled add not already being
-// applied, and returns how many it tried.
+// RetrySpooled makes one attempt at every stored reply and spooled add
+// not already being handled, and returns how many it tried.
 func (s *Service) RetrySpooled(ctx context.Context) int {
+	stored, err := s.replies.List()
+	if err != nil {
+		s.logf("stored replies: %v", err)
+	}
+	n := 0
+	for _, e := range stored {
+		if ctx.Err() != nil {
+			return n
+		}
+		if !s.begin(e.Request.ID) {
+			continue
+		}
+		n++
+		s.resendStored(ctx, e)
+		s.end(e.Request.ID)
+	}
 	entries, err := s.spool.List()
 	if err != nil {
 		s.logf("spool: %v", err)
 	}
-	n := 0
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			break
@@ -283,6 +300,10 @@ func (s *Service) handleSafely(ctx context.Context, req envelope.Request) {
 			// A spooled add may already be written, or will be on its retry:
 			// a failed reply now would tell the asker it was not saved, and a
 			// resend would save it twice. Leave it to the retry to answer.
+			if _, stored, err := s.replies.Get(req.ID); err == nil && stored {
+				s.logf("request %s: the reply is stored, leaving it for the retry to send", req.ID)
+				return
+			}
 			if _, spooled, err := s.spool.Get(req.ID); err == nil && spooled {
 				s.logf("request %s: the add is spooled, leaving it for the retry to apply and answer", req.ID)
 				s.progress(hctx, req, "The notes agent hit an internal error; the add is kept on the notes Mac and will be retried. The reply will carry the note id.")
@@ -302,6 +323,21 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		return
 	}
 	s.logf("request %s from %s: claimed (created %s)", req.ID, req.From, req.CreatedAt.UTC().Format(time.RFC3339))
+
+	// A redelivered search or read whose reply is stored gets that reply
+	// again: the work is not run twice.
+	if e, ok, err := s.replies.Get(req.ID); err != nil {
+		s.logf("request %s: stored reply unreadable, handling it afresh: %v", req.ID, err)
+	} else if ok {
+		if !s.begin(req.ID) {
+			s.logf("request %s: redelivered while a retry is sending its reply", req.ID)
+			return
+		}
+		defer s.end(req.ID)
+		s.logf("request %s from %s: redelivered, its %s reply is stored", req.ID, req.From, e.Op)
+		s.resendStored(ctx, e)
+		return
+	}
 
 	// A redelivered add that is already spooled goes straight to the
 	// helper: the idempotency key makes that return the same note. One
@@ -623,11 +659,61 @@ func (s *Service) decide(ctx context.Context, e SpoolEntry, o Outcome, noteID, b
 	s.sendFinal(ctx, e)
 }
 
-// sendFinal sends the recorded reply of a decided spooled add and clears
-// its entry, unless the relay could not be reached: then the entry stays
-// for a retry, which resends the same reply. A request the relay has
-// already closed (a reply landed, expired, cancelled) is logged and
-// dropped, never retried forever.
+// spoolOf is the spool e lives in: stored replies apart from adds.
+func (s *Service) spoolOf(e SpoolEntry) *Spool {
+	if e.Op == OpSearch || e.Op == OpRead {
+		return s.replies
+	}
+	return s.spool
+}
+
+// store records a computed search or read reply durably and sends it. If
+// it cannot be recorded, it is sent once anyway: the asker is no worse
+// off than before replies were stored.
+func (s *Service) store(ctx context.Context, req envelope.Request, op Op, o Outcome, body string) {
+	if !s.begin(req.ID) {
+		return
+	}
+	defer s.end(req.ID)
+	e := SpoolEntry{Request: req, Op: op, SpooledAt: s.now().UTC(), Outcome: o, Reply: body}
+	if err := s.replies.Put(e); err != nil {
+		s.logf("request %s: could not store the %s reply, sending it unstored: %v", req.ID, op, err)
+		status, _ := o.status()
+		s.reply(ctx, req, body, status)
+		return
+	}
+	s.sendFinal(ctx, e)
+}
+
+// resendStored sends a stored search or read reply again. The asker must
+// still be on the read allowlist: one removed since gets the declined
+// reply a new request would, and nothing from the library. If the list
+// cannot be read, the reply stays stored for the next retry.
+func (s *Service) resendStored(ctx context.Context, e SpoolEntry) {
+	req := e.Request
+	names, err := s.readAllow()
+	if err != nil {
+		s.logf("request %s: could not read the read allowlist, keeping the stored reply for the next retry: %v", req.ID, err)
+		return
+	}
+	loaded := func() ([]string, error) { return names, nil }
+	if reason := history.ChainDenied(loaded, req, s.agent, "read notes", s.logf); reason != "" {
+		s.logf("request %s from %s (chain %v): stored %s reply withheld, the asker may no longer read notes: %s", req.ID, req.From, req.Chain, e.Op, reason)
+		e.Outcome, e.Reply = OutcomeDeclined, reason
+		if err := s.replies.Put(e); err != nil {
+			s.logf("request %s: could not record the decline: %v", req.ID, err)
+		}
+	} else {
+		s.logf("request %s from %s: resending the stored %s reply", req.ID, req.From, e.Op)
+	}
+	s.sendFinal(ctx, e)
+}
+
+// sendFinal sends the recorded reply of a decided entry (an add or a
+// stored reply) and clears it, unless the relay could not be reached:
+// then the entry stays for a retry, which resends the same reply. A
+// request the relay has already closed (a reply landed, expired,
+// cancelled) is logged and dropped, never retried forever.
 func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 	status, ok := e.Outcome.status()
 	if !ok {
@@ -643,7 +729,7 @@ func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 		s.logf("request %s: reply failed, keeping it spooled to retry: %v", e.Request.ID, err)
 		return
 	}
-	if err := s.spool.Remove(e.Request.ID); err != nil {
+	if err := s.spoolOf(e).Remove(e.Request.ID); err != nil {
 		s.logf("request %s: spool remove failed: %v", e.Request.ID, err)
 	}
 }
@@ -654,7 +740,7 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 	s.recordHealth("search", req.ID, err)
 	if err != nil {
 		s.logf("request %s: search: %v", req.ID, err)
-		s.reply(ctx, req, helperFailedReply(err), envelope.StatusFailed)
+		s.store(ctx, req, OpSearch, OutcomeFailed, helperFailedReply(err))
 		return
 	}
 	var active []NoteSummary
@@ -667,7 +753,7 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 		}
 	}
 	s.logf("request %s from %s: search finished in %s (%d of %d matches)", req.ID, req.From, since(start), len(active), len(found))
-	s.reply(ctx, req, searchReply(r.Query, active), envelope.StatusAnswered)
+	s.store(ctx, req, OpSearch, OutcomeAnswered, searchReply(r.Query, active))
 }
 
 func (s *Service) read(ctx context.Context, req envelope.Request, r Request) {
@@ -676,16 +762,16 @@ func (s *Service) read(ctx context.Context, req envelope.Request, r Request) {
 	s.recordHealth("read", req.ID, err)
 	if errors.Is(err, ErrNoteNotFound) || (err == nil && n.Summary.State != StateActive) {
 		s.logf("request %s from %s: read %s: not found", req.ID, req.From, r.ID)
-		s.reply(ctx, req, notFoundReply(r.ID), envelope.StatusFailed)
+		s.store(ctx, req, OpRead, OutcomeFailed, notFoundReply(r.ID))
 		return
 	}
 	if err != nil {
 		s.logf("request %s: read: %v", req.ID, err)
-		s.reply(ctx, req, helperFailedReply(err), envelope.StatusFailed)
+		s.store(ctx, req, OpRead, OutcomeFailed, helperFailedReply(err))
 		return
 	}
 	s.logf("request %s from %s: read %s finished in %s", req.ID, req.From, r.ID, since(start))
-	s.reply(ctx, req, readReply(n), envelope.StatusAnswered)
+	s.store(ctx, req, OpRead, OutcomeAnswered, readReply(n))
 }
 
 // reply sends on a context detached from ctx's deadline, so a request that
