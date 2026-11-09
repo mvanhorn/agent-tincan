@@ -578,6 +578,7 @@ func (s *Server) pollEmailRepliesEvery(ctx context.Context) {
 // Sweep runs one expiry and lease pass and wakes affected waiters.
 func (s *Server) Sweep(ctx context.Context) {
 	s.notifyWebStatus(ctx)
+	s.closeHeldAcks(ctx)
 	trs, err := s.store.Sweep(ctx)
 	if err != nil {
 		log.Printf("sweep: %v", err)
@@ -1561,12 +1562,80 @@ func (s *Server) handleReply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
 		return
 	}
+	if kept, ok := s.keepAckOpen(r, name, rep, raw); ok {
+		writeJSON(w, http.StatusOK, kept)
+		return
+	}
 	rep, err = s.recordReply(r.Context(), r.PathValue("id"), name, rep, "", 0)
 	if err != nil {
 		writeErr(w, attachmentStatus(err, statusFor(err)), err)
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+// keepAckOpen keeps request id open when agent's answered reply only
+// acknowledges the work ("Working on it, full report will follow"):
+// answering would close the request and strand the result. The ack is held
+// on agent's claim (store.HoldAck) as its progress note, the asker is not
+// woken, and the next reply closes the request as usual. If the claim lapses
+// first, the sweep closes the request with the ack (closeHeldAcks), the
+// answer it would have had before, so a reply misread as an ack is late but
+// never handed back to be done again.
+//
+// It reports false, changing nothing, unless the reply is answered, has no
+// attachments, reads as an ack (envelope.LooksLikeAck), was not sent with
+// "final": true, and comes from a client that advertises
+// client.KeptOpenFeature, so it can tell its agent the request is still
+// open; or when agent holds no live claim on an ask id. The reply then goes
+// through as before.
+func (s *Server) keepAckOpen(r *http.Request, agent string, rep envelope.Reply, raw []byte) (envelope.Reply, bool) {
+	if rep.Status != envelope.StatusAnswered || len(rep.Attachments) > 0 || !hasFeature(r, client.KeptOpenFeature) || !envelope.LooksLikeAck(rep.Body) {
+		return envelope.Reply{}, false
+	}
+	var in struct {
+		Final bool `json:"final"`
+	}
+	if json.Unmarshal(raw, &in) == nil && in.Final {
+		return envelope.Reply{}, false
+	}
+	ctx, id := r.Context(), r.PathValue("id")
+	ack := strings.TrimSpace(rep.Body)
+	if err := s.store.HoldAck(ctx, id, agent, ack, s.cfg.ClaimLease, s.cfg.urgentLease()); err != nil {
+		return envelope.Reply{}, false
+	}
+	s.record(ctx, "progress", id, "", agent, store.DetailJSON(map[string]any{"bytes": len(ack), "held_ack": true}))
+	return envelope.Reply{RequestID: id, From: agent, Status: envelope.StatusClaimed, Body: rep.Body, KeptOpen: true}, true
+}
+
+// hasFeature reports whether the calling client lists feature in its
+// client.FeaturesHeader.
+func hasFeature(r *http.Request, feature string) bool {
+	for f := range strings.SplitSeq(r.Header.Get(client.FeaturesHeader), ",") {
+		if strings.TrimSpace(f) == feature {
+			return true
+		}
+	}
+	return false
+}
+
+// closeHeldAcks answers each request whose held ack outlived its claim
+// with that ack (store.CloseHeldAcks) and tells everyone who waits on it, as
+// any reply does. It runs before the store sweep would requeue them.
+func (s *Server) closeHeldAcks(ctx context.Context) {
+	reps, err := s.store.CloseHeldAcks(ctx, func(id, agent string) bool { return s.mayMirror(ctx, id, agent) })
+	if err != nil {
+		log.Printf("sweep: close held acks: %v", err)
+	}
+	for _, rep := range reps {
+		noMirror := rep.NoMirror
+		if _, err := s.recordReplyWith(ctx, rep.RequestID, rep.From, rep, false, func(rep envelope.Reply) (envelope.Reply, error) {
+			rep.NoMirror = noMirror // decided before the store wrote it
+			return rep, nil
+		}); err != nil {
+			log.Printf("sweep: held ack %s: %v", rep.RequestID, err)
+		}
+	}
 }
 
 // recordReply stores agent's reply rep to request id and tells everyone who
@@ -1622,7 +1691,7 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	}
 	// The reply may have freed the replying agent, if someone watches it.
 	s.checkWatches(ctx, agent)
-	if rep.Status == envelope.StatusAnswered {
+	if rep.Status == envelope.StatusAnswered && !rep.Replaced {
 		s.fireFollowOn(ctx, id)
 	}
 	return rep, nil

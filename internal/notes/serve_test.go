@@ -718,13 +718,14 @@ func TestRunDrainsSpoolAndKeepsPolling(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		a, s := r.get(t, "grokbot", add.ID), r.get(t, "muse", search.ID)
-		if a.Status == envelope.StatusAnswered && s.Status == envelope.StatusAnswered {
-			r.assertSpoolEmpty(t)
+		// The relay records the answer before the service removes the
+		// stored reply, so wait for both.
+		if a.Status == envelope.StatusAnswered && s.Status == envelope.StatusAnswered && len(r.spoolFiles(t)) == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("add or search not answered while running")
+	t.Fatalf("add or search not answered while running, or spool not emptied: %v", r.spoolFiles(t))
 }
 
 // An agent on neither allowlist is declined before the extractor runs.

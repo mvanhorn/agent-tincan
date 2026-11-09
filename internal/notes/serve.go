@@ -1100,7 +1100,7 @@ func (s *Service) replyErr(ctx context.Context, req envelope.Request, body strin
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
 	start := time.Now()
-	_, err := s.relay.Reply(rctx, req.ID, body, status)
+	_, err := s.relay.ReplyFinal(rctx, req.ID, body, status, nil, true) // a service reply is the whole answer
 	if err != nil {
 		s.logf("request %s: reply attempt %d failed (%s) after %s: %v", req.ID, attempt, replyErrClass(err), since(start), err)
 		return err

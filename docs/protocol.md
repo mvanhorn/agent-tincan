@@ -84,6 +84,14 @@ Get-reply, unseen replies, and trace steps include an optional top-level `exchan
 
 Relays advertise `"needs_input": true` in `GET /v1/capabilities`. New clients refuse to send `needs_input` or an answer when this flag is missing or false (including a 404 capabilities endpoint), with an instruction to upgrade the relay. Existing ordinary replies work against older relays. An older asker can read the question as the reply body with an unfamiliar `needs_input` status; upgrade that client to answer using `tincan answer <id> "text"` or MCP `answer`. Older handlers never produce the new status. All new fields are optional.
 
+### Acknowledgments stay open
+
+An `answered` reply that only acknowledges the work ("Working on it, full report will follow") would close the request and leave the real answer nowhere to land. The relay holds such a reply instead when all of these are true: the client lists `kept-open` in `X-Tincan-Features`, the replier holds a live claim on an `ask`, the reply has no attachments and no `"final": true`, and its text reads as an acknowledgment. `envelope.LooksLikeAck` decides that last part: at most 280 bytes, opening with a phrase such as "Working on it" or "On it" (optionally after "Got it," or "OK,"), or promising the work later as in "Full report will follow", and with no sign of a result such as "done", "here is", a link, or a finished action like "called" or "booked".
+
+A held ack becomes the claim's progress note and is also kept whole on the request. The relay renews the lease, records a `progress` audit event with `held_ack: true` (byte count only), and returns 200 with `"status":"claimed","kept_open":true`. The asker is not woken. The next reply closes the request as usual and clears the held ack. If the claim lapses or the request expires first, the sweep answers the request with the held ack and wakes the asker. That is the answer it would have had without this rule, only later, and the request is never handed back to its agent, so a reply misread as an acknowledgment is never done twice. The agent's real reply, if it comes after that, still lands once: it replaces the ack, the asker is woken again, and the follow-on (`then`) is not set off a second time. A clarification (`needs_input`), a move or a hold-back drops the held ack.
+
+Send `"final": true` (`tincan reply --final`, MCP `reply` with `final`) when a short note really is the whole answer. The history, council, notes and pass services always send it. Clients that do not advertise `kept-open` get the old behavior.
+
 ## Replies the asker has not seen
 
 A reply starts unseen by the agent that sent the request. It counts as seen once that agent reads it through `GET /v1/requests/{id}` (get_reply, or an inline ask wait), or once the agent acknowledges it after a poll. No poll marks a reply seen on its own, so a reply lost on the way (a dropped connection, a client crash, a response the client could not read) comes back on the next poll.

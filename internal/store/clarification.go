@@ -56,7 +56,7 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 	if err != nil {
 		return envelope.Reply{}, err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 1, lease_until = 0, updated_at = ?, reply_seen_at = 0, reply_generation = reply_generation + 1
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 1, lease_until = 0, updated_at = ?, reply_seen_at = 0, reply_generation = reply_generation + 1, held_ack = ''
 		WHERE id = ? AND to_agent = ? AND status = ? AND expires_at > ? AND lease_until > ?`, envelope.StatusNeedsInput, string(exchanges), now.UnixMilli(), id, agent, envelope.StatusClaimed, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return envelope.Reply{}, err
@@ -126,7 +126,7 @@ func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool) 
 	now := s.now().UnixMilli()
 	// The asker's answer queues the request afresh, so its project gets the
 	// first look again rather than whichever window polls next.
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 0, lease_until = 0, resumed = 1, updated_at = ?, reply_seen_at = ?, queued_at = ?, fallback_woken = 0,
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 0, lease_until = 0, resumed = 1, held_ack = '', updated_at = ?, reply_seen_at = ?, queued_at = ?, fallback_woken = 0,
 		progress_note = '', progress_at = 0, guest_approved = guest_approved AND ?
 		WHERE id = ? AND status = ? AND expires_at > ?`, envelope.StatusQueued, string(exchanges), now, now, now, !guest, id, envelope.StatusNeedsInput, now)
 	if err != nil {

@@ -243,6 +243,13 @@ func (r *Relay) AskAttached(ctx context.Context, to, body, parent string, attach
 
 // ReplyAttached is Reply with attachments; see SendAttached.
 func (r *Relay) ReplyAttached(ctx context.Context, id, body string, status envelope.Status, attachments []string) (envelope.Reply, error) {
+	return r.ReplyFinal(ctx, id, body, status, attachments, false)
+}
+
+// ReplyFinal is ReplyAttached that, with final, tells the relay this reply
+// is the whole answer even when it reads like an acknowledgment, so the
+// relay closes the request instead of keeping it open as a progress note.
+func (r *Relay) ReplyFinal(ctx context.Context, id, body string, status envelope.Status, attachments []string, final bool) (envelope.Reply, error) {
 	if status == envelope.StatusNeedsInput {
 		if err := r.requireNeedsInput(ctx); err != nil {
 			return envelope.Reply{}, err
@@ -255,6 +262,9 @@ func (r *Relay) ReplyAttached(ctx context.Context, id, body string, status envel
 		}
 	}
 	in := map[string]any{"body": body, "status": status}
+	if final {
+		in["final"] = true
+	}
 	if err := r.attachIfAny(ctx, in, attachments); err != nil {
 		return envelope.Reply{}, err
 	}
