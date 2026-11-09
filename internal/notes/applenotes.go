@@ -146,17 +146,21 @@ func (a *AppleNotes) Search(ctx context.Context, query string) ([]NoteSummary, e
 	if len(words) == 0 {
 		return nil, nil
 	}
-	l, err := a.listing(ctx)
+	l, cached, err := a.listing(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// A cached listing's text may be stale, so its flags come fresh: a
+	// note locked, moved or deleted since is never matched on old text.
+	var flags map[string]appleFlag
+	if cached {
+		if flags, err = a.currentFlags(ctx); err != nil {
+			return nil, err
+		}
 	}
 	seen := map[string]bool{}
 	var out []NoteSummary
 	for _, f := range l.Folders {
-		state := StateActive
-		if IsDeletedFolder(f.Folder) {
-			state = StateTrashed
-		}
 		if len(f.Names) != len(f.IDs) || len(f.Texts) != len(f.IDs) || len(f.Locked) != len(f.IDs) {
 			return nil, &HelperError{Code: codeBadOutput, Message: "Apple Notes listed a folder with mismatched fields"}
 		}
@@ -165,7 +169,18 @@ func (a *AppleNotes) Search(ctx context.Context, query string) ([]NoteSummary, e
 				continue
 			}
 			seen[id] = true
-			name, text, locked := f.Names[i], f.Texts[i], f.Locked[i]
+			name, text, locked, folder := f.Names[i], f.Texts[i], f.Locked[i], f.Folder
+			if flags != nil {
+				now, ok := flags[id]
+				if !ok {
+					continue // gone since the listing
+				}
+				locked, folder = now.locked, now.folder
+			}
+			state := StateActive
+			if IsDeletedFolder(folder) {
+				state = StateTrashed
+			}
 			if locked {
 				text = ""
 			}
@@ -207,19 +222,51 @@ type appleRead struct {
 }
 
 // listing lists every note, or reuses a listing made in the last
-// appleListTTL. An add drops it, so the new note is found at once.
-func (a *AppleNotes) listing(ctx context.Context) (*appleList, error) {
+// appleListTTL; cached reports the reuse. An add drops it, so the new note
+// is found at once.
+func (a *AppleNotes) listing(ctx context.Context) (l *appleList, cached bool, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.list != nil && a.clock().Sub(a.listAt) < appleListTTL {
-		return a.list, nil
+		return a.list, true, nil
 	}
-	var l appleList
-	if err := a.script(ctx, jxaList, struct{}{}, &l); err != nil {
+	var fresh appleList
+	if err := a.script(ctx, jxaList, struct{}{}, &fresh); err != nil {
+		return nil, false, err
+	}
+	a.list, a.listAt = &fresh, a.clock()
+	return &fresh, false, nil
+}
+
+type appleFlag struct {
+	folder string
+	locked bool
+}
+
+// currentFlags reads every note's folder and lock flag now, without text.
+func (a *AppleNotes) currentFlags(ctx context.Context) (map[string]appleFlag, error) {
+	var l struct {
+		Folders []struct {
+			Folder string   `json:"folder"`
+			IDs    []string `json:"ids"`
+			Locked []bool   `json:"locked"`
+		} `json:"folders"`
+	}
+	if err := a.script(ctx, jxaFlags, struct{}{}, &l); err != nil {
 		return nil, err
 	}
-	a.list, a.listAt = &l, a.clock()
-	return &l, nil
+	m := map[string]appleFlag{}
+	for _, f := range l.Folders {
+		if len(f.Locked) != len(f.IDs) {
+			return nil, &HelperError{Code: codeBadOutput, Message: "Apple Notes listed a folder with mismatched fields"}
+		}
+		for i, id := range f.IDs {
+			if _, dup := m[id]; !dup {
+				m[id] = appleFlag{folder: f.Folder, locked: f.Locked[i]}
+			}
+		}
+	}
+	return m, nil
 }
 
 func (a *AppleNotes) dropListing() {

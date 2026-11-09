@@ -60,7 +60,7 @@ func (a *fakeNotesApp) run(_ context.Context, script string, input []byte) ([]by
 		a.t.Fatalf("script input is not JSON: %q", input)
 	}
 	switch script {
-	case jxaList:
+	case jxaList, jxaFlags: // jxaFlags reads the same shape, ignoring text
 		byFolder := map[string]map[string]any{}
 		var order []string
 		a.mu.Lock()
@@ -389,5 +389,42 @@ func TestAppleNotesProbeNamesTheDeletedFolder(t *testing.T) {
 	_, _ = a.Probe(t.Context())
 	if got := a.ProbeNote(); !strings.Contains(got, "no folder recognized as Recently Deleted among 2") {
 		t.Fatalf("probe note = %q", got)
+	}
+}
+
+// A search served from the cached listing never returns text from a note
+// locked, trashed or deleted since the listing was made.
+func TestAppleNotesCachedSearchHonorsNotesLockedSince(t *testing.T) {
+	a, app := newAppleNotes(t)
+	app.put("Lake trip", "cabin code", "Notes", false)
+	app.put("Lake map", "cabin road", "Notes", false)
+	app.put("Lake list", "cabin food", "Notes", false)
+	if got, _ := a.Search(t.Context(), "cabin"); len(got) != 3 {
+		t.Fatalf("first search = %v", titles(got))
+	}
+	app.mu.Lock()
+	app.notes[0].locked = true               // Lake trip: locked since
+	app.notes[1].folder = "Recently Deleted" // Lake map: trashed since
+	app.notes = app.notes[:2]                // Lake list: deleted since
+	app.mu.Unlock()
+	got, err := a.Search(t.Context(), "cabin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.count(jxaList) != 1 {
+		t.Fatalf("want the cached listing reused, listed %d times", app.count(jxaList))
+	}
+	for _, n := range got {
+		switch n.Title {
+		case "Lake trip":
+			t.Fatalf("a note locked since the listing matched on its old text: %+v", n)
+		case "Lake map":
+			if n.State == StateActive {
+				t.Fatalf("a note trashed since the listing read as active: %+v", n)
+			}
+		}
+	}
+	if len(got) != 1 || got[0].Title != "Lake map" {
+		t.Fatalf("results = %v, want only the trashed note", titles(got))
 	}
 }

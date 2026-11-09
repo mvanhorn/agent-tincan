@@ -55,6 +55,44 @@ function run() {
 }
 `
 
+// jxaFlags lists every note's id and lock flag by folder, without any
+// text, so a search served from a cached listing honors notes locked,
+// moved or deleted since.
+const jxaFlags = jxaPrelude + `
+function folderFlags(f) {
+  var out = {folder: f.name(), ids: [], locked: []};
+  try {
+    out.ids = f.notes.id();
+    out.locked = f.notes.passwordProtected();
+  } catch (e) {
+    out.ids = []; out.locked = [];
+    var ns = f.notes();
+    for (var i = 0; i < ns.length; i++) {
+      try {
+        var lk = ns[i].passwordProtected();
+        out.ids.push(ns[i].id()); out.locked.push(lk);
+      } catch (e2) {}
+    }
+  }
+  return out;
+}
+function walk(f, acc) {
+  acc.push(folderFlags(f));
+  var subs = f.folders();
+  for (var i = 0; i < subs.length; i++) walk(subs[i], acc);
+}
+function run() {
+  input();
+  var acc = [];
+  var accounts = Notes.accounts();
+  for (var a = 0; a < accounts.length; a++) {
+    var fs = accounts[a].folders();
+    for (var i = 0; i < fs.length; i++) walk(fs[i], acc);
+  }
+  return JSON.stringify({folders: acc});
+}
+`
+
 // jxaRead reads one note by id.
 const jxaRead = jxaPrelude + `
 function run() {
