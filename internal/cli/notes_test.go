@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -324,4 +326,111 @@ func TestNotesServeRequiresALibraryWhenNoneIsFound(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no Agent Notes library found") {
 		t.Fatalf("serve with no library to find: %v", err)
 	}
+}
+
+// Undelivered replies show by id, age and error class, never their text,
+// and a refused credential fails.
+func TestNotesDoctorListsUndeliveredReplies(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	joinNotes(t, m)
+	setKind(t, m, "notes")
+	e := newNotesDoctorEnv(t, m.URL("notes"), "notes")
+	stored := time.Now().Add(-31 * time.Minute)
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "create", OK: true, IdempotencyVerified: true,
+		Pending: []notes.PendingReply{{RequestID: "req-net", Op: "search", StoredAt: stored, Attempts: 5, LastError: "network"}}})
+	out, err := e.run(t)
+	if err != nil {
+		t.Fatalf("doctor failed on a network outage: %v\n%s", err, out)
+	}
+	wantLine(t, out, "[WARN] undelivered replies", "1 waiting", "req-net", "search", "stored 31m", "5 failed attempts", "last error network", "relay is reachable")
+
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "create", OK: true, IdempotencyVerified: true,
+		Pending: []notes.PendingReply{{RequestID: "req-403", Op: "read", StoredAt: stored, Attempts: 1, LastError: "403"}}})
+	out, err = e.run(t)
+	if err == nil {
+		t.Fatalf("doctor passed with replies refused:\n%s", out)
+	}
+	wantLine(t, out, "[FAIL] undelivered replies", "req-403", "last error 403", "refuses")
+}
+
+func TestNotesInstallWithBearSkipsTheLibrary(t *testing.T) {
+	skipOnWindows(t, "the notes service is a macOS service")
+	if runtime.GOOS != "darwin" {
+		t.Skip("the bear backend runs only on macOS")
+	}
+	// A fresh home holds no Agent Notes library, and bear needs none.
+	setHome(t, t.TempDir())
+	out, errOut, err := runSplit(t, notesCmd(), "install", "--backend", "bear", "--binary", "/usr/local/bin/tincan")
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	_, rest, _ := strings.Cut(out, "notes service definition: ")
+	path, _, _ := strings.Cut(rest, " (not started)")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := string(b)
+	if !strings.Contains(def, "<string>--backend</string>") || !strings.Contains(def, "<string>bear</string>") {
+		t.Errorf("service definition does not pass --backend bear:\n%s", def)
+	}
+	if strings.Contains(def, "--library-root") || strings.Contains(def, "--helper") {
+		t.Errorf("service definition still passes the Agent Notes flags:\n%s", def)
+	}
+	if !strings.Contains(errOut, "notes-allow.txt does not exist") {
+		t.Errorf("install did not warn about the missing allowlist:\n%s", errOut)
+	}
+}
+
+func TestNotesCommandsRejectAnUnknownBackend(t *testing.T) {
+	skipOnWindows(t, "the notes service is a macOS service")
+	setHome(t, t.TempDir())
+	for _, sub := range []string{"serve", "install", "doctor"} {
+		_, _, err := runSplit(t, notesCmd(), sub, "--backend", "nope")
+		if err == nil || !strings.Contains(err.Error(), "agent-notes, bear, apple-notes") {
+			t.Errorf("%s --backend nope: %v", sub, err)
+		}
+	}
+}
+
+// Doctor for Bear or Apple Notes trusts the service's own access check
+// and labels its own one as this terminal's.
+func TestNotesDoctorReportsTheServiceAccessCheck(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	joinNotes(t, m)
+	setKind(t, m, "notes")
+	e := newNotesDoctorEnv(t, m.URL("notes"), "notes")
+	at := time.Now()
+	e.writeHealth(t, notes.Health{Backend: "Apple Notes", Probe: &notes.ProbeResult{At: at, Code: "permission_denied", Message: "Notes refused the request"}})
+	o := notesDoctorOptions{
+		backend: notes.BackendAppleNotes, config: e.config, appSupport: e.appSupport, spoolDir: filepath.Join(e.appSupport, "spool"),
+		probe: func(context.Context) (int, error) { return 7, nil },
+	}
+	rep := runNotesDoctor(t.Context(), o)
+	var b strings.Builder
+	printDoctor(&b, rep)
+	out := b.String()
+	if rep.OK {
+		t.Fatalf("doctor passed although the service cannot reach Notes:\n%s", out)
+	}
+	wantLine(t, out, "[FAIL] service access", "permission_denied", "Automation")
+	wantLine(t, out, "[OK] access from this terminal", "7 notes")
+	if strings.Contains(out, "] helper:") {
+		t.Errorf("doctor checked the Agent Notes helper for apple-notes:\n%s", out)
+	}
+
+	e.writeHealth(t, notes.Health{Backend: "Apple Notes", Probe: &notes.ProbeResult{At: at, Count: 42}, Command: "search", OK: true, UpdatedAt: at})
+	b.Reset()
+	rep = runNotesDoctor(t.Context(), o)
+	printDoctor(&b, rep)
+	wantLine(t, b.String(), "[OK] service access", "42 notes")
+
+	// A check made for another app does not count for this one.
+	e.writeHealth(t, notes.Health{Backend: "Bear", Probe: &notes.ProbeResult{At: at, Count: 42}, Command: "search", OK: true, UpdatedAt: at})
+	b.Reset()
+	printDoctor(&b, runNotesDoctor(t.Context(), o))
+	wantLine(t, b.String(), "[WARN] service access", "for Bear, not Apple Notes")
+	e.writeHealth(t, notes.Health{Backend: "Apple Notes", Probe: &notes.ProbeResult{At: at, Count: 42}, Command: "search", OK: true, UpdatedAt: at})
+	// The add ledger dedupes, so no add is needed to verify it.
+	wantLine(t, b.String(), "[OK] last helper result", "search succeeded")
 }

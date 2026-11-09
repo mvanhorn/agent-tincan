@@ -83,36 +83,71 @@ RestartSec=10
 WantedBy=default.target
 `
 
-// ServiceOptions controls InstallService. LibraryRoot is required;
-// HelperPath defaults to DefaultHelperPath.
+// ServiceOptions controls InstallService. Backend defaults to agent-notes,
+// which needs LibraryRoot; HelperPath defaults to DefaultHelperPath. The
+// other backends take neither.
 type ServiceOptions struct {
 	history.ServiceOptions
+	Backend     string
 	LibraryRoot string
 	HelperPath  string
 }
+
+// The agent-notes arguments in each template, and what replaces them for
+// another backend.
+const (
+	launchdHelperArgs = `    <string>--library-root</string>
+    <string>__LIBRARY_ROOT__</string>
+    <string>--helper</string>
+    <string>__HELPER__</string>
+`
+	launchdBackendArgs = `    <string>--backend</string>
+    <string>__BACKEND__</string>
+`
+	systemdHelperArgs  = `--library-root "__LIBRARY_ROOT__" --helper "__HELPER__"`
+	systemdBackendArgs = `--backend "__BACKEND__"`
+)
 
 // InstallService writes the notes service definition, which runs
 // tincan notes serve against o.LibraryRoot as the agent in
 // ~/.config/tincan/notes.json. It never loads or starts it.
 func InstallService(o ServiceOptions) (history.ServiceResult, error) {
-	if o.HelperPath == "" {
-		o.HelperPath = DefaultHelperPath
+	if o.Backend == "" {
+		o.Backend = BackendAgentNotes
+	}
+	if err := CheckBackendName(o.Backend); err != nil {
+		return history.ServiceResult{}, err
 	}
 	goos := o.GOOS
 	if goos == "" {
 		goos = runtime.GOOS
 	}
-	for flag, p := range map[string]string{"library root": o.LibraryRoot, "helper": o.HelperPath} {
-		if err := checkServicePath(goos, flag, p); err != nil {
-			return history.ServiceResult{}, err
+	launchd, systemd := launchdTemplate, systemdTemplate
+	var vars []string
+	if o.Backend == BackendAgentNotes {
+		if o.HelperPath == "" {
+			o.HelperPath = DefaultHelperPath
 		}
+		for flag, p := range map[string]string{"library root": o.LibraryRoot, "helper": o.HelperPath} {
+			if err := checkServicePath(goos, flag, p); err != nil {
+				return history.ServiceResult{}, err
+			}
+		}
+		vars = []string{"__LIBRARY_ROOT__", o.LibraryRoot, "__HELPER__", o.HelperPath}
+	} else {
+		if goos != "darwin" {
+			return history.ServiceResult{}, fmt.Errorf("the %s backend runs only on macOS", o.Backend)
+		}
+		launchd = strings.Replace(launchd, launchdHelperArgs, launchdBackendArgs, 1)
+		systemd = strings.Replace(systemd, systemdHelperArgs, systemdBackendArgs, 1)
+		vars = []string{"__BACKEND__", o.Backend}
 	}
 	return history.InstallServiceDef(o.ServiceOptions, history.ServiceDef{
 		Label:       ServiceLabel,
 		Unit:        systemdUnit,
-		Launchd:     launchdTemplate,
-		Systemd:     systemdTemplate,
-		Vars:        []string{"__LIBRARY_ROOT__", o.LibraryRoot, "__HELPER__", o.HelperPath},
+		Launchd:     launchd,
+		Systemd:     systemd,
+		Vars:        vars,
 		Unsupported: "no notes service definition for " + goos + "; run tincan notes serve under your own service manager",
 		NoLauncher:  true,
 	})

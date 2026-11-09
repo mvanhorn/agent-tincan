@@ -154,6 +154,12 @@ type Request struct {
 	// Relay-only, so a client can never ask for the policy path that takes
 	// an answered request as a parent.
 	FollowOf string `json:"-"`
+	// NoticeFor and NoticeKind link a notice the relay sent an asker to the
+	// request it is about and the kind of note it carries. Relay-only. A
+	// stale-claim notice that is still queued when its request closes is
+	// closed without delivery.
+	NoticeFor  string `json:"-"`
+	NoticeKind string `json:"-"`
 	// FromGuest marks a request a guest sent or a teammate sent while
 	// handling a guest's ask. Only the relay sets it: a send cannot, and an
 	// old client that ignores it still sees GuestLine in the body.
@@ -332,6 +338,9 @@ type Reply struct {
 	// sweep had closed the request with, so the relay does not set the
 	// request's follow-on off twice. Relay-only.
 	Replaced bool `json:"-"`
+	// Superseded lists the relay's queued notices about the request that
+	// this reply closed without delivery. Relay-only.
+	Superseded []string `json:"-"`
 }
 
 // Progress is the latest note from the agent handling a request.

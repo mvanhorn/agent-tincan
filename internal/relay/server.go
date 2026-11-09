@@ -1675,6 +1675,7 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 		detail["via"] = "email"
 	}
 	s.record(ctx, event, id, "", agent, store.DetailJSON(detail))
+	s.recordSuperseded(ctx, id, "replied", rep.Superseded)
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
 	if req, _, err := s.store.Request(ctx, id); err == nil {
@@ -1756,12 +1757,14 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if g, guest := guestOf(r.Context()); guest && strings.HasPrefix(g.NodeID, identity.VirtualPrefix) {
 		cancel = s.store.CancelUntaken
 	}
-	if err := cancel(r.Context(), id, name); err != nil {
+	closed, err := cancel(r.Context(), id, name)
+	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
 	s.hub.notify(requestKey(id))
 	s.record(r.Context(), "cancelled", id, "", name, "")
+	s.recordSuperseded(r.Context(), id, "cancelled", closed)
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": string(envelope.StatusCancelled)})
 }
 

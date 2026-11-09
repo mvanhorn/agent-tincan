@@ -232,7 +232,7 @@ func TestMoveRacesDeliver(t *testing.T) {
 		default:
 			t.Fatalf("move %v, delivered %d, request to %s %s", moveErr, len(delivered), got.To, status)
 		}
-		if err := s.Cancel(ctx, req.ID, "codex"); err != nil && !errors.Is(err, ErrWrongState) {
+		if _, err := s.Cancel(ctx, req.ID, "codex"); err != nil && !errors.Is(err, ErrWrongState) {
 			t.Fatal(err)
 		}
 	}

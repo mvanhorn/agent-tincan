@@ -114,7 +114,7 @@ func TestUnseenRepliesSkipsCancelledAndExpired(t *testing.T) {
 	s, c := open(t, ":memory:")
 	ctx := context.Background()
 	cancelled := ask(t, s, "hermes", "muse", "never mind")
-	if err := s.Cancel(ctx, cancelled.ID, "hermes"); err != nil {
+	if _, err := s.Cancel(ctx, cancelled.ID, "hermes"); err != nil {
 		t.Fatal(err)
 	}
 	ask(t, s, "hermes", "instinct", "too slow")

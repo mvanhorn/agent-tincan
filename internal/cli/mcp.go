@@ -109,6 +109,17 @@ and --no-project sends none.`,
 			}
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			watch := mcpserver.Watch(mcpserver.NewBuildWatch(ownBinary(), Version))
+			if id := os.Getenv("TINCAN_WORKER_REQUEST"); id != "" {
+				// A window tincan window serve opened for one request: no
+				// wake, since every new ask to its agent belongs to a window
+				// of its own, and no inbox. The session is the worker's, set
+				// by the window's environment, so its asks continue the
+				// request's chain.
+				ctx, cancel := context.WithCancel(runCtx)
+				defer cancel()
+				go keepSession(ctx, r, sessionKeepalive)
+				return mcpserver.New(r, Version, files, watch, mcpserver.WorkerRequest(id)).Run(ctx, mcpserver.StdioRecorded(rec))
+			}
 			route, p := pickWake(channel, wakeSocket, claudeSocketFromEnv)
 			if route != wakeByChannel {
 				ctx, cancel := context.WithCancel(runCtx)

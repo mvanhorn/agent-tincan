@@ -1069,17 +1069,22 @@ func (r *Relay) Raw(ctx context.Context, method, path string, in, out any) error
 	return r.call(ctx, r.api, method, path, in, out)
 }
 
-// socksRetry spaces the retries of a call whose SOCKS proxy could not
-// connect to the relay, about 15 seconds in all: long enough for a sandbox's
-// tailnet tunnel to come back after the sandbox wakes. Tests shorten it.
+// socksRetry spaces the retries of a call that could not connect to the
+// relay, through a SOCKS proxy or directly, about 15 seconds in all: long
+// enough for a sandbox's tailnet tunnel to come back after the sandbox
+// wakes, or for a tailnet path to settle after the relay's public endpoint
+// changes. Tests shorten it.
 var socksRetry = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
 
-// call makes one relay call. A call the SOCKS proxy could not connect is
-// made again on the socksRetry schedule while ctx allows; nothing reached
-// the relay, so this is safe for a POST too. Any other failure, and a SOCKS
-// failure that outlasts the schedule, goes on as before: a call that found
-// nothing at the relay's address looks for a moved relay and, if it finds
-// one, is made once more there.
+// call makes one relay call. A call that could not connect, because the
+// SOCKS proxy could not or because a direct dial timed out or found no
+// route, is made again on the socksRetry schedule while ctx allows; nothing
+// reached the relay, so this is safe for a POST too. A refused dial is not
+// retried: something answered at the relay's address, so the relay has
+// likely moved. Any other failure, and a connect failure that outlasts the
+// schedule, goes on as before: a call that found nothing at the relay's
+// address looks for a moved relay and, if it finds one, is made once more
+// there.
 //
 // A call the proxy refused with 407 is made once more if the client now
 // uses a different proxy than the refused attempt did (see proxyAuthRetry);
@@ -1090,8 +1095,11 @@ func (r *Relay) call(ctx context.Context, c *http.Client, method, path string, i
 		return err
 	}
 	for _, delay := range socksRetry {
-		if err == nil || !socksConnectFailed(err) {
+		if err == nil || !socksConnectFailed(err) && !dialBlipped(err) {
 			break
+		}
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < delay+dialTimeout {
+			break // no room for another full attempt: search now instead
 		}
 		select {
 		case <-ctx.Done():

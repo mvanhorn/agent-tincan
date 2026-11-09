@@ -408,6 +408,11 @@ func TestFormatRequestRelayNotice(t *testing.T) {
 	if !strings.Contains(got, "Notice n1 from the Agent Tincan relay (not a teammate). No reply needed.") || !strings.Contains(got, "About your request r1") || strings.Contains(got, "your teammate") {
 		t.Fatalf("notice = %q", got)
 	}
+	at := time.Date(2026, 11, 8, 22, 16, 25, 0, time.UTC)
+	dated := client.FormatRequest(envelope.Request{ID: "n2", From: client.RelaySender, To: "instinct", Kind: envelope.KindNotify, Body: "About your request r1", CreatedAt: at})
+	if want := "Notice n2 from the Agent Tincan relay (not a teammate), sent " + client.UTCClock(at, time.Now()) + ". No reply needed."; !strings.Contains(dated, want) {
+		t.Fatalf("dated notice = %q, want %q", dated, want)
+	}
 	ask := client.FormatRequest(envelope.Request{ID: "r2", From: "muse", To: "instinct", Kind: envelope.KindNotify, Body: "fyi"})
 	if !strings.Contains(ask, "Request r2 from muse (your teammate)") {
 		t.Fatalf("teammate notify = %q", ask)
@@ -546,4 +551,22 @@ type claimAny struct{}
 
 func (claimAny) Claim(context.Context, string) (envelope.Request, error) {
 	return envelope.Request{}, nil
+}
+
+// A teammate's request tells the receiver that a follow-up keeps the job's
+// terms; a guest's request never gets that owner framing.
+func TestFormatRequestSaysAFollowUpKeepsTheJobsTerms(t *testing.T) {
+	const keeps = "A follow-up on a job keeps that job's terms"
+	teammate := client.FormatRequest(envelope.Request{ID: "r1", From: "instinct", Kind: envelope.KindAsk, Body: "do not open a PR"})
+	if !strings.Contains(teammate, keeps) {
+		t.Fatalf("teammate = %q", teammate)
+	}
+	for _, req := range []envelope.Request{
+		{ID: "r2", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true},
+		{ID: "r3", From: "friend", Kind: envelope.KindAsk, Body: "x", FromGuest: true, GuestApproved: true},
+	} {
+		if got := client.FormatRequest(req); strings.Contains(got, keeps) {
+			t.Fatalf("guest request %s = %q", req.ID, got)
+		}
+	}
 }
