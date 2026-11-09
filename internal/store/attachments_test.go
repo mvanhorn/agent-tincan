@@ -248,7 +248,7 @@ func TestSweepAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Cancel(ctx, r3.ID, "grokbot"); err != nil {
+	if _, err := s.Cancel(ctx, r3.ID, "grokbot"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -705,10 +705,11 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			var tr struct {
 				Steps  []envelope.Result `json:"steps"`
 				Events []struct {
-					Seq       int64  `json:"seq"`
-					Event     string `json:"event"`
-					Actor     string `json:"actor"`
-					RequestID string `json:"request_id"`
+					Seq       int64     `json:"seq"`
+					At        time.Time `json:"at"`
+					Event     string    `json:"event"`
+					Actor     string    `json:"actor"`
+					RequestID string    `json:"request_id"`
 				} `json:"events"`
 			}
 			if err := b.Raw(ctx, "GET", "/v1/trace/"+url.PathEscape(in.TraceID), nil, &tr); err != nil {
@@ -727,7 +728,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 			if len(tr.Events) > 0 {
 				out.WriteString("Events:\n")
 				for _, e := range tr.Events {
-					fmt.Fprintf(&out, "  #%d %-9s %-10s %s\n", e.Seq, e.Event, e.Actor, e.RequestID)
+					// The relay's own time for each event, so a delayed notice can be
+					// told from a late one.
+					fmt.Fprintf(&out, "  %s #%d %-9s %-10s %s\n", e.At.UTC().Format("2006-01-02T15:04:05.000Z"), e.Seq, e.Event, e.Actor, e.RequestID)
 				}
 			}
 			return text(out.String())

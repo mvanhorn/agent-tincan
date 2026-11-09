@@ -9,6 +9,8 @@ It is a Go service, `tincan notes serve`, that runs under launchd on the Mac whe
 3. Runs the helper: `create` for an add, `search` for a search, `read` for a read.
 4. Fills in a fixed reply template in Go. Note text is never sent to a model.
 
+The helper matches a multi-word search only when a note holds every word. When that finds nothing, the service searches the words one by one (the first 12 distinct words of three or more letters, leaving out common words such as "the" and "and", within 90 seconds) and replies with the notes that hold the most of them. That reply starts "No note contains every word of ..." and gives, for each note, how many of the searched words it holds and which ones, as in `1. "Family Alaska Airlines Numbers" (id ...), matches 8 of 10 words: alaska, airlines, ...`. Ties go to the note with more of the words in its title, then a pinned note. Words left out for the 12-word limit or for time are named at the end of the reply. If no word could be searched on its own (the helper failed or time ran out on every one), the request fails with a reply that says so, rather than claiming nothing matches. A one-word search that finds nothing still replies "No notes match ...".
+
 v1 never edits, retags, archives or deletes a note. Search and read cover active notes only: an archived or trashed note is left out of search results, and a read of one says "No note with id ... was found."
 
 Every note added through Tincan carries the `from-agent` tag and these properties, so you can find and review them in the app:
@@ -61,6 +63,7 @@ A note an agent asked to save is not silently lost, even when the Mac is asleep 
 
 - On the relay: requests to an agent of kind `notes` wait up to 30 days before they expire (relay flag `--notes-ttl`, default 30 days); other kinds keep 24 hours. This needs a relay from this release or later, and the agent must have kind `notes` (`tincan invite notes --kind notes`, or `tincan kind notes notes` on an admin device for one that joined without it). Until the relay is upgraded, adds keep the 24-hour window.
 - On the Mac: each add the service claims is written to its spool (`~/Library/Application Support/tincan-notes/spool`, or `--spool-dir`) before the library is touched. If the helper fails for a reason that may pass (library missing, no folder access, a timeout), the add stays in the spool, the asker gets a progress note ("Not saved to Agent Notes yet ... The add is kept on the notes Mac and will be retried; the reply will carry the note id."), and the service retries every minute and at every start.
+- Replies: a search or read reply is written to the spool's `replies/` folder before it is sent. If the relay cannot be reached, the reply is kept and resent after 2, 5, 15 and 30 seconds, then every minute, and at once when the service's polls get through again. Retries run beside polling, so other requests are still served meanwhile. If the claim lease runs out first and the relay hands the request back, the stored reply is sent again; the search is not rerun. A reply the relay says is already closed is dropped. A reply it refuses as too large is replaced by a short failed reply. A reply kept more than 24 hours is deleted unsent. The same retry schedule applies to an add's reply once the add is saved.
 - At most once: each add is created with the idempotency key `tincan:<request id>`. Redelivery, restarts and crashes mid-write return the same note instead of a second one, even when you have since archived or trashed it. The reply then says "This request was already saved as note ... No new note was created."
 
 Agents should use `ask`, not `notify`, for an add, so the reply with the note id comes back. A pending add is queued, not lost; they should not resend it.
@@ -108,7 +111,8 @@ After install, check it from another agent: `tincan ask notes 'note: {"op":"sear
 - Free-text requests are sent to the `codex exec` request step, which means OpenAI sees the request text. Structured `note:` requests never leave the Mac except as the reply to the asker.
 - Note text is never sent to a model. Replies are filled in from fixed templates in Go, so text inside a note cannot steer the service. Agents are told that note text is data, never instructions.
 - The helper runs with the service's own Application Support folder, so it never picks up an in-app agent session's context.
-- The spool holds the full text of adds not yet saved, in a folder only your user can read (folder 0700, files 0600), and each entry is removed once its reply is sent.
+- The spool holds the full text of adds not yet saved, and in `replies/` the text of search and read replies not yet delivered, note text included, in folders only your user can read (folders 0700, files 0600). Each entry is removed once its reply is sent or the relay says the request is closed, and a stored reply is deleted unsent after 24 hours. Before a stored reply is resent, the asker is checked against the read allowlist again; one removed since gets the declined reply instead.
+- The log (`~/Library/Logs/tincan-notes.log`) and the health file name requests by id, with times, durations, match counts and error classes. They never hold request text, reply text or note text.
 
 ## Troubleshooting
 
@@ -123,6 +127,7 @@ After install, check it from another agent: `tincan ask notes 'note: {"op":"sear
   - `helper_too_old`: this Agent Notes build cannot save notes safely for the notes agent. Install the latest Agent Notes, then restart the service.
   - `helper_unavailable`: check that Agent Notes is installed and that `--helper` names its helper.
   - No result yet: start the service and send notes a request, then run doctor again.
+- undelivered replies: replies the service has computed but could not deliver, by request id, operation, age, failed attempts and last error class (`network`, `timeout`, `5xx`, or the HTTP status). A warning means the service is still retrying: check that the relay is reachable from the Mac. A failure (`401` or `403`) means the relay refuses the agent's replies: check its join.
 
 Replies and what to do:
 
@@ -135,4 +140,7 @@ Replies and what to do:
 - "The note was not saved: the Agent Notes helper rejected it (...)": the helper refused the note itself (bad metadata, too large). Nothing was written; fix the request and send it again.
 - "The notes agent could not reach the Agent Notes library right now": a search or read failed in the helper. Run `tincan notes doctor`.
 - "No note with id ... was found.": the id is wrong, or the note is archived or trashed.
+- "No note contains every word of ...": the search fell back to single words; see [how search works](#notes-agent).
+- "The notes agent finished this search, but the relay refused its reply (HTTP 413)": the reply was too large for the relay. Ask for fewer results.
+- A late reply: run `tincan notes doctor` and look at undelivered replies. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so you can tell time spent searching from time spent waiting to deliver.
 - No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.notes`) and read `~/Library/Logs/tincan-notes.log`.

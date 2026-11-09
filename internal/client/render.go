@@ -25,7 +25,12 @@ func FormatRequest(req envelope.Request) string {
 		return ""
 	}
 	if req.From == RelaySender && req.Kind == envelope.KindNotify {
-		return fmt.Sprintf("Notice %s from the Agent Tincan relay (not a teammate). No reply needed.\n---\n%s\n---\n", req.ID, req.Body)
+		// When it was made, so a notice read late is not taken for news.
+		sent := ""
+		if !req.CreatedAt.IsZero() {
+			sent = ", sent " + UTCClock(req.CreatedAt, time.Now())
+		}
+		return fmt.Sprintf("Notice %s from the Agent Tincan relay (not a teammate)%s. No reply needed.\n---\n%s\n---\n", req.ID, sent, req.Body)
 	}
 	var b strings.Builder
 	if req.Urgent {

@@ -325,3 +325,28 @@ func TestNotesServeRequiresALibraryWhenNoneIsFound(t *testing.T) {
 		t.Fatalf("serve with no library to find: %v", err)
 	}
 }
+
+// Undelivered replies show by id, age and error class, never their text,
+// and a refused credential fails.
+func TestNotesDoctorListsUndeliveredReplies(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	joinNotes(t, m)
+	setKind(t, m, "notes")
+	e := newNotesDoctorEnv(t, m.URL("notes"), "notes")
+	stored := time.Now().Add(-31 * time.Minute)
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "create", OK: true, IdempotencyVerified: true,
+		Pending: []notes.PendingReply{{RequestID: "req-net", Op: "search", StoredAt: stored, Attempts: 5, LastError: "network"}}})
+	out, err := e.run(t)
+	if err != nil {
+		t.Fatalf("doctor failed on a network outage: %v\n%s", err, out)
+	}
+	wantLine(t, out, "[WARN] undelivered replies", "1 waiting", "req-net", "search", "stored 31m", "5 failed attempts", "last error network", "relay is reachable")
+
+	e.writeHealth(t, notes.Health{UpdatedAt: time.Now().UTC(), Command: "create", OK: true, IdempotencyVerified: true,
+		Pending: []notes.PendingReply{{RequestID: "req-403", Op: "read", StoredAt: stored, Attempts: 1, LastError: "403"}}})
+	out, err = e.run(t)
+	if err == nil {
+		t.Fatalf("doctor passed with replies refused:\n%s", out)
+	}
+	wantLine(t, out, "[FAIL] undelivered replies", "req-403", "last error 403", "refuses")
+}

@@ -1326,6 +1326,13 @@ func TestStaleClaimNoteNamesOnlyListedTeammates(t *testing.T) {
 	if res.RelayNote == nil || !strings.Contains(res.RelayNote.Note, "grokbot") || strings.Contains(res.RelayNote.Note, "instinct") {
 		t.Fatalf("note = %+v", res.RelayNote)
 	}
+	in, err := g.Poll(t.Context(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(in.Requests) != 1 || !strings.HasSuffix(in.Requests[0].Body, res.RelayNote.Note+" Sent by the relay at "+client.UTCClock(now, now)+". No reply needed.") {
+		t.Fatalf("guest inbox = %+v", in.Requests)
+	}
 
 	mate, err := m.Client(t, "grokbot").Send(t.Context(), "instinct", "x", envelope.KindAsk, "", false)
 	if err != nil {

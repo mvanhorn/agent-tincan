@@ -47,6 +47,19 @@ const maxReplyBytes = 64 << 10
 // replyTimeout bounds sending one reply or progress note.
 const replyTimeout = 30 * time.Second
 
+// retryDelays is the wait after each failed reply attempt for an entry;
+// the last one repeats. The schedule is in memory: a restart retries every
+// stored reply at once.
+var retryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
+
+// retryTick is how often the retry loop looks for stored replies whose
+// backoff has run out.
+const retryTick = time.Second
+
+// storedReplyTTL is the longest a stored search or read reply is kept,
+// since it holds note text. The relay's own expiry is not visible here.
+const storedReplyTTL = 24 * time.Hour
+
 // Config is everything a notes service needs. Relay, LibraryRoot,
 // AppSupportRoot, and SpoolDir are required.
 type Config struct {
@@ -90,6 +103,8 @@ type Config struct {
 	PresenceInterval time.Duration
 	// Log receives one line per request and per error (stderr when nil).
 	Log io.Writer
+	// Now is the clock log lines are stamped with (time.Now when nil).
+	Now func() time.Time
 }
 
 // Service is the notes agent.
@@ -98,6 +113,7 @@ type Service struct {
 	agent      string
 	helper     *Helper
 	spool      *Spool
+	replies    *Spool // stored search and read replies
 	healthPath string
 	readAllow  func() ([]string, error)
 	addAllow   func() ([]string, error)
@@ -107,6 +123,14 @@ type Service struct {
 	timeout    time.Duration
 	presence   time.Duration
 	log        io.Writer
+	now        func() time.Time
+	delays     []time.Duration
+	tick       time.Duration
+	// fallbackBudget bounds a search's per-word fallback.
+	fallbackBudget time.Duration
+	// recovered is signalled when a poll succeeds after failing, so stored
+	// replies go out without waiting for their backoff.
+	recovered chan struct{}
 
 	mu       sync.Mutex
 	inflight map[string]bool // request ids being applied, loop or timer
@@ -114,6 +138,15 @@ type Service struct {
 	// one is answered (KTD6). It is in memory: a restart gives a request
 	// fresh attempts, which only delays its answer.
 	extractFails map[string]int
+	// pending is the retry state of each entry whose reply failed, by
+	// request id.
+	pending     map[string]*pendingReply
+	pollFailing bool
+	// lastPending is the list last written to the health file, so an
+	// unchanged list is not written again; stalePending forces the first
+	// write, over a list an earlier run left.
+	lastPending  []PendingReply
+	stalePending bool
 	// createMu runs one helper create at a time: the helper looks an
 	// idempotency key up in the library as loaded at its start, so two
 	// concurrent creates for one key could both write a note.
@@ -143,6 +176,7 @@ func New(cfg Config) (*Service, error) {
 		agent:      orDefault(cfg.Agent, DefaultAgentName),
 		helper:     &Helper{Path: orDefault(cfg.HelperPath, DefaultHelperPath), LibraryRoot: cfg.LibraryRoot, AppSupportRoot: cfg.AppSupportRoot},
 		spool:      &Spool{Dir: cfg.SpoolDir},
+		replies:    (&Spool{Dir: cfg.SpoolDir}).Replies(),
 		healthPath: orDefault(cfg.HealthPath, HealthPathIn(cfg.AppSupportRoot)),
 		readAllow:  allowlistAt(cfg.ReadAllowlistPath),
 		addAllow:   allowlistAt(cfg.AddAllowlistPath),
@@ -152,15 +186,26 @@ func New(cfg Config) (*Service, error) {
 		timeout:    cfg.RequestTimeout,
 		presence:   cfg.PresenceInterval,
 		log:        cfg.Log,
+		now:        cfg.Now,
 		inflight:   map[string]bool{},
 
 		extractFails: map[string]int{},
+		pending:      map[string]*pendingReply{},
+		delays:       retryDelays,
+		tick:         retryTick,
+
+		fallbackBudget: fallbackBudget,
+		recovered:      make(chan struct{}, 1),
+		stalePending:   true,
 	}
 	if s.retryEvery <= 0 {
 		s.retryEvery = DefaultRetryEvery
 	}
 	if s.timeout <= 0 {
 		s.timeout = DefaultRequestTimeout
+	}
+	if s.now == nil {
+		s.now = time.Now
 	}
 	return s, nil
 }
@@ -184,23 +229,41 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w, "tincan notes: "+format+"\n", args...)
+	stamp := s.now().Format(logStamp)
+	_, _ = fmt.Fprintf(w, stamp+" tincan notes: "+format+"\n", args...)
 }
 
-// Run drains the spool once in the background, retries spooled adds every
-// RetryEvery, and polls and handles requests until ctx is cancelled. The
-// drain and retries never hold up polling (KTD9).
+// logStamp is the local time at the start of every log line, to the
+// millisecond, with its zone offset so it lines up with the relay's UTC
+// trace.
+const logStamp = "2006-01-02T15:04:05.000Z07:00"
+
+// Run retries everything spooled once in the background, then keeps
+// retrying: decided replies as their backoff runs out, undecided adds
+// every RetryEvery, and everything at once when polling recovers. It polls
+// and handles requests until ctx is cancelled. Retries never hold up
+// polling.
 func (s *Service) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		s.RetrySpooled(ctx)
-		t := time.NewTicker(s.retryEvery)
-		defer t.Stop()
+		// Replace whatever list an earlier run left, even when nothing is
+		// stored now and the pass above had nothing to record.
+		s.recordPending()
+		slow := time.NewTicker(s.retryEvery)
+		defer slow.Stop()
+		fast := time.NewTicker(s.tick)
+		defer fast.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-t.C:
+			case <-slow.C:
+				s.retry(ctx, retryUnscheduled)
+			case <-fast.C:
+				s.retry(ctx, retryDue)
+			case <-s.recovered:
+				s.logf("the relay answers polls again, retrying stored replies now")
 				s.RetrySpooled(ctx)
 			}
 		}
@@ -211,25 +274,106 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 // PollOnce waits up to the hold for requests and handles each serially.
+// A poll that succeeds after one failed signals the retry loop.
 func (s *Service) PollOnce(ctx context.Context) (int, error) {
-	return history.PollAndHandle(ctx, s.relay, s.hold, "notes-serve", s.handleSafely)
+	n, err := history.PollAndHandle(ctx, s.relay, s.hold, "notes-serve", func(ctx context.Context, req envelope.Request) {
+		s.notePoll(nil) // before handling: the poll itself got through
+		s.handleSafely(ctx, req)
+	})
+	if ctx.Err() == nil {
+		s.notePoll(err)
+	}
+	return n, err
 }
 
-// RetrySpooled makes one attempt at every spooled add not already being
-// applied, and returns how many it tried.
-func (s *Service) RetrySpooled(ctx context.Context) int {
+// notePoll records a poll's outcome and signals the retry loop on the
+// first success after a failure.
+func (s *Service) notePoll(err error) {
+	s.mu.Lock()
+	recovered := s.pollFailing && err == nil
+	s.pollFailing = err != nil
+	s.mu.Unlock()
+	if recovered {
+		select {
+		case s.recovered <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// retryScope picks what one retry pass attempts.
+type retryScope int
+
+const (
+	retryAll         retryScope = iota // everything, now
+	retryDue                           // entries whose reply backoff has run out
+	retryUnscheduled                   // entries with no reply backoff: undecided adds, mostly
+)
+
+// RetrySpooled makes one attempt at every stored reply and spooled add
+// not already being handled, and returns how many it tried.
+func (s *Service) RetrySpooled(ctx context.Context) int { return s.retry(ctx, retryAll) }
+
+func (s *Service) retry(ctx context.Context, scope retryScope) int {
+	now := s.now()
+	if scope == retryDue && !s.anyDue(now) {
+		return 0 // the every-second tick reads no spool while nothing is due
+	}
+	want := func(e SpoolEntry) bool {
+		switch scope {
+		case retryDue:
+			return s.scheduled(e.Request.ID) && s.isDue(e.Request.ID, now)
+		case retryUnscheduled:
+			return !s.scheduled(e.Request.ID)
+		}
+		return true
+	}
+	stored, err := s.replies.List()
+	if err != nil {
+		s.logf("stored replies: %v", err)
+	}
+	n := 0
+	for _, e := range stored {
+		if ctx.Err() != nil {
+			return n
+		}
+		if !want(e) || !s.begin(e.Request.ID) {
+			continue
+		}
+		// The list was read before the in-flight mark: a request handled
+		// meanwhile may have stored a fresh reply, which an old copy must
+		// not purge or overwrite.
+		cur, ok, err := s.replies.Get(e.Request.ID)
+		if err != nil || !ok || !cur.SpooledAt.Equal(e.SpooledAt) {
+			s.end(e.Request.ID)
+			continue
+		}
+		e = cur
+		n++
+		if !s.purgeIfStale(e) {
+			s.resendStored(ctx, e)
+		}
+		s.end(e.Request.ID)
+	}
 	entries, err := s.spool.List()
 	if err != nil {
 		s.logf("spool: %v", err)
 	}
-	n := 0
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			break
 		}
-		if !s.begin(e.Request.ID) {
+		if !want(e) || !s.begin(e.Request.ID) {
 			continue
 		}
+		// Re-read under the mark, so a decision made meanwhile is not
+		// applied again from an old copy.
+		cur, ok, err := s.spool.Get(e.Request.ID)
+		if err != nil || !ok {
+			s.end(e.Request.ID)
+			continue
+		}
+		e = cur
 		n++
 		func() {
 			defer s.end(e.Request.ID)
@@ -239,6 +383,100 @@ func (s *Service) RetrySpooled(ctx context.Context) int {
 		}()
 	}
 	return n
+}
+
+// pendingReply is the retry state of an entry whose reply failed.
+type pendingReply struct {
+	failures int
+	class    string
+	due      time.Time
+}
+
+// isDue reports whether id's backoff has run out; an entry with no failed
+// attempt in this process is due.
+func (s *Service) isDue(id string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pending[id]
+	return p == nil || !now.Before(p.due)
+}
+
+// scheduled reports whether id has a reply backoff running.
+func (s *Service) scheduled(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pending[id] != nil
+}
+
+// anyDue reports whether some reply backoff has run out.
+func (s *Service) anyDue(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.pending {
+		if !now.Before(p.due) {
+			return true
+		}
+	}
+	return false
+}
+
+// attemptOf is the number of id's next reply attempt.
+func (s *Service) attemptOf(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.pending[id]; p != nil {
+		return p.failures + 1
+	}
+	return 1
+}
+
+// retryDelay is the wait after the nth failed attempt.
+func retryDelay(delays []time.Duration, n int) time.Duration {
+	return delays[min(max(n, 1), len(delays))-1]
+}
+
+// failedAttempt records a failed reply for id and logs when it is retried.
+// hold keeps it at the longest delay: retrying sooner cannot help.
+func (s *Service) failedAttempt(id string, err error, hold bool) {
+	now := s.now()
+	s.mu.Lock()
+	p := s.pending[id]
+	if p == nil {
+		p = &pendingReply{}
+		s.pending[id] = p
+	}
+	p.failures++
+	p.class = replyErrClass(err)
+	wait := retryDelay(s.delays, p.failures)
+	if hold {
+		wait = s.delays[len(s.delays)-1]
+	}
+	p.due = now.Add(wait)
+	failures, due := p.failures, p.due
+	s.mu.Unlock()
+	s.logf("request %s: reply kept after %d failed attempts, next retry at %s (in %s)", id, failures, due.Format(logStamp), wait)
+}
+
+func (s *Service) forgetPending(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pending, id)
+}
+
+// purgeIfStale removes a stored reply kept past storedReplyTTL, sending
+// nothing, and reports whether it did.
+func (s *Service) purgeIfStale(e SpoolEntry) bool {
+	age := s.now().Sub(e.SpooledAt)
+	if age <= storedReplyTTL {
+		return false
+	}
+	s.logf("request %s from %s: purged the stored %s reply undelivered, it was stored %s ago (limit %s)", e.Request.ID, e.Request.From, e.Op, age.Round(time.Second), storedReplyTTL)
+	if err := s.replies.Remove(e.Request.ID); err != nil {
+		s.logf("request %s: stored reply remove failed: %v", e.Request.ID, err)
+	}
+	s.forgetPending(e.Request.ID)
+	s.recordPending()
+	return true
 }
 
 // begin marks id as being applied; false means it already is.
@@ -270,6 +508,10 @@ func (s *Service) handleSafely(ctx context.Context, req envelope.Request) {
 			// A spooled add may already be written, or will be on its retry:
 			// a failed reply now would tell the asker it was not saved, and a
 			// resend would save it twice. Leave it to the retry to answer.
+			if _, stored, err := s.replies.Get(req.ID); err == nil && stored {
+				s.logf("request %s: the reply is stored, leaving it for the retry to send", req.ID)
+				return
+			}
 			if _, spooled, err := s.spool.Get(req.ID); err == nil && spooled {
 				s.logf("request %s: the add is spooled, leaving it for the retry to apply and answer", req.ID)
 				s.progress(hctx, req, "The notes agent hit an internal error; the add is kept on the notes Mac and will be retried. The reply will carry the note id.")
@@ -287,6 +529,32 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 	if _, err := s.relay.Claim(ctx, req.ID); err != nil {
 		s.logf("request %s from %s: claim failed: %v", req.ID, req.From, err)
 		return
+	}
+	s.logf("request %s from %s: claimed (created %s)", req.ID, req.From, req.CreatedAt.UTC().Format(time.RFC3339))
+
+	// A redelivered search or read whose reply is stored gets that reply
+	// again: the work is not run twice.
+	if e, ok, err := s.replies.Get(req.ID); err != nil {
+		s.logf("request %s: stored reply unreadable, handling it afresh: %v", req.ID, err)
+	} else if ok {
+		if !s.begin(req.ID) {
+			s.logf("request %s: redelivered while a retry is sending its reply", req.ID)
+			return
+		}
+		// A reply past the limit is purged and the request handled afresh,
+		// which takes the in-flight mark again when it stores the new reply.
+		resent := func() bool {
+			defer s.end(req.ID)
+			if s.purgeIfStale(e) {
+				return false
+			}
+			s.logf("request %s from %s: redelivered, its %s reply is stored", req.ID, req.From, e.Op)
+			s.resendStored(ctx, e)
+			return true
+		}()
+		if resent {
+			return
+		}
 	}
 
 	// A redelivered add that is already spooled goes straight to the
@@ -609,37 +877,128 @@ func (s *Service) decide(ctx context.Context, e SpoolEntry, o Outcome, noteID, b
 	s.sendFinal(ctx, e)
 }
 
-// sendFinal sends the recorded reply of a decided spooled add and clears
-// its entry, unless the relay could not be reached: then the entry stays
-// for a retry, which resends the same reply. A request the relay has
-// already closed (a reply landed, expired, cancelled) is logged and
-// dropped, never retried forever.
+// spoolOf is the spool e lives in: stored replies apart from adds.
+func (s *Service) spoolOf(e SpoolEntry) *Spool {
+	if e.Op == OpSearch || e.Op == OpRead {
+		return s.replies
+	}
+	return s.spool
+}
+
+// store records a computed search or read reply durably and sends it. If
+// it cannot be recorded, it is sent once anyway: the asker is no worse
+// off than before replies were stored.
+func (s *Service) store(ctx context.Context, req envelope.Request, op Op, o Outcome, body string) {
+	if !s.begin(req.ID) {
+		s.logf("request %s: a retry is already sending this request's reply, so the new %s reply is not stored", req.ID, op)
+		return
+	}
+	defer s.end(req.ID)
+	e := SpoolEntry{Request: req, Op: op, SpooledAt: s.now().UTC(), Outcome: o, Reply: body}
+	if err := s.replies.Put(e); err != nil {
+		s.logf("request %s: could not store the %s reply, sending it unstored: %v", req.ID, op, err)
+		status, _ := o.status()
+		s.reply(ctx, req, body, status)
+		return
+	}
+	s.sendFinal(ctx, e)
+}
+
+// resendStored sends a stored search or read reply again. The asker must
+// still be on the read allowlist: one removed since gets the declined
+// reply a new request would, and nothing from the library. If the list
+// cannot be read, the reply stays stored for the next retry.
+func (s *Service) resendStored(ctx context.Context, e SpoolEntry) {
+	req := e.Request
+	names, err := s.readAllow()
+	if err != nil {
+		s.logf("request %s: could not read the read allowlist, keeping the stored reply for the next retry: %v", req.ID, err)
+		return
+	}
+	loaded := func() ([]string, error) { return names, nil }
+	if reason := history.ChainDenied(loaded, req, s.agent, "read notes", s.logf); reason != "" {
+		s.logf("request %s from %s (chain %v): stored %s reply withheld, the asker may no longer read notes: %s", req.ID, req.From, req.Chain, e.Op, reason)
+		e.Outcome, e.Reply = OutcomeDeclined, reason
+		if err := s.replies.Put(e); err != nil {
+			s.logf("request %s: could not record the decline: %v", req.ID, err)
+		}
+	} else {
+		s.logf("request %s from %s: resending the stored %s reply", req.ID, req.From, e.Op)
+	}
+	s.sendFinal(ctx, e)
+}
+
+// sendFinal sends the recorded reply of a decided entry (an add or a
+// stored reply) and clears it, unless the relay could not be reached:
+// then the entry stays for a retry, which resends the same reply. A
+// request the relay has already closed (a reply landed, expired,
+// cancelled) is logged and dropped, never retried forever.
 func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 	status, ok := e.Outcome.status()
 	if !ok {
 		s.logf("request %s: no recorded outcome to send", e.Request.ID)
 		return
 	}
-	err := s.replyErr(ctx, e.Request, e.Reply, status)
+	id := e.Request.ID
+	err := s.replyErr(ctx, e.Request, e.Reply, status, s.attemptOf(id))
 	switch {
 	case err == nil:
 	case client.IsStatus(err, http.StatusConflict), client.IsStatus(err, http.StatusNotFound):
-		s.logf("request %s: reply failed, the request is no longer open, dropping it: %v", e.Request.ID, err)
+		s.logf("request %s: dropped, the relay says the request is no longer open (%s)", id, replyErrClass(err))
+	case (client.IsStatus(err, http.StatusBadRequest) || client.IsStatus(err, http.StatusRequestEntityTooLarge)) && !e.Refused:
+		// The same body can never be accepted: send a short failed reply in
+		// its place, retried like any other.
+		code := http.StatusBadRequest
+		if client.IsStatus(err, http.StatusRequestEntityTooLarge) {
+			code = http.StatusRequestEntityTooLarge
+		}
+		s.logf("request %s: the relay refused the reply (%d), replacing it with a short failed reply", id, code)
+		e = refusedEntry(e, code)
+		if perr := s.spoolOf(e).Put(e); perr != nil {
+			s.logf("request %s: could not record the replacement reply: %v", id, perr)
+		}
+		s.failedAttempt(id, err, false)
+		s.sendFinal(ctx, e)
+		return
 	default:
-		s.logf("request %s: reply failed, keeping it spooled to retry: %v", e.Request.ID, err)
+		// Network errors, timeouts and 5xx pass. A refused credential (401,
+		// 403) or a twice-refused body needs the owner, so it waits at the
+		// longest delay and shows in doctor.
+		hold := refusedClass(replyErrClass(err)) || e.Refused
+		s.failedAttempt(id, err, hold)
+		s.recordPending()
 		return
 	}
-	if err := s.spool.Remove(e.Request.ID); err != nil {
-		s.logf("request %s: spool remove failed: %v", e.Request.ID, err)
+	if err := s.spoolOf(e).Remove(id); err != nil {
+		s.logf("request %s: spool remove failed: %v", id, err)
 	}
+	s.forgetPending(id)
+	s.recordPending()
+}
+
+// refusedEntry replaces e's reply with a short failed reply naming the
+// relay's refusal. A saved add keeps its outcome and note id: the note
+// exists whatever happened to the reply.
+func refusedEntry(e SpoolEntry, code int) SpoolEntry {
+	e.Refused = true
+	e.Reply = fmt.Sprintf("The notes agent finished this %s, but the relay refused its reply (HTTP %d), so the result could not be delivered.", e.op(), code)
+	if e.NoteID != "" {
+		e.Reply += fmt.Sprintf(" The note was saved (id %s).", e.NoteID)
+		return e
+	}
+	if e.Outcome == OutcomeAnswered {
+		e.Outcome = OutcomeFailed
+	}
+	return e
 }
 
 func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
+	start := time.Now()
 	found, err := s.helper.Search(ctx, r.Query)
 	s.recordHealth("search", req.ID, err)
 	if err != nil {
 		s.logf("request %s: search: %v", req.ID, err)
-		s.reply(ctx, req, helperFailedReply(err), envelope.StatusFailed)
+		s.store(ctx, req, OpSearch, OutcomeFailed, helperFailedReply(err))
 		return
 	}
 	var active []NoteSummary
@@ -651,41 +1010,94 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 			break
 		}
 	}
-	s.logf("request %s from %s: search answered (%d of %d matches)", req.ID, req.From, len(active), len(found))
-	s.reply(ctx, req, searchReply(r.Query, active), envelope.StatusAnswered)
+	s.logf("request %s from %s: search finished in %s (%d of %d matches)", req.ID, req.From, since(start), len(active), len(found))
+	if len(active) == 0 && len(strings.Fields(r.Query)) > 1 {
+		// No note holds every word: an over-specific request is not proof
+		// that nothing matches, so try the words one by one.
+		if words, _ := fallbackWords(r.Query); len(words) > 0 {
+			fstart := time.Now()
+			res := s.searchFallback(ctx, r.Query)
+			if res.Err != nil {
+				s.recordHealth("search", req.ID, res.Err) // doctor shows what stopped the fallback
+			}
+			s.logf("request %s from %s: search fallback finished in %s (%d words searched, %d skipped, %d out of time, %d failed; %d notes match some)",
+				req.ID, req.From, since(fstart), len(res.Searched), len(res.Skipped), len(res.TimedOut), len(res.Failed), len(res.Hits))
+			o := OutcomeAnswered
+			if len(res.Searched) == 0 {
+				o = OutcomeFailed // no word could be searched: nothing is known
+			}
+			s.store(ctx, req, OpSearch, o, fallbackReply(r.Query, res, r.Count))
+			return
+		}
+	}
+	s.store(ctx, req, OpSearch, OutcomeAnswered, searchReply(r.Query, active))
 }
 
 func (s *Service) read(ctx context.Context, req envelope.Request, r Request) {
+	start := time.Now()
 	n, err := s.helper.Read(ctx, r.ID)
 	s.recordHealth("read", req.ID, err)
 	if errors.Is(err, ErrNoteNotFound) || (err == nil && n.Summary.State != StateActive) {
 		s.logf("request %s from %s: read %s: not found", req.ID, req.From, r.ID)
-		s.reply(ctx, req, notFoundReply(r.ID), envelope.StatusFailed)
+		s.store(ctx, req, OpRead, OutcomeFailed, notFoundReply(r.ID))
 		return
 	}
 	if err != nil {
 		s.logf("request %s: read: %v", req.ID, err)
-		s.reply(ctx, req, helperFailedReply(err), envelope.StatusFailed)
+		s.store(ctx, req, OpRead, OutcomeFailed, helperFailedReply(err))
 		return
 	}
-	s.logf("request %s from %s: read %s answered", req.ID, req.From, r.ID)
-	s.reply(ctx, req, readReply(n), envelope.StatusAnswered)
+	s.logf("request %s from %s: read %s finished in %s", req.ID, req.From, r.ID, since(start))
+	s.store(ctx, req, OpRead, OutcomeAnswered, readReply(n))
 }
 
 // reply sends on a context detached from ctx's deadline, so a request that
 // ran out of time still gets its answer.
 func (s *Service) reply(ctx context.Context, req envelope.Request, body string, status envelope.Status) {
-	if err := s.replyErr(ctx, req, body, status); err != nil {
-		s.logf("request %s: reply failed: %v", req.ID, err)
-	}
+	_ = s.replyErr(ctx, req, body, status, 1)
 }
 
-func (s *Service) replyErr(ctx context.Context, req envelope.Request, body string, status envelope.Status) error {
+// replyErr makes one reply attempt and logs its outcome: the status sent,
+// the attempt number and, on failure, the error class. Never the body.
+func (s *Service) replyErr(ctx context.Context, req envelope.Request, body string, status envelope.Status, attempt int) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
+	start := time.Now()
 	_, err := s.relay.Reply(rctx, req.ID, body, status)
-	return err
+	if err != nil {
+		s.logf("request %s: reply attempt %d failed (%s) after %s: %v", req.ID, attempt, replyErrClass(err), since(start), err)
+		return err
+	}
+	s.logf("request %s: reply delivered (%s, attempt %d) in %s", req.ID, status, attempt, since(start))
+	return nil
 }
+
+// replyErrClass is the class of a failed reply, for logs and health:
+// the HTTP status for a relay answer (5xx grouped), timeout for a
+// deadline, network for everything else.
+func replyErrClass(err error) string {
+	if e, ok := errors.AsType[*client.APIError](err); ok {
+		if e.Code >= 500 {
+			return "5xx"
+		}
+		return fmt.Sprintf("%d", e.Code)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "network"
+}
+
+// refusedClass reports an error class that retrying cannot fix: the
+// relay refuses the agent's credentials.
+func refusedClass(class string) bool { return class == "401" || class == "403" }
+
+// Refused reports whether the relay refused this reply's credentials, so
+// the owner must act.
+func (p PendingReply) Refused() bool { return refusedClass(p.LastError) }
+
+// since is the time since start, rounded for a log line.
+func since(start time.Time) time.Duration { return time.Since(start).Round(time.Millisecond) }
 
 // progress posts a progress note to the asker; a failure is only logged.
 func (s *Service) progress(ctx context.Context, req envelope.Request, note string) {
@@ -717,6 +1129,20 @@ type Health struct {
 	// across every other call, so doctor can tell a helper whose duplicate
 	// protection was checked from one that has only searched or read.
 	IdempotencyVerified bool `json:"idempotency_verified,omitempty"`
+	// Pending lists the replies not yet delivered: ids, ages and error
+	// classes, never reply text. It is kept across helper calls and
+	// rewritten after every reply attempt.
+	Pending []PendingReply `json:"pending,omitempty"`
+}
+
+// PendingReply is one undelivered reply in the health file.
+type PendingReply struct {
+	RequestID string    `json:"request_id"`
+	Op        string    `json:"op"`
+	StoredAt  time.Time `json:"stored_at"`
+	Attempts  int       `json:"attempts,omitempty"`
+	LastError string    `json:"last_error,omitempty"` // the error class only
+	NextRetry time.Time `json:"next_retry,omitzero"`
 }
 
 // recordHealth writes the health file; a failure is only logged. The
@@ -743,20 +1169,67 @@ func (s *Service) recordHealthIdem(command, requestID string, err error, idemUns
 	if idemUnsupported != nil {
 		h.IdempotencyUnsupported = *idemUnsupported
 		h.IdempotencyVerified = !*idemUnsupported
-	} else if prev, rerr := os.ReadFile(s.healthPath); rerr == nil {
-		var p Health
-		if json.Unmarshal(prev, &p) == nil {
-			h.IdempotencyUnsupported = p.IdempotencyUnsupported
-			h.IdempotencyVerified = p.IdempotencyVerified
-		}
 	}
-	b, merr := json.MarshalIndent(h, "", "  ")
-	if merr != nil {
+	prev := s.readHealth()
+	if idemUnsupported == nil {
+		h.IdempotencyUnsupported = prev.IdempotencyUnsupported
+		h.IdempotencyVerified = prev.IdempotencyVerified
+	}
+	h.Pending = prev.Pending
+	s.writeHealth(h)
+}
+
+// readHealth reads the health file; empty when there is none yet or it
+// cannot be read.
+func (s *Service) readHealth() Health {
+	var h Health
+	if b, err := os.ReadFile(s.healthPath); err == nil {
+		_ = json.Unmarshal(b, &h)
+	}
+	return h
+}
+
+func (s *Service) writeHealth(h Health) {
+	b, err := json.MarshalIndent(h, "", "  ")
+	if err != nil {
 		return
 	}
-	if werr := writeFileAtomic(s.healthPath, append(b, '\n')); werr != nil {
-		s.logf("health file %s: %v", s.healthPath, werr)
+	if err := writeFileAtomic(s.healthPath, append(b, '\n')); err != nil {
+		s.logf("health file %s: %v", s.healthPath, err)
 	}
+}
+
+// recordPending rewrites the health file's list of undelivered replies:
+// every stored reply and decided add still on disk, with its retry state.
+// The last helper result in the file is left as it was.
+func (s *Service) recordPending() {
+	// The list is built under healthMu too, so a list read earlier can
+	// never be written over a newer one.
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	var list []PendingReply
+	for _, sp := range []*Spool{s.replies, s.spool} {
+		entries, _ := sp.List()
+		for _, e := range entries {
+			if _, decided := e.Outcome.status(); !decided {
+				continue
+			}
+			pr := PendingReply{RequestID: e.Request.ID, Op: string(e.op()), StoredAt: e.SpooledAt}
+			s.mu.Lock()
+			if p := s.pending[e.Request.ID]; p != nil {
+				pr.Attempts, pr.LastError, pr.NextRetry = p.failures, p.class, p.due.UTC()
+			}
+			s.mu.Unlock()
+			list = append(list, pr)
+		}
+	}
+	if slices.Equal(list, s.lastPending) && !s.stalePending {
+		return
+	}
+	s.lastPending, s.stalePending = list, false
+	h := s.readHealth()
+	h.Pending = list
+	s.writeHealth(h)
 }
 
 func writeFileAtomic(path string, data []byte) error {

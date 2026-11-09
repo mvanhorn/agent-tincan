@@ -31,6 +31,9 @@ var (
 	ErrGroupFull = errors.New("group already has 8 requests from this sender")
 	// ErrWrongState means the request is not in a state that allows this.
 	ErrWrongState = errors.New("request is not in a state that allows this")
+	// ErrNoticeSuperseded means a stale-claim notice was not queued: the
+	// request it is about had already closed.
+	ErrNoticeSuperseded = errors.New("the request this notice is about has already closed")
 )
 
 const schema = `
@@ -268,6 +271,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateGuests(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate guests: %w", err)
+	}
+	if err := s.migrateNoticeLinks(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate notice links: %w", err)
 	}
 	for {
 		more, err := s.backfillSearchBatch()
@@ -824,6 +831,19 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		ttl = req.HoldTTL
 	}
 	req.WasHeld, req.Approved = status == envelope.StatusHeld, false
+	if req.NoticeFor != "" && req.NoticeKind == NoteStaleClaim {
+		// Checked in the transaction that inserts the notice, so a reply or
+		// cancel commits either before it (no notice) or after it (which
+		// closes the notice): the asker never gets it after the answer.
+		var st string
+		err := tx.QueryRowContext(ctx, `SELECT status FROM requests WHERE id = ?`, req.NoticeFor).Scan(&st)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return envelope.Request{}, err
+		}
+		if closed := envelope.Status(st); closed.Terminal() || closed == envelope.StatusCancelled {
+			return envelope.Request{}, ErrNoticeSuperseded
+		}
+	}
 	req.ID = randomID()
 	req.CreatedAt = now.UTC().Truncate(time.Millisecond)
 	if req.TraceID == "" {
@@ -860,10 +880,10 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1326,6 +1346,11 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
+	if rep.Status.Terminal() {
+		if rep.Superseded, err = s.closeNoticesTx(ctx, tx, id); err != nil {
+			return envelope.Reply{}, err
+		}
+	}
 	return rep, nil
 }
 
@@ -1386,8 +1411,10 @@ func (s *Store) replyFor(ctx context.Context, id string) (*envelope.Reply, error
 	return &rep, nil
 }
 
-// Cancel lets the sender withdraw a request the target has not claimed.
-func (s *Store) Cancel(ctx context.Context, id, agent string) error {
+// Cancel lets the sender withdraw a request the target has not claimed. It
+// returns the relay's queued notices about the request that it closed
+// without delivery.
+func (s *Store) Cancel(ctx context.Context, id, agent string) ([]string, error) {
 	return s.cancel(ctx, id, agent, "")
 }
 
@@ -1396,50 +1423,78 @@ func (s *Store) Cancel(ctx context.Context, id, agent string) error {
 // guest's to withdraw: a claim is what marks what the teammate sends, and
 // cancelling here would stop that claim from ever coming back while the
 // teammate may still be acting on what it read.
-func (s *Store) CancelUntaken(ctx context.Context, id, agent string) error {
+func (s *Store) CancelUntaken(ctx context.Context, id, agent string) ([]string, error) {
 	return s.cancel(ctx, id, agent, ` AND resumed = 0 AND claim_lapsed = 0`)
 }
 
-func (s *Store) cancel(ctx context.Context, id, agent, cond string) error {
+func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, error) {
 	req, _, err := s.lookup(ctx, id)
-	if err != nil {
-		return err
-	}
-	if req.From != agent {
-		return ErrForbidden
-	}
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`+cond,
-		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusHeld))
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrWrongState
-	}
-	return nil
-}
-
-// CancelAllFor cancels every open request sent by or addressed to agent (used
-// when an agent is removed, so nothing it sent is still delivered). It returns
-// the cancelled ids.
-func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?, ?, ?) RETURNING id`,
-		string(envelope.StatusCancelled), s.now().UnixMilli(), agent, agent,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusHeld))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+	if req.From != agent {
+		return nil, ErrForbidden
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`+cond,
+		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusHeld))
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrWrongState
+	}
+	closed, err := s.closeNoticesTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	return closed, tx.Commit()
+}
+
+// CancelAllFor cancels every open request sent by or addressed to agent (used
+// when an agent is removed, so nothing it sent is still delivered), and
+// closes the stale-claim notices queued about them. It returns the cancelled
+// ids, notices included.
+func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	ids, err := func() ([]string, error) {
+		rows, err := tx.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?, ?, ?) RETURNING id`,
+			string(envelope.StatusCancelled), s.now().UnixMilli(), agent, agent,
+			string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusHeld))
+		if err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		return ids, rows.Err()
+	}()
+	if err != nil {
+		return nil, err
 	}
-	return ids, rows.Err()
+	for _, id := range slices.Clone(ids) {
+		closed, err := s.closeNoticesTx(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, closed...)
+	}
+	return ids, tx.Commit()
 }
 
 // Transition is one state change made by Sweep. Prev is the status the
@@ -1559,7 +1614,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1569,7 +1624,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var created, progressAt int64
 	var note string
 	var roomPost sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID = roomPost.Int64
