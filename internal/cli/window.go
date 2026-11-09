@@ -185,7 +185,13 @@ and the command waits until the request is answered or the window is closed.`,
 func openLocalWindow(ctx context.Context, term windowTerminal, w windowLaunch, task string) (string, error) {
 	prompt := task
 	if !typable(task) {
-		dir, err := newWindowRunDir(client.ConfigPath(), "local-"+time.Now().Format("20060102-150405"))
+		runs, err := newWindowRunDir(client.ConfigPath(), "local")
+		if err != nil {
+			return "", err
+		}
+		// A directory of its own, so two opens in the same second cannot
+		// overwrite each other's task.
+		dir, err := os.MkdirTemp(runs, time.Now().Format("20060102-150405-"))
 		if err != nil {
 			return "", err
 		}
@@ -238,8 +244,9 @@ func openWindow(ctx context.Context, term windowTerminal, w windowLaunch, name, 
 		return handle, err
 	}
 	if len(more) > 0 && started == "shell" {
-		// The follow-ups are for Claude Code, not the shell that started it.
-		if _, err := waitForWindowStart(ctx, term, handle, "claude"); err != nil {
+		// The follow-ups are for Claude Code, not the shell that started it,
+		// so they wait for its input box and are never typed into the shell.
+		if err := waitForClaudeInput(ctx, term, handle); err != nil {
 			return handle, err
 		}
 	}
@@ -297,6 +304,29 @@ func waitForWindowStart(ctx context.Context, term windowTerminal, handle, starts
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
+		case <-time.After(windowPoll):
+		}
+	}
+}
+
+// waitForClaudeInput waits for Claude Code's input box in a window, and fails
+// when it does not come up within windowStartTimeout.
+func waitForClaudeInput(ctx context.Context, term windowTerminal, handle string) error {
+	deadline := time.Now().Add(windowStartTimeout)
+	for {
+		s, err := term.screen(ctx, handle)
+		if errors.Is(err, errWindowGone) {
+			return errors.New("the window closed before Claude Code started")
+		}
+		if _, ready := claudeOnScreen(s); err == nil && ready {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Claude Code did not start in the new window within %s", windowStartTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(windowPoll):
 		}
 	}
@@ -448,9 +478,18 @@ func firstLine(s string) string {
 // watchWindowRequest returns nil once req is closed or waiting on its asker,
 // and fails it when its window is closed first.
 func watchWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal, handle string, req windowRequest) error {
+	asked := -1 // clarification rounds when the window opened
 	done := func() bool {
 		res, err := r.Get(ctx, req.id, 0)
-		return err == nil && (res.Status.Terminal() || res.Status == envelope.StatusNeedsInput)
+		if err != nil {
+			return false
+		}
+		if asked < 0 {
+			asked = len(res.Exchanges)
+		}
+		// A new round means the window asked a question. Its answer, even
+		// one already given and queued again, belongs to a fresh window.
+		return res.Status.Terminal() || res.Status == envelope.StatusNeedsInput || len(res.Exchanges) > asked
 	}
 	for {
 		if done() {

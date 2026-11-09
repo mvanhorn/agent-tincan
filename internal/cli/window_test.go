@@ -488,3 +488,54 @@ func TestCmuxTypeLineWaitsForTheInputBoxToClear(t *testing.T) {
 		t.Errorf("send ran %s times, want 3", got)
 	}
 }
+
+func TestWindowRequestLetsGoWhenAQuestionIsAnsweredBeforeItLooks(t *testing.T) {
+	w, req := windowRig(t, false)
+	old := windowWatchEvery
+	windowWatchEvery = 300 * time.Millisecond // slower than the asker
+	t.Cleanup(func() { windowWatchEvery = old })
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "the ask is typed", func() bool { return len(f.typedLines()) == 2 })
+	time.Sleep(50 * time.Millisecond) // the watch has taken its first look
+	wr, _ := w.client(req.session)
+	if _, err := wr.Reply(t.Context(), req.id, "Which README?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.grokbot.Answer(t.Context(), req.id, "the root one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitDone(t, done); err != nil {
+		t.Fatalf("runWindowRequest = %v, want nil once the window asked", err)
+	}
+}
+
+func TestOpenWindowFailsWhenClaudeNeverStartsFromTheShell(t *testing.T) {
+	fastWindow(t)
+	f := &fakeTermWindow{screens: []string{"% "}}
+	if _, err := openWindow(t.Context(), f, windowLaunch{claude: "/c/claude", starts: "auto"}, "n", "/ce-plan x", "then reply"); err == nil || !strings.Contains(err.Error(), "did not start") {
+		t.Fatalf("err = %v, want Claude did not start", err)
+	}
+	if got := f.typedLines(); len(got) != 1 {
+		t.Errorf("typed %q, want only the claude line in the shell", got)
+	}
+}
+
+func TestOpenLocalWindowGivesEachLongTaskItsOwnFile(t *testing.T) {
+	fastWindow(t)
+	t.Setenv("TINCAN_CONFIG", filepath.Join(t.TempDir(), "client.json"))
+	var files []string
+	for _, task := range []string{"one\nA", "two\nB"} {
+		f := &fakeTermWindow{screens: []string{claudeScreen}}
+		if _, err := openLocalWindow(t.Context(), f, windowLaunch{dir: "/w", starts: "auto"}, task); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, strings.TrimSuffix(strings.TrimPrefix(f.typedLines()[0], "Read the task in "), " and do it."))
+	}
+	if files[0] == files[1] {
+		t.Fatalf("both tasks went to %s", files[0])
+	}
+	if got, _ := os.ReadFile(files[0]); string(got) != "one\nA\n" {
+		t.Errorf("first task file %q", got)
+	}
+}
