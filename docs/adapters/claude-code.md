@@ -118,7 +118,7 @@ tincan ask claude-window "summarize what changed on main this week"
 tincan ask claude-window "/ce-plan make a donkey plan"
 ```
 
-With the good-at line above, `cc` is a shortcut: a good-at line that opens with a word and a placeholder (`cc <task>:`) tells every teammate to send a message starting with that word to this agent, word for word. `check_inbox` and `tincan inbox` point it out under a request that starts with it, so a teammate sent `cc /ce-plan make a donkey plan` asks `claude-window` with `/ce-plan make a donkey plan`. When you chat with a teammate in its own app (Instinct, say), tincan is not in the loop, so tell it once to remember the shortcut.
+With the good-at line above, `cc` is a shortcut: a good-at line that opens with a word and a placeholder (`cc <task>:`) tells every teammate to send a message starting with that word to this agent, word for word. `check_inbox` and `tincan inbox` point it out under a request that starts with it, so a teammate sent `cc /ce-plan make a donkey plan` asks `claude-window` with `/ce-plan make a donkey plan`. When you chat with a teammate in its own app (Instinct, say), tincan is not in the loop, so tell it once to remember the shortcut. Every agent's standing instructions also say to pass your request on as you wrote it, flags included, with no limit you did not state, and that a follow-up keeps the original job's terms; an agent whose instructions you pasted by hand gets that line when you paste a fresh `tincan onboard --section agents` block.
 
 How it works:
 
