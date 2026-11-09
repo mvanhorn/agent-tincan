@@ -192,7 +192,7 @@ func TestRelayNeedsJoin(t *testing.T) {
 }
 
 func TestShellJoinQuotes(t *testing.T) {
-	got := shellJoin([]string{"/opt/tincan", "relay", "--state-dir=/Users/o/Library/Application Support/x", "--admin=it's"})
+	got := shellCommand([]string{"/opt/tincan", "relay", "--state-dir=/Users/o/Library/Application Support/x", "--admin=it's"})
 	want := `/opt/tincan relay '--state-dir=/Users/o/Library/Application Support/x' '--admin=it'\''s'`
 	if got != want {
 		t.Fatalf("got %s", got)
