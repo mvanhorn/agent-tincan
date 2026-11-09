@@ -290,19 +290,6 @@ func newFakeHelper(t *testing.T, lib string) *fakeHelper {
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// slowSearches makes every search take d (0 stops).
-func (h *fakeHelper) slowSearches(t *testing.T, d time.Duration) {
-	t.Helper()
-	p := filepath.Join(h.state, "slow-search")
-	if d == 0 {
-		_ = os.Remove(p)
-		return
-	}
-	if err := os.WriteFile(p, []byte(d.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // failWordSearches makes every single-word search return code.
 func (h *fakeHelper) failWordSearches(t *testing.T, code string) {
 	t.Helper()

@@ -20,6 +20,8 @@ type stubBackend struct {
 	probeN    int
 	probeErr  error
 	creates   int
+	// search, when set, answers searches in place of searchErr.
+	search func(ctx context.Context, query string) ([]NoteSummary, error)
 }
 
 func (b *stubBackend) Name() string { return b.name }
@@ -29,7 +31,10 @@ func (b *stubBackend) Create(context.Context, string, string, []string, map[stri
 	return CreateResult{}, b.createErr
 }
 
-func (b *stubBackend) Search(context.Context, string) ([]NoteSummary, error) {
+func (b *stubBackend) Search(ctx context.Context, query string) ([]NoteSummary, error) {
+	if b.search != nil {
+		return b.search(ctx, query)
+	}
 	return nil, b.searchErr
 }
 
