@@ -1293,15 +1293,23 @@ func (s *Store) Reply(ctx context.Context, id, agent string, rep envelope.Reply)
 // request is no longer open, no longer agent's (it moved), or fails guard.
 func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep envelope.Reply, guard string, guardArgs ...any) (envelope.Reply, error) {
 	now := s.now()
+	// A request the sweep answered with its held ack (CloseHeldAcks) is
+	// still waiting on the real answer: it takes one more reply from the
+	// same agent, which replaces the ack.
+	var prior string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM requests WHERE id = ?`, id).Scan(&prior); err != nil {
+		return envelope.Reply{}, ErrWrongState
+	}
+	rep.Replaced = prior == string(envelope.StatusAnswered)
 	args := []any{string(rep.Status), now.UnixMilli(), now.UnixMilli(), id, agent,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed)}
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusAnswered)}
 	where := ""
 	if guard != "" {
 		where = " AND (" + guard + ")"
 		args = append(args, guardArgs...)
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1, lease_lapsed_at = NULL, held_ack = ''
-		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?)`+where, args...)
+		WHERE id = ? AND to_agent = ? AND (status IN (?, ?, ?) OR (status = ? AND held_ack != ''))`+where, args...)
 	if err != nil {
 		return envelope.Reply{}, err
 	}
@@ -1316,6 +1324,11 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if rep.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, rep.Attachments, agent, id); err != nil {
 		return envelope.Reply{}, err
 	}
+	if rep.Replaced {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM replies WHERE request_id = ?`, id); err != nil {
+			return envelope.Reply{}, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO replies(request_id, from_agent, status, body, created_at, attachments) VALUES (?, ?, ?, ?, ?, ?)`,
 		id, agent, string(rep.Status), rep.Body, now.UnixMilli(), atts); err != nil {
 		return envelope.Reply{}, err
@@ -1323,8 +1336,10 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if err := s.mirrorReplyTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
-	if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
-		return envelope.Reply{}, err
+	if !rep.Replaced { // the ack already set any follow-on off
+		if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
+			return envelope.Reply{}, err
+		}
 	}
 	return rep, nil
 }
@@ -1514,7 +1529,7 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0,
 		lease_lapsed_at = CASE WHEN status = ? THEN ? ELSE lease_lapsed_at END,
 		claim_lapsed = CASE WHEN status = ? THEN 1 ELSE claim_lapsed END
-		WHERE status = ? AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ?`,
+		WHERE status = ? AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ? AND held_ack = ''`,
 			string(envelope.StatusQueued), now, string(envelope.StatusClaimed), now, string(envelope.StatusClaimed), string(prev), now); err != nil {
 			return nil, err
 		}

@@ -328,6 +328,10 @@ type Reply struct {
 	// NoMirror keeps a reply to a mention out of the room: the relay sets
 	// it when the replier is no longer allowed in rooms. Relay-only.
 	NoMirror bool `json:"-"`
+	// Replaced is set by the store when this reply replaced a held ack the
+	// sweep had closed the request with, so the relay does not set the
+	// request's follow-on off twice. Relay-only.
+	Replaced bool `json:"-"`
 }
 
 // Progress is the latest note from the agent handling a request.

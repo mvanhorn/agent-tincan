@@ -1623,12 +1623,16 @@ func hasFeature(r *http.Request, feature string) bool {
 // with that ack (store.CloseHeldAcks) and tells everyone who waits on it, as
 // any reply does. It runs before the store sweep would requeue them.
 func (s *Server) closeHeldAcks(ctx context.Context) {
-	reps, err := s.store.CloseHeldAcks(ctx)
+	reps, err := s.store.CloseHeldAcks(ctx, func(id, agent string) bool { return s.mayMirror(ctx, id, agent) })
 	if err != nil {
 		log.Printf("sweep: close held acks: %v", err)
 	}
 	for _, rep := range reps {
-		if _, err := s.recordReplyWith(ctx, rep.RequestID, rep.From, rep, false, func(rep envelope.Reply) (envelope.Reply, error) { return rep, nil }); err != nil {
+		noMirror := rep.NoMirror
+		if _, err := s.recordReplyWith(ctx, rep.RequestID, rep.From, rep, false, func(rep envelope.Reply) (envelope.Reply, error) {
+			rep.NoMirror = noMirror // decided before the store wrote it
+			return rep, nil
+		}); err != nil {
 			log.Printf("sweep: held ack %s: %v", rep.RequestID, err)
 		}
 	}
@@ -1686,7 +1690,7 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	}
 	// The reply may have freed the replying agent, if someone watches it.
 	s.checkWatches(ctx, agent)
-	if rep.Status == envelope.StatusAnswered {
+	if rep.Status == envelope.StatusAnswered && !rep.Replaced {
 		s.fireFollowOn(ctx, id)
 	}
 	return rep, nil

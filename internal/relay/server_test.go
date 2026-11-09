@@ -1040,6 +1040,25 @@ func TestHeldAckClosesOnLapse(t *testing.T) {
 	}
 	// 204: nothing queued for muse, so the request was not handed back.
 	h.do(museAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil)
+
+	// The real report, arriving late, still lands: it replaces the ack and
+	// wakes the asker again. Only once.
+	h.do(grokAddr, "GET", "/v1/requests/"+req.ID, "", 200, &res) // seen
+	inbox = h.srv.hub.wait(inboxKey("grokbot"))
+	late := h.replyFrom(museAddr, req.ID, `{"body":"Called. They open at 9."}`, keptFeatures, 200)
+	if late.Status != envelope.StatusAnswered {
+		t.Fatalf("late reply: %+v", late)
+	}
+	select {
+	case <-inbox:
+	default:
+		t.Fatal("late reply did not wake the asker")
+	}
+	h.do(grokAddr, "GET", "/v1/requests/"+req.ID, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != "Called. They open at 9." {
+		t.Fatalf("after late reply: %+v", res)
+	}
+	h.replyFrom(museAddr, req.ID, `{"body":"one more"}`, keptFeatures, http.StatusConflict)
 }
 
 func TestAckReplyClosesWhenItShould(t *testing.T) {
