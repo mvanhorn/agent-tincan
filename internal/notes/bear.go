@@ -55,6 +55,9 @@ type Bear struct {
 	// TempDir holds each read's copy of the database (os.TempDir() when
 	// empty).
 	TempDir string
+	// copied runs after each copy is taken, before it is checked; tests
+	// use it to write to the database mid-copy.
+	copied func()
 	// Open opens a bear:// URL without bringing Bear forward. It is
 	// open -g on macOS; tests replace it.
 	Open   func(ctx context.Context, u string) error
@@ -106,50 +109,112 @@ func fold(s string) string {
 	return strings.Map(unicode.ToLower, s)
 }
 
-// open copies Bear's database, with its -wal and -shm files when present,
+// bearCopyTries bounds how often open copies again when Bear wrote its
+// database while it was being copied.
+const bearCopyTries = 3
+
+type bearSnapKey struct{}
+
+// bearSnap is one request's copy of Bear's database, shared by every read
+// in that request and removed when the request ends.
+type bearSnap struct {
+	mu   sync.Mutex
+	db   *sql.DB
+	done func()
+}
+
+// Snapshot makes every read under the returned context share one copy of
+// Bear's database, made on first use. release removes it.
+func (b *Bear) Snapshot(ctx context.Context) (context.Context, func()) {
+	s := &bearSnap{}
+	return context.WithValue(ctx, bearSnapKey{}, s), func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.done != nil {
+			s.done()
+			s.db, s.done = nil, nil
+		}
+	}
+}
+
+// open returns a copy of Bear's database: the request's snapshot when ctx
+// carries one, else a copy for this read alone. done releases the latter.
+func (b *Bear) open(ctx context.Context) (db *sql.DB, done func(), err error) {
+	s, _ := ctx.Value(bearSnapKey{}).(*bearSnap)
+	if s == nil {
+		return b.copyDB(ctx)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		if s.db, s.done, err = b.copyDB(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
+	return s.db, func() {}, nil
+}
+
+// copyDB copies Bear's database, with its -wal file when present,
 // into a fresh 0700 directory and opens the copy; Bear's own files are
-// never opened by SQLite. done closes the copy and removes it. A missing
-// database is "Bear is not installed", and one macOS will not let this
-// process read is permission_denied.
-func (b *Bear) open() (db *sql.DB, done func(), err error) {
+// never opened by SQLite. A copy taken while Bear wrote (the database or
+// WAL changed size or time meanwhile) is discarded and taken again, so the
+// database and WAL always match. done closes the copy and removes it. A
+// missing database is "Bear is not installed", and one macOS will not let
+// this process read is permission_denied.
+func (b *Bear) copyDB(ctx context.Context) (db *sql.DB, done func(), err error) {
 	if err := registerFold(); err != nil {
 		return nil, nil, &HelperError{Code: codeUnavailable, Message: "sqlite: " + err.Error()}
 	}
 	path := b.dbPath()
-	dir, err := os.MkdirTemp(b.TempDir, "tincan-bear-")
-	if err != nil {
-		return nil, nil, &HelperError{Code: codeUnavailable, Message: err.Error()}
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	cp := filepath.Join(dir, "database.sqlite")
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		err := copyPrivate(path+suffix, cp+suffix)
-		switch {
-		case err == nil:
-		case suffix != "" && errors.Is(err, fs.ErrNotExist):
-		case errors.Is(err, fs.ErrNotExist):
+	for range bearCopyTries {
+		before := b.dbStamp()
+		dir, err := os.MkdirTemp(b.TempDir, "tincan-bear-")
+		if err != nil {
+			return nil, nil, &HelperError{Code: codeUnavailable, Message: err.Error()}
+		}
+		cleanup := func() { _ = os.RemoveAll(dir) }
+		cp := filepath.Join(dir, "database.sqlite")
+		// Not -shm: it is only an index into the WAL that Bear rewrites
+		// freely, and a stale one can show a page from the wrong moment.
+		// Without it SQLite rebuilds the index from the copied WAL.
+		for _, suffix := range []string{"", "-wal"} {
+			err := copyPrivate(ctx, path+suffix, cp+suffix)
+			switch {
+			case err == nil:
+				continue
+			case suffix != "" && errors.Is(err, fs.ErrNotExist):
+				continue
+			case errors.Is(err, fs.ErrNotExist):
+				err = &HelperError{Code: codeUnavailable, Message: "no Bear database at " + path + "; is Bear installed and opened once?"}
+			case errors.Is(err, fs.ErrPermission):
+				err = &HelperError{Code: CodePermissionDenied, Message: "macOS does not let this process read Bear's database at " + path}
+			default:
+				err = &HelperError{Code: codeUnavailable, Message: err.Error()}
+			}
 			cleanup()
-			return nil, nil, &HelperError{Code: codeUnavailable, Message: "no Bear database at " + path + "; is Bear installed and opened once?"}
-		case errors.Is(err, fs.ErrPermission):
-			cleanup()
-			return nil, nil, &HelperError{Code: CodePermissionDenied, Message: "macOS does not let this process read Bear's database at " + path}
-		default:
+			return nil, nil, err
+		}
+		if b.copied != nil {
+			b.copied()
+		}
+		if b.dbStamp() != before {
+			cleanup() // Bear wrote meanwhile: the copies may not match
+			continue
+		}
+		u := url.URL{Scheme: "file", Path: cp, RawQuery: "_pragma=query_only(1)&_pragma=busy_timeout(5000)"}
+		db, err := sql.Open("sqlite", u.String())
+		if err != nil {
 			cleanup()
 			return nil, nil, &HelperError{Code: codeUnavailable, Message: err.Error()}
 		}
+		db.SetMaxOpenConns(1)
+		return db, func() { _ = db.Close(); cleanup() }, nil
 	}
-	u := url.URL{Scheme: "file", Path: cp, RawQuery: "_pragma=query_only(1)&_pragma=busy_timeout(5000)"}
-	db, err = sql.Open("sqlite", u.String())
-	if err != nil {
-		cleanup()
-		return nil, nil, &HelperError{Code: codeUnavailable, Message: err.Error()}
-	}
-	db.SetMaxOpenConns(1)
-	return db, func() { _ = db.Close(); cleanup() }, nil
+	return nil, nil, &HelperError{Code: codeUnavailable, Message: "Bear kept writing its database while it was being copied; try again"}
 }
 
-// copyPrivate copies src to a new 0600 file dst.
-func copyPrivate(src, dst string) error {
+// copyPrivate copies src to a new 0600 file dst, stopping when ctx ends.
+func copyPrivate(ctx context.Context, src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -159,11 +224,24 @@ func copyPrivate(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, ctxReader{ctx, in}); err != nil {
 		_ = out.Close()
 		return err
 	}
 	return out.Close()
+}
+
+// ctxReader fails its reads once ctx ends.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // dbStamp changes when Bear writes its database or WAL, so a create poll
@@ -238,7 +316,7 @@ func (b *Bear) Search(ctx context.Context, query string) ([]NoteSummary, error) 
 	if len(words) == 0 {
 		return nil, nil
 	}
-	db, done, err := b.open()
+	db, done, err := b.open(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +362,7 @@ func (b *Bear) Search(ctx context.Context, query string) ([]NoteSummary, error) 
 
 // Read returns one note by its Bear id.
 func (b *Bear) Read(ctx context.Context, id string) (Note, error) {
-	db, done, err := b.open()
+	db, done, err := b.open(ctx)
 	if err != nil {
 		return Note{}, err
 	}
@@ -323,7 +401,7 @@ func bearByID(ctx context.Context, db *sql.DB, id string) (bearRow, bool, error)
 
 // Probe counts Bear's notes, so doctor can tell the database is readable.
 func (b *Bear) Probe(ctx context.Context) (int, error) {
-	db, done, err := b.open()
+	db, done, err := b.open(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -579,7 +657,7 @@ func (b *Bear) awaitNote(ctx context.Context, title string, start time.Time) (st
 	for {
 		var ids []string
 		if stamp := b.dbStamp(); stamp == "" || stamp != seen {
-			db, done, err := b.open()
+			db, done, err := b.open(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -608,7 +686,9 @@ func (b *Bear) awaitNote(ctx context.Context, title string, start time.Time) (st
 }
 
 func createdSince(ctx context.Context, db *sql.DB, since float64, title string) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT ZUNIQUEIDENTIFIER, COALESCE(ZTITLE, '') FROM ZSFNOTE WHERE ZCREATIONDATE >= ? AND COALESCE(ZPERMANENTLYDELETED, 0) = 0`, since)
+	// A trashed note is never the one just made, and Bear rewrites a note's
+	// creation date when it trashes it, so trashed notes are left out.
+	rows, err := db.QueryContext(ctx, `SELECT ZUNIQUEIDENTIFIER, COALESCE(ZTITLE, '') FROM ZSFNOTE WHERE ZCREATIONDATE >= ? AND COALESCE(ZPERMANENTLYDELETED, 0) = 0 AND COALESCE(ZTRASHED, 0) = 0`, since)
 	if err != nil {
 		return nil, dbError(err)
 	}

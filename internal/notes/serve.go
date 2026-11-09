@@ -1014,6 +1014,14 @@ func refusedEntry(e SpoolEntry, code int) SpoolEntry {
 }
 
 func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
+	if sn, ok := s.backend.(interface {
+		Snapshot(context.Context) (context.Context, func())
+	}); ok {
+		// One copy of the library serves the search and its fallback.
+		var release func()
+		ctx, release = sn.Snapshot(ctx)
+		defer release()
+	}
 	start := time.Now()
 	found, err := s.backend.Search(ctx, r.Query)
 	s.recordHealth("search", req.ID, err)

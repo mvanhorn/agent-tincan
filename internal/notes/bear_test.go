@@ -488,3 +488,73 @@ func TestBearReadsAPrivateCopyIncludingTheWAL(t *testing.T) {
 		t.Fatalf("copies left behind: %v %v", left, err)
 	}
 }
+
+// Reads under one snapshot share a single copy, removed on release.
+func TestBearSnapshotSharesOneCopyPerRequest(t *testing.T) {
+	f := newBearFixture(t)
+	f.put(bearNote{Title: "Tent", Text: "stakes"})
+	b := f.bear()
+	b.TempDir = t.TempDir()
+	copies := 0
+	b.copied = func() { copies++ }
+	ctx, release := b.Snapshot(t.Context())
+	for _, q := range []string{"tent", "stakes", "lamp"} {
+		if _, err := b.Search(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("three searches in one request copied the library %d times, want once", copies)
+	}
+	release()
+	if left, _ := os.ReadDir(b.TempDir); len(left) != 0 {
+		t.Fatalf("the request's copy was left behind: %v", left)
+	}
+	if _, err := b.Search(t.Context(), "tent"); err != nil || copies != 2 {
+		t.Fatalf("a read outside the snapshot: copies=%d err=%v", copies, err)
+	}
+}
+
+// A copy taken while Bear wrote is taken again, so the database and its
+// WAL never come from different moments; a database that never settles
+// is a transient failure.
+func TestBearCopyTakenDuringAWriteIsRetaken(t *testing.T) {
+	f := newBearFixture(t)
+	if _, err := f.db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	f.put(bearNote{Title: "Tent", Text: "stakes"})
+	b := f.bear()
+	b.TempDir = t.TempDir()
+	copies := 0
+	b.copied = func() {
+		copies++
+		if copies == 1 {
+			f.put(bearNote{Title: "Tent two", Text: "stakes"}) // Bear writes mid-copy
+		}
+	}
+	got, err := b.Search(t.Context(), "tent")
+	if err != nil || copies != 2 || len(got) != 2 {
+		t.Fatalf("search = %v, %v after %d copies; want both notes from a second copy", ids(got), err, copies)
+	}
+	b.copied = func() { f.put(bearNote{Title: "Tent more", Text: "x"}) }
+	if _, err := b.Search(t.Context(), "tent"); errorCode(err) != codeUnavailable || IsPermanent(err) {
+		t.Fatalf("always-changing database = %v, want a transient failure", err)
+	}
+	if left, _ := os.ReadDir(b.TempDir); len(left) != 0 {
+		t.Fatalf("discarded copies were left behind: %v", left)
+	}
+}
+
+// Bear rewrites a note's creation date when it trashes it, so a
+// same-titled note trashed while an add waits looks newly created. It is
+// never the add's note.
+func TestBearNoteTrashedDuringTheAddIsNotACandidate(t *testing.T) {
+	fastBearPoll(t, time.Second)
+	b, app := newBearWithApp(t)
+	app.f.put(bearNote{Title: "Tent", Text: "an older note", Trashed: true, Created: time.Now()})
+	res, err := b.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1")
+	if err != nil || res.Note.Summary.ID == "" {
+		t.Fatalf("create = %+v, %v; want the new note, not create_unconfirmed", res, err)
+	}
+}
