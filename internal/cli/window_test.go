@@ -687,6 +687,9 @@ func TestWindowRequestRecordsWhoSentItAndWhatWasTyped(t *testing.T) {
 	if typed := f.typedLines(); !slices.Equal(got.Typed, typed) {
 		t.Errorf("record typed %q, window got %q", got.Typed, typed)
 	}
+	if typed := f.typedLines(); !strings.Contains(typed[len(typed)-1], "A follow-up on a job keeps that job's terms") {
+		t.Errorf("a typed request's last line %q lacks the follow-up rule", typed[len(typed)-1])
+	}
 	f.mu.Lock()
 	env := strings.Join(f.env, " ")
 	f.mu.Unlock()
@@ -699,4 +702,49 @@ func TestWindowRequestRecordsWhoSentItAndWhatWasTyped(t *testing.T) {
 	}
 	f.close()
 	_ = waitDone(t, done)
+}
+
+// Two requests to the same window agent leave two records, not one file
+// the second overwrote.
+func TestWindowRequestsEachKeepTheirOwnRecord(t *testing.T) {
+	w, first := windowRigAsking(t, false, "/ce-plan first")
+	wr, err := w.client(first.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.id = w.ask("/ce-plan second")
+	second.body = "/ce-plan second"
+	if _, err := wr.Claim(t.Context(), second.id); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]string{}
+	for _, req := range []windowRequest{first, second} {
+		f := &fakeTermWindow{screens: []string{claudeScreen}}
+		done := runRequestAsync(t, w, f, req)
+		eventually(t, "both lines are typed", func() bool { return len(f.typedLines()) == 2 })
+		f.close()
+		_ = waitDone(t, done)
+	}
+	for _, req := range []windowRequest{first, second} {
+		path := filepath.Join(filepath.Dir(req.config), "window-runs", safeRunName(req.id), "request.json")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			RequestID string   `json:"request_id"`
+			Typed     []string `json:"typed"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.RequestID != req.id || len(got.Typed) == 0 || got.Typed[0] != req.body {
+			t.Errorf("%s record = %+v, want request %s typed %q", path, got, req.id, req.body)
+		}
+		ids[path] = got.RequestID
+	}
+	if len(ids) != 2 {
+		t.Errorf("records %v, want two files", ids)
+	}
 }
