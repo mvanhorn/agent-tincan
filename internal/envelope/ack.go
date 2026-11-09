@@ -6,34 +6,33 @@ import "strings"
 // short, but an acknowledgment is never long.
 const MaxAckBytes = 280
 
-// ackPhrases say the work has started or is still to come.
-var ackPhrases = []string{
-	"working on it",
+// ackOpeners are how an acknowledgment starts: the replier saying it has
+// begun. They must open the reply (after an optional ackLead), so a result
+// that mentions work in passing ("Booked; the venue is working on it") is
+// not taken for one.
+var ackOpeners = []string{
+	"working on it", "working on this", "working on that",
 	"on it",
-	"will follow",
-	"to follow",
-	"will send",
-	"will report",
-	"will get back",
-	"i'll get back",
-	"get back to you",
-	"will update",
-	"will reply",
-	"will let you know",
-	"starting now",
-	"starting on it",
-	"looking into it",
+	"starting now", "starting on it", "starting on this", "starting on that",
+	"looking into it", "looking into this", "looking into that",
 	"in progress",
 	"stand by",
-	"one moment",
-	"give me a few",
+	"will do",
 }
+
+// ackLeads may come before an opener: "Got it, working on it."
+var ackLeads = []string{"ok", "okay", "got it", "sure", "thanks", "ack", "acknowledged", "roger", "on it"}
+
+// laterNouns name the work an acknowledgment promises: "Full report will
+// follow." Only these count, so "Confirmation will follow by email" after a
+// finished call is not taken for an acknowledgment.
+var laterNouns = []string{"report", "results", "result", "answer", "findings", "analysis", "details", "summary", "write-up", "writeup", "reply", "response"}
 
 // doneMarkers say the reply already carries a result, so it is not just an
 // acknowledgment even when it also promises more.
 var doneMarkers = []string{
 	"done", "finished", "complete", "here's", "here is", "attached",
-	"found", "result", "http://", "https://", "```",
+	"http://", "https://", "```",
 }
 
 // LooksLikeAck reports whether body reads as an acknowledgment that work has
@@ -41,6 +40,10 @@ var doneMarkers = []string{
 // itself. The relay keeps a request open when its answered reply looks like
 // one, because closing it would strand the real answer: nothing could attach
 // to a closed request, and the asker would never be woken for it.
+//
+// A wrong yes keeps a finished request open until its claim lapses and the
+// request is handed back, so the test is narrow: the reply must open with an
+// acknowledgment or promise the report later, and must show no result.
 func LooksLikeAck(body string) bool {
 	b := strings.ToLower(strings.TrimSpace(body))
 	if b == "" || len(b) > MaxAckBytes || strings.Count(b, "\n") > 2 {
@@ -51,16 +54,56 @@ func LooksLikeAck(body string) bool {
 			return false
 		}
 	}
-	for _, p := range ackPhrases {
-		if containsWord(b, p) {
+	return opensWithAck(b) || promisesLater(b)
+}
+
+func opensWithAck(b string) bool {
+	if startsWithOpener(b) {
+		return true
+	}
+	for _, lead := range ackLeads {
+		if r, ok := cutWord(b, lead); ok && r != "" && strings.ContainsAny(r[:1], ",.!:;-") {
+			return startsWithOpener(strings.TrimLeft(r, ",.!:;- "))
+		}
+	}
+	return false
+}
+
+func startsWithOpener(s string) bool {
+	for _, o := range ackOpeners {
+		if _, ok := cutWord(s, o); ok {
 			return true
 		}
 	}
 	return false
 }
 
-// containsWord reports whether phrase occurs in s bounded by non-letters, so
-// "on it" does not match inside "donation items".
+// promisesLater reports a "<report> will follow" or "<report> to follow".
+func promisesLater(b string) bool {
+	for _, n := range laterNouns {
+		for _, tail := range []string{" will follow", " to follow", " coming"} {
+			if containsWord(b, n+tail) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cutWord reports whether s starts with word as a whole word, and returns
+// what follows it.
+func cutWord(s, word string) (string, bool) {
+	if !strings.HasPrefix(s, word) {
+		return "", false
+	}
+	rest := s[len(word):]
+	if rest != "" && isLetter(rest[0]) {
+		return "", false
+	}
+	return rest, true
+}
+
+// containsWord reports whether phrase occurs in s bounded by non-letters.
 func containsWord(s, phrase string) bool {
 	for i := 0; ; {
 		j := strings.Index(s[i:], phrase)
