@@ -168,7 +168,7 @@ func (s *Server) tryFollowOn(ctx context.Context, id string) error {
 func (s *Server) dropFollowOn(ctx context.Context, first envelope.Request, to, why, reason string) error {
 	var notice *envelope.Request
 	if why != "" {
-		n := askerNotice(first, fmt.Sprintf("the follow-on to %s was not sent: %s.", to, why))
+		n := askerNotice(first, fmt.Sprintf("the follow-on to %s was not sent: %s.", to, why), s.cfg.Now())
 		notice = &n
 	}
 	n, err := s.store.DropFollowOn(ctx, first.ID, notice, s.requestTTL(ctx, first.From))

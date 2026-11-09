@@ -263,13 +263,13 @@ func TestOnlyTheRightAgentMayAct(t *testing.T) {
 	if _, err := s.Get(ctx, req.ID, "instinct"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("instinct get: want ErrNotFound, got %v", err)
 	}
-	if err := s.Cancel(ctx, req.ID, "instinct"); !errors.Is(err, ErrForbidden) {
+	if _, err := s.Cancel(ctx, req.ID, "instinct"); !errors.Is(err, ErrForbidden) {
 		t.Errorf("instinct cancel: want ErrForbidden, got %v", err)
 	}
-	if err := s.Cancel(ctx, req.ID, "muse"); !errors.Is(err, ErrForbidden) {
+	if _, err := s.Cancel(ctx, req.ID, "muse"); !errors.Is(err, ErrForbidden) {
 		t.Errorf("target cancel: want ErrForbidden, got %v", err)
 	}
-	if err := s.Cancel(ctx, req.ID, "grokbot"); err != nil {
+	if _, err := s.Cancel(ctx, req.ID, "grokbot"); err != nil {
 		t.Errorf("sender cancel: %v", err)
 	}
 	if _, err := s.Claim(ctx, req.ID, "muse", time.Minute); !errors.Is(err, ErrWrongState) {
@@ -282,7 +282,7 @@ func TestCannotCancelClaimed(t *testing.T) {
 	ctx := context.Background()
 	req := ask(t, s, "grokbot", "muse", "x")
 	s.Claim(ctx, req.ID, "muse", time.Minute)
-	if err := s.Cancel(ctx, req.ID, "grokbot"); !errors.Is(err, ErrWrongState) {
+	if _, err := s.Cancel(ctx, req.ID, "grokbot"); !errors.Is(err, ErrWrongState) {
 		t.Fatalf("want ErrWrongState, got %v", err)
 	}
 }

@@ -408,6 +408,11 @@ func TestFormatRequestRelayNotice(t *testing.T) {
 	if !strings.Contains(got, "Notice n1 from the Agent Tincan relay (not a teammate). No reply needed.") || !strings.Contains(got, "About your request r1") || strings.Contains(got, "your teammate") {
 		t.Fatalf("notice = %q", got)
 	}
+	at := time.Date(2026, 11, 8, 22, 16, 25, 0, time.UTC)
+	dated := client.FormatRequest(envelope.Request{ID: "n2", From: client.RelaySender, To: "instinct", Kind: envelope.KindNotify, Body: "About your request r1", CreatedAt: at})
+	if want := "Notice n2 from the Agent Tincan relay (not a teammate), sent " + client.UTCClock(at, time.Now()) + ". No reply needed."; !strings.Contains(dated, want) {
+		t.Fatalf("dated notice = %q, want %q", dated, want)
+	}
 	ask := client.FormatRequest(envelope.Request{ID: "r2", From: "muse", To: "instinct", Kind: envelope.KindNotify, Body: "fyi"})
 	if !strings.Contains(ask, "Request r2 from muse (your teammate)") {
 		t.Fatalf("teammate notify = %q", ask)

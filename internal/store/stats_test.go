@@ -46,7 +46,7 @@ func TestAgentStatsCountsFinishedAsks(t *testing.T) {
 	finish(t, s, c, "muse", envelope.StatusDeclined, time.Minute)
 	// Cancelled by its sender.
 	cancelled := ask(t, s, "grokbot", "muse", "dummy question")
-	if err := s.Cancel(ctx, cancelled.ID, "grokbot"); err != nil {
+	if _, err := s.Cancel(ctx, cancelled.ID, "grokbot"); err != nil {
 		t.Fatal(err)
 	}
 	// Denied by the owner, and left to lapse in the hold.
