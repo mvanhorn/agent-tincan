@@ -83,6 +83,15 @@ const spoolExt = ".json"
 // never mistakes a stored reply for an add.
 const repliesDir = "replies"
 
+// op is the operation e answers: OpAdd for an add entry, whose Op is
+// empty.
+func (e SpoolEntry) op() Op {
+	if e.Op == "" {
+		return OpAdd
+	}
+	return e.Op
+}
+
 // Replies is the spool of stored search and read replies under s.
 func (s *Spool) Replies() *Spool { return &Spool{Dir: filepath.Join(s.Dir, repliesDir)} }
 

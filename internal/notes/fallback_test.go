@@ -26,7 +26,7 @@ func putIncidentLibrary(t *testing.T, h *fakeHelper) (family, second fakeNote) {
 	return family, second
 }
 
-// Covers AE3 (R10, R11): the incident query finds the family note first,
+// The incident query finds the family note first,
 // says no note held every word, and names the words it matched.
 func TestIncidentQueryFindsFamilyNoteFirst(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -103,7 +103,7 @@ func TestFallbackListsActiveNotesOnly(t *testing.T) {
 	}
 }
 
-// Covers R12: words the budget did not reach are named.
+// Words the budget did not reach are named.
 func TestFallbackOutOfTimeNamesUnsearchedWords(t *testing.T) {
 	r := newRig(t, relay.Config{})
 	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // The Agent Notes helper matches a multi-word query only when a note holds
@@ -44,7 +45,7 @@ func fallbackWords(query string) (words, skipped []string) {
 	for _, w := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
-		if len([]rune(w)) < fallbackMinRunes || fallbackStopwords[w] || seen[w] {
+		if utf8.RuneCountInString(w) < fallbackMinRunes || fallbackStopwords[w] || seen[w] {
 			continue
 		}
 		seen[w] = true
@@ -121,11 +122,12 @@ type fallbackResult struct {
 	Failed   []string // the helper failed on them
 }
 
-// searchFallback searches each word of query alone under budget.
-func (s *Service) searchFallback(ctx context.Context, query string, budget time.Duration) fallbackResult {
+// searchFallback searches each word of query alone within the service's
+// fallback budget.
+func (s *Service) searchFallback(ctx context.Context, query string) fallbackResult {
 	words, skipped := fallbackWords(query)
 	res := fallbackResult{Skipped: skipped}
-	bctx, cancel := context.WithTimeout(ctx, budget)
+	bctx, cancel := context.WithTimeout(ctx, s.fallbackBudget)
 	defer cancel()
 	found := map[string][]NoteSummary{}
 	for i, w := range words {
@@ -177,21 +179,21 @@ func fallbackReply(query string, res fallbackResult, count int) string {
 			fmt.Fprintf(&b, "\n%d more notes contain some of the words.\n", len(res.Hits)-len(hits))
 		}
 	}
-	notSearched := func(why string, words []string) {
-		if len(words) > 0 {
-			fmt.Fprintf(&b, "\nNot searched (%s): %s.", why, strings.Join(words, ", "))
+	out := strings.TrimRight(b.String(), "\n")
+	sep := "\n"
+	for _, ns := range []struct {
+		why   string
+		words []string
+	}{
+		{fmt.Sprintf("past the %d-word limit", fallbackMaxWords), res.Skipped},
+		{"out of time", res.TimedOut},
+		{"the Agent Notes helper failed", res.Failed},
+	} {
+		if len(ns.words) > 0 {
+			out += fmt.Sprintf("%s\nNot searched (%s): %s.", sep, ns.why, strings.Join(ns.words, ", "))
+			sep = ""
 		}
 	}
-	out := strings.TrimRight(b.String(), "\n")
-	b.Reset()
-	b.WriteString(out)
-	if len(res.Skipped)+len(res.TimedOut)+len(res.Failed) > 0 {
-		b.WriteString("\n")
-	}
-	notSearched(fmt.Sprintf("past the %d-word limit", fallbackMaxWords), res.Skipped)
-	notSearched("out of time", res.TimedOut)
-	notSearched("the Agent Notes helper failed", res.Failed)
-	out = b.String()
 	if len(out) > maxReplyBytes {
 		const notice = "\n(reply truncated)"
 		out = capBytes(out, maxReplyBytes-len(notice)) + notice

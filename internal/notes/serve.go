@@ -142,9 +142,11 @@ type Service struct {
 	// request id.
 	pending     map[string]*pendingReply
 	pollFailing bool
-	// shownPending is whether the health file lists pending replies, so an
-	// empty list is written once, not after every reply.
-	shownPending bool
+	// lastPending is the list last written to the health file, so an
+	// unchanged list is not written again; stalePending forces the first
+	// write, over a list an earlier run left.
+	lastPending  []PendingReply
+	stalePending bool
 	// createMu runs one helper create at a time: the helper looks an
 	// idempotency key up in the library as loaded at its start, so two
 	// concurrent creates for one key could both write a note.
@@ -194,8 +196,7 @@ func New(cfg Config) (*Service, error) {
 
 		fallbackBudget: fallbackBudget,
 		recovered:      make(chan struct{}, 1),
-		// A list left by an earlier run is rewritten on the first attempt.
-		shownPending: true,
+		stalePending:   true,
 	}
 	if s.retryEvery <= 0 {
 		s.retryEvery = DefaultRetryEvery
@@ -241,7 +242,7 @@ const logStamp = "2006-01-02T15:04:05.000Z07:00"
 // retrying: decided replies as their backoff runs out, undecided adds
 // every RetryEvery, and everything at once when polling recovers. It polls
 // and handles requests until ctx is cancelled. Retries never hold up
-// polling (KTD9).
+// polling.
 func (s *Service) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -255,7 +256,7 @@ func (s *Service) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case <-slow.C:
-				s.retry(ctx, retryAdds)
+				s.retry(ctx, retryUnscheduled)
 			case <-fast.C:
 				s.retry(ctx, retryDue)
 			case <-s.recovered:
@@ -301,9 +302,9 @@ func (s *Service) notePoll(err error) {
 type retryScope int
 
 const (
-	retryAll  retryScope = iota // everything, now
-	retryDue                    // decided entries whose backoff has run out
-	retryAdds                   // undecided adds
+	retryAll         retryScope = iota // everything, now
+	retryDue                           // entries whose reply backoff has run out
+	retryUnscheduled                   // entries with no reply backoff: undecided adds, mostly
 )
 
 // RetrySpooled makes one attempt at every stored reply and spooled add
@@ -312,13 +313,15 @@ func (s *Service) RetrySpooled(ctx context.Context) int { return s.retry(ctx, re
 
 func (s *Service) retry(ctx context.Context, scope retryScope) int {
 	now := s.now()
+	if scope == retryDue && !s.anyDue(now) {
+		return 0 // the every-second tick reads no spool while nothing is due
+	}
 	want := func(e SpoolEntry) bool {
-		_, decided := e.Outcome.status()
 		switch scope {
 		case retryDue:
-			return decided && s.isDue(e.Request.ID, now)
-		case retryAdds:
-			return !decided
+			return s.scheduled(e.Request.ID) && s.isDue(e.Request.ID, now)
+		case retryUnscheduled:
+			return !s.scheduled(e.Request.ID)
 		}
 		return true
 	}
@@ -376,6 +379,25 @@ func (s *Service) isDue(id string, now time.Time) bool {
 	defer s.mu.Unlock()
 	p := s.pending[id]
 	return p == nil || !now.Before(p.due)
+}
+
+// scheduled reports whether id has a reply backoff running.
+func (s *Service) scheduled(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pending[id] != nil
+}
+
+// anyDue reports whether some reply backoff has run out.
+func (s *Service) anyDue(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.pending {
+		if !now.Before(p.due) {
+			return true
+		}
+	}
+	return false
 }
 
 // attemptOf is the number of id's next reply attempt.
@@ -913,7 +935,7 @@ func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 		// Network errors, timeouts and 5xx pass. A refused credential (401,
 		// 403) or a twice-refused body needs the owner, so it waits at the
 		// longest delay and shows in doctor.
-		hold := client.IsStatus(err, http.StatusUnauthorized) || client.IsStatus(err, http.StatusForbidden) || e.Refused
+		hold := refusedClass(replyErrClass(err)) || e.Refused
 		s.failedAttempt(id, err, hold)
 		s.recordPending()
 		return
@@ -929,12 +951,8 @@ func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 // relay's refusal. A saved add keeps its outcome and note id: the note
 // exists whatever happened to the reply.
 func refusedEntry(e SpoolEntry, code int) SpoolEntry {
-	what := string(e.Op)
-	if what == "" {
-		what = string(OpAdd)
-	}
 	e.Refused = true
-	e.Reply = fmt.Sprintf("The notes agent finished this %s, but the relay refused its reply (HTTP %d), so the result could not be delivered.", what, code)
+	e.Reply = fmt.Sprintf("The notes agent finished this %s, but the relay refused its reply (HTTP %d), so the result could not be delivered.", e.op(), code)
 	if e.NoteID != "" {
 		e.Reply += fmt.Sprintf(" The note was saved (id %s).", e.NoteID)
 		return e
@@ -969,7 +987,7 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 		// that nothing matches, so try the words one by one.
 		if words, _ := fallbackWords(r.Query); len(words) > 0 {
 			fstart := time.Now()
-			res := s.searchFallback(ctx, r.Query, s.fallbackBudget)
+			res := s.searchFallback(ctx, r.Query)
 			s.logf("request %s from %s: search fallback finished in %s (%d words searched, %d skipped, %d out of time, %d failed; %d notes match some)",
 				req.ID, req.From, since(fstart), len(res.Searched), len(res.Skipped), len(res.TimedOut), len(res.Failed), len(res.Hits))
 			s.store(ctx, req, OpSearch, OutcomeAnswered, fallbackReply(r.Query, res, r.Count))
@@ -1033,6 +1051,14 @@ func replyErrClass(err error) string {
 	}
 	return "network"
 }
+
+// refusedClass reports an error class that retrying cannot fix: the
+// relay refuses the agent's credentials.
+func refusedClass(class string) bool { return class == "401" || class == "403" }
+
+// Refused reports whether the relay refused this reply's credentials, so
+// the owner must act.
+func (p PendingReply) Refused() bool { return refusedClass(p.LastError) }
 
 // since is the time since start, rounded for a log line.
 func since(start time.Time) time.Duration { return time.Since(start).Round(time.Millisecond) }
@@ -1148,11 +1174,7 @@ func (s *Service) recordPending() {
 			if _, decided := e.Outcome.status(); !decided {
 				continue
 			}
-			op := string(e.Op)
-			if op == "" {
-				op = string(OpAdd)
-			}
-			pr := PendingReply{RequestID: e.Request.ID, Op: op, StoredAt: e.SpooledAt}
+			pr := PendingReply{RequestID: e.Request.ID, Op: string(e.op()), StoredAt: e.SpooledAt}
 			s.mu.Lock()
 			if p := s.pending[e.Request.ID]; p != nil {
 				pr.Attempts, pr.LastError, pr.NextRetry = p.failures, p.class, p.due.UTC()
@@ -1163,10 +1185,10 @@ func (s *Service) recordPending() {
 	}
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
-	if len(list) == 0 && !s.shownPending {
+	if slices.Equal(list, s.lastPending) && !s.stalePending {
 		return
 	}
-	s.shownPending = len(list) > 0
+	s.lastPending, s.stalePending = list, false
 	h := s.readHealth()
 	h.Pending = list
 	s.writeHealth(h)

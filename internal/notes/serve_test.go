@@ -358,7 +358,7 @@ func TestAddAnswersWithNoteIDAndProvenance(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers R4: a free-text add stores the sender's text verbatim, whatever
+// A free-text add stores the sender's text verbatim, whatever
 // body the extractor produced.
 func TestFreeTextAddKeepsSenderTextVerbatim(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -486,7 +486,7 @@ func TestReadBodyOverCapIsTruncated(t *testing.T) {
 	}
 }
 
-// Covers AE2: the helper succeeds but the reply fails, the service
+// The helper succeeds but the reply fails, the service
 // restarts, and the relay redelivers: the recorded reply is resent with
 // the same note id, without calling the helper again.
 func TestReplyFailureThenRedeliveryRepliesSameNoteID(t *testing.T) {
@@ -527,7 +527,7 @@ func TestReplyFailureThenRedeliveryRepliesSameNoteID(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers AE1: with the library missing, an add stays spooled and
+// With the library missing, an add stays spooled and
 // unanswered, the asker gets a progress note, and once the library is back
 // the add is applied and answered.
 func TestAddStaysSpooledWhileLibraryMissingThenApplied(t *testing.T) {
@@ -574,7 +574,7 @@ func TestAddStaysSpooledWhileLibraryMissingThenApplied(t *testing.T) {
 	}
 }
 
-// Covers AE3: an add applied and then trashed by the owner is redelivered:
+// An add applied and then trashed by the owner is redelivered:
 // no new note, and the reply names the trashed note.
 func TestRedeliveredAddOfTrashedNoteRepliesWithIt(t *testing.T) {
 	r := newRig(t, relay.Config{ClaimLease: 150 * time.Millisecond})
@@ -1557,7 +1557,7 @@ func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
 	}
 }
 
-// Covers R13: one search logs its claim, its finish with duration and
+// One search logs its claim, its finish with duration and
 // counts, and its delivery, each with a parseable timestamp.
 func TestSearchLogsClaimFinishAndDelivery(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1572,7 +1572,7 @@ func TestSearchLogsClaimFinishAndDelivery(t *testing.T) {
 	}
 }
 
-// Covers R13: a failed reply attempt names its attempt number and error
+// A failed reply attempt names its attempt number and error
 // class.
 func TestFailedReplyAttemptLogsAttemptAndErrorClass(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1599,7 +1599,7 @@ func TestReplyErrorClass(t *testing.T) {
 	}
 }
 
-// Covers R15: no log line carries a note's text, whatever the request.
+// No log line carries a note's text, whatever the request.
 func TestLogsNeverCarryNoteText(t *testing.T) {
 	r := newRig(t, relay.Config{})
 	const secret = "MP-000-111-2222" // invented
@@ -1614,7 +1614,7 @@ func TestLogsNeverCarryNoteText(t *testing.T) {
 	}
 }
 
-// Covers R1: a search whose reply fails is stored, and the next retry
+// A search whose reply fails is stored, and the next retry
 // delivers the same reply without searching again.
 func TestSearchReplyFailureIsStoredAndRetried(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1640,7 +1640,7 @@ func TestSearchReplyFailureIsStoredAndRetried(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers R7 and the incident: the reply fails, the claim lease lapses,
+// The reply fails, the claim lease lapses,
 // and the redelivered request gets the stored reply without a second
 // search.
 func TestSearchRedeliveredAfterLeaseLapseResendsStoredReply(t *testing.T) {
@@ -1665,7 +1665,7 @@ func TestSearchRedeliveredAfterLeaseLapseResendsStoredReply(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers R1: a read reply stored before a restart is sent by the
+// A read reply stored before a restart is sent by the
 // restarted service.
 func TestStoredReadReplySurvivesRestart(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1688,7 +1688,7 @@ func TestStoredReadReplySurvivesRestart(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers R2: a reply that landed but whose response was lost is resent,
+// A reply that landed but whose response was lost is resent,
 // refused as already closed, and dropped; the relay holds one reply.
 func TestLostReplyResponseIsDroppedAsAlreadyClosed(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1708,7 +1708,7 @@ func TestLostReplyResponseIsDroppedAsAlreadyClosed(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers AE4 (R5): a stored search reply for an asker since removed from
+// A stored search reply for an asker since removed from
 // the read allowlist is answered declined and deleted.
 func TestStoredSearchReplyDeclinedWhenReadAccessRevoked(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1751,7 +1751,7 @@ func TestRetryDelayBacksOffAndCaps(t *testing.T) {
 	}
 }
 
-// Covers R13: each failed attempt logs when it is retried, on the
+// Each failed attempt logs when it is retried, on the
 // backoff schedule.
 func TestFailedReplyLogsNextRetryTime(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1798,7 +1798,7 @@ func (r *rig) waitStatus(t *testing.T, id string, want envelope.Status, d time.D
 	}
 }
 
-// Covers AE1 (R3): with polls and replies both failing, the stored reply
+// With polls and replies both failing, the stored reply
 // goes out as soon as a poll gets through, not when its backoff ends.
 func TestStoredReplyDeliveredWhenPollingRecovers(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1832,7 +1832,7 @@ func TestStoredReplyDeliveredWhenPollingRecovers(t *testing.T) {
 	}
 }
 
-// Covers R3: a retry stuck on an unreachable relay never holds up
+// A retry stuck on an unreachable relay never holds up
 // polling: a second request is claimed and answered meanwhile.
 func TestPollingNotHeldByAStuckRetry(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1860,7 +1860,7 @@ func TestPollingNotHeldByAStuckRetry(t *testing.T) {
 	r.waitStatus(t, a.ID, envelope.StatusAnswered, 5*time.Second)
 }
 
-// Covers KTD3: a reply the relay refuses as too large is replaced with a
+// A reply the relay refuses as too large is replaced with a
 // short failed reply, and that replacement is retried through an outage.
 func TestRefusedReplyIsReplacedAndRetried(t *testing.T) {
 	r := newRig(t, relay.Config{})
@@ -1879,7 +1879,7 @@ func TestRefusedReplyIsReplacedAndRetried(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers R4: a reply the relay refuses with 403 is kept at the longest
+// A reply the relay refuses with 403 is kept at the longest
 // delay and listed in the health file by id and error class, without its
 // text.
 func TestForbiddenReplyIsHeldAndShownInHealth(t *testing.T) {
@@ -1921,7 +1921,7 @@ func TestForbiddenReplyIsHeldAndShownInHealth(t *testing.T) {
 	}
 }
 
-// Covers R6: a stored reply older than 24 hours is purged unsent.
+// A stored reply older than 24 hours is purged unsent.
 func TestStaleStoredReplyIsPurgedUnsent(t *testing.T) {
 	r := newRig(t, relay.Config{})
 	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
@@ -1940,7 +1940,7 @@ func TestStaleStoredReplyIsPurgedUnsent(t *testing.T) {
 	r.assertSpoolEmpty(t)
 }
 
-// Covers KTD3: the 24-hour purge never touches an undecided add.
+// The 24-hour purge never touches an undecided add.
 func TestOldUndecidedAddIsStillApplied(t *testing.T) {
 	r := newRig(t, relay.Config{})
 	req := r.send(t, "grokbot", addBody("Tent", "buy the blue tent"))

@@ -11,7 +11,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
-// Covers R16: the incident replayed. The search is computed, the relay
+// The incident replayed. The search is computed, the relay
 // is unreachable for polls and replies past the claim lease, the relay
 // requeues the request and queues a lease notice, and then the relay
 // comes back. The asker gets exactly one reply, listing the family note

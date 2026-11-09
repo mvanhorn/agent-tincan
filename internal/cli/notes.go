@@ -420,7 +420,7 @@ func pendingRepliesCheck(path string, now time.Time) check {
 	var parts []string
 	refused := false
 	for i, p := range h.Pending {
-		if p.LastError == "401" || p.LastError == "403" {
+		if p.Refused() {
 			refused = true
 		}
 		if i >= shown {
