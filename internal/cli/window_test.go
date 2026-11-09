@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -656,4 +657,46 @@ func TestWindowSessionAsksContinueTheRequestsChain(t *testing.T) {
 	if got.Request.ParentID != req.id || !slices.Contains(got.Request.Chain, "grokbot") {
 		t.Errorf("sub-ask parent %q chain %v, want parent %s with grokbot in the chain", got.Request.ParentID, got.Request.Chain, req.id)
 	}
+}
+
+// A window request leaves a record beside its task file: who sent it and the
+// exact text typed into the window, so a later message in that window can be
+// told apart from the request that opened it. Each request gets its own.
+func TestWindowRequestRecordsWhoSentItAndWhatWasTyped(t *testing.T) {
+	w, req := windowRigAsking(t, false, "/osc-newfeature --bulk simple")
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "both lines are typed", func() bool { return len(f.typedLines()) == 2 })
+	dir := filepath.Join(filepath.Dir(req.config), "window-runs", safeRunName(req.id))
+	raw, err := os.ReadFile(filepath.Join(dir, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		RequestID string   `json:"request_id"`
+		From      string   `json:"from"`
+		Guest     bool     `json:"guest"`
+		Typed     []string `json:"typed"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("request.json = %s: %v", raw, err)
+	}
+	if got.RequestID != req.id || got.From != "grokbot" || got.Guest {
+		t.Errorf("record = %+v", got)
+	}
+	if typed := f.typedLines(); !slices.Equal(got.Typed, typed) {
+		t.Errorf("record typed %q, window got %q", got.Typed, typed)
+	}
+	f.mu.Lock()
+	env := strings.Join(f.env, " ")
+	f.mu.Unlock()
+	if want := "TINCAN_REQUEST_FILE=" + filepath.Join(dir, "request.json"); !strings.Contains(env, want) {
+		t.Errorf("window env %q lacks %q", env, want)
+	}
+	task, _ := os.ReadFile(filepath.Join(dir, "task.md"))
+	if !strings.Contains(string(task), "A follow-up on a job keeps that job's terms") {
+		t.Errorf("task.md lacks the follow-up rule:\n%s", task)
+	}
+	f.close()
+	_ = waitDone(t, done)
 }
