@@ -340,6 +340,15 @@ func (s *Service) retry(ctx context.Context, scope retryScope) int {
 		if !want(e) || !s.begin(e.Request.ID) {
 			continue
 		}
+		// The list was read before the in-flight mark: a request handled
+		// meanwhile may have stored a fresh reply, which an old copy must
+		// not purge or overwrite.
+		cur, ok, err := s.replies.Get(e.Request.ID)
+		if err != nil || !ok || !cur.SpooledAt.Equal(e.SpooledAt) {
+			s.end(e.Request.ID)
+			continue
+		}
+		e = cur
 		n++
 		if !s.purgeIfStale(e) {
 			s.resendStored(ctx, e)
@@ -357,6 +366,14 @@ func (s *Service) retry(ctx context.Context, scope retryScope) int {
 		if !want(e) || !s.begin(e.Request.ID) {
 			continue
 		}
+		// Re-read under the mark, so a decision made meanwhile is not
+		// applied again from an old copy.
+		cur, ok, err := s.spool.Get(e.Request.ID)
+		if err != nil || !ok {
+			s.end(e.Request.ID)
+			continue
+		}
+		e = cur
 		n++
 		func() {
 			defer s.end(e.Request.ID)
@@ -1000,6 +1017,9 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 		if words, _ := fallbackWords(r.Query); len(words) > 0 {
 			fstart := time.Now()
 			res := s.searchFallback(ctx, r.Query)
+			if res.Err != nil {
+				s.recordHealth("search", req.ID, res.Err) // doctor shows what stopped the fallback
+			}
 			s.logf("request %s from %s: search fallback finished in %s (%d words searched, %d skipped, %d out of time, %d failed; %d notes match some)",
 				req.ID, req.From, since(fstart), len(res.Searched), len(res.Skipped), len(res.TimedOut), len(res.Failed), len(res.Hits))
 			o := OutcomeAnswered

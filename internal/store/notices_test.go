@@ -138,6 +138,19 @@ func TestStaleClaimNoticeAfterCloseIsNotQueued(t *testing.T) {
 	}
 }
 
+// Removing an agent cancels the requests addressed to it and closes the
+// stale-claim notices queued to their askers.
+func TestRemovalClosesQueuedStaleClaimNotice(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	req := ask(t, s, "instinct", "grokbot", "find it")
+	n := relayNotice(t, s, req, NoteStaleClaim)
+	ids, err := s.CancelAllFor(context.Background(), "grokbot")
+	if err != nil || !slices.Contains(ids, req.ID) || !slices.Contains(ids, n.ID) {
+		t.Fatalf("cancelled %v %v, want the request and its notice", ids, err)
+	}
+	statusIs(t, s, n.ID, envelope.StatusCancelled)
+}
+
 // The notice link columns migrate in place: a database from before them
 // opens, opening it again is a no-op, and a notice queued before the
 // upgrade, which has no link, is still delivered after a reply.

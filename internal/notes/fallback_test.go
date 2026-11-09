@@ -174,3 +174,27 @@ func TestFallbackThatSearchedNothingFails(t *testing.T) {
 		t.Fatalf("reply %q", body)
 	}
 }
+
+// A fallback that searched some words but not all says only that the
+// searched ones matched nothing.
+func TestFallbackWithUnsearchedWordsClaimsOnlyWhatItSearched(t *testing.T) {
+	body := fallbackReply("stove lantern", fallbackResult{Searched: []string{"stove"}, TimedOut: []string{"lantern"}}, 10)
+	want := "No note contains every word of \"stove lantern\", and none of the words searched on their own matched a note.\n\nNot searched (out of time): lantern."
+	if body != want {
+		t.Fatalf("reply %q, want %q", body, want)
+	}
+}
+
+// When the helper fails on the fallback's searches, doctor's health shows
+// that failure, not the earlier successful full search.
+func TestFallbackHelperFailureIsRecordedInHealth(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.helper.failWordSearches(t, "helper_crashed")
+	res := r.ask(t, "grokbot", `note: {"op":"search","query":"stove lantern"}`)
+	if res.Status != envelope.StatusFailed {
+		t.Fatalf("status %s", res.Status)
+	}
+	if h := readHealth(t, r.cfg.HealthPath); h.OK || h.Command != "search" {
+		t.Fatalf("health %+v, want the fallback's failure", h)
+	}
+}

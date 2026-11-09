@@ -1456,26 +1456,45 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 }
 
 // CancelAllFor cancels every open request sent by or addressed to agent (used
-// when an agent is removed, so nothing it sent is still delivered). It returns
-// the cancelled ids.
+// when an agent is removed, so nothing it sent is still delivered), and
+// closes the stale-claim notices queued about them. It returns the cancelled
+// ids, notices included.
 func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
-		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?, ?, ?) RETURNING id`,
-		string(envelope.StatusCancelled), s.now().UnixMilli(), agent, agent,
-		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusHeld))
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+	defer tx.Rollback()
+	ids, err := func() ([]string, error) {
+		rows, err := tx.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+		WHERE (from_agent = ? OR to_agent = ?) AND status IN (?, ?, ?, ?, ?) RETURNING id`,
+			string(envelope.StatusCancelled), s.now().UnixMilli(), agent, agent,
+			string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusHeld))
+		if err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		return ids, rows.Err()
+	}()
+	if err != nil {
+		return nil, err
 	}
-	return ids, rows.Err()
+	for _, id := range slices.Clone(ids) {
+		closed, err := s.closeNoticesTx(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, closed...)
+	}
+	return ids, tx.Commit()
 }
 
 // Transition is one state change made by Sweep. Prev is the status the

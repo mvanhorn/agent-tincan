@@ -1995,3 +1995,51 @@ func TestStartupClearsPendingAnEarlierRunLeft(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A retry pass that read the stored replies before another request's
+// reply was stored afresh never purges that fresh reply from its old copy:
+// here the old copy turns stale while the pass waits on an earlier resend.
+func TestRetryDoesNotPurgeAReplyStoredAfterItsList(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	var clock atomic.Int64
+	base := time.Now()
+	clock.Store(base.UnixNano())
+	r.svc.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	first := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	second := r.send(t, "grokbot", `note: {"op":"search","query":"stove"}`)
+	if err := r.svc.replies.Put(SpoolEntry{Request: first, Op: OpSearch, SpooledAt: base.Add(-23 * time.Hour), Outcome: OutcomeAnswered, Reply: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.replies.Put(SpoolEntry{Request: second, Op: OpSearch, SpooledAt: base.Add(-22 * time.Hour), Outcome: OutcomeAnswered, Reply: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	r.failReplies(first.ID, 0) // the first resend hangs until released
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.svc.RetrySpooled(t.Context())
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for !r.hanging.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the retry never reached the hanging relay")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Meanwhile the second request was handled again and its reply stored
+	// afresh, and the pass's old copy of it is now past the limit.
+	clock.Store(base.Add(3 * time.Hour).UnixNano())
+	if err := r.svc.replies.Put(SpoolEntry{Request: second, Op: OpSearch, SpooledAt: base.Add(3 * time.Hour).UTC(), Outcome: OutcomeAnswered, Reply: "fresh"}); err != nil {
+		t.Fatal(err)
+	}
+	r.failReplies(second.ID, 503) // keep the fresh reply on disk to inspect
+	r.unhang()
+	<-done
+	got, ok, err := r.svc.replies.Get(second.ID)
+	if err != nil || !ok || got.Reply != "fresh" {
+		t.Fatalf("stored reply %+v %v %v, want the fresh one kept", got, ok, err)
+	}
+	if strings.Contains(r.log.String(), "request "+second.ID+" from grokbot: purged") {
+		t.Fatal("the old copy purged the fresh reply")
+	}
+}

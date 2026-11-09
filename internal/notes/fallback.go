@@ -120,6 +120,7 @@ type fallbackResult struct {
 	Skipped  []string // past the word cap
 	TimedOut []string // not searched before the budget ran out
 	Failed   []string // the helper failed on them
+	Err      error    // the last helper failure, if any
 }
 
 // searchFallback searches each word of query alone within the service's
@@ -142,6 +143,7 @@ func (s *Service) searchFallback(ctx context.Context, query string) fallbackResu
 				break
 			}
 			res.Failed = append(res.Failed, w)
+			res.Err = err
 			continue
 		}
 		found[w] = notes
@@ -159,6 +161,8 @@ func fallbackReply(query string, res fallbackResult, count int) string {
 	switch {
 	case len(res.Searched) == 0:
 		fmt.Fprintf(&b, "No note contains every word of %q, and the search for each word on its own could not run.", q)
+	case len(res.Hits) == 0 && len(res.Skipped)+len(res.TimedOut)+len(res.Failed) > 0:
+		fmt.Fprintf(&b, "No note contains every word of %q, and none of the words searched on their own matched a note.", q)
 	case len(res.Hits) == 0:
 		fmt.Fprintf(&b, "No notes match %q, and no note contains any of its words on its own.", q)
 	default:

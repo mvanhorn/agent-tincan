@@ -48,7 +48,8 @@ type fakeCall struct {
 
 // fakeHelperMain emulates the agent-notes helper contract: one JSON line on
 // stdout, exit 0 on ok and 1 on failure. Controls, in the state dir:
-// fail-create holds an error code every create returns; the library root
+// fail-create holds an error code every create returns, and
+// fail-word-search one every single-word search returns; the library root
 // missing gives unauthorized_library; a session-context.json in the
 // Application Support root gives turn_context_invalid; old-helper makes
 // create behave like a build without idempotency keys.
@@ -175,6 +176,9 @@ func fakeHelperMain(state string, args []string) int {
 		if q == "" {
 			return fail("missing_option", "Missing required --query option.")
 		}
+		if b, err := os.ReadFile(filepath.Join(state, "fail-word-search")); err == nil && !strings.Contains(q, " ") {
+			return fail(strings.TrimSpace(string(b)), "injected failure")
+		}
 		if b, err := os.ReadFile(filepath.Join(state, "slow-search")); err == nil {
 			if d, err := time.ParseDuration(strings.TrimSpace(string(b))); err == nil {
 				time.Sleep(d)
@@ -295,6 +299,14 @@ func (h *fakeHelper) slowSearches(t *testing.T, d time.Duration) {
 		return
 	}
 	if err := os.WriteFile(p, []byte(d.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// failWordSearches makes every single-word search return code.
+func (h *fakeHelper) failWordSearches(t *testing.T, code string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(h.state, "fail-word-search"), []byte(code), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
