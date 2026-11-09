@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1433,4 +1434,108 @@ func TestOldFormatSpoolEntryIsApplied(t *testing.T) {
 		t.Fatalf("status %s reply %+v notes %+v", res.Status, res.Reply, notes)
 	}
 	r.assertSpoolEmpty(t)
+}
+
+// logStampRE is the start of every notes log line: local RFC 3339 time
+// with milliseconds, then the service prefix.
+var logStampRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(Z|[+-]\d{2}:\d{2}) tincan notes: `)
+
+// logLines returns the service's log lines that mention id.
+func (r *rig) logLines(id string) []string {
+	var out []string
+	for line := range strings.Lines(r.log.String()) {
+		if strings.Contains(line, id) {
+			out = append(out, strings.TrimRight(line, "\n"))
+		}
+	}
+	return out
+}
+
+// lineWith returns the first log line for id containing want, failing the
+// test when there is none.
+func (r *rig) lineWith(t *testing.T, id, want string) string {
+	t.Helper()
+	for _, l := range r.logLines(id) {
+		if strings.Contains(l, want) {
+			return l
+		}
+	}
+	t.Fatalf("no log line for %s with %q:\n%s", id, want, strings.Join(r.logLines(id), "\n"))
+	return ""
+}
+
+func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
+	r.cfg.Now = func() time.Time { return at }
+	r.restart(t)
+	r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	lines := r.logLines(req.ID)
+	if len(lines) == 0 {
+		t.Fatal("no log lines for the request")
+	}
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "2026-11-08T21:55:07.137-08:00 tincan notes: ") {
+			t.Fatalf("line not stamped with the service clock: %q", l)
+		}
+	}
+}
+
+// Covers R13: one search logs its claim, its finish with duration and
+// counts, and its delivery, each with a parseable timestamp.
+func TestSearchLogsClaimFinishAndDelivery(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	for _, want := range []string{"claimed", "search finished in ", "(1 of 1 matches)", "reply delivered (answered, attempt 1)"} {
+		l := r.lineWith(t, req.ID, want)
+		if !logStampRE.MatchString(l) {
+			t.Fatalf("line without a timestamp: %q", l)
+		}
+	}
+}
+
+// Covers R13: a failed reply attempt names its attempt number and error
+// class.
+func TestFailedReplyAttemptLogsAttemptAndErrorClass(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	r.replyFail.Store(true)
+	req := r.send(t, "grokbot", `note: {"op":"search","query":"tent"}`)
+	r.poll(t, 1)
+	r.lineWith(t, req.ID, "reply attempt 1 failed (5xx)")
+}
+
+func TestReplyErrorClass(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{&client.APIError{Code: 503}, "5xx"},
+		{&client.APIError{Code: 409}, "409"},
+		{fmt.Errorf("post: %w", &client.APIError{Code: 413}), "413"},
+		{errors.New("dial tcp 100.64.0.1:8787: i/o timeout"), "network"},
+		{context.DeadlineExceeded, "timeout"},
+	} {
+		if got := replyErrClass(tc.err); got != tc.want {
+			t.Errorf("replyErrClass(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
+// Covers R15: no log line carries a note's text, whatever the request.
+func TestLogsNeverCarryNoteText(t *testing.T) {
+	r := newRig(t, relay.Config{})
+	const secret = "MP-000-111-2222" // invented
+	n := r.helper.put(t, fakeNote{Title: "Family numbers", Body: "Loyalty " + secret, Tags: []string{"travel"}})
+	r.ask(t, "grokbot", `note: {"op":"search","query":"family"}`)
+	r.ask(t, "grokbot", `note: {"op":"read","id":"`+n.ID+`"}`)
+	r.replyFail.Store(true)
+	r.send(t, "grokbot", `note: {"op":"read","id":"`+n.ID+`"}`)
+	r.poll(t, 1)
+	if strings.Contains(r.log.String(), secret) {
+		t.Fatal("a log line carries note text")
+	}
 }

@@ -90,6 +90,8 @@ type Config struct {
 	PresenceInterval time.Duration
 	// Log receives one line per request and per error (stderr when nil).
 	Log io.Writer
+	// Now is the clock log lines are stamped with (time.Now when nil).
+	Now func() time.Time
 }
 
 // Service is the notes agent.
@@ -107,6 +109,7 @@ type Service struct {
 	timeout    time.Duration
 	presence   time.Duration
 	log        io.Writer
+	now        func() time.Time
 
 	mu       sync.Mutex
 	inflight map[string]bool // request ids being applied, loop or timer
@@ -152,6 +155,7 @@ func New(cfg Config) (*Service, error) {
 		timeout:    cfg.RequestTimeout,
 		presence:   cfg.PresenceInterval,
 		log:        cfg.Log,
+		now:        cfg.Now,
 		inflight:   map[string]bool{},
 
 		extractFails: map[string]int{},
@@ -161,6 +165,9 @@ func New(cfg Config) (*Service, error) {
 	}
 	if s.timeout <= 0 {
 		s.timeout = DefaultRequestTimeout
+	}
+	if s.now == nil {
+		s.now = time.Now
 	}
 	return s, nil
 }
@@ -184,8 +191,14 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w, "tincan notes: "+format+"\n", args...)
+	stamp := s.now().Format(logStamp)
+	_, _ = fmt.Fprintf(w, stamp+" tincan notes: "+format+"\n", args...)
 }
+
+// logStamp is the local time at the start of every log line, to the
+// millisecond, with its zone offset so it lines up with the relay's UTC
+// trace.
+const logStamp = "2006-01-02T15:04:05.000Z07:00"
 
 // Run drains the spool once in the background, retries spooled adds every
 // RetryEvery, and polls and handles requests until ctx is cancelled. The
@@ -288,6 +301,7 @@ func (s *Service) Handle(ctx context.Context, req envelope.Request) {
 		s.logf("request %s from %s: claim failed: %v", req.ID, req.From, err)
 		return
 	}
+	s.logf("request %s from %s: claimed (created %s)", req.ID, req.From, req.CreatedAt.UTC().Format(time.RFC3339))
 
 	// A redelivered add that is already spooled goes straight to the
 	// helper: the idempotency key makes that return the same note. One
@@ -620,7 +634,7 @@ func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 		s.logf("request %s: no recorded outcome to send", e.Request.ID)
 		return
 	}
-	err := s.replyErr(ctx, e.Request, e.Reply, status)
+	err := s.replyErr(ctx, e.Request, e.Reply, status, 1)
 	switch {
 	case err == nil:
 	case client.IsStatus(err, http.StatusConflict), client.IsStatus(err, http.StatusNotFound):
@@ -635,6 +649,7 @@ func (s *Service) sendFinal(ctx context.Context, e SpoolEntry) {
 }
 
 func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
+	start := time.Now()
 	found, err := s.helper.Search(ctx, r.Query)
 	s.recordHealth("search", req.ID, err)
 	if err != nil {
@@ -651,11 +666,12 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 			break
 		}
 	}
-	s.logf("request %s from %s: search answered (%d of %d matches)", req.ID, req.From, len(active), len(found))
+	s.logf("request %s from %s: search finished in %s (%d of %d matches)", req.ID, req.From, since(start), len(active), len(found))
 	s.reply(ctx, req, searchReply(r.Query, active), envelope.StatusAnswered)
 }
 
 func (s *Service) read(ctx context.Context, req envelope.Request, r Request) {
+	start := time.Now()
 	n, err := s.helper.Read(ctx, r.ID)
 	s.recordHealth("read", req.ID, err)
 	if errors.Is(err, ErrNoteNotFound) || (err == nil && n.Summary.State != StateActive) {
@@ -668,24 +684,49 @@ func (s *Service) read(ctx context.Context, req envelope.Request, r Request) {
 		s.reply(ctx, req, helperFailedReply(err), envelope.StatusFailed)
 		return
 	}
-	s.logf("request %s from %s: read %s answered", req.ID, req.From, r.ID)
+	s.logf("request %s from %s: read %s finished in %s", req.ID, req.From, r.ID, since(start))
 	s.reply(ctx, req, readReply(n), envelope.StatusAnswered)
 }
 
 // reply sends on a context detached from ctx's deadline, so a request that
 // ran out of time still gets its answer.
 func (s *Service) reply(ctx context.Context, req envelope.Request, body string, status envelope.Status) {
-	if err := s.replyErr(ctx, req, body, status); err != nil {
-		s.logf("request %s: reply failed: %v", req.ID, err)
-	}
+	_ = s.replyErr(ctx, req, body, status, 1)
 }
 
-func (s *Service) replyErr(ctx context.Context, req envelope.Request, body string, status envelope.Status) error {
+// replyErr makes one reply attempt and logs its outcome: the status sent,
+// the attempt number and, on failure, the error class. Never the body.
+func (s *Service) replyErr(ctx context.Context, req envelope.Request, body string, status envelope.Status, attempt int) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
+	start := time.Now()
 	_, err := s.relay.Reply(rctx, req.ID, body, status)
-	return err
+	if err != nil {
+		s.logf("request %s: reply attempt %d failed (%s) after %s: %v", req.ID, attempt, replyErrClass(err), since(start), err)
+		return err
+	}
+	s.logf("request %s: reply delivered (%s, attempt %d) in %s", req.ID, status, attempt, since(start))
+	return nil
 }
+
+// replyErrClass is the class of a failed reply, for logs and health:
+// the HTTP status for a relay answer (5xx grouped), timeout for a
+// deadline, network for everything else.
+func replyErrClass(err error) string {
+	if e, ok := errors.AsType[*client.APIError](err); ok {
+		if e.Code >= 500 {
+			return "5xx"
+		}
+		return fmt.Sprintf("%d", e.Code)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "network"
+}
+
+// since is the time since start, rounded for a log line.
+func since(start time.Time) time.Duration { return time.Since(start).Round(time.Millisecond) }
 
 // progress posts a progress note to the asker; a failure is only logged.
 func (s *Service) progress(ctx context.Context, req envelope.Request, note string) {

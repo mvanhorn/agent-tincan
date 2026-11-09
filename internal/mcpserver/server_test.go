@@ -199,6 +199,10 @@ func TestAskInboxReplyOverMCP(t *testing.T) {
 	if !strings.Contains(got, "Events:\n") || !regexp.MustCompile(`#\d+ claimed\s+muse\s+`+id).MatchString(got) {
 		t.Fatalf("trace missing audit events: %q", got)
 	}
+	// Each event shows its relay time in UTC, before its sequence number.
+	if !regexp.MustCompile(`(?m)^  \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z #\d+ claimed\s`).MatchString(got) {
+		t.Fatalf("trace events without their time: %q", got)
+	}
 	// A second check finds nothing: the request was claimed.
 	if got := call(t, muse, "check_inbox", nil); !strings.Contains(got, "No requests waiting") {
 		t.Fatalf("second inbox = %q", got)
