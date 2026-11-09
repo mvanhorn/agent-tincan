@@ -500,8 +500,13 @@ func runWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal,
 	}
 	// The record says who sent this request and exactly what was typed, so
 	// a later message in the window that matches neither came from the
-	// owner at the keyboard, not from the request that opened it.
+	// owner at the keyboard, not from the request that opened it. A window
+	// reopened after a question gets its own record, so the first window's
+	// record still describes what it received.
 	record := filepath.Join(dir, "request.json")
+	if asked > 0 {
+		record = filepath.Join(dir, fmt.Sprintf("request-%d.json", asked))
+	}
 	if err := writeWindowRecord(record, req, cur.Request.ParentID, append([]string{prompt}, more...)); err != nil {
 		return failWindowRequest(ctx, r, req, "tincan window could not write this request's record: "+err.Error())
 	}

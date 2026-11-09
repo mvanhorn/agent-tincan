@@ -748,3 +748,47 @@ func TestWindowRequestsEachKeepTheirOwnRecord(t *testing.T) {
 		t.Errorf("records %v, want two files", ids)
 	}
 }
+
+// A question answered opens a fresh window for the same request. The first
+// window's record stays as it was, and the new window gets its own.
+func TestReopenedWindowRequestKeepsTheEarlierRecord(t *testing.T) {
+	w, req := windowRig(t, false)
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "the ask is typed", func() bool { return len(f.typedLines()) == 2 })
+	wr, err := w.client(req.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wr.Reply(t.Context(), req.id, "Which README?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.grokbot.Answer(t.Context(), req.id, "the root one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitDone(t, done); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(filepath.Dir(req.config), "window-runs", safeRunName(req.id))
+	first, err := os.ReadFile(filepath.Join(dir, "request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wr.Claim(t.Context(), req.id); err != nil {
+		t.Fatal(err)
+	}
+	g := &fakeTermWindow{screens: []string{claudeScreen}}
+	done = runRequestAsync(t, w, g, req)
+	eventually(t, "the second window opens", func() bool { return len(g.typedLines()) > 0 })
+	g.mu.Lock()
+	env := strings.Join(g.env, " ")
+	g.mu.Unlock()
+	if strings.Contains(env, "TINCAN_REQUEST_FILE="+filepath.Join(dir, "request.json")+" ") || strings.HasSuffix(env, "TINCAN_REQUEST_FILE="+filepath.Join(dir, "request.json")) {
+		t.Errorf("the second window shares the first window's record: %q", env)
+	}
+	if again, _ := os.ReadFile(filepath.Join(dir, "request.json")); string(again) != string(first) {
+		t.Errorf("the first window's record changed:\n%s\nwas\n%s", again, first)
+	}
+	g.close()
+	_ = waitDone(t, done)
+}
