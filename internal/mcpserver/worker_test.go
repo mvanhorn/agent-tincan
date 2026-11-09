@@ -52,3 +52,19 @@ func TestWorkerRequestServerTakesNoOtherRequest(t *testing.T) {
 		t.Errorf("claim of its own request = %q", got)
 	}
 }
+
+// check_inbox points out a request that starts with a teammate's shortcut.
+func TestCheckInboxPointsOutAShortcut(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	admin := m.Client(t, "admin")
+	if _, err := admin.SetGoodAt(t.Context(), "grokbot", "cc <task>: opens a new Claude Code window"); err != nil {
+		t.Skipf("set good-at: %v", err)
+	}
+	if _, err := m.Client(t, "instinct").Send(t.Context(), "muse", "cc /ce-plan make a donkey plan", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	got := call(t, session(t, m, "muse"), "check_inbox", map[string]any{})
+	if !strings.Contains(got, "ask grokbot") || !strings.Contains(got, `"/ce-plan make a donkey plan"`) {
+		t.Errorf("check_inbox = %q", got)
+	}
+}

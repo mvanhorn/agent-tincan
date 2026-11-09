@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -296,7 +297,7 @@ func waitForWindowStart(ctx context.Context, term windowTerminal, handle, starts
 				return "claude", nil
 			case starts == "shell" && settled:
 				return "shell", nil
-			case starts == "auto" && !claudeSeen && settled:
+			case starts == "auto" && !claudeSeen && settled && shellPromptOnScreen(s):
 				return "shell", nil
 			}
 		}
@@ -304,8 +305,10 @@ func waitForWindowStart(ctx context.Context, term windowTerminal, handle, starts
 			switch {
 			case starts == "claude" || (starts == "auto" && claudeSeen):
 				return "claude", nil // send anyway; a slow start still reads it
-			case strings.TrimSpace(last) != "":
+			case starts == "shell" && strings.TrimSpace(last) != "", shellPromptOnScreen(last):
 				return "shell", nil
+			case strings.TrimSpace(last) != "":
+				return "", fmt.Errorf("the new window showed neither Claude Code nor a shell prompt within %s; pass --starts claude or --starts shell", windowStartTimeout)
 			}
 			return "", fmt.Errorf("the new window showed nothing within %s", windowStartTimeout)
 		}
@@ -346,6 +349,18 @@ func waitForClaudeInput(ctx context.Context, term windowTerminal, handle string)
 func claudeOnScreen(s string) (seen, ready bool) {
 	seen = strings.Contains(s, "Claude Code")
 	return seen, seen && strings.Contains(s, "❯")
+}
+
+// shellPrompt matches the end of a shell prompt waiting for a command, such
+// as "matt@mac ~ % " or "$ ".
+var shellPrompt = regexp.MustCompile(`[$%#>❯]\s*$`)
+
+// shellPromptOnScreen reports whether a screen's last non-empty line looks
+// like a shell prompt. A login banner alone, shown while a launcher is still
+// starting Claude Code, does not.
+func shellPromptOnScreen(s string) bool {
+	lines := strings.Split(strings.TrimRight(s, " \t\r\n"), "\n")
+	return shellPrompt.MatchString(lines[len(lines)-1] + " ")
 }
 
 // newWindowRunDir makes a private directory for one window's files beside
