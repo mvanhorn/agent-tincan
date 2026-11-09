@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -105,13 +106,24 @@ func TestFallbackListsActiveNotesOnly(t *testing.T) {
 
 // Words the budget did not reach are named.
 func TestFallbackOutOfTimeNamesUnsearchedWords(t *testing.T) {
-	r := newRig(t, relay.Config{})
-	n := r.helper.put(t, fakeNote{Title: "Tent", Body: "tent"})
+	// "tent" answers at once and "stove" runs until the budget ends, so
+	// the outcome does not depend on how loaded the machine is.
+	const id = "0F6A2C1E-3B7D-4E0A-9C21-5D8E7F6A1B2C"
+	b := &stubBackend{name: "Agent Notes", search: func(ctx context.Context, q string) ([]NoteSummary, error) {
+		switch q {
+		case "tent":
+			return []NoteSummary{{ID: id, Title: "Tent", State: StateActive}}, nil
+		case "stove", "lantern":
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}}
+	r := rigWith(t, b)
 	r.svc.fallbackBudget = 300 * time.Millisecond
-	r.helper.slowSearches(t, 200*time.Millisecond)
 	res := r.ask(t, "grokbot", `note: {"op":"search","query":"tent stove lantern"}`)
 	body := res.Reply.Body
-	if !strings.Contains(body, n.ID) || !strings.Contains(body, "Not searched (out of time): ") || !strings.Contains(body, "lantern") {
+	if !strings.Contains(body, id) || !strings.Contains(body, "Not searched (out of time): ") || !strings.Contains(body, "stove") || !strings.Contains(body, "lantern") {
 		t.Fatalf("reply %q", body)
 	}
 }

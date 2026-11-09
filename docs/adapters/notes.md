@@ -22,6 +22,32 @@ Every note added through Tincan carries the `from-agent` tag and these propertie
 
 It needs an Agent Notes build whose helper supports `create --idempotency-key` (the release after the one current when this service shipped). `tincan notes doctor` reports an older helper as `helper_too_old`.
 
+## Bear and Apple Notes
+
+The notes agent can use Bear or Apple Notes instead of Agent Notes. Pick one with `--backend` on `tincan notes install`, `serve` and `doctor`:
+
+```sh
+tincan notes install --backend bear          # or apple-notes
+tincan notes doctor --backend bear
+```
+
+`--library-root` and `--helper` apply to Agent Notes only. Both other backends run on macOS only. Requests, replies, allowlists, the spool and the reply store work the same way for all three. These are the differences:
+
+| | Bear | Apple Notes |
+|---|---|---|
+| Search and read | Reads Bear's database directly, read only. Bear does not need to be open. | Runs fixed scripts in Notes through `osascript`. Notes opens in the background if it is not running. |
+| Add | Opens a `bear://x-callback-url/create` link in the background (`open -g`), so Bear never comes to the front. | Makes the note in the default account's default folder. |
+| Tags | Bear tags. | A `#tag` line at the end of the note. |
+| Locked notes | Found by title only; a read says the note is locked. | Same, for password-protected notes. |
+| Archived and trashed notes | Left out, as for Agent Notes. | Notes in Recently Deleted count as trashed and are left out. |
+| Permission | Access to Bear's data for the tincan binary (System Settings > Privacy & Security). | Automation access for the tincan binary to control Notes. |
+
+Neither app stores the `remote.*` properties on the note. The service keeps them, with each add's id and request key, in an add ledger on the notes Mac (`tincan-notes-bear-adds.json` or `tincan-notes-apple-notes-adds.json` in the service's Application Support folder, mode 0600). The ledger is also what stops a redelivered add from being saved twice: an add is recorded before the app is asked, and a retry of the same request returns the note the first attempt made instead of asking again. If the service cannot tell which of two new notes with the same title is the one it asked for, the add fails and the reply asks the sender to check the app before asking again.
+
+Bear and Apple Notes hold everything you have ever written, not one library made for agents. `install`, `serve` and `doctor` warn when an allowlist file is missing, since a missing file lets every joined agent search, read and add. Write both files before you start the service.
+
+macOS grants access to the service's process, not to Terminal, so doctor's own check can succeed while the service is refused. The service checks access when it starts and again after any request is refused for lack of permission, and records the note count or the error in its health file. Doctor reports that recorded result as `service access` and its own check as `access from this terminal`. The first is the one that counts.
+
 ## Allowlists
 
 There are two allowlist files, one agent name per line, in the same format as the history agent's ([history.md](history.md#allowlist)): commas and spaces also separate names, `#` starts a comment, and a `*` entry means every joined agent.

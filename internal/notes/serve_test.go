@@ -900,8 +900,8 @@ func TestNewRejectsIncompleteConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if svc.helper.Path != DefaultHelperPath {
-		t.Fatalf("helper path = %q, want the default", svc.helper.Path)
+	if h, ok := svc.backend.(*Helper); !ok || h.Path != DefaultHelperPath {
+		t.Fatalf("backend = %#v, want the helper at its default path", svc.backend)
 	}
 }
 
@@ -1121,7 +1121,7 @@ func TestAddWithNULBodyAnsweredFailedNothingSpooled(t *testing.T) {
 // a NUL in argv) is a permanent failure, not a missing helper.
 func TestHelperStartFailureFromArgsIsPermanent(t *testing.T) {
 	r := newRig(t, relay.Config{})
-	_, err := r.svc.helper.Create(t.Context(), "Tent", "a\x00b", nil, map[string]string{}, "tincan:x")
+	_, err := r.svc.backend.Create(t.Context(), "Tent", "a\x00b", nil, map[string]string{}, "tincan:x")
 	if !IsPermanent(err) || errorCode(err) != "invalid_request" {
 		t.Fatalf("err = %v (code %q), want permanent invalid_request", err, errorCode(err))
 	}
