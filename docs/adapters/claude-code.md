@@ -88,9 +88,53 @@ Only a window on that project is told about the ask and can take it. A window th
 
 The label is routing only, like the session id. See the [trust model](../trust-model.md).
 
+## Open a new window for each ask
+
+`tincan window` opens a new Claude Code window in cmux, in the background, for a task. Run it yourself on the Mac:
+
+```bash
+tincan window open "fix the flaky relay test"
+```
+
+Or let teammates do it: join a second agent, for example `claude-window`, and keep `tincan window serve` running as it. Each ask to that agent opens its own window, which works on that one request where you can watch or take over and replies to the asker. Asks to your usual `claude-code` agent still go to the windows you already have open.
+
+On an admin device, `tincan invite claude-window --kind claude-code`. On the Mac:
+
+```bash
+TINCAN_CONFIG=~/.config/tincan/window.json tincan join <code> --relay http://tincan-relay
+tincan window install --start
+```
+
+Give it a good-at line so teammates know when to use it, for example so `cc <task>` to any teammate means "open a window":
+
+```bash
+tincan good-at claude-window "cc <task>: send <task> as the ask; opens a new Claude Code window on the Mac and types it in"
+```
+
+`install` writes the LaunchAgent `com.agenttincan.window`, which runs `tincan window serve` at login and keeps it running; `--start` loads it now. It logs to `~/Library/Logs/tincan-window.log`. Then from any teammate:
+
+```bash
+tincan ask claude-window "summarize what changed on main this week"
+tincan ask claude-window "/ce-plan make a donkey plan"
+```
+
+With the good-at line above, `cc` is a shortcut: a good-at line that opens with a word and a placeholder (`cc <task>:`) tells every teammate to send a message starting with that word to this agent, word for word. `check_inbox` and `tincan inbox` point it out under a request that starts with it, so a teammate sent `cc /ce-plan make a donkey plan` asks `claude-window` with `/ce-plan make a donkey plan`. When you chat with a teammate in its own app (Instinct, say), tincan is not in the loop, so tell it once to remember the shortcut.
+
+How it works:
+
+- Each window opens as a new cmux workspace with focus left where it is, in `--dir` (default: your home directory). A teammate cannot choose the directory.
+- If your terminal starts Claude Code in every new window by itself (a Ghostty `command` set to a Claude launcher), the task is typed into it. If it starts a shell, tincan types the `claude` command line. `--starts auto` looks at the new window to tell which: it waits for Claude Code, and counts the window as a shell only once a shell prompt has sat still for a few seconds, so a launcher that is slow to start Claude is not mistaken for one. `--starts claude` or `--starts shell` says so outright.
+- A one-line ask is typed into Claude Code as it is, so `/ce-plan make a donkey plan` runs the slash command, and a second message (which Claude Code queues behind the first) says how to reply. A longer or multi-line ask is not typed; the window is pointed at its file. So is an ask starting with `-` (a `claude` startup option when a shell starts it), `!` (a shell command in Claude Code's input box) or `#` (a memory).
+- A request's task goes in a private file beside the window agent's config (`window-runs/<request id>/task.md`), with the exact `tincan reply` command for that request. The window opens with `TINCAN_CONFIG`, `TINCAN_SESSION` and `TINCAN_WORKER_REQUEST` set, so its tincan tools run as `claude-window` under the session that holds the claim: the reply tool answers the request, and an ask the window sends continues the request's chain, so approval rules and chain limits keyed on the first asker still apply. In that mode `tincan mcp` runs no channel or socket wake, `check_inbox` takes no new requests, and `claim` takes no other request, so a window never pulls other `claude-window` asks out of the queue.
+- The asker sees a progress note when the window opens. A request whose window is closed before it replies is failed with a message saying so. A clarifying question from the window ends that window's hold on the request, and the asker's answer opens a fresh window with the exchange.
+- A request a guest's ask led to opens no window and is failed.
+- `--max-windows` (default 3) caps windows working at once, and later asks wait. `--timeout` (default 12h) fails a request whose window holds it longer.
+
+The window runs Claude Code with your own settings and permission mode; tincan never adds `--dangerously-skip-permissions`. If your launcher starts Claude with permissions skipped, an ask to `claude-window` can run anything on this Mac without a prompt, so hold asks to it with the [owner approval gate](../../README.md#owner-approval) if any teammate reads untrusted content. cmux's `automation.socketControlMode` must let a process started outside cmux connect (`allowAll` or `password`; agentmail-to-claude-code's `setup_cmux.py` sets it), and cmux must be restarted after changing it.
+
 ## Fallback: open a session in cmux
 
-If no session is open to wake, or socket wake is off, run a listener that opens a new Claude Code session in cmux whenever requests are waiting. The script, `examples/claude-code/cmux-wake.sh`, lives in the agent-tincan repo (it is not in the release downloads); copy it to `~/bin` and `chmod +x` it first:
+`tincan window` (above) is the built-in way to open windows. If you want a new window only to drain the inbox when no session is open to wake, or socket wake is off, run a listener that opens a new Claude Code session in cmux whenever requests are waiting. The script, `examples/claude-code/cmux-wake.sh`, lives in the agent-tincan repo (it is not in the release downloads); copy it to `~/bin` and `chmod +x` it first:
 
 ```bash
 tincan listen --exec ~/bin/cmux-wake.sh

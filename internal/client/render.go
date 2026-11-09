@@ -484,6 +484,7 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 			}
 		}
 	}
+	hints := shortcutHints(ctx, c, in.Requests)
 	for _, req := range in.Requests {
 		if req.Kind == envelope.KindPing {
 			continue
@@ -493,6 +494,7 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 			continue
 		}
 		b.WriteString(FormatRequest(req))
+		b.WriteString(hints[req.ID])
 	}
 	b.WriteString(UpgradeNotice(in.UpgradeAvailable))
 	return b.String()

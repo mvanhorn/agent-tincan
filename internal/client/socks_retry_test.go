@@ -98,9 +98,67 @@ func TestSOCKSConnectFailureGivesUpWithTunnelHint(t *testing.T) {
 	}
 }
 
+// dialFailures are direct connects that timed out or found no route:
+// nothing reached the relay.
+var dialFailures = []struct {
+	name string
+	fail func() error
+}{
+	{"dial timeout", func() error { return &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded} }},
+	{"no route", func() error { return &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("no route to host")} }},
+}
+
+// A direct connection that blips while the tailnet path to the relay
+// settles costs the caller a short wait, not an error or a search for a
+// moved relay.
+func TestDialFailureIsRetried(t *testing.T) {
+	fastSOCKSRetry(t)
+	for _, tc := range dialFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			r, attempts, searched := flakyRelay(t, 2, tc.fail)
+			agents, err := r.Agents(t.Context())
+			findIdle(t, r)
+			if err != nil || len(agents) != 1 {
+				t.Fatalf("Agents = %+v, %v; want the relay's roster after the retries", agents, err)
+			}
+			if n := attempts.Load(); n != 3 {
+				t.Fatalf("attempts = %d, want 3 (two dial failures, then the answer)", n)
+			}
+			if searched.Load() {
+				t.Fatal("a dial that recovers within the retries must not search for a moved relay")
+			}
+		})
+	}
+}
+
+// A dial that keeps failing is retried on the schedule, then searches for a
+// moved relay as before. It gets no tunnel hint.
+func TestDialFailureOutlastingRetriesSearches(t *testing.T) {
+	fastSOCKSRetry(t)
+	for _, tc := range dialFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			r, attempts, searched := flakyRelay(t, 100, tc.fail)
+			_, err := r.Agents(t.Context())
+			findIdle(t, r)
+			if err == nil {
+				t.Fatal("want the failure")
+			}
+			if n, want := int(attempts.Load()), len(socksRetry)+1; n != want {
+				t.Fatalf("attempts = %d, want %d (the first try and one per retry)", n, want)
+			}
+			if !searched.Load() {
+				t.Fatal("a dial that outlasts the retries must search for a moved relay")
+			}
+			if TunnelHint(err) != err {
+				t.Fatalf("only a SOCKS failure gets the tunnel hint: %v", TunnelHint(err))
+			}
+		})
+	}
+}
+
 // Every other failure keeps today's path: one attempt, then a search for a
-// moved relay (a refused or failed dial, a timeout after connecting), or
-// nothing more for a relay error. None of them gets the tunnel hint.
+// moved relay (a refused dial, a timeout after connecting), or nothing more
+// for a relay error. None of them gets the tunnel hint.
 func TestOtherFailuresAreNotRetriedAsSOCKS(t *testing.T) {
 	fastSOCKSRetry(t)
 	timeout := func() error { return &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded} }
@@ -109,7 +167,6 @@ func TestOtherFailuresAreNotRetriedAsSOCKS(t *testing.T) {
 		fail func() error
 	}{
 		{"connection refused dial", func() error { return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED} }},
-		{"plain dial failure", func() error { return &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("no route to host")} }},
 		{"timeout after connect", timeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,7 +177,7 @@ func TestOtherFailuresAreNotRetriedAsSOCKS(t *testing.T) {
 				t.Fatal("want the failure")
 			}
 			if n := attempts.Load(); n != 1 {
-				t.Fatalf("attempts = %d, want 1 (no SOCKS retry)", n)
+				t.Fatalf("attempts = %d, want 1 (no retry)", n)
 			}
 			if !searched.Load() {
 				t.Fatal("a call that found nothing at the relay's address must still search for a moved relay")
@@ -188,5 +245,24 @@ func TestSOCKSFailureFollowsMovedRelay(t *testing.T) {
 	findIdle(t, r)
 	if r.Base() != moved {
 		t.Fatalf("base %s, want the moved relay %s", r.Base(), moved)
+	}
+}
+
+// A caller whose deadline leaves no room for another full attempt is not
+// held by retries: it goes straight to the search for a moved relay.
+func TestDialRetryStopsShortOfTheDeadline(t *testing.T) {
+	fastSOCKSRetry(t)
+	r, attempts, searched := flakyRelay(t, 100, dialFailures[0].fail)
+	ctx, cancel := context.WithTimeout(t.Context(), dialTimeout/2)
+	defer cancel()
+	if _, err := r.Agents(ctx); err == nil {
+		t.Fatal("want the failure")
+	}
+	findIdle(t, r)
+	if n := attempts.Load(); n != 1 {
+		t.Fatalf("attempts = %d, want 1 (no room for a retry)", n)
+	}
+	if !searched.Load() {
+		t.Fatal("want the search for a moved relay")
 	}
 }
