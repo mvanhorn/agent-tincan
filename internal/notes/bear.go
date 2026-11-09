@@ -201,7 +201,9 @@ func (b *Bear) Search(ctx context.Context, query string) ([]NoteSummary, error) 
 		args = append(args, w, w)
 	}
 	q := `SELECT ` + bearCols + ` FROM ZSFNOTE WHERE ` + strings.Join(where, " AND ") +
-		fmt.Sprintf(` ORDER BY COALESCE(ZPINNED, 0) DESC, ZMODIFICATIONDATE DESC LIMIT %d`, bearSearchLimit)
+		// Active notes first, so trashed and archived matches never push
+		// them past the limit.
+		fmt.Sprintf(` ORDER BY (COALESCE(ZTRASHED, 0) = 0 AND COALESCE(ZARCHIVED, 0) = 0) DESC, COALESCE(ZPINNED, 0) DESC, ZMODIFICATIONDATE DESC LIMIT %d`, bearSearchLimit)
 	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, dbError(err)

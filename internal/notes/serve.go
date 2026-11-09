@@ -60,8 +60,8 @@ const retryTick = time.Second
 // since it holds note text. The relay's own expiry is not visible here.
 const storedReplyTTL = 24 * time.Hour
 
-// Config is everything a notes service needs. Relay, LibraryRoot,
-// AppSupportRoot, and SpoolDir are required.
+// Config is everything a notes service needs. Relay, AppSupportRoot and
+// SpoolDir are required, and LibraryRoot unless Backend is set.
 type Config struct {
 	// Relay is the client the service polls and replies with, as its own
 	// agent identity.
@@ -1168,6 +1168,9 @@ type ProbeResult struct {
 	Count   int       `json:"count"`
 	Code    string    `json:"code,omitempty"`
 	Message string    `json:"message,omitempty"`
+	// Note is what the backend adds about the check, such as which folder
+	// Apple Notes treats as Recently Deleted. Never note contents.
+	Note string `json:"note,omitempty"`
 }
 
 // PendingReply is one undelivered reply in the health file.
@@ -1233,6 +1236,8 @@ func (s *Service) recordProbe(ctx context.Context) {
 			p.Message = err.Error()
 		}
 		s.logf("%s access check failed: %v", s.backend.Name(), err)
+	} else if pn, ok := s.backend.(interface{ ProbeNote() string }); ok {
+		p.Note = pn.ProbeNote()
 	}
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()

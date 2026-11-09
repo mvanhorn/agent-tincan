@@ -63,8 +63,11 @@ function run() {
   var name;
   try { name = n.name(); } catch (e) { return JSON.stringify({found: false}); }
   var locked = n.passwordProtected();
-  var folder = '';
-  try { folder = n.container().name(); } catch (e) {}
+  var folder;
+  try { folder = n.container().name(); } catch (e) {
+    // Without its folder the note may be in Recently Deleted: no text.
+    return JSON.stringify({found: true, id: n.id(), name: name, locked: locked, folderUnknown: true, text: ''});
+  }
   return JSON.stringify({found: true, id: n.id(), name: name, locked: locked, folder: folder, text: locked ? '' : n.plaintext()});
 }
 `
@@ -90,10 +93,14 @@ function run() {
 }
 `
 
-// jxaCount counts the notes, for doctor.
+// jxaCount counts the notes and lists each account's top-level folder
+// names, for doctor to show which folder is treated as Recently Deleted.
 const jxaCount = jxaPrelude + `
 function run() {
   input();
-  return JSON.stringify({count: Notes.notes.id().length});
+  var folders = [];
+  var accounts = Notes.accounts();
+  for (var a = 0; a < accounts.length; a++) folders = folders.concat(accounts[a].folders.name());
+  return JSON.stringify({count: Notes.notes.id().length, folders: folders});
 }
 `

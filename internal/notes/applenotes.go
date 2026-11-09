@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,12 +43,23 @@ type AppleNotes struct {
 	// stdout. Tests replace it.
 	Run    func(ctx context.Context, script string, input []byte) ([]byte, error)
 	ledger *ledger
+	now    func() time.Time
+
+	// The last listing, reused for appleListTTL so one search's per-word
+	// fallback does not list the whole library once per word.
+	mu        sync.Mutex
+	list      *appleList
+	listAt    time.Time
+	probeNote string
 }
+
+// appleListTTL is how long a listing of every note is reused.
+var appleListTTL = 30 * time.Second
 
 // NewAppleNotes builds the Apple Notes backend, keeping its add ledger in
 // appSupport.
 func NewAppleNotes(appSupport string, logf func(string, ...any)) *AppleNotes {
-	return &AppleNotes{ledger: newLedger(ledgerPath(appSupport, BackendAppleNotes), logf)}
+	return &AppleNotes{ledger: newLedger(ledgerPath(appSupport, BackendAppleNotes), logf), now: time.Now}
 }
 
 var _ Backend = (*AppleNotes)(nil)
@@ -106,13 +118,16 @@ func classifyOsascript(ctx context.Context, err error) error {
 	switch {
 	case strings.Contains(msg, "-1743") || strings.Contains(msg, "Not authorized to send Apple events"):
 		return &HelperError{Code: CodePermissionDenied, Message: "macOS does not let this process control Notes (Automation permission)"}
-	case ctx.Err() != nil:
-		return &HelperError{Code: codeUnavailable, Message: "Apple Notes did not answer in time"}
+	case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded):
+		return errAppleTimeout
 	case errors.Is(err, exec.ErrNotFound):
 		return &HelperError{Code: codeUnavailable, Message: "osascript not found"}
 	}
 	return &HelperError{Code: codeUnavailable, Message: capRunes(oneLine(msg), 300)}
 }
+
+// errAppleTimeout is a script that ran out of time: Notes may still act.
+var errAppleTimeout = &HelperError{Code: codeUnavailable, Message: "Apple Notes did not answer in time"}
 
 type appleList struct {
 	Folders []struct {
@@ -131,8 +146,8 @@ func (a *AppleNotes) Search(ctx context.Context, query string) ([]NoteSummary, e
 	if len(words) == 0 {
 		return nil, nil
 	}
-	var l appleList
-	if err := a.script(ctx, jxaList, struct{}{}, &l); err != nil {
+	l, err := a.listing(ctx)
+	if err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}
@@ -185,7 +200,39 @@ type appleRead struct {
 	Name   string `json:"name"`
 	Locked bool   `json:"locked"`
 	Folder string `json:"folder"`
-	Text   string `json:"text"`
+	// FolderUnknown is a note whose folder Notes would not say, so it may
+	// be in Recently Deleted.
+	FolderUnknown bool   `json:"folderUnknown"`
+	Text          string `json:"text"`
+}
+
+// listing lists every note, or reuses a listing made in the last
+// appleListTTL. An add drops it, so the new note is found at once.
+func (a *AppleNotes) listing(ctx context.Context) (*appleList, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.list != nil && a.clock().Sub(a.listAt) < appleListTTL {
+		return a.list, nil
+	}
+	var l appleList
+	if err := a.script(ctx, jxaList, struct{}{}, &l); err != nil {
+		return nil, err
+	}
+	a.list, a.listAt = &l, a.clock()
+	return &l, nil
+}
+
+func (a *AppleNotes) dropListing() {
+	a.mu.Lock()
+	a.list = nil
+	a.mu.Unlock()
+}
+
+func (a *AppleNotes) clock() time.Time {
+	if a.now == nil {
+		return time.Now()
+	}
+	return a.now()
 }
 
 // Read reads one note by its Apple Notes id.
@@ -201,8 +248,8 @@ func (a *AppleNotes) Read(ctx context.Context, id string) (Note, error) {
 		return Note{}, ErrNoteNotFound
 	}
 	state := StateActive
-	if IsDeletedFolder(r.Folder) {
-		state = StateTrashed
+	if r.FolderUnknown || IsDeletedFolder(r.Folder) {
+		state = StateTrashed // never answered to teammates
 	}
 	n := Note{Summary: appleSummary(r.ID, r.Name, r.Text, state, r.Locked, nil)}
 	n.Summary.Snippet = ""
@@ -216,10 +263,33 @@ func (a *AppleNotes) Read(ctx context.Context, id string) (Note, error) {
 // Probe counts the notes, so doctor can tell Notes answers this process.
 func (a *AppleNotes) Probe(ctx context.Context) (int, error) {
 	var c struct {
-		Count int `json:"count"`
+		Count   int      `json:"count"`
+		Folders []string `json:"folders"`
 	}
 	err := a.script(ctx, jxaCount, struct{}{}, &c)
+	if err == nil {
+		var deleted []string
+		for _, f := range c.Folders {
+			if IsDeletedFolder(f) {
+				deleted = append(deleted, f)
+			}
+		}
+		note := fmt.Sprintf("no folder recognized as Recently Deleted among %d top-level folders (Notes shows it only while it holds notes; if it is there under another name, its notes would be answered as active)", len(c.Folders))
+		if len(deleted) > 0 {
+			note = fmt.Sprintf("treated as deleted: %s", strings.Join(deleted, ", "))
+		}
+		a.mu.Lock()
+		a.probeNote = note
+		a.mu.Unlock()
+	}
 	return c.Count, err
+}
+
+// ProbeNote says which folder the last Probe treated as Recently Deleted.
+func (a *AppleNotes) ProbeNote() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.probeNote
 }
 
 // Create makes a note in the default folder. The add is recorded as
@@ -253,12 +323,10 @@ func (a *AppleNotes) Create(ctx context.Context, title, body string, tags []stri
 	var made struct {
 		ID string `json:"id"`
 	}
-	if err := a.script(ctx, jxaCreate, map[string]string{"html": appleNoteHTML(title, body, tags)}, &made); err != nil {
-		if errorCode(err) == CodePermissionDenied {
-			// macOS refused before Notes was asked: nothing was made.
-			_ = a.ledger.Forget(key)
-		}
-		return CreateResult{}, err
+	err = a.script(ctx, jxaCreate, map[string]string{"html": appleNoteHTML(title, body, tags)}, &made)
+	a.dropListing()
+	if err != nil {
+		return a.createFailed(ctx, key, title, start, err)
 	}
 	if made.ID == "" {
 		return CreateResult{}, &HelperError{Code: codeBadOutput, Message: "Apple Notes returned no note id"}
@@ -269,6 +337,35 @@ func (a *AppleNotes) Create(ctx context.Context, title, body string, tags []stri
 	res, err := a.existing(ctx, made.ID)
 	res.Existed = false
 	return res, err
+}
+
+// createFailed settles the ledger after a create script failed. macOS
+// refusing Automation means Notes was never asked. Otherwise the script may
+// have failed before or after the note was made, so look now: a note found
+// is this add's, and none found means the add can be asked again. Only a
+// timeout, when Notes may still be saving, stays pending for the retry.
+func (a *AppleNotes) createFailed(ctx context.Context, key, title string, start time.Time, err error) (CreateResult, error) {
+	if errorCode(err) == CodePermissionDenied {
+		_ = a.ledger.Forget(key)
+		return CreateResult{}, err
+	}
+	if ctx.Err() != nil || errors.Is(err, errAppleTimeout) {
+		return CreateResult{}, err
+	}
+	id, ferr := a.findCreated(ctx, title, start)
+	switch {
+	case ferr != nil:
+		return CreateResult{}, err // still pending: the retry looks again
+	case id == "":
+		_ = a.ledger.Forget(key)
+		return CreateResult{}, err
+	}
+	if derr := a.ledger.Done(key, id); derr != nil {
+		return CreateResult{}, &HelperError{Code: codeUnavailable, Message: derr.Error()}
+	}
+	res, rerr := a.existing(ctx, id)
+	res.Existed = false
+	return res, rerr
 }
 
 func (a *AppleNotes) existing(ctx context.Context, id string) (CreateResult, error) {

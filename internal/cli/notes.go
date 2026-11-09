@@ -23,9 +23,9 @@ import (
 func notesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "notes",
-		Short: "Run the notes agent, which saves and finds notes in Agent Notes for teammates",
-		Long: "The notes agent runs on the Mac with Agent Notes and drives its bundled agent-notes helper:\n" +
-			"teammates ask it to save a note, search notes, or read one back. Set it up once with\n" +
+		Short: "Run the notes agent, which saves and finds notes in Agent Notes, Bear or Apple Notes for teammates",
+		Long: "The notes agent runs on the Mac with your notes app (Agent Notes, Bear or Apple Notes, chosen with\n" +
+			"--backend): teammates ask it to save a note, search notes, or read one back. Set it up once with\n" +
 			"tincan notes install, then check it with tincan notes doctor. See docs/adapters/notes.md.",
 		Args: cobra.NoArgs,
 	}
@@ -86,13 +86,13 @@ func notesServeCmd() *cobra.Command {
 	var configPath, backendName, libraryRoot, helperPath, appSupport, spoolDir, readAllow, addAllow, scratchDir string
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the notes agent: save, search and read Agent Notes notes for teammates over the relay",
-		Long: "Long-polls the relay as the notes agent and handles each request with the agent-notes helper,\n" +
-			"run against --library-root with the service's own Application Support root. An add that cannot be\n" +
+		Short: "Run the notes agent: save, search and read notes in the chosen notes app for teammates over the relay",
+		Long: "Long-polls the relay as the notes agent and handles each request in the --backend notes app: the\n" +
+			"agent-notes helper run against --library-root (the default), Bear, or Apple Notes. An add that cannot be\n" +
 			"applied yet is kept in the spool and retried, so it is never lost. Free-text requests go through a\n" +
 			"tool-less codex exec call that turns the request text into a structured one.\n" +
 			"The allowlist files (one agent per line) limit who may search and read, and who may add; a missing\n" +
-			"file lets every joined agent. The last helper result is written for tincan notes doctor.\n" +
+			"file lets every joined agent. The last result and an access check are written for tincan notes doctor.\n" +
 			"Normally started by the service definition tincan notes install writes. See docs/adapters/notes.md.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -195,7 +195,7 @@ func notesInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Write the notes service definition (launchd on macOS, systemd on Linux); does not start it",
 		Long: "Writes a launchd agent (" + notes.ServiceLabel + ") on macOS, or a systemd user unit on Linux, that runs\n" +
-			"tincan notes serve against --library-root with TINCAN_CONFIG=~/.config/tincan/notes.json and keeps it\n" +
+			"tincan notes serve with --backend (and --library-root for agent-notes) with TINCAN_CONFIG=~/.config/tincan/notes.json and keeps it\n" +
 			"running. It prints the command that starts the service and never starts it itself.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -244,10 +244,11 @@ func notesDoctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check the notes agent's setup and the service's last helper result",
-		Long: "Checks the agent-notes helper, the spool directory, the relay, the kind the relay stores for this\n" +
-			"agent (it must be notes, or requests wait only 24 hours), and the running service's last helper\n" +
-			"result. It reads that result from the service's health file rather than running the helper itself,\n" +
-			"since the service may lack folder access that Terminal has. Exit status is 1 when a check fails.",
+		Long: "Checks the agent-notes helper (or, with --backend bear or apple-notes, the service's own access check\n" +
+			"and the allowlists), the spool directory, the relay, the kind the relay stores for this agent (it must\n" +
+			"be notes, or requests wait only 24 hours), and the running service's last result. It reads those from\n" +
+			"the service's health file, since the service may lack access that Terminal has. Exit status is 1 when\n" +
+			"a check fails.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := notes.CheckBackendName(backendName); err != nil {
@@ -347,7 +348,11 @@ func serviceAccessCheck(healthPath, backend, exe string) check {
 	}
 	when := h.Probe.At.Local().Format(time.DateTime)
 	if h.Probe.Code == "" && h.Probe.Message == "" {
-		return check{name, "ok", fmt.Sprintf("%s: the service saw %d notes at %s", h.Backend, h.Probe.Count, when), ""}
+		detail := fmt.Sprintf("%s: the service saw %d notes at %s", h.Backend, h.Probe.Count, when)
+		if h.Probe.Note != "" {
+			detail += "; " + h.Probe.Note
+		}
+		return check{name, "ok", detail, ""}
 	}
 	detail := fmt.Sprintf("%s: the service could not reach its notes at %s", h.Backend, when)
 	if h.Probe.Code != "" {

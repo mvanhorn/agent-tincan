@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -441,5 +442,23 @@ func TestBearOpenFailureLetsTheRetryAskAgain(t *testing.T) {
 	}
 	if res, err := b.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); err != nil || res.Note.Summary.ID == "" {
 		t.Fatalf("retry = %+v, %v", res, err)
+	}
+}
+
+// The row cap must not crowd out an active note: newer trashed notes that
+// match would otherwise fill the cap first.
+func TestBearSearchCapKeepsActiveNotesFirst(t *testing.T) {
+	f := newBearFixture(t)
+	old := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.put(bearNote{ID: "SFNote2Intro1", Title: "Tent active", Text: "tent", Created: old})
+	for i := range bearSearchLimit + 5 {
+		f.put(bearNote{ID: fmt.Sprintf("UUID-%d-AB", i), Title: "Tent trashed", Text: "tent", Trashed: true})
+	}
+	got, err := f.bear().Search(t.Context(), "tent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(got, func(n NoteSummary) bool { return n.State == StateActive }) {
+		t.Fatalf("the active note was cut by the row cap (%d results)", len(got))
 	}
 }

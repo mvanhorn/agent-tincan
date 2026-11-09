@@ -38,7 +38,7 @@ const (
 	ledgerDone    = "done"
 )
 
-// ledgerFile is the ledger's name in the service's Application Support
+// ledgerPath is the ledger's name in the service's Application Support
 // root, one per backend.
 func ledgerPath(appSupport, backend string) string {
 	return filepath.Join(appSupport, "tincan-notes-"+backend+"-adds.json")

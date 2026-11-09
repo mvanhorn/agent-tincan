@@ -2,8 +2,10 @@ package notes
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,4 +79,35 @@ func TestLiveAppleNotes(t *testing.T) {
 		}
 		t.Logf("read %s (state %s, %d bytes)", note.Summary.ID, note.Summary.State, len(note.Body))
 	}
+
+	// Create, redeliver, read back and delete a test note of our own.
+	key := fmt.Sprintf("tincan:live-%d", time.Now().UnixNano())
+	res, err := a.Create(t.Context(), liveTitle, "made by TestLiveAppleNotes", nil, nil, key)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	id := res.Note.Summary.ID
+	t.Cleanup(func() {
+		if err := a.script(context.Background(), liveAppleDelete, map[string]string{"id": id}, &struct{}{}); err != nil {
+			t.Logf("delete test note %s: %v (delete it by hand)", id, err)
+		}
+	})
+	again, err := a.Create(t.Context(), liveTitle, "made by TestLiveAppleNotes", nil, nil, key)
+	if err != nil || !again.Existed || again.Note.Summary.ID != id {
+		t.Fatalf("redelivered create = %+v, %v; want the same note", again.Note.Summary, err)
+	}
+	got, err := a.Read(t.Context(), id)
+	if err != nil || got.Summary.State != StateActive || !strings.Contains(got.Body, "made by TestLiveAppleNotes") {
+		t.Fatalf("read back = %+v, %v", got.Summary, err)
+	}
+	t.Logf("created, deduped and read %s", id)
 }
+
+// liveAppleDelete moves the test note to Recently Deleted.
+const liveAppleDelete = jxaPrelude + `
+function run() {
+  var a = input();
+  Notes.delete(Notes.notes.byId(a.id));
+  return JSON.stringify({});
+}
+`

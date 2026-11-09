@@ -25,11 +25,15 @@ type fakeNotesApp struct {
 	// createErr fails a create after the note is made, as a timeout
 	// after Notes saved it would.
 	createErr error
+	// createFailFirst fails a create before any note is made.
+	createFailFirst error
+	// folders is what jxaCount lists as top-level folders.
+	folders []string
 }
 
 type fakeAppleNote struct {
 	id, name, text, folder string
-	locked                 bool
+	locked, noFolder       bool
 	created                time.Time
 }
 
@@ -91,11 +95,17 @@ func (a *fakeNotesApp) run(_ context.Context, script string, input []byte) ([]by
 				if n.locked {
 					text = ""
 				}
+				if n.noFolder {
+					return json.Marshal(map[string]any{"found": true, "id": n.id, "name": n.name, "locked": n.locked, "folderUnknown": true, "text": ""})
+				}
 				return json.Marshal(map[string]any{"found": true, "id": n.id, "name": n.name, "locked": n.locked, "folder": n.folder, "text": text})
 			}
 		}
 		return []byte(`{"found":false}`), nil
 	case jxaCreate:
+		if a.createFailFirst != nil {
+			return nil, a.createFailFirst
+		}
 		h := in["html"].(string)
 		name := strings.TrimSuffix(strings.TrimPrefix(h[:strings.Index(h, "</h1>")+5], "<div><h1>"), "</h1>")
 		id := a.put(name, h, "Notes", false)
@@ -117,7 +127,7 @@ func (a *fakeNotesApp) run(_ context.Context, script string, input []byte) ([]by
 	case jxaCount:
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		return json.Marshal(map[string]int{"count": len(a.notes)})
+		return json.Marshal(map[string]any{"count": len(a.notes), "folders": a.folders})
 	}
 	a.t.Fatalf("unknown script")
 	return nil, nil
@@ -239,7 +249,7 @@ func TestAppleNotesCreateIsIdempotent(t *testing.T) {
 
 func TestAppleNotesCreateThatTimedOutIsAdoptedNotRepeated(t *testing.T) {
 	a, app := newAppleNotes(t)
-	app.createErr = errors.New("signal: killed")
+	app.createErr = context.DeadlineExceeded // Notes saved it, but too late
 	if _, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); err == nil || IsPermanent(err) {
 		t.Fatalf("first attempt = %v, want transient", err)
 	}
@@ -287,5 +297,97 @@ func TestDeletedFolderNames(t *testing.T) {
 	}
 	if IsDeletedFolder("Notes") {
 		t.Error("Notes recognized as deleted")
+	}
+}
+
+// A create script that fails for any reason but a timeout settles at once:
+// a note it made anyway is this add's, and if it made none the add can be
+// asked again rather than ending as create_unconfirmed.
+func TestAppleNotesCreateFailureIsSettledAtOnce(t *testing.T) {
+	a, app := newAppleNotes(t)
+	app.createFailFirst = errors.New("exit status 1")
+	if _, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); err == nil || IsPermanent(err) {
+		t.Fatalf("failed before saving = %v, want transient", err)
+	}
+	app.createFailFirst = nil
+	res, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1")
+	if err != nil || res.Existed || res.Note.Summary.ID == "" {
+		t.Fatalf("retry = %+v, %v; want a new note", res, err)
+	}
+
+	app.createErr = errors.New("exit status 1") // fails after saving
+	res, err = a.Create(t.Context(), "Lamp", "oil", nil, nil, "tincan:r2")
+	if err != nil || res.Note.Summary.ID == "" {
+		t.Fatalf("failed after saving = %+v, %v; want the note adopted", res, err)
+	}
+	app.createErr = nil
+	again, err := a.Create(t.Context(), "Lamp", "oil", nil, nil, "tincan:r2")
+	if err != nil || !again.Existed || again.Note.Summary.ID != res.Note.Summary.ID || app.count(jxaCreate) != 3 {
+		t.Fatalf("redelivered = %+v, %v, %d creates", again, err, app.count(jxaCreate))
+	}
+}
+
+func TestAppleNotesPendingRetryThatFindsTwoNotesIsUnconfirmed(t *testing.T) {
+	a, app := newAppleNotes(t)
+	app.createErr = context.DeadlineExceeded
+	if _, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); err == nil {
+		t.Fatal("want the timed-out first attempt to fail")
+	}
+	app.put("Tent", "other", "Notes", false)
+	if _, err := a.Create(t.Context(), "Tent", "stakes", nil, nil, "tincan:r1"); errorCode(err) != codeCreateUnconfirmed || !IsPermanent(err) {
+		t.Fatalf("retry with two candidates = %v, want permanent create_unconfirmed", err)
+	}
+}
+
+// A note whose folder Notes will not name may be in Recently Deleted, so
+// it is never read out as active.
+func TestAppleNotesReadWithoutAFolderIsNotActive(t *testing.T) {
+	a, app := newAppleNotes(t)
+	id := app.put("Diary", "private", "Recently Deleted", false)
+	app.notes[0].noFolder = true
+	n, err := a.Read(t.Context(), id)
+	if err != nil || n.Summary.State == StateActive || n.Body != "" {
+		t.Fatalf("read = %+v, %v; want a non-active note with no text", n, err)
+	}
+}
+
+func TestAppleNotesSearchReusesOneListingUntilAnAdd(t *testing.T) {
+	a, app := newAppleNotes(t)
+	app.put("Lake trip", "cabin", "Notes", false)
+	for _, q := range []string{"lake", "cabin", "trip"} {
+		if _, err := a.Search(t.Context(), q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if app.count(jxaList) != 1 {
+		t.Fatalf("listed the library %d times for three searches, want once", app.count(jxaList))
+	}
+	if _, err := a.Create(t.Context(), "Lake map", "x", nil, nil, "tincan:r1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.Search(t.Context(), "map"); len(got) != 1 {
+		t.Fatalf("a note added after the listing was not found: %v", titles(got))
+	}
+	start := time.Now()
+	a.now = func() time.Time { return start.Add(appleListTTL) }
+	_, _ = a.Search(t.Context(), "lake")
+	if app.count(jxaList) != 3 {
+		t.Fatalf("listings = %d, want a fresh one after the add and after the TTL", app.count(jxaList))
+	}
+}
+
+func TestAppleNotesProbeNamesTheDeletedFolder(t *testing.T) {
+	a, app := newAppleNotes(t)
+	app.folders = []string{"Notes", "Zuletzt gelöscht"}
+	if _, err := a.Probe(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ProbeNote(); !strings.Contains(got, "treated as deleted: Zuletzt gelöscht") {
+		t.Fatalf("probe note = %q", got)
+	}
+	app.folders = []string{"Notes", "Smazané"}
+	_, _ = a.Probe(t.Context())
+	if got := a.ProbeNote(); !strings.Contains(got, "no folder recognized as Recently Deleted among 2") {
+		t.Fatalf("probe note = %q", got)
 	}
 }
