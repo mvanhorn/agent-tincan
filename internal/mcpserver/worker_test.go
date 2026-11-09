@@ -58,7 +58,7 @@ func TestCheckInboxPointsOutAShortcut(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	admin := m.Client(t, "admin")
 	if _, err := admin.SetGoodAt(t.Context(), "grokbot", "cc <task>: opens a new Claude Code window"); err != nil {
-		t.Skipf("set good-at: %v", err)
+		t.Fatalf("set good-at: %v", err)
 	}
 	if _, err := m.Client(t, "instinct").Send(t.Context(), "muse", "cc /ce-plan make a donkey plan", envelope.KindAsk, "", false); err != nil {
 		t.Fatal(err)

@@ -351,9 +351,10 @@ func claudeOnScreen(s string) (seen, ready bool) {
 	return seen, seen && strings.Contains(s, "❯")
 }
 
-// shellPrompt matches the end of a shell prompt waiting for a command, such
-// as "matt@mac ~ % " or "$ ".
-var shellPrompt = regexp.MustCompile(`[$%#>❯]\s*$`)
+// shellPrompt matches a shell prompt waiting for a command, such as
+// "matt@mac ~ % " or "$ ", including one with a right-side prompt (zsh's
+// RPROMPT) after a wide gap, such as "matt@mac ~ %            12:30".
+var shellPrompt = regexp.MustCompile(`[$%#>❯](\s*$|\s{3,}\S.*$)`)
 
 // shellPromptOnScreen reports whether a screen's last non-empty line looks
 // like a shell prompt. A login banner alone, shown while a launcher is still
