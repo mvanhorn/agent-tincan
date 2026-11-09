@@ -31,12 +31,13 @@ func TestMain(m *testing.M) {
 // fakeNote is one note in the fake library: a JSON file per note in the
 // library root.
 type fakeNote struct {
-	ID    string            `json:"id"`
-	Title string            `json:"title"`
-	Body  string            `json:"body"`
-	Tags  []string          `json:"tags"`
-	State string            `json:"state"`
-	Props map[string]string `json:"props"`
+	ID     string            `json:"id"`
+	Title  string            `json:"title"`
+	Body   string            `json:"body"`
+	Tags   []string          `json:"tags"`
+	State  string            `json:"state"`
+	Pinned bool              `json:"pinned"`
+	Props  map[string]string `json:"props"`
 }
 
 // fakeCall is one recorded helper invocation.
@@ -110,7 +111,7 @@ func fakeHelperMain(state string, args []string) int {
 	}
 	notes := loadFakeNotes(lib)
 	summary := func(n fakeNote) map[string]any {
-		return map[string]any{"id": n.ID, "title": n.Title, "state": n.State, "pinned": false, "tags": n.Tags, "hash": "h-" + n.ID}
+		return map[string]any{"id": n.ID, "title": n.Title, "state": n.State, "pinned": n.Pinned, "tags": n.Tags, "hash": "h-" + n.ID}
 	}
 	switch command {
 	case "create":
@@ -174,10 +175,25 @@ func fakeHelperMain(state string, args []string) int {
 		if q == "" {
 			return fail("missing_option", "Missing required --query option.")
 		}
+		if b, err := os.ReadFile(filepath.Join(state, "slow-search")); err == nil {
+			if d, err := time.ParseDuration(strings.TrimSpace(string(b))); err == nil {
+				time.Sleep(d)
+			}
+		}
+		// As the app's helper: the whole query, or with two or more words
+		// every word, each a lowercase substring of the title, body or a tag.
+		in := func(n fakeNote, w string) bool {
+			return strings.Contains(strings.ToLower(n.Title), w) || strings.Contains(strings.ToLower(n.Body), w) ||
+				slices.ContainsFunc(n.Tags, func(t string) bool { return strings.Contains(strings.ToLower(t), w) })
+		}
+		words := strings.Fields(q)
 		out := []map[string]any{}
 		for _, n := range notes {
-			if strings.Contains(strings.ToLower(n.Title), q) || strings.Contains(strings.ToLower(n.Body), q) ||
-				slices.ContainsFunc(n.Tags, func(t string) bool { return strings.Contains(strings.ToLower(t), q) }) {
+			all := len(words) > 1
+			for _, w := range words {
+				all = all && in(n, w)
+			}
+			if in(n, q) || all {
 				s := summary(n)
 				s["snippet"] = firstRunes(n.Body, 160)
 				out = append(out, s)
@@ -269,6 +285,19 @@ func newFakeHelper(t *testing.T, lib string) *fakeHelper {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// slowSearches makes every search take d (0 stops).
+func (h *fakeHelper) slowSearches(t *testing.T, d time.Duration) {
+	t.Helper()
+	p := filepath.Join(h.state, "slow-search")
+	if d == 0 {
+		_ = os.Remove(p)
+		return
+	}
+	if err := os.WriteFile(p, []byte(d.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // failCreates makes every create return code ("" stops failing).
 func (h *fakeHelper) failCreates(t *testing.T, code string) {

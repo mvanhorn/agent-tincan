@@ -126,6 +126,8 @@ type Service struct {
 	now        func() time.Time
 	delays     []time.Duration
 	tick       time.Duration
+	// fallbackBudget bounds a search's per-word fallback.
+	fallbackBudget time.Duration
 	// recovered is signalled when a poll succeeds after failing, so stored
 	// replies go out without waiting for their backoff.
 	recovered chan struct{}
@@ -189,7 +191,9 @@ func New(cfg Config) (*Service, error) {
 		pending:      map[string]*pendingReply{},
 		delays:       retryDelays,
 		tick:         retryTick,
-		recovered:    make(chan struct{}, 1),
+
+		fallbackBudget: fallbackBudget,
+		recovered:      make(chan struct{}, 1),
 		// A list left by an earlier run is rewritten on the first attempt.
 		shownPending: true,
 	}
@@ -960,6 +964,18 @@ func (s *Service) search(ctx context.Context, req envelope.Request, r Request) {
 		}
 	}
 	s.logf("request %s from %s: search finished in %s (%d of %d matches)", req.ID, req.From, since(start), len(active), len(found))
+	if len(active) == 0 && len(strings.Fields(r.Query)) > 1 {
+		// No note holds every word: an over-specific request is not proof
+		// that nothing matches, so try the words one by one.
+		if words, _ := fallbackWords(r.Query); len(words) > 0 {
+			fstart := time.Now()
+			res := s.searchFallback(ctx, r.Query, s.fallbackBudget)
+			s.logf("request %s from %s: search fallback finished in %s (%d words searched, %d skipped, %d out of time, %d failed; %d notes match some)",
+				req.ID, req.From, since(fstart), len(res.Searched), len(res.Skipped), len(res.TimedOut), len(res.Failed), len(res.Hits))
+			s.store(ctx, req, OpSearch, OutcomeAnswered, fallbackReply(r.Query, res, r.Count))
+			return
+		}
+	}
 	s.store(ctx, req, OpSearch, OutcomeAnswered, searchReply(r.Query, active))
 }
 
