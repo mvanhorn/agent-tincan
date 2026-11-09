@@ -331,7 +331,7 @@ func (s *Service) progress(ctx context.Context, id, note string) {
 func (s *Service) reply(ctx context.Context, req envelope.Request, body string, status envelope.Status) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
-	if _, err := s.Relay.Reply(rctx, req.ID, body, status); err != nil {
+	if _, err := s.Relay.ReplyFinal(rctx, req.ID, body, status, nil, true); err != nil { // a service reply is the whole answer
 		s.logf("request %s: reply failed: %v", req.ID, err)
 	}
 }

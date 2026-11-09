@@ -180,7 +180,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate urgent: %w", err)
 	}
-	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}, {"from_session", "TEXT NOT NULL DEFAULT ''"}, {"claim_session", "TEXT NOT NULL DEFAULT ''"}} {
+	for _, col := range []struct{ name, definition string }{{"progress_note", "TEXT NOT NULL DEFAULT ''"}, {"progress_at", "INTEGER NOT NULL DEFAULT 0"}, {"claimed_at", "INTEGER NOT NULL DEFAULT 0"}, {"from_session", "TEXT NOT NULL DEFAULT ''"}, {"claim_session", "TEXT NOT NULL DEFAULT ''"}, {"held_ack", "TEXT NOT NULL DEFAULT ''"}} {
 		var exists bool
 		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)", col.name).Scan(&exists); err != nil {
 			db.Close()
@@ -1300,7 +1300,7 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 		where = " AND (" + guard + ")"
 		args = append(args, guardArgs...)
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1, lease_lapsed_at = NULL
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, reply_seen_at = CASE WHEN kind = 'ping' THEN ? ELSE 0 END, reply_generation = reply_generation + 1, lease_lapsed_at = NULL, held_ack = ''
 		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?)`+where, args...)
 	if err != nil {
 		return envelope.Reply{}, err

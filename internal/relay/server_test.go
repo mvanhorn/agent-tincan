@@ -957,26 +957,47 @@ func TestProgressAuthorizationAndPrivacy(t *testing.T) {
 	h.do(museAddr, "POST", path+"/progress", `{"note":"late"}`, 409, nil)
 }
 
+// replyFrom posts body as agent's reply to id from a client that advertises
+// features, and returns the response.
+func (h *harness) replyFrom(addr, id, body, features string, want int) envelope.Reply {
+	h.t.Helper()
+	req := httptest.NewRequest("POST", "/v1/requests/"+id+"/reply", strings.NewReader(body))
+	req.RemoteAddr = addr
+	req.Header.Set(client.FeaturesHeader, features)
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		h.t.Fatalf("reply %s: status %d, want %d: %s", id, rec.Code, want, rec.Body.String())
+	}
+	var rep envelope.Reply
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		h.t.Fatalf("decode reply: %v: %s", err, rec.Body.String())
+	}
+	return rep
+}
+
+const (
+	testAck      = "Working on it: pulling posts via X search now. Full report will follow."
+	keptFeatures = "ping," + client.KeptOpenFeature
+)
+
 func TestAckReplyKeepsRequestOpen(t *testing.T) {
 	h := newHarness(t, Config{})
 	req := h.send(grokAddr, "muse", "study @boardyai and send the full report")
 	path := "/v1/requests/" + req.ID
 	h.do(museAddr, "POST", path+"/claim", "", 200, nil)
 
-	ack := "Working on it: pulling posts via X search now. Full report will follow."
-	var kept envelope.Reply
-	h.do(museAddr, "POST", path+"/reply", `{"body":"`+ack+`"}`, 200, &kept)
+	kept := h.replyFrom(museAddr, req.ID, `{"body":"`+testAck+`"}`, keptFeatures, 200)
 	if !kept.KeptOpen || kept.Status != envelope.StatusClaimed {
 		t.Fatalf("ack reply: %+v", kept)
 	}
 	var res envelope.Result
 	h.do(grokAddr, "GET", path, "", 200, &res)
-	if res.Status != envelope.StatusClaimed || res.Reply != nil || res.Progress == nil || res.Progress.Note != ack {
+	if res.Status != envelope.StatusClaimed || res.Reply != nil || res.Progress == nil || res.Progress.Note != testAck {
 		t.Fatalf("after ack: %+v", res)
 	}
 
-	var final envelope.Reply
-	h.do(museAddr, "POST", path+"/reply", `{"body":"Read 214 posts. Report: ..."}`, 200, &final)
+	final := h.replyFrom(museAddr, req.ID, `{"body":"Read 214 posts. Report: ..."}`, keptFeatures, 200)
 	if final.KeptOpen || final.Status != envelope.StatusAnswered {
 		t.Fatalf("real reply: %+v", final)
 	}
@@ -984,26 +1005,70 @@ func TestAckReplyKeepsRequestOpen(t *testing.T) {
 	if res.Status != envelope.StatusAnswered || res.Reply == nil || !strings.HasPrefix(res.Reply.Body, "Read 214") {
 		t.Fatalf("after answer: %+v", res)
 	}
+	// The real reply cleared the held ack: a later sweep leaves it alone.
+	h.srv.Sweep(t.Context())
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || !strings.HasPrefix(res.Reply.Body, "Read 214") {
+		t.Fatalf("after sweep: %+v", res)
+	}
 }
 
-func TestAckReplyFinalOrUnclaimedCloses(t *testing.T) {
-	h := newHarness(t, Config{})
-	ack := "On it, will follow up."
-
-	// final: true is the replier saying this short note is the whole answer.
-	req := h.send(grokAddr, "muse", "can you take this?")
+// A held ack whose claim lapses closes the request with the ack, as it
+// would have closed before, and is never handed back to its agent: a reply
+// misread as an ack must not be done twice.
+func TestHeldAckClosesOnLapse(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	h := newHarness(t, Config{Now: clock.Now})
+	h.st.SetClock(clock.Now)
+	req := h.send(grokAddr, "muse", "call the clinic")
 	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", 200, nil)
-	var rep envelope.Reply
-	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"`+ack+`","final":true}`, 200, &rep)
-	if rep.KeptOpen || rep.Status != envelope.StatusAnswered {
-		t.Fatalf("final ack: %+v", rep)
+	if rep := h.replyFrom(museAddr, req.ID, `{"body":"`+testAck+`"}`, keptFeatures, 200); !rep.KeptOpen {
+		t.Fatalf("ack reply: %+v", rep)
 	}
+	inbox := h.srv.hub.wait(inboxKey("grokbot"))
+	clock.advance(DefaultClaimLease + time.Minute)
+	h.srv.Sweep(t.Context())
+	select {
+	case <-inbox:
+	default:
+		t.Fatal("closing a held ack did not wake the asker")
+	}
+	var res envelope.Result
+	h.do(grokAddr, "GET", "/v1/requests/"+req.ID, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != testAck {
+		t.Fatalf("after lapse: %+v", res)
+	}
+	// 204: nothing queued for muse, so the request was not handed back.
+	h.do(museAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil)
+}
 
-	// With no claim to keep open, the reply goes through as before.
-	req = h.send(grokAddr, "muse", "and this one?")
-	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/reply", `{"body":"`+ack+`"}`, 200, &rep)
-	if rep.KeptOpen || rep.Status != envelope.StatusAnswered {
-		t.Fatalf("unclaimed ack: %+v", rep)
+func TestAckReplyClosesWhenItShould(t *testing.T) {
+	h := newHarness(t, Config{})
+	claimed := func(body string) envelope.Request {
+		req := h.send(grokAddr, "muse", body)
+		h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", 200, nil)
+		return req
+	}
+	for name, tc := range map[string]struct {
+		id, body, features string
+	}{
+		// final: true is the replier saying this short note is the whole answer.
+		"final": {claimed("can you take this?").ID, `{"body":"` + testAck + `","final":true}`, keptFeatures},
+		// An older client would tell its agent the request was answered.
+		"old client": {claimed("and this?").ID, `{"body":"` + testAck + `"}`, "ping"},
+		// With no claim to keep open, the reply goes through as before.
+		"unclaimed": {h.send(grokAddr, "muse", "one more").ID, `{"body":"` + testAck + `"}`, keptFeatures},
+	} {
+		if rep := h.replyFrom(museAddr, tc.id, tc.body, tc.features, 200); rep.KeptOpen || rep.Status != envelope.StatusAnswered {
+			t.Errorf("%s: %+v", name, rep)
+		}
+	}
+	// A notify has no lease to run out, so an ack to it is not held.
+	var note envelope.Request
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"fyi","kind":"notify"}`, http.StatusCreated, &note)
+	h.do(museAddr, "POST", "/v1/requests/"+note.ID+"/claim", "", 200, nil)
+	if rep := h.replyFrom(museAddr, note.ID, `{"body":"`+testAck+`"}`, keptFeatures, 200); rep.KeptOpen {
+		t.Errorf("notify: %+v", rep)
 	}
 }
 

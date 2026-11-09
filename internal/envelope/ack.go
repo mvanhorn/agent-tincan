@@ -15,9 +15,7 @@ var ackOpeners = []string{
 	"on it",
 	"starting now", "starting on it", "starting on this", "starting on that",
 	"looking into it", "looking into this", "looking into that",
-	"in progress",
 	"stand by",
-	"will do",
 }
 
 // ackLeads may come before an opener: "Got it, working on it."
@@ -31,8 +29,12 @@ var laterNouns = []string{"report", "results", "result", "answer", "findings", "
 // doneMarkers say the reply already carries a result, so it is not just an
 // acknowledgment even when it also promises more.
 var doneMarkers = []string{
-	"done", "finished", "complete", "here's", "here is", "attached",
+	"done", "finished", "complete", "completed", "here's", "here is", "attached",
 	"http://", "https://", "```",
+	// Finished real-world actions.
+	"called", "booked", "paid", "sent", "submitted", "emailed", "texted",
+	"ordered", "scheduled", "cancelled", "canceled", "confirmed", "bought",
+	"purchased", "filed", "posted", "reserved", "signed",
 }
 
 // LooksLikeAck reports whether body reads as an acknowledgment that work has
@@ -41,16 +43,17 @@ var doneMarkers = []string{
 // one, because closing it would strand the real answer: nothing could attach
 // to a closed request, and the asker would never be woken for it.
 //
-// A wrong yes keeps a finished request open until its claim lapses and the
-// request is handed back, so the test is narrow: the reply must open with an
-// acknowledgment or promise the report later, and must show no result.
+// A wrong yes delays a finished answer until the claim lapses and the relay
+// closes the request with it, so the test stays narrow: the reply must open
+// with an acknowledgment or promise the report later, and must show no
+// result.
 func LooksLikeAck(body string) bool {
 	b := strings.ToLower(strings.TrimSpace(body))
 	if b == "" || len(b) > MaxAckBytes || strings.Count(b, "\n") > 2 {
 		return false
 	}
 	for _, m := range doneMarkers {
-		if strings.Contains(b, m) {
+		if containsWord(b, m) || strings.HasPrefix(m, "http") && strings.Contains(b, m) || m == "```" && strings.Contains(b, m) {
 			return false
 		}
 	}

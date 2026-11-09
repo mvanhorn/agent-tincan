@@ -630,7 +630,7 @@ func (s *Service) sendFinal(ctx context.Context, req envelope.Request, body stri
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
-	if _, err := s.relay.ReplyAttached(rctx, req.ID, body, status, ids); err != nil {
+	if _, err := s.relay.ReplyFinal(rctx, req.ID, body, status, ids, true); err != nil { // the model's text is the whole answer; nothing follows up
 		s.logf("request %s: reply failed: %v", req.ID, err)
 	}
 }

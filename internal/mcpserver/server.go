@@ -201,7 +201,7 @@ type FinalReplier interface {
 
 // keptOpenText is what the reply tool tells an agent whose answered reply the
 // relay kept as a progress note.
-const keptOpenText = "That reads like an acknowledgment, so the relay saved it as a progress note on %s and kept the request open. Reply again with the result when you have it (or status failed if you can't finish). Use progress, not reply, to say you've started. If this short note really is the whole answer, reply again with final: true."
+const keptOpenText = "That reads like an acknowledgment, so the relay saved it as a progress note on %s and kept the request open. Reply again with the result when you have it (or status failed if you can't finish); if your claim runs out first, the relay closes the request with this note. Use progress, not reply, to say you've started. If this short note really is the whole answer, reply again with final: true."
 
 type attachmentIn struct {
 	ID string `json:"id" jsonschema:"the attachment id, as listed with the request or reply"`

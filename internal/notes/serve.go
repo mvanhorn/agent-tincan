@@ -683,7 +683,7 @@ func (s *Service) reply(ctx context.Context, req envelope.Request, body string, 
 func (s *Service) replyErr(ctx context.Context, req envelope.Request, body string, status envelope.Status) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
-	_, err := s.relay.Reply(rctx, req.ID, body, status)
+	_, err := s.relay.ReplyFinal(rctx, req.ID, body, status, nil, true) // a service reply is the whole answer
 	return err
 }
 

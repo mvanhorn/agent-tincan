@@ -905,7 +905,7 @@ func replyCmd() *cobra.Command {
 				return err
 			}
 			if rep.KeptOpen {
-				cmd.Printf("That reads like an acknowledgment, so the relay saved it as a progress note on %s and kept the request open. Reply again with the result (or --status failed). Use tincan progress to say you've started; add --final if this note is the whole answer.\n", args[0])
+				cmd.Printf("That reads like an acknowledgment, so the relay saved it as a progress note on %s and kept the request open. Reply again with the result (or --status failed); if your claim runs out first, the relay closes the request with this note. Use tincan progress to say you've started; add --final if this note is the whole answer.\n", args[0])
 				return nil
 			}
 			cmd.Printf("Replied to %s (%s).\n", args[0], rep.Status)
