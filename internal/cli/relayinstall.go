@@ -159,7 +159,7 @@ starting the service.`,
 				if exe == "" {
 					exe, _ = os.Executable()
 				}
-				fmt.Fprintf(out, "This relay has not joined your tailnet yet, and the service never stores TS_AUTHKEY. Run it once in a terminal first, stop it with Ctrl-C once it is up, then start the service:\n  TS_AUTHKEY=tskey-auth-... %s\n", shellJoin(append([]string{exe, "relay"}, args...)))
+				fmt.Fprintf(out, "This relay has not joined your tailnet yet, and the service never stores TS_AUTHKEY. Run it once in a terminal first, stop it with Ctrl-C once it is up, then start the service:\n  TS_AUTHKEY=tskey-auth-... %s\n", shellCommand(append([]string{exe, "relay"}, args...)))
 			}
 			fmt.Fprintf(out, "start it with:\n  %s\n", res.Next)
 			return nil
@@ -255,8 +255,8 @@ func warnOtherRelayAgents(out io.Writer, binary string) {
 	}
 }
 
-// shellJoin quotes args for a POSIX shell where they need it.
-func shellJoin(args []string) string {
+// shellCommand quotes args for a POSIX shell where they need it.
+func shellCommand(args []string) string {
 	q := make([]string, len(args))
 	for i, a := range args {
 		if a != "" && strings.Trim(a, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=./,:@+") == "" {
