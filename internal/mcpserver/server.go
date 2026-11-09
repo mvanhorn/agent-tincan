@@ -92,6 +92,23 @@ type Option func(*options)
 type options struct {
 	filesDir string      // where received non-image files are saved; "" means local files are off
 	watch    *BuildWatch // the binary this server runs from; nil off its own machine
+	// workerRequest is the one request a per-request window works on, ""
+	// for an ordinary server. Such a server takes no other requests.
+	workerRequest string
+}
+
+// WorkerRequest makes the server one window's, working on request id alone
+// (tincan window serve sets TINCAN_WORKER_REQUEST): check_inbox takes no new
+// requests, and claim takes no other request, so the window cannot pull its
+// agent's other asks out of the queue. Its asks still go out under the
+// worker's session, which files them under id's chain.
+func WorkerRequest(id string) Option {
+	return func(o *options) { o.workerRequest = id }
+}
+
+// workerInboxText is check_inbox's answer in a window working on one request.
+func workerInboxText(id string) string {
+	return fmt.Sprintf("This window works on Agent Tincan request %s alone, so check_inbox takes no new requests here; they wait for their own windows. To read the reply to an ask you sent, call get_reply with the id the ask returned. Reply to %s with the reply tool when you are done.\n", id, id)
 }
 
 // LocalFiles lets ask and reply attach files from this machine and saves
@@ -430,6 +447,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 
 	mcp.AddTool(s, &mcp.Tool{Name: "check_inbox", Description: "Pick up requests from teammates, and replies to requests you sent that you have not seen yet. Claims the requests so no one else handles them. Reply to each request when done."},
 		func(ctx context.Context, req *mcp.CallToolRequest, in inboxIn) (*mcp.CallToolResult, any, error) {
+			if f.workerRequest != "" {
+				return text(workerInboxText(f.workerRequest))
+			}
 			inbox, err := b.Poll(ctx, clamp(in.WaitSeconds))
 			if err != nil {
 				return fail(err)
@@ -465,6 +485,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 
 	mcp.AddTool(s, &mcp.Tool{Name: "claim", Description: "Mark a delivered request as yours to handle. check_inbox already does this."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in idIn) (*mcp.CallToolResult, any, error) {
+			if f.workerRequest != "" && in.RequestID != f.workerRequest {
+				return fail(fmt.Errorf("this window works on request %s alone and cannot claim another", f.workerRequest))
+			}
 			req, err := b.Claim(ctx, in.RequestID)
 			if err != nil {
 				return fail(err)

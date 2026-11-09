@@ -201,13 +201,17 @@ func openLocalWindow(ctx context.Context, term windowTerminal, w windowLaunch, t
 		}
 		prompt = "Read the task in " + file + " and do it."
 	}
-	return openWindow(ctx, term, w, windowName(task), prompt)
+	return openWindow(ctx, term, w, nil, windowName(task), prompt)
 }
 
 // typable reports whether task can be typed into Claude Code as it is, so a
 // slash command such as "/ce-plan make a plan" runs as one.
+//
+// A task that starts with "-" would be a claude startup option when a shell
+// starts it, "!" runs a shell command in Claude Code's input box without a
+// model, and "#" saves a memory, so those go in a file instead.
 func typable(task string) bool {
-	return task != "" && len(task) <= maxTypedTask && !strings.ContainsAny(task, "\r\n")
+	return task != "" && len(task) <= maxTypedTask && !strings.ContainsAny(task, "\r\n") && !strings.ContainsAny(task[:1], "-!#")
 }
 
 // windowName is the workspace title: "tincan: " and the start of the task.
@@ -227,8 +231,12 @@ var windowFollowUpPause = 1500 * time.Millisecond
 // Claude Code, or the claude command line with prompt when it is a shell.
 // Each of more is then typed as a message of its own, which Claude Code
 // queues while it works on the first.
-func openWindow(ctx context.Context, term windowTerminal, w windowLaunch, name, prompt string, more ...string) (string, error) {
-	handle, err := term.open(ctx, name, w.dir)
+func openWindow(ctx context.Context, term windowTerminal, w windowLaunch, env []string, name, prompt string, more ...string) (string, error) {
+	if strings.HasPrefix(prompt, "-") {
+		// claude would read it as a startup option, not a prompt.
+		return "", errors.New("a prompt cannot start with -")
+	}
+	handle, err := term.open(ctx, name, w.dir, env)
 	if err != nil {
 		return "", err
 	}
@@ -445,6 +453,13 @@ func runWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal,
 	if err != nil {
 		return failWindowRequest(ctx, r, req, "tincan window could not make this request's folder: "+err.Error())
 	}
+	// Clarification rounds before the window opens: one more later means
+	// the window asked a question, even once it is answered.
+	cur, err := r.Get(ctx, req.id, 0)
+	if err != nil {
+		return failWindowRequest(ctx, r, req, "tincan window could not read this request: "+err.Error())
+	}
+	asked := len(cur.Exchanges)
 	file := filepath.Join(dir, "task.md")
 	if err := os.WriteFile(file, []byte(windowTaskFile(req)), 0o600); err != nil {
 		return failWindowRequest(ctx, r, req, "tincan window could not write this request's task file: "+err.Error())
@@ -461,13 +476,17 @@ func runWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal,
 		prompt = task
 		more = []string{fmt.Sprintf("That was Agent Tincan request %s from %s. When you have finished it, send your answer with the reply command at the end of %s.", req.id, from, file)}
 	}
-	handle, err := openWindow(ctx, term, w, windowName(from+" asks: "+firstLine(req.body)), prompt, more...)
+	// The window's own tincan (its MCP server, and the CLI in its shell)
+	// runs as this agent under the worker's session, so what it sends
+	// continues the request's chain, and it takes no other request.
+	env := []string{"TINCAN_CONFIG=" + req.config, "TINCAN_SESSION=" + req.session, "TINCAN_WORKER_REQUEST=" + req.id}
+	handle, err := openWindow(ctx, term, w, env, windowName(from+" asks: "+firstLine(req.body)), prompt, more...)
 	if err != nil {
 		return failWindowRequest(ctx, r, req, "tincan window could not open a Claude Code window: "+err.Error())
 	}
 	host, _ := os.Hostname()
 	_ = r.Progress(ctx, req.id, fmt.Sprintf("Opened a Claude Code window (%s) on %s for this request.", handle, strings.TrimSuffix(host, ".local")))
-	return watchWindowRequest(ctx, r, term, handle, req)
+	return watchWindowRequest(ctx, r, term, handle, req, asked)
 }
 
 func firstLine(s string) string {
@@ -477,15 +496,11 @@ func firstLine(s string) string {
 
 // watchWindowRequest returns nil once req is closed or waiting on its asker,
 // and fails it when its window is closed first.
-func watchWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal, handle string, req windowRequest) error {
-	asked := -1 // clarification rounds when the window opened
+func watchWindowRequest(ctx context.Context, r *client.Relay, term windowTerminal, handle string, req windowRequest, asked int) error {
 	done := func() bool {
 		res, err := r.Get(ctx, req.id, 0)
 		if err != nil {
 			return false
-		}
-		if asked < 0 {
-			asked = len(res.Exchanges)
 		}
 		// A new round means the window asked a question. Its answer, even
 		// one already given and queued again, belongs to a fresh window.
@@ -519,9 +534,9 @@ func failWindowRequest(ctx context.Context, r *client.Relay, req windowRequest, 
 }
 
 // windowTaskFile is what the window reads: the request, then how to reply
-// as the agent the ask was sent to. The reply goes through the CLI under the
-// worker's session, which holds the claim; the window's own tincan MCP server
-// keeps running as the owner's usual Claude Code agent.
+// as the agent the ask was sent to, under the worker's session, which holds
+// the claim. The window's environment sets the same session for its tincan
+// tools; the CLI command here also works where it did not reach them.
 func windowTaskFile(req windowRequest) string {
 	from := req.from
 	if from == "" {
@@ -538,7 +553,7 @@ func windowTaskFile(req windowRequest) string {
 	fmt.Fprintf(&b, "```sh\n%s reply %s \"$(cat <<'TINCAN_ANSWER'\nANSWER\nTINCAN_ANSWER\n)\"\n```\n\n", env, req.id)
 	b.WriteString("Add `--status failed` if you could not do it, and say why. To ask a question first, use `--needs-input` in place of `--status`.\n\n")
 	fmt.Fprintf(&b, "For a long job, post a short progress note now and then:\n\n```sh\n%s progress %s \"what you are doing\"\n```\n\n", env, req.id)
-	b.WriteString("Use these commands for this request only. Your usual Agent Tincan tools keep working as the owner's Claude Code agent.\n")
+	fmt.Fprintf(&b, "Your Agent Tincan tools in this window run as the agent this was sent to, for this request: the reply tool with request_id %s works too, and asks you send to teammates continue this request. check_inbox takes no new requests here.\n", req.id)
 	return b.String()
 }
 

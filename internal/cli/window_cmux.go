@@ -13,9 +13,9 @@ import (
 // windowTerminal opens and watches the terminal windows tincan window starts
 // Claude Code in. cmux is the only one so far.
 type windowTerminal interface {
-	// open makes a new window in dir, without focusing it, and returns its
-	// handle.
-	open(ctx context.Context, name, dir string) (string, error)
+	// open makes a new window in dir, without focusing it, with env
+	// (KEY=VALUE) set for everything it runs, and returns its handle.
+	open(ctx context.Context, name, dir string, env []string) (string, error)
 	// screen returns the window's visible text. errWindowGone means the
 	// window no longer exists.
 	screen(ctx context.Context, handle string) (string, error)
@@ -88,8 +88,12 @@ func cmuxError(err error, out string) error {
 	return fmt.Errorf("cmux: %s", out)
 }
 
-func (c cmuxTerminal) open(ctx context.Context, name, dir string) (string, error) {
-	out, err := c.run(ctx, "workspace", "create", "--name", name, "--cwd", dir, "--focus", "false")
+func (c cmuxTerminal) open(ctx context.Context, name, dir string, env []string) (string, error) {
+	args := []string{"workspace", "create", "--name", name, "--cwd", dir, "--focus", "false"}
+	for _, kv := range env {
+		args = append(args, "--env", kv)
+	}
+	out, err := c.run(ctx, args...)
 	if err != nil {
 		return "", err
 	}

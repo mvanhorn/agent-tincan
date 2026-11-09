@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,11 +28,13 @@ type fakeTermWindow struct {
 	opened  []string // dirs
 	typed   []string
 	openErr error
+	env     []string
 }
 
-func (f *fakeTermWindow) open(_ context.Context, name, dir string) (string, error) {
+func (f *fakeTermWindow) open(_ context.Context, name, dir string, env []string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.env = env
 	if f.openErr != nil {
 		return "", f.openErr
 	}
@@ -129,14 +132,14 @@ func TestOpenWindowTypesThePromptIntoClaudeOrTheClaudeLineIntoAShell(t *testing.
 	fastWindow(t)
 	w := windowLaunch{claude: "/opt/my tools/claude", dir: "/work", starts: "auto"}
 	f := &fakeTermWindow{screens: []string{claudeScreen}}
-	if _, err := openWindow(t.Context(), f, w, "n", "fix it's test"); err != nil {
+	if _, err := openWindow(t.Context(), f, w, nil, "n", "fix it's test"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.typedLines(); len(got) != 1 || got[0] != "fix it's test" {
 		t.Errorf("into Claude typed %q", got)
 	}
 	f = &fakeTermWindow{screens: []string{"% "}}
-	if _, err := openWindow(t.Context(), f, w, "n", "fix it's test"); err != nil {
+	if _, err := openWindow(t.Context(), f, w, nil, "n", "fix it's test"); err != nil {
 		t.Fatal(err)
 	}
 	got := f.typedLines()
@@ -344,7 +347,7 @@ esac
 
 func TestCmuxTerminalCallsTheCLI(t *testing.T) {
 	c, log := fakeCmux(t, `echo "Error: Workspace ref not found: $3"; exit 1`)
-	ws, err := c.open(t.Context(), "tincan: x", "/w")
+	ws, err := c.open(t.Context(), "tincan: x", "/w", []string{"TINCAN_SESSION=s1"})
 	if err != nil || ws != "workspace:42" {
 		t.Fatalf("open = %q, %v", ws, err)
 	}
@@ -358,7 +361,7 @@ func TestCmuxTerminalCallsTheCLI(t *testing.T) {
 		t.Errorf("screen of a gone workspace = %v, want errWindowGone", err)
 	}
 	got, _ := os.ReadFile(log)
-	want := "workspace|create|--name|tincan: x|--cwd|/w|--focus|false|\n" +
+	want := "workspace|create|--name|tincan: x|--cwd|/w|--focus|false|--env|TINCAN_SESSION=s1|\n" +
 		"send|--workspace|workspace:42|do it|\n" +
 		"send-key|--workspace|workspace:42|enter|\n" +
 		"read-screen|--workspace|workspace:42|\n"
@@ -460,7 +463,7 @@ func TestWindowRequestPointsAMultiLineAskAtItsFile(t *testing.T) {
 func TestOpenWindowTypesFollowUpsIntoClaudeAfterAShellStartsIt(t *testing.T) {
 	fastWindow(t)
 	f := &fakeTermWindow{screens: []string{"% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", "% ", claudeScreen}}
-	if _, err := openWindow(t.Context(), f, windowLaunch{claude: "/c/claude", starts: "auto"}, "n", "/ce-plan x", "then reply"); err != nil {
+	if _, err := openWindow(t.Context(), f, windowLaunch{claude: "/c/claude", starts: "auto"}, nil, "n", "/ce-plan x", "then reply"); err != nil {
 		t.Fatal(err)
 	}
 	got := f.typedLines()
@@ -513,7 +516,7 @@ func TestWindowRequestLetsGoWhenAQuestionIsAnsweredBeforeItLooks(t *testing.T) {
 func TestOpenWindowFailsWhenClaudeNeverStartsFromTheShell(t *testing.T) {
 	fastWindow(t)
 	f := &fakeTermWindow{screens: []string{"% "}}
-	if _, err := openWindow(t.Context(), f, windowLaunch{claude: "/c/claude", starts: "auto"}, "n", "/ce-plan x", "then reply"); err == nil || !strings.Contains(err.Error(), "did not start") {
+	if _, err := openWindow(t.Context(), f, windowLaunch{claude: "/c/claude", starts: "auto"}, nil, "n", "/ce-plan x", "then reply"); err == nil || !strings.Contains(err.Error(), "did not start") {
 		t.Fatalf("err = %v, want Claude did not start", err)
 	}
 	if got := f.typedLines(); len(got) != 1 {
@@ -537,5 +540,76 @@ func TestOpenLocalWindowGivesEachLongTaskItsOwnFile(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(files[0]); string(got) != "one\nA\n" {
 		t.Errorf("first task file %q", got)
+	}
+}
+
+func TestWindowRequestRunsTheWindowsToolsUnderTheWorkerSession(t *testing.T) {
+	w, req := windowRig(t, false)
+	f := &fakeTermWindow{screens: []string{claudeScreen}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "the ask is typed", func() bool { return len(f.typedLines()) == 2 })
+	f.mu.Lock()
+	env := strings.Join(f.env, " ")
+	f.mu.Unlock()
+	for _, want := range []string{"TINCAN_SESSION=worker-test", "TINCAN_WORKER_REQUEST=" + req.id, "TINCAN_CONFIG=" + req.config} {
+		if !strings.Contains(env, want) {
+			t.Errorf("window env %q lacks %q", env, want)
+		}
+	}
+	f.close()
+	_ = waitDone(t, done)
+}
+
+func TestTypableKeepsOptionsAndShellEscapesOutOfThePrompt(t *testing.T) {
+	for task, want := range map[string]bool{
+		"/ce-plan make a donkey plan":    true,
+		"summarize the README":           true,
+		"--dangerously-skip-permissions": false,
+		"-p hi":                          false,
+		"!rm -rf ~":                      false,
+		"# remember this":                false,
+		"":                               false,
+	} {
+		if got := typable(task); got != want {
+			t.Errorf("typable(%q) = %v, want %v", task, got, want)
+		}
+	}
+	fastWindow(t)
+	if _, err := openWindow(t.Context(), &fakeTermWindow{screens: []string{"% "}}, windowLaunch{claude: "/c/claude", starts: "auto"}, nil, "n", "--dangerously-skip-permissions"); err == nil {
+		t.Error("openWindow typed a prompt starting with -")
+	}
+}
+
+func TestWindowRequestPointsAnOptionShapedAskAtItsFile(t *testing.T) {
+	w, req := windowRigAsking(t, false, "--dangerously-skip-permissions")
+	f := &fakeTermWindow{screens: []string{"% "}}
+	done := runRequestAsync(t, w, f, req)
+	eventually(t, "the claude line is typed", func() bool { return len(f.typedLines()) == 1 })
+	if got := f.typedLines()[0]; !strings.HasPrefix(got, "'/bin/claude' 'Agent Tincan request") {
+		t.Errorf("typed %q, want claude started with the fixed pointer prompt", got)
+	}
+	f.close()
+	_ = waitDone(t, done)
+}
+
+// An ask the window sends under the worker's session continues the
+// request's chain, so approval rules keyed on the first asker still apply.
+func TestWindowSessionAsksContinueTheRequestsChain(t *testing.T) {
+	w, req := windowRig(t, false)
+	wr, err := w.client(req.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instinct := w.m.Client(t, "instinct")
+	sent, err := wr.Send(t.Context(), "instinct", "a sub-task", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := instinct.Get(t.Context(), sent.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Request.ParentID != req.id || !slices.Contains(got.Request.Chain, "grokbot") {
+		t.Errorf("sub-ask parent %q chain %v, want parent %s with grokbot in the chain", got.Request.ParentID, got.Request.Chain, req.id)
 	}
 }
