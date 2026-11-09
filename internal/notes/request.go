@@ -195,9 +195,16 @@ var uuidRE = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[
 // appleNoteIDRE is an Apple Notes note id: the note's Core Data URI.
 var appleNoteIDRE = regexp.MustCompile(`^x-coredata://[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/ICNote/p[0-9]{1,18}$`)
 
+// bearNoteIDRE is a Bear note id: a UUID, often followed by the saving
+// process's id and a hex stamp, or one of Bear's own intro notes.
+var bearNoteIDRE = regexp.MustCompile(`^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}-[0-9]{1,10}-[0-9A-Fa-f]{1,16}|SFNote2Intro[0-9]{1,4})$`)
+
 // isNoteID reports whether id has the shape of a note id in one of the
-// supported apps: a UUID (Agent Notes, Bear) or an Apple Notes URI.
-func isNoteID(id string) bool { return uuidRE.MatchString(id) || appleNoteIDRE.MatchString(id) }
+// supported apps: a UUID (Agent Notes, Bear), a longer Bear id, or an
+// Apple Notes URI.
+func isNoteID(id string) bool {
+	return uuidRE.MatchString(id) || bearNoteIDRE.MatchString(id) || appleNoteIDRE.MatchString(id)
+}
 
 // Validate checks r against the helper's metadata rules and the service's
 // limits. Its error text is safe to show the asker.

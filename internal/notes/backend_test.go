@@ -89,7 +89,10 @@ func TestBackendNamesAreChecked(t *testing.T) {
 
 func TestReadAcceptsEachAppsNoteIDs(t *testing.T) {
 	for id, ok := range map[string]bool{
-		"0F6A2C1E-3B7D-4E0A-9C21-5D8E7F6A1B2C":                             true,
+		"0F6A2C1E-3B7D-4E0A-9C21-5D8E7F6A1B2C":                       true,
+		"0F6A2C1E-3B7D-4E0A-9C21-5D8E7F6A1B2C-4242-00000ABCDEF01234": true,
+		"SFNote2Intro3":                          true,
+		"0F6A2C1E-3B7D-4E0A-9C21-5D8E7F6A1B2C-x": false,
 		"x-coredata://5A6B7C8D-1E2F-4A5B-8C9D-0E1F2A3B4C5D/ICNote/p1234":   true,
 		"x-coredata://5A6B7C8D-1E2F-4A5B-8C9D-0E1F2A3B4C5D/ICFolder/p1234": false,
 		"x-coredata://nope/ICNote/p1":                                      false,
