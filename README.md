@@ -912,8 +912,10 @@ Run the relay on the VM as its own OS user, separate from the one Grok Bot's too
 ```bash
 tincan relay --admin <your-laptop>
 tincan invite grokbot --kind vm-webhook --socket <state-dir>/admin.sock   # on the VM
-tincan join <code> --relay http://tincan-relay --proxy http://localhost:1055   # as Grok Bot's user (userspace Tailscale)
+tincan join <code> --relay http://tincan-relay.<tailnet>.ts.net   # as Grok Bot's user, through the managed Tailscale connector
 ```
+
+With the older self-installed userspace Tailscale (a fallback, see [docs/adapters/grokbot.md](docs/adapters/grokbot.md)), join with `--relay http://tincan-relay --proxy http://localhost:1055` instead.
 
 #### How it wakes
 
