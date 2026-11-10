@@ -74,8 +74,26 @@ func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
 	checks := make([]check, len(selves))
 	for i, s := range selves {
 		checks[i] = tailnetCheck(s, role)
+		if running == 0 && (r == nil || !r.ThroughRemoteProxy()) {
+			checks[i] = stoppedTailnet(checks[i])
+		}
 	}
 	return checks
+}
+
+// stoppedTailnet marks a tailscaled check when no tailscaled on this machine
+// is running and tincan does not reach the relay through a remote proxy. Then
+// this machine cannot see the relay or any teammate, which the relay check
+// alone reports only as unreachable.
+func stoppedTailnet(c check) check {
+	c.Status = "warn"
+	c.Detail += "; Tailscale is not running on this machine"
+	fix := "Start Tailscale (open the Tailscale app and turn it on, or run tailscale up with the flags you used before) and run tincan doctor again."
+	if c.Fix != "" {
+		fix = c.Fix + " " + fix
+	}
+	c.Fix = fix
+	return c
 }
 
 // tailnetCheck judges one tailscaled. Tailscale is the security boundary, so
@@ -121,12 +139,12 @@ func tailnetCheck(s client.TailnetSelf, role deviceRole) check {
 	case len(s.Tags) > 0:
 		detail = append(detail, "tagged "+strings.Join(s.Tags, ", "))
 	case role == roleAdmin:
-		detail = append(detail, "untagged, as an admin device is by design")
+		detail = append(detail, "untagged, as an admin device is by design; agents on this machine have the owner's admin power, including approving held requests")
 	case role == roleGuest:
 		detail = append(detail, "untagged, which is fine for a guest: tags are for the owner's own machines")
 	case role == roleAgent:
 		warn("this agent machine is untagged",
-			"Tag it (for example tag:agent) in the Tailscale admin console: a tagged node is never an admin device, whatever it is called. See docs/trust-model.md.")
+			"Tag it (for example tag:agent) in the Tailscale admin console: a tagged node is never an admin device, whatever it is called. Before tagging a personal laptop, see What lives where in docs/quickstart.md.")
 	default:
 		detail = append(detail, "untagged, tag check skipped: could not tell whether this is an admin device")
 	}

@@ -329,7 +329,7 @@ In Sesame, create a Sesame schedule every 5 minutes, the same interval as wake.j
 {{- end -}}
 
 {{- define "setup.hermes" -}}
-Add tincan to Hermes MCP config (~/.hermes/config.yaml, under mcp_servers): tincan with command "tincan", args ["mcp"] and {{template "mcpenv" .}}.
+Add tincan to Hermes MCP config (~/.hermes/config.yaml, under mcp_servers): agent-tincan with command "tincan", args ["mcp"] and {{template "mcpenv" .}}.
 Create a Hermes webhook route for Agent Tincan with an HMAC secret; its prompt should pass through the incoming text (count only).
 On the relay host, in wake.json (chmod 600): set {{.Name}} to method "webhook". The fields url (the route URL) and hmac_secret (the route's secret) hold secrets; set them in the file only. The relay signs each wake with X-Hub-Signature-256.
 Paste the standing instructions into Hermes.

@@ -199,16 +199,12 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	}
 
 	rep.OK = true
-	hostProblem := false
 	for _, c := range rep.Checks {
 		if c.Status == "fail" {
 			rep.OK = false
 		}
-		if c.Status != "ok" && (c.Name == "app launches" || c.Name == "mcp config") {
-			hostProblem = true
-		}
 	}
-	if hostProblem {
+	if hostFixNeeded(rep.Checks, rep.Launches) {
 		rep.Fix = hostFix(exe)
 	}
 	return rep
@@ -288,12 +284,23 @@ func addressCheck(ctx context.Context, r *client.Relay, urls []string) check {
 		"If this agent's app asks before each new site, allow these addresses always; otherwise it cannot follow the relay to them after a move."}
 }
 
+// distErrorFix is the fix for a relay that answered that it does not serve
+// upgrades. Only whoever runs the relay can change that. Any other error,
+// including a bare 404 from a relay too old to have the route, gets none.
+func distErrorFix(err error) string {
+	e, ok := errors.AsType[*client.APIError](err)
+	if !ok || e.Code != 404 || !strings.Contains(e.Message, "does not serve upgrades") {
+		return ""
+	}
+	return "Whoever runs the relay: add --dist <dir> and --release-url https://github.com/mvanhorn/agent-tincan/releases/download to the relay's start command (the flags you gave tincan relay install, or its service file) and restart it. Then tincan relay-upgrade --from-github <tag> from the relay host or an admin device can update it, and agents can run tincan upgrade. See Upgrading in docs/quickstart.md."
+}
+
 func versionCheck(ctx context.Context, r *client.Relay, exe string) check {
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	m, err := r.Dist(cctx)
 	if err != nil {
-		return check{"version", "warn", fmt.Sprintf("tincan %s; the relay does not say which release is current (%v)", Version, err), ""}
+		return check{"version", "warn", fmt.Sprintf("tincan %s; the relay does not say which release is current (%v)", Version, err), distErrorFix(err)}
 	}
 	want := m.SHA256Of(releaseAsset(runtime.GOOS, runtime.GOARCH))
 	have, err := fileSHA256(exe)
@@ -542,15 +549,33 @@ func hostLabel(kind string) string {
 	return "other apps"
 }
 
+// hostFixNeeded reports whether the app on this machine is really not running
+// tincan, so the numbered repair steps apply: a failed app launches or mcp
+// config check, or no record that any app ever started tincan. Other warnings,
+// such as a process that listed its tools and then ended, carry their own fix
+// line, and the repair steps would have a healthy machine remove its server.
+func hostFixNeeded(checks []check, launches []mcpserver.Launch) bool {
+	for _, c := range checks {
+		switch {
+		case c.Name != "app launches" && c.Name != "mcp config":
+		case c.Status == "fail":
+			return true
+		case c.Name == "app launches" && c.Status == "warn" && len(launches) == 0:
+			return true
+		}
+	}
+	return false
+}
+
 // hostFix is the repair for an app that lists tincan but does not run it.
 func hostFix(exe string) []string {
 	if exe == "" {
 		exe = "/path/to/tincan"
 	}
-	entry, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"tincan": map[string]any{"command": exe, "args": []string{"mcp"}}}})
+	entry, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"agent-tincan": map[string]any{"command": exe, "args": []string{"mcp"}}}})
 	return []string{
 		"Remove every tincan server from the app, including old or oddly named ones (for example \"user-tincan\" or \"user-tincan mcp\"). The mcp config entries above show where they are.",
-		"Add exactly one server named tincan: " + string(entry),
+		"Add exactly one server named agent-tincan: " + string(entry),
 		"Use the full path to the binary and put mcp in args, not in the command. Claude Code adds --channel after mcp for channel wakes, and claude mcp add needs --scope user for the server to exist in every project (its default scope keeps it to the directory it was added in).",
 		"Quit and reopen the app (a reload of one server is not always enough), then start a new chat.",
 		"Run tincan doctor again: app launches should say the app listed the tools.",
