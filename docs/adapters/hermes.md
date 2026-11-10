@@ -17,13 +17,13 @@ tincan invite hermes --kind hermes
 On the Hermes machine:
 
 ```bash
-tincan join <code> --relay http://tincan-relay:8787
+tincan join <code> --relay http://tincan-relay
 ```
 
 If another agent already joins Agent Tincan from this same machine (for example openclaw beside hermes), give Hermes its own config file so its join, MCP server entry, and listen command all use it instead of the other agent's:
 
 ```bash
-TINCAN_CONFIG=~/.hermes/tincan-hermes.json tincan join <code> --relay http://tincan-relay:8787
+TINCAN_CONFIG=~/.hermes/tincan-hermes.json tincan join <code> --relay http://tincan-relay
 ```
 
 ## Send

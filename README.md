@@ -431,7 +431,7 @@ The relay only listens on your tailnet. The one exception is the optional ChatGP
 
 ### Joining with an invite
 
-On the relay machine (or an admin device), mint a one-time code (valid 10 minutes). On the agent's machine, redeem it.
+On the relay machine (or an admin device), mint a one-time code (valid 10 minutes). On the agent's machine, redeem it. Each agent joins on its own: a second machine, or a second agent on the same machine, needs its own code. [What lives where](docs/quickstart.md#what-lives-where) lists what is per account, per machine and per agent.
 
 ```bash
 tincan invite grokbot --kind vm-webhook          # relay machine (or an admin device)
@@ -1244,7 +1244,7 @@ Hermes runs its own messaging gateway with a built-in webhook server, so it can 
 
 ```bash
 tincan invite hermes --kind hermes
-tincan join <code> --relay http://tincan-relay:8787
+tincan join <code> --relay http://tincan-relay
 ```
 
 If another agent joins from the same machine (for example OpenClaw), give Hermes its own config: `TINCAN_CONFIG=~/.hermes/tincan-hermes.json tincan join ...`, and use the same path in its MCP entry and any listen command.

@@ -21,7 +21,7 @@ tincan invite copilot-cli --kind copilot-cli
 (On a relay that does not know the `copilot-cli` kind yet, invite without `--kind`.) On the machine that runs Copilot, with a config of its own:
 
 ```bash
-TINCAN_CONFIG="$HOME/.config/tincan/copilot-cli.json" tincan join <code> --relay http://<relay>:8787
+TINCAN_CONFIG="$HOME/.config/tincan/copilot-cli.json" tincan join <code> --relay http://tincan-relay
 ```
 
 ## Setup

@@ -24,7 +24,7 @@ tincan invite gemini-cli --kind gemini-cli
 On the machine that runs the teammate, with a config of its own:
 
 ```bash
-TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan join <code> --relay http://<relay>:8787
+TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" tincan join <code> --relay http://tincan-relay
 ```
 
 ### 2. Install agy and log in

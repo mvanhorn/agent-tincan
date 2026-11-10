@@ -208,6 +208,10 @@ B2. Join, with the code and relay address from your message (the relay is
         tincan join <CODE> --relay <relay URL>
 
     Save the config path printed by join and reuse it for every later call.
+    Each agent on a machine needs its own invite and config; signing in to the
+    same Claude or Codex account elsewhere does not join this machine. What is
+    per account, per machine and per agent:
+    https://github.com/mvanhorn/agent-tincan/blob/main/docs/quickstart.md#what-lives-where
     Without TINCAN_CONFIG, macOS writes ~/Library/Application Support/tincan/client.json;
     Linux uses ${XDG_CONFIG_HOME:-~/.config}/tincan/client.json. Paths under
     ~/.config/tincan/<name>.json in this guide are explicit per-agent overrides,
