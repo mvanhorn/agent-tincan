@@ -305,11 +305,11 @@ func TestSocketWakeStopsPeekingWhenSocketFails(t *testing.T) {
 	if before > socketFailLimit {
 		t.Fatalf("peeks before giving up = %d, want at most %d", before, socketFailLimit)
 	}
-	if got := peekFeatures.Load(); got != "ping,socket-wake" {
-		t.Fatalf("peek features = %v, want ping,socket-wake", got)
+	if got := peekFeatures.Load(); got != "ping,kept-open,socket-wake" {
+		t.Fatalf("peek features = %v, want ping,kept-open,socket-wake", got)
 	}
-	if got := keepFeatures.Load(); got != "ping" {
-		t.Fatalf("keepalive features = %v, want ping", got)
+	if got := keepFeatures.Load(); got != "ping,kept-open" {
+		t.Fatalf("keepalive features = %v, want ping,kept-open", got)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestSocketWakeResumesAfterReverify(t *testing.T) {
 	if len(got) != 1 || got[0]["request_ids"] != "q1" {
 		t.Fatalf("pushes after the socket checked out again = %v", got)
 	}
-	if _, ok := features.Load("ping," + client.SocketWakeFeature); !ok {
+	if _, ok := features.Load("ping," + client.KeptOpenFeature + "," + client.SocketWakeFeature); !ok {
 		t.Fatal("resumed peeks did not advertise socket wake")
 	}
 }

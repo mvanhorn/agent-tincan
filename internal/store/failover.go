@@ -72,7 +72,7 @@ func (s *Store) wrongState(ctx context.Context, id, agent string) error {
 
 // requeueClaim is the SET list that returns a request to the queue with
 // its claim, lease and progress cleared, shared by Move and HoldBack.
-const requeueClaim = `status = 'queued', lease_until = 0, claimed_at = 0, claim_session = '', progress_note = '', progress_at = 0, lease_lapsed_at = NULL`
+const requeueClaim = `status = 'queued', lease_until = 0, claimed_at = 0, claim_session = '', progress_note = '', progress_at = 0, lease_lapsed_at = NULL, held_ack = ''`
 
 // Move makes to the target of request id in place of from, keeping its id,
 // sender, chain and body. A queued request moves (claimed false); a claimed

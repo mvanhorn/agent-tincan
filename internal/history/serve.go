@@ -538,7 +538,7 @@ func (s *Service) reply(ctx context.Context, req envelope.Request, body string, 
 func replyDetached(ctx context.Context, relay *client.Relay, req envelope.Request, body string, status envelope.Status, ids []string, logf func(string, ...any)) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyTimeout)
 	defer cancel()
-	if _, err := relay.ReplyAttached(rctx, req.ID, body, status, ids); err != nil {
+	if _, err := relay.ReplyFinal(rctx, req.ID, body, status, ids, true); err != nil { // the model's text is the whole answer; nothing follows up
 		logf("request %s: reply failed: %v", req.ID, err)
 	}
 }

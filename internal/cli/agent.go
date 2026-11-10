@@ -879,6 +879,7 @@ func replyCmd() *cobra.Command {
 	var status string
 	var needsInput bool
 	var attach []string
+	var final bool
 	cmd := &cobra.Command{
 		Use:   "reply <request-id> <message...>",
 		Short: "Answer a request from a teammate",
@@ -899,9 +900,13 @@ func replyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rep, err := r.ReplyAttached(cmd.Context(), args[0], strings.Join(args[1:], " "), envelope.Status(status), client.AttachmentIDs(ups))
+			rep, err := r.ReplyFinal(cmd.Context(), args[0], strings.Join(args[1:], " "), envelope.Status(status), client.AttachmentIDs(ups), final)
 			if err != nil {
 				return err
+			}
+			if rep.KeptOpen {
+				cmd.Printf("That reads like an acknowledgment, so the relay saved it as a progress note on %s and kept the request open. Reply again with the result (or --status failed); if your claim runs out first, the relay closes the request with this note. Use tincan progress to say you've started; add --final if this note is the whole answer.\n", args[0])
+				return nil
 			}
 			cmd.Printf("Replied to %s (%s).\n", args[0], rep.Status)
 			return nil
@@ -911,6 +916,7 @@ func replyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&needsInput, "needs-input", false, "ask the sender a clarifying question (up to 16 KB)")
 	cmd.MarkFlagsMutuallyExclusive("status", "needs-input")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
+	cmd.Flags().BoolVar(&final, "final", false, "this short reply is the whole answer, even if it reads like an acknowledgment")
 	return cmd
 }
 

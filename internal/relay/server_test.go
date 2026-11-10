@@ -957,6 +957,140 @@ func TestProgressAuthorizationAndPrivacy(t *testing.T) {
 	h.do(museAddr, "POST", path+"/progress", `{"note":"late"}`, 409, nil)
 }
 
+// replyFrom posts body as agent's reply to id from a client that advertises
+// features, and returns the response.
+func (h *harness) replyFrom(addr, id, body, features string, want int) envelope.Reply {
+	h.t.Helper()
+	req := httptest.NewRequest("POST", "/v1/requests/"+id+"/reply", strings.NewReader(body))
+	req.RemoteAddr = addr
+	req.Header.Set(client.FeaturesHeader, features)
+	rec := httptest.NewRecorder()
+	h.h.ServeHTTP(rec, req)
+	if rec.Code != want {
+		h.t.Fatalf("reply %s: status %d, want %d: %s", id, rec.Code, want, rec.Body.String())
+	}
+	var rep envelope.Reply
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		h.t.Fatalf("decode reply: %v: %s", err, rec.Body.String())
+	}
+	return rep
+}
+
+const (
+	testAck      = "Working on it: pulling posts via X search now. Full report will follow."
+	keptFeatures = "ping," + client.KeptOpenFeature
+)
+
+func TestAckReplyKeepsRequestOpen(t *testing.T) {
+	h := newHarness(t, Config{})
+	req := h.send(grokAddr, "muse", "study @boardyai and send the full report")
+	path := "/v1/requests/" + req.ID
+	h.do(museAddr, "POST", path+"/claim", "", 200, nil)
+
+	kept := h.replyFrom(museAddr, req.ID, `{"body":"`+testAck+`"}`, keptFeatures, 200)
+	if !kept.KeptOpen || kept.Status != envelope.StatusClaimed {
+		t.Fatalf("ack reply: %+v", kept)
+	}
+	var res envelope.Result
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Status != envelope.StatusClaimed || res.Reply != nil || res.Progress == nil || res.Progress.Note != testAck {
+		t.Fatalf("after ack: %+v", res)
+	}
+
+	final := h.replyFrom(museAddr, req.ID, `{"body":"Read 214 posts. Report: ..."}`, keptFeatures, 200)
+	if final.KeptOpen || final.Status != envelope.StatusAnswered {
+		t.Fatalf("real reply: %+v", final)
+	}
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || !strings.HasPrefix(res.Reply.Body, "Read 214") {
+		t.Fatalf("after answer: %+v", res)
+	}
+	// The real reply cleared the held ack: a later sweep leaves it alone.
+	h.srv.Sweep(t.Context())
+	h.do(grokAddr, "GET", path, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || !strings.HasPrefix(res.Reply.Body, "Read 214") {
+		t.Fatalf("after sweep: %+v", res)
+	}
+}
+
+// A held ack whose claim lapses closes the request with the ack, as it
+// would have closed before, and is never handed back to its agent: a reply
+// misread as an ack must not be done twice.
+func TestHeldAckClosesOnLapse(t *testing.T) {
+	clock := &fakeClock{t: time.Now()}
+	h := newHarness(t, Config{Now: clock.Now})
+	h.st.SetClock(clock.Now)
+	req := h.send(grokAddr, "muse", "call the clinic")
+	h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", 200, nil)
+	if rep := h.replyFrom(museAddr, req.ID, `{"body":"`+testAck+`"}`, keptFeatures, 200); !rep.KeptOpen {
+		t.Fatalf("ack reply: %+v", rep)
+	}
+	inbox := h.srv.hub.wait(inboxKey("grokbot"))
+	clock.advance(DefaultClaimLease + time.Minute)
+	h.srv.Sweep(t.Context())
+	select {
+	case <-inbox:
+	default:
+		t.Fatal("closing a held ack did not wake the asker")
+	}
+	var res envelope.Result
+	h.do(grokAddr, "GET", "/v1/requests/"+req.ID, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != testAck {
+		t.Fatalf("after lapse: %+v", res)
+	}
+	// 204: nothing queued for muse, so the request was not handed back.
+	h.do(museAddr, "GET", "/v1/poll", "", http.StatusNoContent, nil)
+
+	// The real report, arriving late, still lands: it replaces the ack and
+	// wakes the asker again. Only once.
+	h.do(grokAddr, "GET", "/v1/requests/"+req.ID, "", 200, &res) // seen
+	inbox = h.srv.hub.wait(inboxKey("grokbot"))
+	late := h.replyFrom(museAddr, req.ID, `{"body":"Called. They open at 9."}`, keptFeatures, 200)
+	if late.Status != envelope.StatusAnswered {
+		t.Fatalf("late reply: %+v", late)
+	}
+	select {
+	case <-inbox:
+	default:
+		t.Fatal("late reply did not wake the asker")
+	}
+	h.do(grokAddr, "GET", "/v1/requests/"+req.ID, "", 200, &res)
+	if res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != "Called. They open at 9." {
+		t.Fatalf("after late reply: %+v", res)
+	}
+	h.replyFrom(museAddr, req.ID, `{"body":"one more"}`, keptFeatures, http.StatusConflict)
+}
+
+func TestAckReplyClosesWhenItShould(t *testing.T) {
+	h := newHarness(t, Config{})
+	claimed := func(body string) envelope.Request {
+		req := h.send(grokAddr, "muse", body)
+		h.do(museAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", 200, nil)
+		return req
+	}
+	for name, tc := range map[string]struct {
+		id, body, features string
+	}{
+		// final: true is the replier saying this short note is the whole answer.
+		"final": {claimed("can you take this?").ID, `{"body":"` + testAck + `","final":true}`, keptFeatures},
+		// An older client would tell its agent the request was answered.
+		"old client": {claimed("and this?").ID, `{"body":"` + testAck + `"}`, "ping"},
+		// With no claim to keep open, the reply goes through as before.
+		"unclaimed": {h.send(grokAddr, "muse", "one more").ID, `{"body":"` + testAck + `"}`, keptFeatures},
+	} {
+		if rep := h.replyFrom(museAddr, tc.id, tc.body, tc.features, 200); rep.KeptOpen || rep.Status != envelope.StatusAnswered {
+			t.Errorf("%s: %+v", name, rep)
+		}
+	}
+	// A notify has no lease to run out, so an ack to it is not held.
+	var note envelope.Request
+	h.do(grokAddr, "POST", "/v1/send", `{"to":"muse","body":"fyi","kind":"notify"}`, http.StatusCreated, &note)
+	h.do(museAddr, "POST", "/v1/requests/"+note.ID+"/claim", "", 200, nil)
+	if rep := h.replyFrom(museAddr, note.ID, `{"body":"`+testAck+`"}`, keptFeatures, 200); rep.KeptOpen {
+		t.Errorf("notify: %+v", rep)
+	}
+}
+
 func TestSweepUrgentLeaseExpiryWakesWithoutDebounce(t *testing.T) {
 	for _, claimed := range []bool{false, true} {
 		name := "delivery"

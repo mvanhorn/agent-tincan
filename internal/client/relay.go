@@ -55,6 +55,13 @@ const FeaturesHeader = "X-Tincan-Features"
 // tell an asker that the session will be prompted.
 const SocketWakeFeature = "socket-wake"
 
+// KeptOpenFeature is the FeaturesHeader value of a client that understands
+// a reply response with kept_open set: the relay held an answered reply
+// that only acknowledged the work, and the request is still open. The relay
+// only holds acks from clients that send it, since an older one would tell
+// its agent the request was answered.
+const KeptOpenFeature = "kept-open"
+
 // PlatformHeader carries the client's os_arch (for example darwin_arm64), so
 // the relay only announces a release it holds a binary for.
 const PlatformHeader = "X-Tincan-Platform"
@@ -1164,7 +1171,7 @@ func (r *Relay) headers(req *http.Request) {
 	if r.agent != "" {
 		req.Header.Set(AgentHeader, r.agent)
 	}
-	features := "ping"
+	features := "ping," + KeptOpenFeature
 	if r.socketWake.Load() {
 		features += "," + SocketWakeFeature
 	}
