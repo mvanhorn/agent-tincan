@@ -237,9 +237,6 @@ func setVersion(t *testing.T, v string) {
 	t.Cleanup(func() { Version = old })
 }
 
-// A binary that differs from the relay's release is only a failure when the
-// relay's release is newer or the order is unknown. A newer client warns and
-// tells the owner how to bring the relay up to it.
 // A relay started without --dist cannot say which release is current. The fix
 // is for whoever runs the relay, and only that error should earn it.
 func TestVersionCheckRelayWithoutDist(t *testing.T) {
@@ -275,6 +272,9 @@ func TestDistErrorFix(t *testing.T) {
 	}
 }
 
+// A binary that differs from the relay's release is only a failure when the
+// relay's release is newer or the order is unknown. A newer client warns and
+// tells the owner how to bring the relay up to it.
 func TestVersionCheck(t *testing.T) {
 	cases := []struct {
 		name, client, relay, build string

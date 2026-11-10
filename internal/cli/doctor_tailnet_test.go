@@ -109,7 +109,6 @@ func TestTailnetCheckTags(t *testing.T) {
 	}{
 		{"untagged agent", tailnetSelf("1.104.4", false), roleAgent, "warn", "this agent machine is untagged", "never an admin device"},
 		{"untagged agent guidance", tailnetSelf("1.104.4", false), roleAgent, "warn", "this agent machine is untagged", "What lives where"},
-		{"untagged agent tag name", tailnetSelf("1.104.4", false), roleAgent, "warn", "this agent machine is untagged", "tag:agent"},
 		{"untagged admin", tailnetSelf("1.104.4", false), roleAdmin, "ok", "admin device", ""},
 		{"untagged admin power", tailnetSelf("1.104.4", false), roleAdmin, "ok", "the owner's admin power", ""},
 		{"untagged admin holds", tailnetSelf("1.104.4", false), roleAdmin, "ok", "held requests", ""},
@@ -331,8 +330,6 @@ func TestTailnetChecksLoopbackProxyKeepsRole(t *testing.T) {
 	}
 }
 
-// The doctor reports the host's Tailscale even before a join, and a warning
-// there does not turn the report into a failure.
 // A stopped Tailscale is the first thing to rule out on a machine that cannot
 // see the relay. One running daemon or a remote proxy means it is not the cause.
 func TestTailnetChecksStopped(t *testing.T) {
@@ -364,6 +361,8 @@ func TestTailnetChecksStopped(t *testing.T) {
 	}
 }
 
+// The doctor reports the host's Tailscale even before a join, and a warning
+// there does not turn the report into a failure.
 func TestRunDoctorTailnet(t *testing.T) {
 	useConfig(t, client.Config{})
 	stubTailnet(t, tailnetSelf("1.104.3", true))

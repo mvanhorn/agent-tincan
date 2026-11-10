@@ -292,7 +292,7 @@ func distErrorFix(err error) string {
 	if !ok || e.Code != 404 || !strings.Contains(e.Message, "does not serve upgrades") {
 		return ""
 	}
-	return "Whoever runs the relay: add --dist <dir> and --release-url https://github.com/mvanhorn/agent-tincan/releases/download to the relay's start command (the flags you gave tincan relay install, or its service file) and restart it. Then tincan relay-upgrade --from-github <tag> from the relay host or an admin device can update it, and agents can run tincan upgrade. See Upgrading in docs/quickstart.md."
+	return "Whoever runs the relay: add --dist <dir> and --release-url " + GitHubReleaseURL + " to the relay's start command (the flags you gave tincan relay install, or its service file) and restart it. Then tincan relay-upgrade --from-github <tag> from the relay host or an admin device can update it, and agents can run tincan upgrade. See Upgrading in docs/quickstart.md."
 }
 
 func versionCheck(ctx context.Context, r *client.Relay, exe string) check {
@@ -556,11 +556,13 @@ func hostLabel(kind string) string {
 // line, and the repair steps would have a healthy machine remove its server.
 func hostFixNeeded(checks []check, launches []mcpserver.Launch) bool {
 	for _, c := range checks {
-		switch {
-		case c.Name != "app launches" && c.Name != "mcp config":
-		case c.Status == "fail":
+		if c.Name != "app launches" && c.Name != "mcp config" {
+			continue
+		}
+		if c.Status == "fail" {
 			return true
-		case c.Name == "app launches" && c.Status == "warn" && len(launches) == 0:
+		}
+		if c.Name == "app launches" && c.Status == "warn" && len(launches) == 0 {
 			return true
 		}
 	}

@@ -71,10 +71,11 @@ func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
 	case r != nil && running == 1 && !r.ThroughRemoteProxy():
 		role = deviceRoleOf(ctx, r)
 	}
+	stopped := running == 0 && (r == nil || !r.ThroughRemoteProxy())
 	checks := make([]check, len(selves))
 	for i, s := range selves {
 		checks[i] = tailnetCheck(s, role)
-		if running == 0 && (r == nil || !r.ThroughRemoteProxy()) {
+		if stopped {
 			checks[i] = stoppedTailnet(checks[i])
 		}
 	}
