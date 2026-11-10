@@ -645,7 +645,7 @@ func TestVMWebhookRunsBringUpFirst(t *testing.T) {
 		t.Fatalf("vm-webhook instructions must run %s before the check_inbox step:\n%s", bringUp, txt)
 	}
 	line := txt[strings.LastIndex(txt[:up], "\n")+1 : inbox]
-	for _, want := range []string{"If ~/.local/bin/tincan-up.sh exists", "skip this step", "every turn", "before check_inbox", "tell Matt", "exit code", "docs/adapters/grokbot.md"} {
+	for _, want := range []string{"If ~/.local/bin/tincan-up.sh exists", "skip this step", "every turn", "before check_inbox", "tell Matt", "exit code", "TS_MODE=managed", "docs/adapters/grokbot.md"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("bring-up line lacks %q:\n%s", want, line)
 		}

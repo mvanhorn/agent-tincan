@@ -186,7 +186,7 @@ Before you upgrade:
 - [Good-at lines](#last-seen): `tincan good-at muse "phone calls; fast pickup"` gives a teammate one line, in your words, saying what it is good at. `tincan agents` and `list_agents` show it as `good_at="..."`, and agents choose whom to ask by it. History, notes, council, the web teammates and the product tools (Claude Code, Codex, Gemini CLI, Grok CLI and the ChatGPT connector) show a default line until you write one; hosting shapes, Hermes and OpenClaw show none. Agents are also told to send a real-world action (a call, a payment, a booking) to one teammate at a time.
 - [`tincan top`](#last-seen) shows the whole mesh live in one terminal, with the agents that need attention first.
 - Invite codes are stored on the relay as HMAC digests under a new `invite-pepper` file instead of in plain text.
-- [Grok Bot on hosts that are wiped and restored](docs/adapters/grokbot.md), with a no-sudo startup script.
+- [Grok Bot on hosts that are wiped and restored](docs/adapters/grokbot.md), through Grok Bot's managed Tailscale connector, with a no-sudo startup script.
 - Extension 0.6.1.
 
 Before you upgrade:
@@ -912,8 +912,10 @@ Run the relay on the VM as its own OS user, separate from the one Grok Bot's too
 ```bash
 tincan relay --admin <your-laptop>
 tincan invite grokbot --kind vm-webhook --socket <state-dir>/admin.sock   # on the VM
-tincan join <code> --relay http://tincan-relay --proxy http://localhost:1055   # as Grok Bot's user (userspace Tailscale)
+tincan join <code> --relay http://tincan-relay.<tailnet>.ts.net   # as Grok Bot's user, through the managed Tailscale connector
 ```
+
+With the older self-installed userspace Tailscale (a fallback, see [docs/adapters/grokbot.md](docs/adapters/grokbot.md)), join with `--relay http://tincan-relay --proxy http://localhost:1055` instead.
 
 #### How it wakes
 
@@ -937,8 +939,8 @@ It follows a quiet rule. It runs a silent standing check every 30 minutes, fixes
 
 - Keep the relay's OS user separate from the agent's so the database and `wake.json` stay out of the agent's reach. Any process running as the relay's user can use its admin socket with the owner's authority. Because only the main user's home folder survives a Grok Bot wipe, a relay on another always-on host is the safer choice there.
 - A 401 or 403 in the relay log for a webhook means `bearer_token` does not match the receiver. Fix it in `wake.json`, never in chat.
-- Grok Bot's machine is wiped and restored often, usually daily, and only the home folder and workspace come back. With a default Tailscale install, every wipe creates a new device you have to approve. Run tailscaled in userspace as Grok Bot's user, with its state in `~/.config/tailscale`, and log in once with a one-off, pre-approved, tagged auth key in the `TS_AUTHKEY` secret, then remove the secret. The box then rejoins as the same device with no approval and no key. Setup and a startup script: [docs/adapters/grokbot.md](docs/adapters/grokbot.md).
-- The box is tagged, so the relay never re-admits it automatically. Normally that does not matter, because the identity survives a wipe. If it is lost, re-link with a new `tincan invite` and `tincan join --replace`.
+- Grok Bot's machine is wiped and restored often, usually daily, and only the home folder and workspace come back. Put Grok Bot on the tailnet with its managed Tailscale connector (Connect apps > Your plugins > Tailscale), which runs on Cursor's side and survives a wipe. Do not install a Tailscale client on the bot's computer, and do not tag the managed device: a tag disconnects it ([cursor/plugins#1140](https://github.com/cursor/plugins/issues/1140)). Join with the relay's full MagicDNS name and no `--proxy`, and set `TS_MODE=managed` for the startup script. Setup, access limits and the older self-installed userspace method: [docs/adapters/grokbot.md](docs/adapters/grokbot.md).
+- The managed device is untagged and owned by your login, so never list its `grokbot-user-...` name in `--admin`. On a personal tailnet it has your full access until tagging works; a company tailnet can limit it with a `custom:grokbot` posture.
 
 #### Adapter doc
 

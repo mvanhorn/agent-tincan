@@ -65,11 +65,17 @@ A1. Check Tailscale. Run `tailscale status`. This machine should be signed in to
     your owner's tailnet. If Tailscale is missing or signed out, ask your owner to
     install it and sign in (https://tailscale.com/download), then continue.
 
-    On Grok Bot, or any host that is wiped and keeps only your home folder, do
-    not use the default Tailscale install: every wipe would create a new device
-    for your owner to approve. Ask your owner once for a one-off (not
-    reusable), pre-approved auth key with your tag (for example tag:grokbot),
-    saved as your secret env var TS_AUTHKEY (never in chat). Then follow
+    On Grok Bot, do not install a Tailscale client: `tailscale status` finds
+    none, and that is expected. Ask your owner to connect Grok Bot's managed
+    Tailscale connector (Connect apps > Your plugins > Tailscale) and to set
+    TS_MODE=managed as your env var, then follow docs/adapters/grokbot.md. Never
+    ask your owner to tag the managed device: a tag disconnects it.
+
+    On another host that is wiped and keeps only your home folder, do not use
+    the default Tailscale install: every wipe would create a new device for
+    your owner to approve. Ask your owner once for a one-off (not reusable),
+    pre-approved auth key with your tag (for example tag:grokbot), saved as
+    your secret env var TS_AUTHKEY (never in chat). Then follow the fallback in
     docs/adapters/grokbot.md: userspace tailscaled with its state in
     ~/.config/tailscale, started by examples/grokbot/tincan-up.sh, which you
     run hourly on this machine. After the first login, ask your owner to
@@ -213,7 +219,11 @@ B2. Join, with the code and relay address from your message (the relay is
       mints a new proxy password for every shell, also add
       `--proxy-credentials-from-env`: the password stays out of your config and
       each command takes the current one from HTTPS_PROXY on the same host.
-    - Userspace Tailscale (Grok Bot and other wiped hosts): add
+    - Grok Bot with its managed Tailscale connector: no --proxy, and use the
+      relay's full MagicDNS name, `--relay http://tincan-relay.<tailnet>.ts.net`.
+      A config joined through the old userspace proxy keeps it until you join
+      again with `--proxy=`.
+    - Userspace Tailscale (other wiped hosts that run their own client): add
       `--proxy http://localhost:1055`, tailscaled's local proxy. Your machine is
       tagged, so rejoin cannot re-admit it. If its Tailscale identity was lost,
       ask your owner for a new invite and join with `--replace`.
