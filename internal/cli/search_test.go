@@ -46,6 +46,26 @@ func TestSearchCLI(t *testing.T) {
 	}
 }
 
+// Search shows teammates' text as data: a body or reply cannot rewrite the
+// owner's terminal with control or bidi runes.
+func TestSearchCLIIsTerminalSafe(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	answered(t, m, "restaurant \x1b[2K\u202ebooking", "confirmed\x1b]0;owned\x07 Tuesday")
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	out, err := run(t, Root(), "search", "restaurant", "Tuesday")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"\x1b", "\x07", "\u202e"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("search kept %q: %q", bad, out)
+		}
+	}
+	if !strings.Contains(out, "[restaurant]") || !strings.Contains(out, "[Tuesday]") {
+		t.Fatalf("search = %q", out)
+	}
+}
+
 func TestSearchAttachmentNamesBounded(t *testing.T) {
 	names := []string{strings.Repeat("界", 100), "two\nlines", "three", "four", "five", "hidden", "also hidden"}
 	got := searchAttachmentNames(names)

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -294,12 +295,20 @@ func writeFenced(b *strings.Builder, label, text string) {
 	fmt.Fprintf(b, "\n%stext\n%s\n%s\n", fence, strings.TrimSuffix(text, "\n"), fence)
 }
 
+// oneLine is s on one line, cut to at most 80 bytes on a rune boundary.
+// Relay text is data, including when it contains terminal control
+// sequences, so control and bidi runes become spaces: a body cannot rewrite
+// or hide what a listing shows the owner.
 func oneLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 80 {
-		return s[:77] + "..."
+	s = strings.Join(strings.Fields(client.TerminalSafe(s)), " ")
+	if len(s) <= 80 {
+		return s
 	}
-	return s
+	n := 77
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
 }
 
 func auditCmd() *cobra.Command {
