@@ -108,7 +108,7 @@ Adding a machine to a working team goes faster once you know which parts belong 
 | Tailscale node | Each machine | Tailscale must be running and signed in to your tailnet. If it is stopped, the machine cannot see the relay; `tincan doctor` says so. |
 | Tincan agent | One name and one config file on one machine | Each agent joins once with its own invite. Claude Code and Codex on the same Mac are two agents: two invites, and `TINCAN_CONFIG` keeps their configs apart. |
 | MCP entry | Each app on each machine | Add `agent-tincan` in every app that should have the tools. Account sync does not copy it. |
-| Wake | The relay's `wake.json`, plus a process on the machine for command wakes | A machine can send without one; to be woken it needs both. |
+| Wake | The relay's `wake.json`, plus a listener process on the machine for command wakes such as Codex | A machine can send without a wake. To be woken it needs its method in `wake.json`, and a command wake also needs the local listener running. |
 | Admin rights | The relay's `--admin` list | Only listed, untagged machines and the relay host can invite, remove or approve held requests. |
 
 The relay URL is the one `tincan invite` printed. A default relay answers at `http://tincan-relay` on port 80; a port appears only when the relay was started with `--listen` and `--port`.
@@ -116,7 +116,7 @@ The relay URL is the one `tincan invite` printed. A default relay answers at `ht
 ### Tagging machines
 
 - A machine named in `--admin` must stay untagged: a tag removes its admin status.
-- A machine that hosts an agent and is not in `--admin` should be tagged, for example `tag:agent`, even a personal laptop. Tailscale advises against tagging user devices, and the costs are real: the device is identified by its tags instead of your user, rules that target your user stop applying to it, key expiry is off by default, tagged devices can use Tailscale SSH only to other tagged devices, and tincan cannot re-admit a tagged machine on its own after a rebuild, so it needs a new invite. See [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
+- A machine that hosts an agent and is not in `--admin` should be tagged, for example `tag:agent`, even a personal laptop. Tailscale advises against tagging user devices, and the costs are real: the device is identified by its tags instead of your user, so access rules written for your user may no longer cover it, key expiry is turned off when a device signs in with a tag (tagging it in the admin console leaves expiry as it was), tagged devices can use Tailscale SSH only to other tagged devices, and tincan cannot re-admit a tagged machine on its own after a rebuild, so it needs a new invite. See [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
 - If you leave such a machine untagged, keep the risk in mind: whoever controls a machine chooses its Tailscale name, so a program on it that renames it to a name in `--admin` gains admin power. `--admin-login` does not stop that on a single-user tailnet, where every node has the same owner.
 - Adding an agent machine to `--admin` clears doctor's untagged warning but is not a fix: every agent on an admin device has the owner's admin power, including approving its own held requests.
 
