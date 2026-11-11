@@ -63,8 +63,10 @@ type ServiceConfig struct {
 	// (DefaultRenewEvery when zero).
 	RenewEvery time.Duration
 	// Log receives one line per request, stage, and error (stderr when
-	// nil).
+	// nil), each starting with the time on Now.
 	Log io.Writer
+	// Now is the clock log lines are stamped with (time.Now when nil).
+	Now func() time.Time
 }
 
 // Service is the Council teammate. It claims each convening request as
@@ -78,6 +80,7 @@ type Service struct {
 	hold       time.Duration
 	renewEvery time.Duration
 	log        io.Writer
+	now        func() time.Time
 
 	mu      sync.Mutex
 	queue   []envelope.Request
@@ -104,11 +107,15 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		hold:       cfg.Hold,
 		renewEvery: cfg.RenewEvery,
 		log:        cfg.Log,
+		now:        cfg.Now,
 		notes:      map[string]string{},
 		wake:       make(chan struct{}, 1),
 	}
 	if s.renewEvery <= 0 {
 		s.renewEvery = DefaultRenewEvery
+	}
+	if s.now == nil {
+		s.now = time.Now
 	}
 	return s, nil
 }
@@ -118,7 +125,7 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w, "tincan council: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(w, s.now().Format(client.LogStamp)+" tincan council: "+format+"\n", args...)
 }
 
 // Run refuses to serve unless the relay stores kind council for this

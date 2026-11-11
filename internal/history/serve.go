@@ -299,8 +299,11 @@ type Service struct {
 	// presence while it handles a request (client.DefaultPresenceInterval
 	// when zero).
 	PresenceInterval time.Duration
-	// Log receives one line per request and per error (stderr when nil).
+	// Log receives one line per request and per error (stderr when nil),
+	// each starting with the time on Now.
 	Log io.Writer
+	// Now is the clock log lines are stamped with (time.Now when nil).
+	Now func() time.Time
 
 	// onImageDir is a test hook called with each per-request image dir.
 	onImageDir func(dir string)
@@ -311,7 +314,14 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w, "tincan history: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(w, s.now().Format(client.LogStamp)+" tincan history: "+format+"\n", args...)
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 // Run polls and handles requests until ctx is cancelled. A request being

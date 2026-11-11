@@ -70,7 +70,8 @@ type Service struct {
 	ReplyWait, RenewEvery time.Duration
 	// Now is the clock (time.Now when nil).
 	Now func() time.Time
-	// Log receives one line per request and per error (stderr when nil).
+	// Log receives one line per request and per error (stderr when nil),
+	// each starting with the time on Now.
 	Log io.Writer
 }
 
@@ -79,7 +80,7 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w, "tincan pass: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(w, s.now().Format(client.LogStamp)+" tincan pass: "+format+"\n", args...)
 }
 
 func (s *Service) now() time.Time {

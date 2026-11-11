@@ -186,7 +186,7 @@ Replies and what to do:
 - "No matching ... conversation in the recent window": nothing inside the window the reply names matched. Try other words, or widen the window (see [Window](#window)).
 - "The history agent could not use its window file": `~/.config/tincan/history-window.json` is unreadable, not `{"days": N, "max": N}`, or out of bounds. Fix or delete it. The log says which.
 - "... were searched, so older ones may be missing": the window stopped the lookup before it was complete. Widen the window if the conversation is older.
-- No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.history`) and read `~/Library/Logs/tincan-history.log`. A "403" there means the config is not joined as an agent.
+- No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.history`) and read `~/Library/Logs/tincan-history.log`. A "403" there means the config is not joined as an agent. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so the two line up.
 
 ## Release zip installation fallback
 

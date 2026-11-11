@@ -184,7 +184,7 @@ func (w *WebAgent) logf(format string, args ...any) {
 	if out == nil {
 		out = os.Stderr
 	}
-	_, _ = fmt.Fprintf(out, "tincan web %s: "+format+"\n", append([]any{w.Name}, args...)...)
+	_, _ = fmt.Fprintf(out, w.clk().Now().Format(client.LogStamp)+" tincan web %s: "+format+"\n", append([]any{w.Name}, args...)...)
 }
 
 // Run polls and handles requests until ctx is cancelled; see Service.Run.
