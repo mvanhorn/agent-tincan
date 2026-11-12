@@ -56,6 +56,19 @@ func TestComputeStatus(t *testing.T) {
 			agentStatus{status: client.StatusOffline}},
 		{"quiet after a restart", statusFacts{online: true, wake: "wait", stat: store.QueueStat{Queued: 1, Lapsed: 1}}, now.Add(time.Minute),
 			agentStatus{status: client.StatusIdle}},
+		// A host-reported busy does not hide a queue nothing has taken.
+		{"host busy with an untaken queue", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 3, OldestQueued: now.Add(-25 * time.Minute)}}, settled,
+			agentStatus{status: client.StatusStuck, reason: "3 queued, untaken 25m"}},
+		{"idle with an untaken queue", statusFacts{online: true, wake: "wait", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-15 * time.Minute)}}, settled,
+			agentStatus{status: client.StatusStuck, reason: "1 queued, untaken 15m"}},
+		{"host busy inside the grace", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-5 * time.Minute)}}, settled,
+			agentStatus{status: client.StatusBusy}},
+		{"a live claim is moving", statusFacts{online: true, wake: "channel", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute), Claimed: 1, OldestClaim: now, ClaimAsker: "codex"}}, settled,
+			agentStatus{status: client.StatusBusy, busyFor: "codex", busySince: now}},
+		{"the relay wakes it, no untaken rule", statusFacts{online: true, wake: "webhook", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}}, settled,
+			agentStatus{status: client.StatusIdle}},
+		{"untaken stays quiet after a restart", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}}, now.Add(time.Minute),
+			agentStatus{status: client.StatusBusy}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := computeStatus(tc.f, now, tc.quiet); got != tc.want {
@@ -331,5 +344,25 @@ func TestHostStatusAfterRemovalDropped(t *testing.T) {
 	}
 	if !grokEntry.busy {
 		t.Fatalf("grokbot's report was dropped: %+v", grokEntry)
+	}
+}
+
+// The incident shape: a channel agent online and host-busy, with an ask no
+// session takes. Inside the notice grace it shows busy; past it the roster
+// says stuck with how many wait and for how long, not busy.
+func TestRosterUntakenQueueBeatsHostBusy(t *testing.T) {
+	h, clk, fw := statusHarness(t)
+	fw.methods["muse"] = "channel"
+	h.send(instinctAddr, "muse", "x")
+	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, nil)
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusBusy {
+		t.Fatalf("inside the grace: %+v", a)
+	}
+	clk.advance(DefaultWakeGrace + time.Minute)
+	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, nil)
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusStuck || a.StatusReason != "1 queued, untaken 11m" {
+		t.Fatalf("past the grace: status %q (%q), want stuck (1 queued, untaken 11m)", a.Status, a.StatusReason)
 	}
 }

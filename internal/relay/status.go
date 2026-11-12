@@ -30,6 +30,10 @@ type statusFacts struct {
 	// hostBusy is set when the agent's host reports it is working, such as
 	// a Claude Code session in the middle of a turn.
 	hostBusy bool
+	// untakenAfter is the notice grace: how long a queued request may wait
+	// on an agent that wakes itself, with no live claim, before the agent
+	// counts as stuck. Zero turns the rule off.
+	untakenAfter time.Duration
 }
 
 // agentStatus is one agent's roster status: the word, why a stuck agent is
@@ -88,6 +92,15 @@ func stuckReason(f statusFacts, now time.Time) string {
 	relayWakes := relayWoken(f.wake) || f.wake == wake.Schedule
 	if !f.online && f.stat.Queued > 0 && !relayWakes {
 		return fmt.Sprintf("%d queued while offline", f.stat.Queued)
+	}
+	// An agent that wakes itself can look online, and its host can report
+	// busy, while no session ever looks at its queue: a Claude Code channel
+	// reaches only an idle session started with channels. With no claim
+	// held, a queue older than the notice grace is not moving, whatever the
+	// host says.
+	if !relayWakes && f.untakenAfter > 0 && f.stat.Claimed == 0 && f.stat.Queued > 0 &&
+		!f.stat.OldestQueued.IsZero() && now.Sub(f.stat.OldestQueued) > f.untakenAfter {
+		return fmt.Sprintf("%d queued, untaken %s", f.stat.Queued, client.QueueAge(now.Sub(f.stat.OldestQueued)))
 	}
 	if f.stat.Queued > 0 && !f.stat.OldestQueued.IsZero() && now.Sub(f.stat.OldestQueued) > staleQueue {
 		return "oldest queued " + client.QueueAge(now.Sub(f.stat.OldestQueued))
