@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -192,6 +193,9 @@ const (
 	// NoteRoomRemoved: the request was a mention, cancelled because its
 	// target was removed from the room.
 	NoteRoomRemoved = "room_removed"
+	// NoteUntaken: the target wakes itself (channel, wait, command, none)
+	// and has left the ask untaken past the notice grace.
+	NoteUntaken = "untaken"
 )
 
 // migrateRelayNotes creates the table of notes the relay added to requests
@@ -213,6 +217,34 @@ func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Req
 		WHERE to_agent = ? AND status = ? AND kind = ? AND expires_at > ? AND id NOT IN (SELECT request_id FROM relay_notes WHERE kind = ?)
 		ORDER BY created_at, rowid`,
 		agent, string(envelope.StatusQueued), string(envelope.KindAsk), s.now().UnixMilli(), NoteWake)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRequests(rows)
+}
+
+// UntakenAsks returns the live queued asks to agents, never claimed, that
+// carry no wake or untaken note yet and have waited since before cutoff
+// (urgentCutoff for an urgent ask), oldest first. An ask waits from the
+// later of its creation, or its approval when it was held, and its
+// deliver_after. Self-asks are left out.
+func (s *Store) UntakenAsks(ctx context.Context, agents []string, cutoff, urgentCutoff time.Time) ([]envelope.Request, error) {
+	if len(agents) == 0 {
+		return nil, nil
+	}
+	args := []any{string(envelope.StatusQueued), string(envelope.KindAsk), s.now().UnixMilli()}
+	for _, a := range agents {
+		args = append(args, a)
+	}
+	args = append(args, NoteWake, NoteUntaken, urgentCutoff.UnixMilli(), cutoff.UnixMilli())
+	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
+		WHERE status = ? AND kind = ? AND expires_at > ? AND claim_lapsed = 0 AND from_agent != to_agent
+		AND to_agent IN (?`+strings.Repeat(", ?", len(agents)-1)+`)
+		AND id NOT IN (SELECT request_id FROM relay_notes WHERE kind IN (?, ?))
+		AND MAX(deliver_after, CASE WHEN was_held = 1 THEN COALESCE((SELECT MAX(a.at) FROM audit a WHERE a.request_id = requests.id AND a.event = 'approved'), created_at) ELSE created_at END)
+			<= CASE WHEN urgent = 1 THEN ? ELSE ? END
+		ORDER BY created_at, rowid`, args...)
 	if err != nil {
 		return nil, err
 	}

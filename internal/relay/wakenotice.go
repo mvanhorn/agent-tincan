@@ -13,14 +13,16 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 // MaxNoticeTeammates caps the online teammates one wake notice names.
 const MaxNoticeTeammates = 5
 
 // Notes for askers. The relay tells an asker, once, when its ask is stuck:
-// the target was woken and never checked in (TellAskers), the target's
-// claim went stale, or the request expired with no reply (tellSwept). Each
+// the target was woken and never checked in (TellAskers), a target that
+// wakes itself left it untaken (tellUntaken), the target's claim went
+// stale, or the request expired with no reply (tellSwept). Each
 // note is kept on the request, where get_reply shows it to the asker, and
 // sent to the asker as a notice from the relay, which check_inbox shows and
 // which wakes a webhook or email asker. No note changes the request's
@@ -79,6 +81,69 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 		}
 		s.noteAndTell(ctx, req, store.NoteWake, 0, note, now)
 	}
+}
+
+// agentSideWake reports a wake method the relay does not drive and has no
+// overdue check for: channel, wait, command, none and the like. The relay
+// cannot tell whether such an agent is looking at its queue, so an ask it
+// leaves untaken is the asker's to hear about.
+func agentSideWake(method string) bool {
+	return !relayWoken(method) && method != wake.Schedule
+}
+
+// tellUntaken is the sweep's check on agents that wake themselves. Each
+// live queued ask to one of them that nothing has claimed, past the notice
+// grace (UrgentWakeGrace when urgent, WakeGrace otherwise), gets a note for
+// its asker, once per request. An ask TellAskers already noted is left
+// alone, and so are held asks, self-asks, asks that were claimed once (the
+// stale-claim note covers those) and asks from anyone not on the roster.
+func (s *Server) tellUntaken(ctx context.Context) {
+	if s.wake == nil {
+		return
+	}
+	roster, err := s.dir.Agents(ctx)
+	if err != nil {
+		log.Printf("untaken notice: roster: %v", err)
+		return
+	}
+	var agents []string
+	for _, a := range roster {
+		if agentSideWake(s.wake.WakeMethod(a.Name)) {
+			agents = append(agents, a.Name)
+		}
+	}
+	now := s.cfg.Now()
+	reqs, err := s.store.UntakenAsks(ctx, agents, now.Add(-s.noticeGrace(false)), now.Add(-s.noticeGrace(true)))
+	if err != nil {
+		log.Printf("untaken notice: %v", err)
+		return
+	}
+	for _, req := range reqs {
+		if !slices.ContainsFunc(roster, func(a identity.Agent) bool { return a.Name == req.From }) {
+			continue // the relay's own notices, or an asker since removed
+		}
+		online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, req.To)
+		var note string
+		if guestAsker(roster, req.From) {
+			// How a teammate wakes is not a guest's to read.
+			note = fmt.Sprintf("%s has not picked this up yet. The request is still queued.", req.To) + suggest(online, "If it can't wait, cancel it and ask")
+		} else {
+			note = untakenNote(req.To, s.wake.WakeMethod(req.To), online)
+		}
+		s.noteAndTell(ctx, req, store.NoteUntaken, 0, note, now)
+	}
+}
+
+// untakenNote is the text an asker gets when agent, which wakes itself by
+// method, has left its ask untaken. It says that nothing is working on the
+// request, because the roster can show the agent busy or online for other
+// reasons: another session's turn, or a channel loop that answers pings.
+func untakenNote(agent, method string, online []string) string {
+	note := fmt.Sprintf("%s has not taken this request. It is still queued and nothing is working on it yet; %s showing as busy or online does not mean it is working on this request.", agent, agent)
+	if method == wake.Channel {
+		note += " " + agent + " wakes by channel, and a Claude Code session sees a channel notice only while it is idle and was started with channels."
+	}
+	return note + suggest(online, "If it can't wait, cancel it and ask")
 }
 
 // silentEpisode is one relay-woken agent's current run of unanswered

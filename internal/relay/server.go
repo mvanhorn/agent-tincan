@@ -603,6 +603,7 @@ func (s *Server) Sweep(ctx context.Context) {
 		}
 	}
 	s.wakeFallenBack(ctx)
+	s.tellUntaken(ctx)
 	s.sweepGuests(ctx)
 	s.failoverSweep(ctx)
 	s.sweepFollowOns(ctx)
