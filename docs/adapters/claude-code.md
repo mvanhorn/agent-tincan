@@ -60,6 +60,29 @@ While socket wake runs, the session tells the relay so, and a teammate's pending
 
 `--wake-socket=false` turns socket wake off. With `--channel` the channel runs and `--wake-socket` is ignored.
 
+## Check the inbox on every prompt (hook)
+
+A channel notice reaches only an idle session started with channels, and socket wake only a terminal session registered in `~/.claude/sessions/`. A session that was busy when the notice came, one started without channels, and SDK or desktop sessions may never look at the inbox, while the roster still shows the agent online or busy. Add the inbox hook so every session checks at its start and on each prompt. In `~/.claude/settings.json` (merge with any hooks you already have):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}]
+  }
+}
+```
+
+`tincan hook claude-code` peeks at the relay once, with no hold, and never claims. When teammate requests or replies are waiting it prints one line, which Claude Code adds to the session's context:
+
+```text
+Agent Tincan: 2 teammate requests waiting (oldest 12m). Call check_inbox before anything else.
+```
+
+With nothing waiting it prints nothing. It gives up after 3 seconds, and on any error (no config, relay unreachable) it writes to stderr only and exits 0, so it never blocks or fails a prompt. Pings are left out; the MCP server answers those. The hook names no session, so it also counts replies meant for another window of the same agent, and that window's `check_inbox` is the one that gets them.
+
+When an ask to a channel agent sits untaken past the relay's wake grace, the relay tells the asker that nothing is working on it yet, and the roster shows `status=stuck (N queued, untaken 25m)` even while a session reports busy.
+
 ## Several sessions on one machine
 
 Every Claude Code window on a machine runs as the same agent. A teammate can [name a project](#send-an-ask-to-one-projects-window) to reach the window on that repo, but one window cannot ask another: an `ask` to the agent's own name fails with `send: an agent cannot send to itself`. To reach another window on the same machine, use Claude Code's own messaging between sessions where it has one. To make a window addressable on the relay, join it as an agent of its own, with its own invite and `TINCAN_CONFIG`.

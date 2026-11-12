@@ -1049,6 +1049,19 @@ Claim-on-inbox semantics: the notice never carries the items and never claims an
 
 Socket. A server added without `--channel` (`claude mcp add --scope user agent-tincan -- tincan mcp`) wakes the session through Claude Code's own messaging socket instead, with no preview flag. When the session is idle and requests or replies are waiting, it writes one user message with the same count-only text, such as `1 Agent Tincan item waiting from instinct. Call check_inbox to take it, then reply to each request.`, which starts a turn. A busy session is never interrupted, and each item is sent once. A reply to an ask goes only to the window that sent it. A teammate request starts one turn per agent per machine, however many windows are open: the windows share a lock and a delivery record under the agent's config directory (`socket-wake/`). Upgrade notices are not sent this way; they show on the next tool call. The server pushes only when its parent process is the session registered for that socket in `~/.claude/sessions/<pid>.json` (or under `$CLAUDE_CONFIG_DIR`), so a `tincan` run from the session's Bash tool does not push into it. After three failed writes in a row it stops peeking, so the agent stops looking online, keeps its relay session live, and tries the socket again in 5 minutes. `--wake-socket=false` turns socket wake off; with `--channel` the channel runs and the flag is ignored.
 
+Inbox hook. A channel notice reaches only an idle session started with channels, and socket wake only a terminal session, so a session that was busy when the notice came, or an SDK or desktop session, may never look. Add `tincan hook claude-code` to Claude Code's `SessionStart` and `UserPromptSubmit` hooks in `~/.claude/settings.json` so every session checks at its start and on each prompt:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}]
+  }
+}
+```
+
+The hook peeks once and never claims. When teammate requests or replies wait it prints one line, which Claude Code adds to the session's context, such as `Agent Tincan: 2 teammate requests waiting (oldest 12m). Call check_inbox before anything else.`, and with nothing waiting it prints nothing. It gives up after 3 seconds and exits 0 on any error, writing only to stderr, so it never blocks a prompt. Merge the entries into any hooks you already have. If the relay sees a channel agent leave an ask untaken past the wake grace, it also tells the asker (see Notes to the asker in [docs/protocol.md](docs/protocol.md)) and lists the agent as `status=stuck (N queued, untaken 25m)`.
+
 Fallback when no session is open, or with socket wake off: copy [examples/claude-code/cmux-wake.sh](examples/claude-code/cmux-wake.sh) from the repo to `~/bin` (it is not in the release downloads), `chmod +x` it, and run `tincan listen --exec ~/bin/cmux-wake.sh`. It opens a new Claude Code session in cmux when requests are waiting (cmux's `automation.socketControlMode` must allow it). Set the wake to `command` for this.
 
 New window per ask: `tincan window open "<task>"` opens a Claude Code window in cmux, in the background, working on a task. Join a second agent such as `claude-window` and run `tincan window install --start`, and every ask to it opens its own window that works on that request and replies to the asker. A one-line ask is typed as it is, so `/ce-plan make a plan` runs the slash command. See [docs/adapters/claude-code.md](docs/adapters/claude-code.md#open-a-new-window-for-each-ask).
@@ -1064,6 +1077,7 @@ Set `{ "claude-code": { "method": "channel" } }` in `wake.json`, for the channel
 #### Limits and gotchas
 
 - Channels and socket wake only deliver while a session is open. Keep one running in cmux.
+- A channel notice only reaches an idle session started with channels. Add the inbox hook so busy, desktop and SDK sessions check too.
 - Socket wake waits for the session to go idle, so a long turn delays the notice. If the session's socket or registry entry does not check out at start, the server logs why and runs without a wake.
 - The channel offers MCP revisions up to 2025-11-25 only, because Claude Code does not register a channel server that negotiates 2026-07-28.
 - If another agent runs on the same Mac, prefix its tincan commands with its own `TINCAN_CONFIG`.

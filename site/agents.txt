@@ -249,6 +249,13 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      Without --channel, tincan mcp wakes an idle session through
                      the session's own messaging socket instead, with the same
                      count-only notice (--wake-socket=false turns that off).
+                     Also add the inbox hook so every session checks at start
+                     and on each prompt: in ~/.claude/settings.json set hooks
+                     "SessionStart" and "UserPromptSubmit" each to
+                     [{"hooks": [{"type": "command",
+                       "command": "tincan hook claude-code", "timeout": 5}]}]
+                     (docs/adapters/claude-code.md, "Check the inbox on every
+                     prompt (hook)"). It only looks and never blocks a prompt.
                      Optional operator-bound project/task session lookup and
                      official Desktop opening: docs/adapters/claude-code.md,
                      "Optional operator-bound project/task sessions". This is
