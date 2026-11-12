@@ -1,7 +1,9 @@
 package store
 
 // Failover: moving an ask nothing has typed into a site yet off a web
-// agent that is out of messages, to another web agent. A move changes a
+// agent that is out of messages, to another web agent; and the owner's
+// fallback, moving an ask its target left untaken to the agent the owner
+// named for it (RerouteUntaken). A move changes a
 // request's target, so every write keyed by request id also checks the
 // target (to_agent), and an agent the request moved from no longer finds
 // it.
@@ -86,6 +88,35 @@ const requeueClaim = `status = 'queued', lease_until = 0, claimed_at = 0, claim_
 // (ClaimLapsed). It returns ErrWrongState when the request is no longer in that state for
 // from (a Deliver or Claim won), and the moved request otherwise.
 func (s *Store) Move(ctx context.Context, id, from, to string, claimed bool) (envelope.Request, error) {
+	cond, args := `status = 'queued'`, []any(nil)
+	if claimed {
+		cond, args = `status = 'claimed' AND lease_until > ?`, []any{s.now().UnixMilli()}
+	}
+	return s.move(ctx, id, from, to, "", nil, cond, args...)
+}
+
+// untakenMove is RerouteUntaken's condition: a live queued ask its target
+// never claimed, never resumed after a clarification, that never moved
+// before and is not held back. It is UntakenAsks' choice, checked again
+// in the write.
+const untakenMove = `status = 'queued' AND kind = 'ask' AND claimed_at = 0 AND resumed = 0 AND moved_from = '' AND deliver_after <= ?`
+
+// RerouteUntaken moves request id, an ask from left untaken, to the owner's
+// fallback for it, to, in one conditional write: the request must still be
+// an ask queued for from that nothing ever claimed, was never resumed,
+// never moved and is not held back, so a claim or reply that lands after
+// the caller read it leaves it where it is (ErrWrongState). It moves as
+// Move moves a queued request, and its queue clock (queued_at) restarts,
+// so to gets a full grace before its own untaken note.
+func (s *Store) RerouteUntaken(ctx context.Context, id, from, to string) (envelope.Request, error) {
+	now := s.now().UnixMilli()
+	return s.move(ctx, id, from, to, `, queued_at = ?, fallback_woken = 0`, []any{now}, untakenMove, now)
+}
+
+// move is the one write that changes a request's target, for Move and
+// RerouteUntaken: set (with setArgs) adds to the SET list, and cond (with
+// args) to the WHERE clause, after the id, from and expiry checks.
+func (s *Store) move(ctx context.Context, id, from, to, set string, setArgs []any, cond string, args ...any) (envelope.Request, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Request{}, err
@@ -103,16 +134,11 @@ func (s *Store) Move(ctx context.Context, id, from, to string, claimed bool) (en
 		return envelope.Request{}, err
 	}
 	now := s.now().UnixMilli()
-	cond := `status = 'queued'`
-	if claimed {
-		cond = `status = 'claimed' AND lease_until > ?`
-	}
-	args := []any{to, string(movedFrom), now, id, from, now}
-	if claimed {
-		args = append(args, now)
-	}
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET to_agent = ?, moved_from = ?, to_project = '', `+requeueClaim+`, deliver_after = 0, updated_at = ?
-		WHERE id = ? AND to_agent = ? AND expires_at > ? AND claim_lapsed = 0 AND `+cond, args...)
+	all := append([]any{to, string(movedFrom), now}, setArgs...)
+	all = append(all, id, from, now)
+	all = append(all, args...)
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET to_agent = ?, moved_from = ?, to_project = '', `+requeueClaim+`, deliver_after = 0, updated_at = ?`+set+`
+		WHERE id = ? AND to_agent = ? AND expires_at > ? AND claim_lapsed = 0 AND `+cond, all...)
 	if err != nil {
 		return envelope.Request{}, err
 	}

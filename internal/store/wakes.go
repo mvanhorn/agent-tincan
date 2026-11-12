@@ -196,6 +196,9 @@ const (
 	// NoteUntaken: the target wakes itself (channel, wait, command, none)
 	// and has left the ask untaken past the notice grace.
 	NoteUntaken = "untaken"
+	// NoteRerouted: the target left the ask untaken past the notice grace,
+	// and the relay moved it to the owner's fallback for that target.
+	NoteRerouted = "rerouted"
 )
 
 // migrateRelayNotes creates the table of notes the relay added to requests
@@ -257,6 +260,19 @@ func (s *Store) UntakenAsks(ctx context.Context, agents []string, cutoff, urgent
 	}
 	defer rows.Close()
 	return scanRequests(rows)
+}
+
+// UntakenSince is when request id started waiting for its target, as
+// UntakenAsks times it (see untakenSince).
+func (s *Store) UntakenSince(ctx context.Context, id string) (time.Time, error) {
+	var ms int64
+	if err := s.db.QueryRowContext(ctx, `SELECT `+untakenSince+` FROM requests WHERE id = ?`, id).Scan(&ms); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, ErrNotFound
+		}
+		return time.Time{}, err
+	}
+	return time.UnixMilli(ms), nil
 }
 
 // UntakenStat is one agent's asks that it never took: how many, and when

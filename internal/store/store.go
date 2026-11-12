@@ -151,6 +151,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent good-at: %w", err)
 	}
+	if err := s.migrateAgentFallback(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent fallback: %w", err)
+	}
 	if err := s.migrateAgentFeatures(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent features: %w", err)
@@ -434,6 +438,21 @@ func (s *Store) migrateAgentGoodAt() error {
 	return err
 }
 
+// migrateAgentFallback adds the fallback column (the agent an untaken ask
+// moves to, NULL until the owner sets one) to an agents table created before
+// fallbacks were stored. It is a no-op on a current table.
+func (s *Store) migrateAgentFallback() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'fallback')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN fallback TEXT`)
+	return err
+}
+
 // migrateProject adds to_project (the project of the session a request is
 // for, "" for any session), queued_at (when its fallback clock started) and
 // fallback_woken (whether FallenBack reported it since that clock started).
@@ -553,10 +572,11 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// A name moving to a new machine replaces its old binding. Other agents
 	// on either machine are untouched: a node may carry several names. The
 	// name's last activity and poll, the build it last reported and the
-	// owner's good-at line carry over; only SetAgentGoodAt writes the line.
+	// owner's good-at line and fallback carry over; only SetAgentGoodAt and
+	// SetAgentFallback write those.
 	var lastSeen, lastPoll sql.NullInt64
-	var version, features, pollFeatures, goodAt sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, last_poll_at, version, features, poll_features, good_at FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &lastPoll, &version, &features, &pollFeatures, &goodAt)
+	var version, features, pollFeatures, goodAt, fallback sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, last_poll_at, version, features, poll_features, good_at, fallback FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &lastPoll, &version, &features, &pollFeatures, &goodAt, &fallback)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -567,8 +587,8 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at, guest_until, guest_asks, guest_no_hold, guest_ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt, until, asks, a.Guest.NoHold, a.Guest.Ended); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at, fallback, guest_until, guest_asks, guest_no_hold, guest_ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt, fallback, until, asks, a.Guest.NoHold, a.Guest.Ended); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -576,7 +596,8 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 
 // DeleteAgent removes name and, in the same transaction, the last wake the
 // relay sent it, every idle watch it set or that watches it, every scheduled
-// ask from or to it, and its room memberships, so an agent joined again under
+// ask from or to it, its room memberships, and every other agent's fallback
+// to it, so an agent joined again under
 // the name starts with none and in no rooms. Its room posts stay, shown under
 // its name.
 func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
@@ -608,6 +629,9 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM work_leases WHERE holder = ?`, name); err != nil {
 		return false, err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agents SET fallback = NULL WHERE fallback = ?`, name); err != nil {
+		return false, err
+	}
 	return n > 0, tx.Commit()
 }
 
@@ -625,6 +649,17 @@ func (s *Store) SetAgentKind(ctx context.Context, name, kind string) (bool, erro
 // NULL.
 func (s *Store) SetAgentGoodAt(ctx context.Context, name, line string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE agents SET good_at = ? WHERE name = ?`, nullable(line), name)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// SetAgentFallback records the agent an untaken ask to name moves to; ""
+// stores NULL. It reports whether name exists.
+func (s *Store) SetAgentFallback(ctx context.Context, name, to string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET fallback = ? WHERE name = ?`, nullable(to), name)
 	if err != nil {
 		return false, err
 	}
@@ -729,7 +764,7 @@ func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, b
 }
 
 func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]identity.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, ''), guest_until, guest_asks, guest_no_hold, guest_ended FROM agents WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, ''), COALESCE(fallback, ''), guest_until, guest_asks, guest_no_hold, guest_ended FROM agents WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +774,7 @@ func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]i
 		var a identity.Agent
 		var joined, until int64
 		var asks string
-		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt, &until, &asks, &a.Guest.NoHold, &a.Guest.Ended); err != nil {
+		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt, &a.Fallback, &until, &asks, &a.Guest.NoHold, &a.Guest.Ended); err != nil {
 			return nil, err
 		}
 		a.JoinedAt = time.UnixMilli(joined)

@@ -472,6 +472,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("POST /v1/admin/remove", s.handleRemove)
 	mux.HandleFunc("PUT /v1/agents/{name}/kind", s.handleSetKind)
 	mux.HandleFunc("PUT /v1/agents/{name}/good-at", s.handleSetGoodAt)
+	mux.HandleFunc("PUT /v1/agents/{name}/fallback", s.handleSetFallback)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
@@ -1973,7 +1974,7 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		if p := persisted[a.Name]; p.After(active) {
 			active = p
 		}
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Version: s.versions[a.Name], GuestUntil: a.Guest.Until}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Fallback: a.Fallback, Version: s.versions[a.Name], GuestUntil: a.Guest.Until}
 		if info.GoodAt == "" {
 			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}

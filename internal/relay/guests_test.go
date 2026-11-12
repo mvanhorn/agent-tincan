@@ -1576,6 +1576,90 @@ func TestUntakenNoteToAGuestLeavesOutTheWake(t *testing.T) {
 	}
 }
 
+// fallbackGuestMesh is a mesh where every agent wakes by channel, on a
+// clock the test moves, with the guest friend joined on terms in and muse's
+// fallback set to instinct. advance moves the clock and has instinct poll,
+// so it counts as online for the sweep.
+func fallbackGuestMesh(t *testing.T, in client.GuestInvite) (m *testrelay.Mesh, g *client.Relay, advance func(time.Duration)) {
+	t.Helper()
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	m = testrelay.NewWithAdminLogin(t, relay.Config{Now: clock})
+	m.Store.SetClock(clock)
+	m.Server.SetWakeNamer(channelWake{})
+	in.ForSeconds = guestFor
+	g = m.JoinGuest(t, guestName, in)
+	if err := m.Client(t, "admin").SetFallback(t.Context(), "muse", "instinct"); err != nil {
+		t.Fatal(err)
+	}
+	advance = func(d time.Duration) {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+		if _, err := m.Client(t, "instinct").Poll(t.Context(), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return m, g, advance
+}
+
+// A --no-hold guest's ask moves to the fallback when the guest's list names
+// it, and the guest's note names no wake or routing detail. A guest is never
+// a fallback and never has one.
+func TestFallbackMovesGuestAskOnlyWhenListed(t *testing.T) {
+	m, g, advance := fallbackGuestMesh(t, client.GuestInvite{Ask: []string{"muse", "instinct"}, NoHold: true})
+	admin := m.Client(t, "admin")
+	if err := admin.SetFallback(t.Context(), "muse", guestName); err == nil {
+		t.Fatal("a guest was set as a fallback")
+	}
+	if err := admin.SetFallback(t.Context(), guestName, "muse"); err == nil {
+		t.Fatal("a guest was given a fallback")
+	}
+	req := guestAsk(t, g, "start")
+	advance(time.Hour)
+	m.Server.Sweep(t.Context())
+	res, err := g.Get(t.Context(), req.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Request.To != "instinct" || res.RelayNote == nil || !strings.Contains(res.RelayNote.Note, "passed it to instinct") {
+		t.Fatalf("guest ask = %+v, note %+v", res.Request, res.RelayNote)
+	}
+	for _, leak := range []string{"channel", "owner set", "untaken"} {
+		if strings.Contains(res.RelayNote.Note, leak) {
+			t.Errorf("guest note names %q: %s", leak, res.RelayNote.Note)
+		}
+	}
+}
+
+// A guest's ask stays with its target, with the guest's untaken note, when
+// the guest may not ask the fallback, and when the owner approved the ask
+// for its first target only (a guest without --no-hold).
+func TestFallbackKeepsGuestAskOffUnlistedOrUnapprovedTarget(t *testing.T) {
+	for name, in := range map[string]client.GuestInvite{
+		"not listed":             {Ask: []string{"muse"}, NoHold: true},
+		"approved for muse only": {Ask: []string{"muse", "instinct"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, g, advance := fallbackGuestMesh(t, in)
+			req := guestAsk(t, g, "start")
+			if !in.NoHold {
+				approve(t, m, req.ID)
+			}
+			advance(time.Hour)
+			m.Server.Sweep(t.Context())
+			res, err := g.Get(t.Context(), req.ID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Request.To != "muse" || res.RelayNote == nil || !strings.Contains(res.RelayNote.Note, "has not picked this up") {
+				t.Fatalf("guest ask = %+v, note %+v", res.Request, res.RelayNote)
+			}
+		})
+	}
+}
+
 type channelWake struct{}
 
 func (channelWake) WakeMethod(string) string { return "channel" }

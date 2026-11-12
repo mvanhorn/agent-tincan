@@ -489,6 +489,9 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 		if workingOn := a.WorkingOnField(); workingOn != "" {
 			fmt.Fprintf(&b, " %s", workingOn)
 		}
+		if fallback := a.FallbackField(); fallback != "" {
+			fmt.Fprintf(&b, " %s", fallback)
+		}
 		if goodAt := a.GoodAtField(); goodAt != "" {
 			fmt.Fprintf(&b, " %s", goodAt)
 		}

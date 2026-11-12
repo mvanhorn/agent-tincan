@@ -1034,6 +1034,28 @@ func TestClaudeCodeOnboardingAddsInboxHook(t *testing.T) {
 	}
 }
 
+// A claude-code agent's setup suggests tincan fallback set to the window
+// agent when one is on the roster, and only then; the window agent's own
+// block does not suggest falling back to itself.
+func TestClaudeCodeOnboardingSuggestsWindowFallback(t *testing.T) {
+	roster := []Member{
+		{Name: "grokbot", Wake: "webhook", Kind: "vm-webhook"},
+		{Name: "claude-code", Wake: "channel", Kind: "claude-code"},
+	}
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: roster})
+	if strings.Contains(blockText(block(t, k, "claude-code")), "tincan fallback") {
+		t.Error("suggests a fallback with no window agent on the roster")
+	}
+	roster = append(roster, Member{Name: "claude-window", Wake: "none", Kind: "claude-code"})
+	k = build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: roster})
+	if setup := strings.Join(block(t, k, "claude-code").Setup, "\n"); !strings.Contains(setup, "tincan fallback set claude-code claude-window") {
+		t.Errorf("claude-code setup lacks the fallback line:\n%s", setup)
+	}
+	if strings.Contains(blockText(block(t, k, "claude-window")), "tincan fallback") {
+		t.Error("the window agent is told to fall back")
+	}
+}
+
 // A Claude Code agent's onboarding says that without --channel tincan mcp
 // wakes the session through its own messaging socket, and the operator's
 // channel troubleshooting says the same. Sharing session titles is an owner

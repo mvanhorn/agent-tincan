@@ -93,8 +93,10 @@ func agentSideWake(method string) bool {
 
 // tellUntaken is the sweep's check on agents that wake themselves. Each
 // live queued ask to one of them that nothing has claimed, past the notice
-// grace (UrgentWakeGrace when urgent, WakeGrace otherwise), gets a note for
-// its asker, once per request. An ask TellAskers already noted is left
+// grace (UrgentWakeGrace when urgent, WakeGrace otherwise), moves to the
+// owner's fallback for that agent when one is set and the move passes
+// rerouteUntaken's checks, and otherwise gets a note for its asker, once
+// per request. An ask TellAskers already noted is left
 // alone, and so are held asks, self-asks, asks that were claimed once (the
 // stale-claim note covers those) and asks from anyone not on the roster.
 func (s *Server) tellUntaken(ctx context.Context) {
@@ -107,9 +109,11 @@ func (s *Server) tellUntaken(ctx context.Context) {
 		return
 	}
 	var agents []string
+	fallbacks := map[string]string{}
 	for _, a := range roster {
 		if agentSideWake(s.wake.WakeMethod(a.Name)) {
 			agents = append(agents, a.Name)
+			fallbacks[a.Name] = a.Fallback
 		}
 	}
 	now := s.cfg.Now()
@@ -121,6 +125,13 @@ func (s *Server) tellUntaken(ctx context.Context) {
 	for _, req := range reqs {
 		if !slices.ContainsFunc(roster, func(a identity.Agent) bool { return a.Name == req.From }) {
 			continue // the relay's own notices, or an asker since removed
+		}
+		if fb := fallbacks[req.To]; fb != "" {
+			done, why := s.rerouteUntaken(ctx, req, roster, fb, now)
+			if done {
+				continue
+			}
+			s.record(ctx, "reroute_skipped", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"from": req.To, "to": fb, "reason": why}))
 		}
 		online := s.onlineTeammates(noticeRoster(roster, req.From), now, req.From, req.To)
 		var note string
