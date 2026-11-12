@@ -1547,6 +1547,39 @@ func TestWakeNoteToAGuestLeavesOutTheWake(t *testing.T) {
 	}
 }
 
+// A guest's ask to a teammate that wakes itself and never takes it gets the
+// same plain note, without the wake method or how channels reach a session.
+func TestUntakenNoteToAGuestLeavesOutTheWake(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	m := testrelay.NewWithAdminLogin(t, relay.Config{Now: clock})
+	m.Store.SetClock(clock)
+	m.Server.SetWakeNamer(channelWake{})
+	g := m.JoinGuest(t, guestName, client.GuestInvite{Ask: []string{"muse"}, ForSeconds: guestFor, NoHold: true})
+	req := guestAsk(t, g, "start")
+	mu.Lock()
+	now = now.Add(time.Hour)
+	mu.Unlock()
+	m.Server.Sweep(t.Context())
+	res, err := g.Get(t.Context(), req.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RelayNote == nil || !strings.Contains(res.RelayNote.Note, "has not picked this up") {
+		t.Fatalf("note = %+v", res.RelayNote)
+	}
+	for _, leak := range []string{"channel", "Claude Code", "busy"} {
+		if strings.Contains(res.RelayNote.Note, leak) {
+			t.Errorf("guest note names %q: %s", leak, res.RelayNote.Note)
+		}
+	}
+}
+
+type channelWake struct{}
+
+func (channelWake) WakeMethod(string) string { return "channel" }
+
 type guestWake struct{}
 
 func (guestWake) WakeMethod(string) string { return "webhook" }

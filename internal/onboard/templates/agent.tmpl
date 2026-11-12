@@ -309,6 +309,7 @@ Ask {{.Name}} to paste the standing instructions into its cron job, so every run
 Add the MCP server for every project: claude mcp add --scope user agent-tincan -- tincan mcp --channel (without --scope user it exists only in the directory it was added in)
 Start the session with channels: claude --dangerously-load-development-channels server:agent-tincan (keep it open), and pre-approve mcp__agent-tincan__* in /permissions.
 Without --channel, tincan mcp wakes an idle session through its own messaging socket instead, with no channels flag (--wake-socket=false turns that off).
+Add hooks so every session checks its inbox, including sessions a channel notice never reaches (busy, started without channels, SDK or desktop): in ~/.claude/settings.json, under "hooks", set "SessionStart" and "UserPromptSubmit" each to [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}]. The hook only looks (it never claims), prints one line when teammate requests or replies wait, and never blocks the prompt.
 On the relay host, in wake.json: set {{.Name}} to method "channel". No secret fields.
 Fallback when no session is open: tincan listen --exec <script that opens a Claude Code session>, and set method "command" instead.
 {{template "setup.cfghint" .}}
