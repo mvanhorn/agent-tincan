@@ -266,6 +266,12 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      owner runs `tincan window serve` as a separate agent such as
                      claude-window (docs/adapters/claude-code.md, "Open a new
                      window for each ask"); ask that agent, not claude-code.
+                     With both joined, the owner can run (admin device)
+                     `tincan fallback set claude-code claude-window`: an ask
+                     no claude-code session claims within the wake grace then
+                     moves once to claude-window, keeping its id, and the
+                     asker is told (docs/adapters/claude-code.md, "Hand
+                     untaken asks to a window agent").
     - Codex:         codex mcp add agent-tincan -- tincan mcp
                      (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
     - Antigravity:   agy mcp add a server agent-tincan running tincan mcp with env

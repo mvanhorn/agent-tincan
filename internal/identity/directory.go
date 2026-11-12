@@ -113,6 +113,11 @@ type Agent struct {
 	// GoodAt is the owner-written line saying what the agent is good at,
 	// empty when unset. Only SetAgentGoodAt writes it; PutAgent keeps it.
 	GoodAt string `json:"good_at,omitempty"`
+	// Fallback is the owner-set agent an ask to this one moves to when it
+	// sits untaken past the notice grace, empty when unset. Only
+	// SetAgentFallback writes it; PutAgent keeps it, and removing the
+	// fallback agent clears it.
+	Fallback string `json:"fallback,omitempty"`
 	// Guest is set on a guest, a narrower tier than a teammate; see
 	// GuestTerms. Every rewrite of the row must carry it.
 	Guest GuestTerms `json:"guest,omitzero"`
@@ -171,6 +176,10 @@ type Store interface {
 	// it) and reports whether the agent exists. PutAgent keeps the line an
 	// existing agent already has.
 	SetAgentGoodAt(ctx context.Context, name, line string) (bool, error)
+	// SetAgentFallback records the agent an untaken ask to name moves to (""
+	// clears it) and reports whether name exists. PutAgent keeps it, and
+	// DeleteAgent clears it on every agent that names the removed one.
+	SetAgentFallback(ctx context.Context, name, to string) (bool, error)
 	// PutInvite stores inv and retires any earlier unredeemed code for the
 	// same name, so re-inviting a name leaves only the newest code valid.
 	// Callers pass inv.Code already digested (see hashInviteCode); the raw
@@ -590,6 +599,10 @@ func (d *Directory) Remove(ctx context.Context, remoteAddr, name string) error {
 	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
 		return err
 	}
+	// Serialize with SetFallback, so a fallback checked against name before
+	// the removal is not written after it, naming an agent that is gone.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	ok, err := d.store.DeleteAgent(ctx, name)
 	if err != nil {
 		return err
@@ -644,6 +657,49 @@ func (d *Directory) SetGoodAt(ctx context.Context, remoteAddr, name, line string
 		return "", fmt.Errorf("%s: %w", name, ErrUnknownAgent)
 	}
 	return line, nil
+}
+
+// SetFallback records the agent that an ask to name moves to when it sits
+// untaken ("" clears it). Only admin devices may set it. Both must be joined
+// teammates, not guests, and not the same agent.
+func (d *Directory) SetFallback(ctx context.Context, remoteAddr, name, to string) error {
+	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
+		return err
+	}
+	// Serialize with Join, as SetKind does.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	a, ok, err := d.store.AgentByName(ctx, name)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+	case a.Guest.Set():
+		return fmt.Errorf("%s is a guest; a guest's asks never move", name)
+	}
+	if to != "" {
+		if to == name {
+			return fmt.Errorf("%s cannot be its own fallback", name)
+		}
+		b, ok, err := d.store.AgentByName(ctx, to)
+		switch {
+		case err != nil:
+			return err
+		case !ok:
+			return fmt.Errorf("%s: %w", to, ErrUnknownAgent)
+		case b.Guest.Set():
+			return fmt.Errorf("%s is a guest and cannot be a fallback", to)
+		}
+	}
+	ok, err = d.store.SetAgentFallback(ctx, name, to)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+	}
+	return nil
 }
 
 // Agents lists joined agents.

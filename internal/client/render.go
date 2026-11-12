@@ -327,6 +327,16 @@ func (a AgentInfo) GoodAtField() string {
 	return "good_at=" + strconv.Quote(a.GoodAt)
 }
 
+// FallbackField is the agent's fallback as a roster field, fallback=<name>:
+// the teammate the relay moves an ask to when this agent leaves it untaken.
+// It is empty for an agent with none.
+func (a AgentInfo) FallbackField() string {
+	if a.Fallback == "" {
+		return ""
+	}
+	return "fallback=" + a.Fallback
+}
+
 // SelfField is the mark on the caller's own roster entry, you, shown as the
 // last field. It is empty on every other entry.
 func (a AgentInfo) SelfField() string {

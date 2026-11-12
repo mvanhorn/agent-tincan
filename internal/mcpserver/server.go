@@ -606,6 +606,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				if workingOn := a.WorkingOnField(); workingOn != "" {
 					fmt.Fprintf(&out, ", %s", workingOn)
 				}
+				if fallback := a.FallbackField(); fallback != "" {
+					fmt.Fprintf(&out, ", %s", fallback)
+				}
 				if goodAt := a.GoodAtField(); goodAt != "" {
 					fmt.Fprintf(&out, ", %s", goodAt)
 				}

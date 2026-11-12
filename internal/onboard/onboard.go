@@ -257,11 +257,30 @@ type agentData struct {
 	// gateway, so it has the Agent Tincan tools but no shell, no tincan CLI
 	// and no local tincan mcp to reload, and only tincan connect rejoins it.
 	Gateway bool
+	// Window names a window agent on the roster (tincan window serve) that
+	// a claude-code agent's untaken asks can fall back to; empty for none.
+	Window string
 }
 
 func newAgentData(name, kind, wake, relay, owner string, team []string) agentData {
 	return agentData{Name: name, Kind: kind, Wake: wake, RelayURL: relay, Owner: owner, OwnerPoss: possessive(owner), Team: team,
 		OwnConfig: freshSession[kind] || isService(kind), Service: isService(kind), Gateway: isGatewayKind(kind)}
+}
+
+// windowAgent is the window agent on roster that name's untaken asks can
+// fall back to: another claude-code agent with "window" in its name, the
+// shape tincan window serve is joined as (claude-window). Empty when there
+// is none, or when name is itself one.
+func windowAgent(roster []Member, name string, overrides map[string]string) string {
+	if strings.Contains(name, "window") {
+		return ""
+	}
+	for _, m := range roster {
+		if m.Name != name && strings.Contains(m.Name, "window") && resolveKind(m, overrides) == KindClaudeCode {
+			return m.Name
+		}
+	}
+	return ""
 }
 
 // isGatewayKind reports whether kind is a cloud agent that connects through
@@ -322,6 +341,9 @@ func Build(o Options) (Kit, error) {
 		}
 		wakes[wake] = true
 		d := newAgentData(m.Name, kind, wake, relay, owner, others(names, m.Name))
+		if kind == KindClaudeCode {
+			d.Window = windowAgent(roster, m.Name, o.KindOverrides)
+		}
 		b, err := agentBlock(d)
 		if err != nil {
 			return Kit{}, err

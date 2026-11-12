@@ -65,7 +65,8 @@ type MoveChecker interface {
 // mentioned member), carries attachments, names a conversation, has a
 // clarification exchange or was resumed, follows an answered request (its
 // body carries a teammate's reply), comes from a guest (the owner listed its
-// teammates by name), or may have been sent already.
+// teammates by name), was moved by the owner's fallback (one hop at most),
+// or may have been sent already.
 func failoverIneligible(req envelope.Request, claimed bool, fromKind, toKind string) string {
 	first, _, _ := strings.Cut(req.Body, "\n")
 	switch {
@@ -77,6 +78,8 @@ func failoverIneligible(req envelope.Request, claimed bool, fromKind, toKind str
 		return "it is a " + string(req.Kind)
 	case req.WasHeld:
 		return "it was held for the owner's approval"
+	case req.Rerouted:
+		return "the owner's fallback moved it already"
 	case req.FollowOf != "":
 		return "it is a follow-on"
 	case req.FromGuest:

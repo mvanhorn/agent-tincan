@@ -21,8 +21,9 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) PutAgent(_ context.Context, a Agent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Only SetAgentGoodAt writes the line; a rewrite keeps it.
-	a.GoodAt = m.agents[a.Name].GoodAt
+	// Only SetAgentGoodAt and SetAgentFallback write those; a rewrite keeps
+	// them.
+	a.GoodAt, a.Fallback = m.agents[a.Name].GoodAt, m.agents[a.Name].Fallback
 	m.agents[a.Name] = a
 	return nil
 }
@@ -32,6 +33,12 @@ func (m *MemoryStore) DeleteAgent(_ context.Context, name string) (bool, error) 
 	defer m.mu.Unlock()
 	_, ok := m.agents[name]
 	delete(m.agents, name)
+	for n, a := range m.agents {
+		if a.Fallback == name {
+			a.Fallback = ""
+			m.agents[n] = a
+		}
+	}
 	return ok, nil
 }
 
@@ -106,4 +113,15 @@ func (m *MemoryStore) TakeInvite(_ context.Context, code string) (Invite, bool, 
 	inv, ok := m.invites[code]
 	delete(m.invites, code)
 	return inv, ok, nil
+}
+
+func (m *MemoryStore) SetAgentFallback(_ context.Context, name, to string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[name]
+	if ok {
+		a.Fallback = to
+		m.agents[name] = a
+	}
+	return ok, nil
 }

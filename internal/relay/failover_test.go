@@ -194,6 +194,7 @@ func TestFailoverIneligible(t *testing.T) {
 		"conversation":   {req: with(func(r *envelope.Request) { r.Body = "  Conversation: abc123\nand more" })},
 		"exchange":       {req: with(func(r *envelope.Request) { r.Exchanges = []envelope.Exchange{{Question: "which?"}} })},
 		"resumed":        {req: with(func(r *envelope.Request) { r.Resumed = true })},
+		"rerouted":       {req: with(func(r *envelope.Request) { r.Rerouted = true })},
 		"maybe sent":     {req: ask, claimed: true},
 		"to dot-web":     {req: ask, to: "dot-web"},
 		"from dot-web":   {req: ask, from: "dot-web"},

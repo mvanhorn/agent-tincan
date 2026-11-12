@@ -108,6 +108,10 @@ type AgentInfo struct {
 	// shapes, Hermes and OpenClaw until the owner sets one, and from relays
 	// that predate it.
 	GoodAt string `json:"good_at,omitempty"`
+	// Fallback is the agent an ask to this one moves to when it sits
+	// untaken past the relay's notice grace, set by the owner with tincan
+	// fallback set. Empty when unset, and from relays that predate it.
+	Fallback string `json:"fallback,omitempty"`
 	// WorkingOn is the title of the agent's most recently refreshed session
 	// that shares its title (tincan mcp --share-title), and WorkingOnOthers
 	// how many other sessions of the agent share one. The text is the
@@ -888,6 +892,12 @@ func (r *Relay) ConnectGuest(ctx context.Context, name string, in GuestInvite) (
 // SetKind records a joined agent's kind; "" clears it (admin devices only).
 func (r *Relay) SetKind(ctx context.Context, name, kind string) error {
 	return r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/kind", map[string]string{"kind": kind}, nil)
+}
+
+// SetFallback records the agent an untaken ask to name moves to; "" clears
+// it. Only admin devices may set it.
+func (r *Relay) SetFallback(ctx context.Context, name, to string) error {
+	return r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/fallback", map[string]string{"fallback": to}, nil)
 }
 
 // SetGoodAt records the owner's line saying what an agent is good at; ""
