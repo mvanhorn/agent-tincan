@@ -296,6 +296,9 @@ type Pending struct {
 	// can tell one return from the last without seeing the whole queue. It
 	// is opaque, and a relay that predates it leaves it zero.
 	Rev int64 `json:"rev,omitempty"`
+	// CreatedAt is when the request was sent, so a peek can say how long
+	// the oldest has waited. A relay that predates it leaves it zero.
+	CreatedAt time.Time `json:"created_at,omitzero"`
 }
 
 // Held is a claimed ask the agent has not replied to, as the relay reports

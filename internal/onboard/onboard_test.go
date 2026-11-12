@@ -1015,6 +1015,25 @@ func TestHarkRuntimeNameIsScheduled(t *testing.T) {
 	}
 }
 
+// The claude-code setup adds the inbox hook for SessionStart and
+// UserPromptSubmit, with the exact command and a timeout, so sessions a
+// channel notice never reaches still see waiting requests.
+func TestClaudeCodeOnboardingAddsInboxHook(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Owner: "Matt", Operator: "grokbot", Roster: []Member{
+		{Name: "grokbot", Wake: "webhook", Kind: "vm-webhook"},
+		{Name: "claude-code", Wake: "channel", Kind: "claude-code"},
+	}})
+	setup := strings.Join(block(t, k, "claude-code").Setup, "\n")
+	for _, want := range []string{`"SessionStart"`, `"UserPromptSubmit"`, `"command": "tincan hook claude-code"`, `"timeout": 5`, "~/.claude/settings.json"} {
+		if !strings.Contains(setup, want) {
+			t.Errorf("claude-code setup lacks %q:\n%s", want, setup)
+		}
+	}
+	if strings.Contains(strings.Join(block(t, k, "grokbot").Setup, "\n"), "tincan hook") {
+		t.Error("a webhook agent's setup names the Claude Code hook")
+	}
+}
+
 // A Claude Code agent's onboarding says that without --channel tincan mcp
 // wakes the session through its own messaging socket, and the operator's
 // channel troubleshooting says the same. Sharing session titles is an owner
