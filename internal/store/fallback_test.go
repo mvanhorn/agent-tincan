@@ -98,7 +98,14 @@ func TestRerouteUntakenMoves(t *testing.T) {
 	if err != nil || !since.Equal(c.t) {
 		t.Fatalf("queue clock = %v, %v; want %v", since, err, c.t)
 	}
-	// One hop only: a moved ask never moves again, back or onward.
+	if !moved.Rerouted {
+		t.Fatalf("moved ask not marked rerouted: %+v", moved)
+	}
+	// One hop only: a moved ask never moves again, back or onward, and
+	// failover does not carry it on either.
+	if _, err := s.Move(ctx, req.ID, "claude-window", "gemini-web", false); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("failover after a fallback move: %v", err)
+	}
 	if _, err := s.RerouteUntaken(ctx, req.ID, "claude-window", "codex"); !errors.Is(err, ErrWrongState) {
 		t.Fatalf("second hop: %v", err)
 	}

@@ -24,7 +24,8 @@ import (
 // chain), deliver_after, before which a held-back request is not
 // delivered (Unix ms, 0 for none), and claim_lapsed, 1 once any claim on
 // the request ran out of lease (that claimant may have typed it into a
-// site, so it never moves). claim_lapsed is never cleared; when it is
+// site, so it never moves), and rerouted, 1 once the owner's fallback moved
+// it (it never moves again). claim_lapsed is never cleared; when it is
 // added, requests whose claim already lapsed get it. It is a no-op on a
 // current table.
 func (s *Store) migrateFailover() error {
@@ -32,6 +33,7 @@ func (s *Store) migrateFailover() error {
 		{"moved_from", "TEXT NOT NULL DEFAULT ''", ""},
 		{"deliver_after", "INTEGER NOT NULL DEFAULT 0", ""},
 		{"claim_lapsed", "INTEGER NOT NULL DEFAULT 0", `UPDATE requests SET claim_lapsed = 1 WHERE lease_lapsed_at IS NOT NULL OR (status = 'queued' AND claimed_at > 0)`},
+		{"rerouted", "INTEGER NOT NULL DEFAULT 0", ""},
 	} {
 		var has bool
 		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, col.name).Scan(&has); err != nil {
@@ -88,9 +90,9 @@ const requeueClaim = `status = 'queued', lease_until = 0, claimed_at = 0, claim_
 // (ClaimLapsed). It returns ErrWrongState when the request is no longer in that state for
 // from (a Deliver or Claim won), and the moved request otherwise.
 func (s *Store) Move(ctx context.Context, id, from, to string, claimed bool) (envelope.Request, error) {
-	cond, args := `status = 'queued'`, []any(nil)
+	cond, args := `rerouted = 0 AND status = 'queued'`, []any(nil)
 	if claimed {
-		cond, args = `status = 'claimed' AND lease_until > ?`, []any{s.now().UnixMilli()}
+		cond, args = `rerouted = 0 AND status = 'claimed' AND lease_until > ?`, []any{s.now().UnixMilli()}
 	}
 	return s.move(ctx, id, from, to, "", nil, cond, args...)
 }
@@ -99,7 +101,7 @@ func (s *Store) Move(ctx context.Context, id, from, to string, claimed bool) (en
 // never claimed, never resumed after a clarification, that never moved
 // before and is not held back. It is UntakenAsks' choice, checked again
 // in the write.
-const untakenMove = `status = 'queued' AND kind = 'ask' AND claimed_at = 0 AND resumed = 0 AND moved_from = '' AND deliver_after <= ?`
+const untakenMove = `status = 'queued' AND kind = 'ask' AND claimed_at = 0 AND resumed = 0 AND moved_from = '' AND rerouted = 0 AND deliver_after <= ?`
 
 // RerouteUntaken moves request id, an ask from left untaken, to the owner's
 // fallback for it, to, in one conditional write: the request must still be
@@ -110,7 +112,7 @@ const untakenMove = `status = 'queued' AND kind = 'ask' AND claimed_at = 0 AND r
 // so to gets a full grace before its own untaken note.
 func (s *Store) RerouteUntaken(ctx context.Context, id, from, to string) (envelope.Request, error) {
 	now := s.now().UnixMilli()
-	return s.move(ctx, id, from, to, `, queued_at = ?, fallback_woken = 0`, []any{now}, untakenMove, now)
+	return s.move(ctx, id, from, to, `, queued_at = ?, fallback_woken = 0, rerouted = 1`, []any{now}, untakenMove, now)
 }
 
 // move is the one write that changes a request's target, for Move and

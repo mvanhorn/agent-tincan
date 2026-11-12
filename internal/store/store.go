@@ -1666,7 +1666,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1676,7 +1676,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var created, progressAt int64
 	var note string
 	var roomPost sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID = roomPost.Int64

@@ -119,6 +119,10 @@ type Request struct {
 	// (failover). The relay sets it; a send cannot. Empty from relays that
 	// predate failover.
 	MovedFrom []string `json:"moved_from,omitempty"`
+	// Rerouted marks a request the owner's fallback moved off a target that
+	// left it untaken. Relay-only: such a request never moves again, by
+	// fallback or failover.
+	Rerouted bool `json:"-"`
 	// RoomPostID marks an ask the relay built from an @mention in a room
 	// post: the id of that post. Only the relay sets it (a send cannot);
 	// older clients ignore it and see an ordinary ask.

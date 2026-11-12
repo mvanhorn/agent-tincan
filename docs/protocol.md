@@ -729,8 +729,8 @@ at two points only:
 An ask never moves when it is to or from `dot-web` or `duet-web`, from a `council`, was ever
 held for approval, is a `notify` or `ping`, is in a group, came from a room
 mention, carries attachments, starts with a `conversation:` line, has a
-clarification exchange or was resumed,
-or was ever claimed and then requeued (it may have been typed into a site), or
+clarification exchange or was resumed, was moved by the owner's fallback (see
+Fallback), or was ever claimed and then requeued (it may have been typed into a site), or
 when its target is not a web chat agent. Such an ask is delivered as before, and
 its handback gets 409.
 
@@ -771,8 +771,9 @@ re-ask after the reset." The asker hears of it like any reply (no wait note is
 sent), the relay audits `limit_outlives` (agent, until), and a handback answers
 `{"outcome": "failed", "until": "<RFC 3339>"}`.
 
-Failover adds two `requests` columns, `moved_from` (JSON array, default `''`)
-and `deliver_after` (Unix ms, default 0). An older relay opening the database
+Failover adds the `requests` columns `moved_from` (JSON array, default `''`),
+`deliver_after` (Unix ms, default 0), `claim_lapsed` and `rerouted` (0 or 1,
+default 0). An older relay opening the database
 ignores them: it delivers a held-back ask at once and moves nothing.
 
 ### Fallback
@@ -787,7 +788,7 @@ The owner can name, per agent, a fallback agent (`tincan fallback set claude-cod
 
 Otherwise the ask stays and gets the untaken note, and the relay audits `reroute_skipped` (ids, from, to, reason). The untaken note marks the request, so it is not tried again.
 
-The move is the same single conditional update as a failover move, with more conditions: `id`, the old `to_agent`, `status = 'queued'`, `kind = 'ask'`, not expired, `claimed_at = 0`, `resumed = 0`, `claim_lapsed = 0`, `moved_from = ''` and `deliver_after` not ahead. A claim, reply or cancel that lands after the sweep read the ask leaves no row to change, and the ask is neither moved nor noted. The request keeps its id, trace, chain, hop, sender, body, attachments, urgency, guest mark and expiry; like a failover move it appends the old target to `moved_from`, drops its `project` label and deletes its pending wake note. Its `queued_at` restarts, so the new target gets a full grace before its own untaken note. The relay audits `rerouted` (ids, from, to, reason `untaken`), notes the asker once, and wakes the new target as a send does (its inbox and `Events.Queued`). It does not run failover on the moved ask.
+The move is the same single conditional update as a failover move, with more conditions: `id`, the old `to_agent`, `status = 'queued'`, `kind = 'ask'`, not expired, `claimed_at = 0`, `resumed = 0`, `claim_lapsed = 0`, `moved_from = ''` and `deliver_after` not ahead. A claim, reply or cancel that lands after the sweep read the ask leaves no row to change, and the ask is neither moved nor noted. The request keeps its id, trace, chain, hop, sender, body, attachments, urgency, guest mark and expiry; like a failover move it appends the old target to `moved_from`, drops its `project` label and deletes its pending wake note. Its `queued_at` restarts, so the new target gets a full grace before its own untaken note. The relay audits `rerouted` (ids, from, to, reason `untaken`), notes the asker once, and wakes the new target as a send does (its inbox and `Events.Queued`). The move sets a relay-only `rerouted` column on the request, and failover never moves a rerouted ask (its move statement requires `rerouted = 0`), so the ask cannot travel past the fallback that way either.
 
 It covers only agents that wake themselves (any wake method but `webhook`, `email` and `schedule`). An agent the relay wakes gets the wake follow-up and notice instead, and its asks never move this way.
 

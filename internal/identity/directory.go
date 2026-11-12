@@ -599,6 +599,10 @@ func (d *Directory) Remove(ctx context.Context, remoteAddr, name string) error {
 	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
 		return err
 	}
+	// Serialize with SetFallback, so a fallback checked against name before
+	// the removal is not written after it, naming an agent that is gone.
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	ok, err := d.store.DeleteAgent(ctx, name)
 	if err != nil {
 		return err
