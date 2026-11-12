@@ -214,3 +214,20 @@ func untakenNoteEvents(t *testing.T, st *store.Store) int {
 	}
 	return n
 }
+
+// An ask the target claimed, asked a question on, and got an answer to is
+// back in the queue with its old creation time, but the target did take
+// it: no untaken note.
+func TestUntakenNoticeNotAfterClarification(t *testing.T) {
+	h, clk, _ := untakenHarness(t)
+	ask := h.send(instinctAddr, "muse", "book a table")
+	clk.advance(2 * DefaultWakeGrace)
+	h.do(museAddr, "POST", "/v1/requests/"+ask.ID+"/claim", "", http.StatusOK, nil)
+	h.do(museAddr, "POST", "/v1/requests/"+ask.ID+"/reply", `{"status":"needs_input","body":"which restaurant?"}`, http.StatusOK, nil)
+	h.do(instinctAddr, "POST", "/v1/requests/"+ask.ID+"/answer", `{"body":"Nopa"}`, http.StatusOK, nil)
+	clk.advance(2 * DefaultWakeGrace)
+	h.srv.Sweep(context.Background())
+	if got := untakenNotices(t, h, instinctAddr); len(got) != 0 {
+		t.Fatalf("told about an ask the target took and asked about: %+v", got)
+	}
+}

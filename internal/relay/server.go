@@ -1932,6 +1932,11 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		}
 		log.Printf("agents queue stats: %v", err)
 	}
+	untaken, err := s.store.UntakenStats(ctx)
+	if err != nil {
+		// Display only: without it the untaken stuck rule stays quiet.
+		log.Printf("agents untaken stats: %v", err)
+	}
 	now := s.cfg.Now()
 	// Read the waker before taking s.mu, which it need not wait on.
 	wakes := map[string]store.Wake{}
@@ -1994,7 +1999,7 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		}
 		webFacts[a.Name].Apply(a, &info.Target, now)
 		info.WorkingOn, info.WorkingOnOthers = s.currentWorkingOn(a.Name, now)
-		applyStatus(&info, computeStatus(statusFacts{online: info.Online, wake: info.Wake, stat: stat, target: info.Target, hostBusy: s.hostBusy(a.Name, now), untakenAfter: s.noticeGrace(false)}, now, quietUntil))
+		applyStatus(&info, computeStatus(statusFacts{online: info.Online, wake: info.Wake, stat: stat, target: info.Target, hostBusy: s.hostBusy(a.Name, now), untaken: untaken[a.Name], untakenAfter: s.noticeGrace(false)}, now, quietUntil))
 		// The same rule for a guest named as the asker: still busy, for no
 		// one a teammate may see.
 		if !admin && guestAsker(agents, info.BusyFor) {

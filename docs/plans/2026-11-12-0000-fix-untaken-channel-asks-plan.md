@@ -19,10 +19,10 @@ Three gaps let this happen:
 
 - A new relay note kind, `untaken`, beside `wake`, `stale_claim` and `expired`. It goes through the existing `noteAndTell` path, so it is stored once per request in `relay_notes`, shown as `relay_note` on the asker's get, and sent as a notify from `relay`.
 - The check runs from the relay's existing sweep (`Server.Sweep`, every `SweepEvery`), not a new goroutine. It reads every candidate in one query.
-- It covers agents whose wake method is not relay-woken and not `schedule` (schedule agents already have overdue checks). A request is a candidate when it is a live queued ask, never claimed (no lapsed lease, which already has a stale-claim note), from a joined agent other than the target, with no `wake` or `untaken` note yet, and has waited past `noticeGrace(urgent)` since the later of its creation (or approval, for a held ask) and its `deliver_after`.
+- It covers agents whose wake method is not relay-woken and not `schedule` (schedule agents already have overdue checks). A request is a candidate when it is a live queued ask the target never claimed (so not one requeued after a lapsed claim, which has a stale-claim note, nor one resumed after a clarification), from a joined agent other than the target, with no `wake` or `untaken` note yet, and has waited past `noticeGrace(urgent)` since the later of when it last entered the queue (`queued_at`: sent or approved) and its `deliver_after`.
 - The note says plainly that the agent has not taken the request, that it is still queued, that nothing is working on it yet, and that showing busy or online does not mean it is working on this one. For `channel`, one more sentence says Claude Code sessions only see it while idle and started with channels. Then the usual `suggest` teammate line.
 - A guest asker gets the same generic text `TellAskers` gives a guest, with no wake details.
-- Status: for the same agent-side wakes, an agent with no live claim whose oldest queued request has waited past the notice grace is `stuck` with reason `N queued, untaken 25m`, ahead of busy and idle. `statusFacts` carries the grace. The 1h `staleQueue` rule stays for everyone else, and the `quietUntil` guard still applies. Clients print `status_reason` as given, so no client change is needed for the new reason.
+- Status: for the same agent-side wakes, an agent with no live claim whose oldest never-claimed queued ask has waited past the notice grace, timed the same way as the notice, is `stuck` with reason `N queued, untaken 25m`, ahead of busy and idle. `statusFacts` carries the grace and a per-agent untaken count and oldest wait (`Store.UntakenStats`). The 1h `staleQueue` rule stays for everyone else, and the `quietUntil` guard still applies. Clients print `status_reason` as given, so no client change is needed for the new reason.
 - Client: a new `tincan hook claude-code` command for Claude Code's `SessionStart` and `UserPromptSubmit` hooks. It peeks once (no hold, never claims, the same `Peek` the channel loop uses) under a 3s timeout, and prints one line when teammate requests or replies wait. It always exits 0; errors go to stderr only.
 - To print the oldest age, `envelope.Pending` gains an optional `created_at`. Older relays leave it out and the hook drops the age.
 
@@ -45,10 +45,10 @@ Three gaps let this happen:
 
 - A channel agent with a queued ask past grace: the asker gets one notice, and a second sweep sends none.
 - Before grace: no notice. An urgent ask uses the urgent grace.
-- A held ask, a self-ask, and an ask that already has a `wake` note: no notice.
+- A held ask, a self-ask, an ask resumed after a clarification, and an ask that already has a `wake` note: no notice. An approved ask waits a full grace from its approval.
 - A relay-woken (webhook) or schedule agent: no untaken notice.
 - A guest asker: generic text, no wake method or channel details.
-- Status: a channel agent that is host-busy with a queued ask past grace flips to `stuck` with `1 queued, untaken 15m`; inside grace it stays busy; a live claim keeps it busy; quietUntil still hides it.
+- Status: a channel agent that is host-busy with a queued ask past grace flips to `stuck` with `1 queued, untaken 15m`; inside grace it stays busy; a live claim keeps it busy; an ask approved after a long hold is not stuck at once; quietUntil still hides it.
 - Hook: prints nothing when nothing waits; prints the line with the count and oldest age when requests wait; exits 0 with output on stderr only when the relay errors or is unreachable.
 
 ## Risks

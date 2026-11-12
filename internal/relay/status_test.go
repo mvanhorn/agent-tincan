@@ -57,17 +57,20 @@ func TestComputeStatus(t *testing.T) {
 		{"quiet after a restart", statusFacts{online: true, wake: "wait", stat: store.QueueStat{Queued: 1, Lapsed: 1}}, now.Add(time.Minute),
 			agentStatus{status: client.StatusIdle}},
 		// A host-reported busy does not hide a queue nothing has taken.
-		{"host busy with an untaken queue", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 3, OldestQueued: now.Add(-25 * time.Minute)}}, settled,
+		{"host busy with an untaken queue", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 3, OldestQueued: now.Add(-25 * time.Minute)}, untaken: store.UntakenStat{Count: 3, Oldest: now.Add(-25 * time.Minute)}}, settled,
 			agentStatus{status: client.StatusStuck, reason: "3 queued, untaken 25m"}},
-		{"idle with an untaken queue", statusFacts{online: true, wake: "wait", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-15 * time.Minute)}}, settled,
+		{"idle with an untaken queue", statusFacts{online: true, wake: "wait", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-15 * time.Minute)}, untaken: store.UntakenStat{Count: 1, Oldest: now.Add(-15 * time.Minute)}}, settled,
 			agentStatus{status: client.StatusStuck, reason: "1 queued, untaken 15m"}},
-		{"host busy inside the grace", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-5 * time.Minute)}}, settled,
+		{"host busy inside the grace", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-5 * time.Minute)}, untaken: store.UntakenStat{Count: 1, Oldest: now.Add(-5 * time.Minute)}}, settled,
 			agentStatus{status: client.StatusBusy}},
-		{"a live claim is moving", statusFacts{online: true, wake: "channel", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute), Claimed: 1, OldestClaim: now, ClaimAsker: "codex"}}, settled,
+		// Approved or answered a minute ago: the queue is old, the wait is not.
+		{"recently approved", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}, untaken: store.UntakenStat{Count: 1, Oldest: now.Add(-time.Minute)}}, settled,
+			agentStatus{status: client.StatusBusy}},
+		{"a live claim is moving", statusFacts{online: true, wake: "channel", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute), Claimed: 1, OldestClaim: now, ClaimAsker: "codex"}, untaken: store.UntakenStat{Count: 1, Oldest: now.Add(-25 * time.Minute)}}, settled,
 			agentStatus{status: client.StatusBusy, busyFor: "codex", busySince: now}},
-		{"the relay wakes it, no untaken rule", statusFacts{online: true, wake: "webhook", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}}, settled,
+		{"the relay wakes it, no untaken rule", statusFacts{online: true, wake: "webhook", untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}, untaken: store.UntakenStat{Count: 1, Oldest: now.Add(-25 * time.Minute)}}, settled,
 			agentStatus{status: client.StatusIdle}},
-		{"untaken stays quiet after a restart", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}}, now.Add(time.Minute),
+		{"untaken stays quiet after a restart", statusFacts{online: true, wake: "channel", hostBusy: true, untakenAfter: DefaultWakeGrace, stat: store.QueueStat{Queued: 1, OldestQueued: now.Add(-25 * time.Minute)}, untaken: store.UntakenStat{Count: 1, Oldest: now.Add(-25 * time.Minute)}}, now.Add(time.Minute),
 			agentStatus{status: client.StatusBusy}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -364,5 +367,21 @@ func TestRosterUntakenQueueBeatsHostBusy(t *testing.T) {
 	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
 	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusStuck || a.StatusReason != "1 queued, untaken 11m" {
 		t.Fatalf("past the grace: status %q (%q), want stuck (1 queued, untaken 11m)", a.Status, a.StatusReason)
+	}
+}
+
+// An ask held for approval longer than the grace is not stuck the moment
+// it is approved: the wait counts from the approval.
+func TestRosterApprovedAskNotUntakenAtOnce(t *testing.T) {
+	h, clk, fw := statusHarness(t)
+	fw.methods["muse"] = "channel"
+	h.srv.SetPreparer(holdingPreparer{})
+	held := h.send(instinctAddr, "muse", "x")
+	clk.advance(2 * DefaultWakeGrace)
+	h.do(macAddr, "POST", "/v1/admin/requests/"+held.ID+"/approve", "", http.StatusOK, nil)
+	h.do(museAddr, "GET", "/v1/poll?hold=0&peek=1", "", http.StatusOK, nil)
+	hostStatus(h, museAddr, "s1", `{"busy":true}`, http.StatusNoContent)
+	if a := agentInfo(t, h, macAddr, "muse"); a.Status != client.StatusBusy {
+		t.Fatalf("just approved: status %q (%q), want busy", a.Status, a.StatusReason)
 	}
 }

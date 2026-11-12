@@ -224,32 +224,72 @@ func (s *Store) UnnoticedAsks(ctx context.Context, agent string) ([]envelope.Req
 	return scanRequests(rows)
 }
 
-// UntakenAsks returns the live queued asks to agents, never claimed, that
-// carry no wake or untaken note yet and have waited since before cutoff
-// (urgentCutoff for an urgent ask), oldest first. An ask waits from the
-// later of its creation, or its approval when it was held, and its
-// deliver_after. Self-asks are left out.
+// untakenSince is when a queued request started waiting for its target:
+// the later of when it last entered the queue (sent, approved, or resumed
+// with an answer; created_at for rows from before queued_at) and when it
+// became deliverable.
+const untakenSince = `MAX(deliver_after, CASE WHEN queued_at > 0 THEN queued_at ELSE created_at END)`
+
+// untakenWhere picks live queued asks that the target never took: no claim
+// ever (so no lapsed claim and no clarification round) and not a self-ask.
+const untakenWhere = `status = 'queued' AND kind = 'ask' AND expires_at > ? AND claimed_at = 0 AND resumed = 0 AND from_agent != to_agent`
+
+// UntakenAsks returns the live queued asks to agents that their target
+// never took, carry no wake or untaken note yet, and have waited (see
+// untakenSince) since before cutoff, or urgentCutoff for an urgent ask,
+// oldest first.
 func (s *Store) UntakenAsks(ctx context.Context, agents []string, cutoff, urgentCutoff time.Time) ([]envelope.Request, error) {
 	if len(agents) == 0 {
 		return nil, nil
 	}
-	args := []any{string(envelope.StatusQueued), string(envelope.KindAsk), s.now().UnixMilli()}
+	args := []any{s.now().UnixMilli()}
 	for _, a := range agents {
 		args = append(args, a)
 	}
 	args = append(args, NoteWake, NoteUntaken, urgentCutoff.UnixMilli(), cutoff.UnixMilli())
 	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+` FROM requests
-		WHERE status = ? AND kind = ? AND expires_at > ? AND claim_lapsed = 0 AND from_agent != to_agent
-		AND to_agent IN (?`+strings.Repeat(", ?", len(agents)-1)+`)
+		WHERE `+untakenWhere+` AND to_agent IN (?`+strings.Repeat(", ?", len(agents)-1)+`)
 		AND id NOT IN (SELECT request_id FROM relay_notes WHERE kind IN (?, ?))
-		AND MAX(deliver_after, CASE WHEN was_held = 1 THEN COALESCE((SELECT MAX(a.at) FROM audit a WHERE a.request_id = requests.id AND a.event = 'approved'), created_at) ELSE created_at END)
-			<= CASE WHEN urgent = 1 THEN ? ELSE ? END
+		AND `+untakenSince+` <= CASE WHEN urgent = 1 THEN ? ELSE ? END
 		ORDER BY created_at, rowid`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanRequests(rows)
+}
+
+// UntakenStat is one agent's asks that it never took: how many, and when
+// the longest-waiting one started waiting.
+type UntakenStat struct {
+	Count  int
+	Oldest time.Time
+}
+
+// UntakenStats returns, per agent, its deliverable live queued asks that it
+// never took, as UntakenAsks picks them, with no note filter. The roster's
+// stuck rule reads it, so an ask approved or answered a minute ago does not
+// count as waiting since it was first sent.
+func (s *Store) UntakenStats(ctx context.Context) (map[string]UntakenStat, error) {
+	now := s.now().UnixMilli()
+	rows, err := s.db.QueryContext(ctx, `SELECT to_agent, COUNT(*), MIN(`+untakenSince+`) FROM requests
+		WHERE `+untakenWhere+` AND deliver_after <= ? GROUP BY to_agent`, now, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]UntakenStat{}
+	for rows.Next() {
+		var agent string
+		var st UntakenStat
+		var oldest int64
+		if err := rows.Scan(&agent, &st.Count, &oldest); err != nil {
+			return nil, err
+		}
+		st.Oldest = time.UnixMilli(oldest)
+		out[agent] = st
+	}
+	return out, rows.Err()
 }
 
 // OldestQueued returns agent's oldest live queued request of any kind, and
