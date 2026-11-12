@@ -157,6 +157,32 @@ How it works:
 
 The window runs Claude Code with your own settings and permission mode; tincan never adds `--dangerously-skip-permissions`. If your launcher starts Claude with permissions skipped, an ask to `claude-window` can run anything on this Mac without a prompt, so hold asks to it with the [owner approval gate](../../README.md#owner-approval) if any teammate reads untrusted content. cmux's `automation.socketControlMode` must let a process started outside cmux connect (`allowAll` or `password`; agentmail-to-claude-code's `setup_cmux.py` sets it), and cmux must be restarted after changing it.
 
+## Hand untaken asks to a window agent
+
+`claude-code` and `claude-window` stay separate agents: asks to `claude-code` go to the sessions you already have open, and asks to `claude-window` each open a new window. A channel notice reaches only an idle session started with channels, so an ask to `claude-code` can sit while every session is busy or none listens. To have the relay hand such an ask to `claude-window`, run once from an admin device (or on the relay host):
+
+```bash
+tincan fallback set claude-code claude-window
+```
+
+When an ask to `claude-code` is still queued and never claimed after the relay's wake grace (`--wake-grace`, default 10 minutes; `--urgent-wake-grace`, default 2 minutes, for an urgent ask), the relay's sweep moves it to `claude-window`, which opens a window for it. The ask keeps its id, trace and chain, so the window's reply goes back to the original asker on the same request. The asker gets one note:
+
+```text
+claude-code had not taken this request in 12m, so the relay moved it to claude-window, the teammate the owner set to take what claude-code leaves untaken. Nothing had worked on it before the move. It keeps its id, and claude-window's reply comes back on this request. Do not send it again.
+```
+
+The rules:
+
+- It moves only an ask the untaken note would cover: a live queued ask that `claude-code` never claimed, not held for approval, past the grace. An ask a session claimed, even once, stays.
+- It moves at most once. An ask that `claude-window` also leaves untaken stays there, and the asker gets the untaken note for `claude-window`. Two agents that name each other do not pass an ask back and forth.
+- `claude-window` must be online (its `tincan window serve` polling). If it is not, or the move would be held by the [owner approval gate](../../README.md#owner-approval), or a guest's ask may not reach it, the ask stays with `claude-code` and the asker gets the plain untaken note. The relay audits `reroute_skipped` with the reason.
+- A guest's ask moves only when the guest was invited with `--no-hold` and its list names `claude-window`. (`tincan window` fails a request a guest's ask led to anyway.)
+- Grouped asks and room mentions stay with their target.
+- The project label is dropped, as `tincan window` does not route on it.
+- It covers agents that wake themselves (channel, wait, command, none). An agent the relay wakes by webhook or email gets the wake notice instead, and its asks never move this way.
+
+`tincan agents` and `list_agents` show `fallback=claude-window` on `claude-code`. `tincan fallback clear claude-code` turns it off. Removing `claude-window` clears it too. Each move is audited as `rerouted` (ids, from, to, never the text).
+
 ## Fallback: open a session in cmux
 
 `tincan window` (above) is the built-in way to open windows. If you want a new window only to drain the inbox when no session is open to wake, or socket wake is off, run a listener that opens a new Claude Code session in cmux whenever requests are waiting. The script, `examples/claude-code/cmux-wake.sh`, lives in the agent-tincan repo (it is not in the release downloads); copy it to `~/bin` and `chmod +x` it first:
