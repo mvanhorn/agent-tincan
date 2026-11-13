@@ -42,11 +42,11 @@ func (l *logWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var b strings.Builder
-	prefix := ""
+	prefix, havePrefix := "", false
 	for rest := string(p); rest != ""; {
 		if l.lineStart {
-			if prefix == "" {
-				prefix = LogPrefix(l.now())
+			if !havePrefix {
+				prefix, havePrefix = LogPrefix(l.now()), true
 			}
 			b.WriteString(prefix)
 		}
