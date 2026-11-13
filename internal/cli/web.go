@@ -106,6 +106,7 @@ func webServeCmd() *cobra.Command {
 			"Normally started by the service definition tincan web install writes.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			src, err := webSiteFlag(site)
 			if err != nil {
 				return err

@@ -1235,6 +1235,8 @@ type NativeHost struct {
 	// Log receives one line per reload decision (discarded when nil;
 	// stdout belongs to Chrome).
 	Log io.Writer
+	// Now is the clock log lines are stamped with (time.Now when nil).
+	Now func() time.Time
 	// RecheckInterval is how often, while the extension stays connected,
 	// the host compares its last hello with the files on disk again
 	// (DefaultRecheckInterval when zero), so an update is picked up

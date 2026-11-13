@@ -62,6 +62,7 @@ project (tincan ask --project) reaches this window before the agent's other
 windows. The label is the git repository's directory name; --project sets it
 and --no-project sends none.`,
 		RunE: func(cmd *cobra.Command, _ []string) (err error) {
+			defer useServiceLog()()
 			// Record the launch before anything can fail, so tincan doctor
 			// can tell an app that never starts tincan from one that does.
 			rec := mcpserver.StartRecorder(mcpserver.LaunchDir(client.ConfigPath()), Version, channel)

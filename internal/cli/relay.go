@@ -130,6 +130,7 @@ then upgrade the relay itself with tincan relay-upgrade: it installs the dist
 build over this binary (which the relay user must own) and re-executes, or
 with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			if err := f.validate(); err != nil {
 				return err
 			}

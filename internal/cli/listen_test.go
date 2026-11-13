@@ -551,3 +551,11 @@ func TestRelayRefusesOnWindows(t *testing.T) {
 		}
 	}
 }
+
+// listen's own log lines carry the service stamp, like every service.
+func TestListenLogLinesAreStamped(t *testing.T) {
+	t.Setenv("JOURNAL_STREAM", "")
+	log := fastListen(t, time.Minute, time.Minute, time.Second)
+	listenLogf("command failed: %v", "exit status 1")
+	assertStampedLines(t, log.String(), "tincan listen: command failed: exit status 1")
+}

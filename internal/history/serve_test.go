@@ -1249,12 +1249,26 @@ func TestServeLiveReadOutOfTimeSaysTookTooLong(t *testing.T) {
 // clock's local time, to the millisecond, so it lines up with the relay's
 // UTC trace.
 func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
+	t.Setenv("JOURNAL_STREAM", "")
 	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
 	var log bytes.Buffer
 	svc := &Service{Log: &log, Now: func() time.Time { return at }}
 	svc.logf("request %s: declined", "r1")
 	if got, want := log.String(), "2026-11-08T21:55:07.137-08:00 tincan history: request r1: declined\n"; got != want {
 		t.Fatalf("history log = %q, want %q", got, want)
+	}
+	// A message that runs over several lines is stamped on each, so every
+	// line of the log still sorts into the timeline.
+	log.Reset()
+	svc.logf("codex failed: %s", "exit 1\nstderr: boom")
+	if got, want := log.String(), "2026-11-08T21:55:07.137-08:00 tincan history: codex failed: exit 1\n2026-11-08T21:55:07.137-08:00 stderr: boom\n"; got != want {
+		t.Fatalf("history log = %q, want %q", got, want)
+	}
+	log.Reset()
+	host := &NativeHost{Log: &log, Now: func() time.Time { return at }}
+	host.logf("extension %s is not unpacked; it updates through its store", "1.2.3")
+	if got, want := log.String(), "2026-11-08T21:55:07.137-08:00 tincan native-host: extension 1.2.3 is not unpacked; it updates through its store\n"; got != want {
+		t.Fatalf("native host log = %q, want %q", got, want)
 	}
 	log.Reset()
 	w := &WebAgent{Name: "chatgpt-web", Log: &log, clock: &fakeClock{t: at}}

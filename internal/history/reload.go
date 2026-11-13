@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"sort"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 // Hello is what the extension sends when it connects to the native host,
@@ -102,9 +104,14 @@ type reloadState struct {
 }
 
 func (h *NativeHost) logf(format string, args ...any) {
-	if h.Log != nil {
-		_, _ = fmt.Fprintf(h.Log, "tincan native-host: "+format+"\n", args...)
+	if h.Log == nil {
+		return
 	}
+	now := h.Now
+	if now == nil {
+		now = time.Now
+	}
+	_, _ = io.WriteString(h.Log, client.LogLines(now(), fmt.Sprintf("tincan native-host: "+format, args...)))
 }
 
 // recheck compares the last hello with the files on disk every

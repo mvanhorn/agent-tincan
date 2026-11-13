@@ -236,8 +236,7 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	stamp := s.now().Format(client.LogStamp)
-	_, _ = fmt.Fprintf(w, stamp+" tincan notes: "+format+"\n", args...)
+	_, _ = io.WriteString(w, client.LogLines(s.now(), fmt.Sprintf("tincan notes: "+format, args...)))
 }
 
 // Run retries everything spooled once in the background, then keeps

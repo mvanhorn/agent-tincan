@@ -305,6 +305,7 @@ func historyServeCmd() *cobra.Command {
 			"Normally started by the service definition tincan history install writes. See docs/adapters/history.md.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			if configPath == "" {
 				configPath = defaultHistoryConfig()
 			}
@@ -382,7 +383,7 @@ func historyServeCmd() *cobra.Command {
 			}
 			cmd.PrintErrf("%stincan history: serving as %s on %s (%s)\n", serviceStamp(), me.Name, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
 			w, werr := history.LoadWindow(windowPath)
-			cmd.PrintErrf("tincan history: %s\n", history.DescribeWindow(windowPath, w, werr))
+			cmd.PrintErrf("%stincan history: %s\n", serviceStamp(), history.DescribeWindow(windowPath, w, werr))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrf("%stincan history: stopped\n", serviceStamp())
@@ -416,6 +417,7 @@ func historyNativeHostCmd() *cobra.Command {
 		// belongs to the native messaging protocol.
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			origin := ""
