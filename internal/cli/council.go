@@ -404,10 +404,10 @@ func councilServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cmd.PrintErrf("tincan council: serving as %s on %s, folder %s\n", me.Name, cfg.Relay, data)
+			cmd.PrintErrf("%stincan council: serving as %s on %s, folder %s\n", serviceStamp(), me.Name, cfg.Relay, data)
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
-				cmd.PrintErrln("tincan council: stopped")
+				cmd.PrintErrf("%stincan council: stopped\n", serviceStamp())
 				return nil
 			}
 			return err

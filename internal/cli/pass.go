@@ -234,13 +234,13 @@ func passServeCmd() *cobra.Command {
 				WindowFile:       windowPath,
 				Log:              cmd.ErrOrStderr(),
 			}
-			cmd.PrintErrf("tincan pass: serving as %s on %s (%s; %s)\n", me.Name, cfg.Relay,
+			cmd.PrintErrf("%stincan pass: serving as %s on %s (%s; %s)\n", serviceStamp(), me.Name, cfg.Relay,
 				history.DescribeAllowlist(allowPath, allowed), history.DescribeAllowlist(historyAllowPath, historyAllowed))
 			w, werr := history.LoadWindow(windowPath)
 			cmd.PrintErrf("tincan pass: %s\n", history.DescribeWindow(windowPath, w, werr))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
-				cmd.PrintErrln("tincan pass: stopped")
+				cmd.PrintErrf("%stincan pass: stopped\n", serviceStamp())
 				return nil
 			}
 			return err

@@ -378,3 +378,15 @@ func TestPassBadWindowFileFailsClosed(t *testing.T) {
 		t.Fatalf("reads %d, queued %d", r.reader.reads, r.mesh.Server.QueuedCount("chatgpt-web"))
 	}
 }
+
+// Every log line starts with the service clock's local time, to the
+// millisecond, so it lines up with the relay's UTC trace.
+func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
+	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
+	var log strings.Builder
+	svc := &Service{Log: &log, Now: func() time.Time { return at }}
+	svc.logf("request %s: declined", "r1")
+	if got, want := log.String(), "2026-11-08T21:55:07.137-08:00 tincan pass: request r1: declined\n"; got != want {
+		t.Fatalf("log = %q, want %q", got, want)
+	}
+}

@@ -165,14 +165,14 @@ func notesServeCmd() *cobra.Command {
 				cmd.PrintErrf("tincan notes: warning: the relay stores kind %q for this agent, not \"notes\", so adds wait only 24 hours for this Mac; fix it with: tincan kind notes notes\n", me.Kind)
 			}
 			if backend == nil {
-				cmd.PrintErrf("tincan notes: serving as %s on %s, library %s\n", me.Name, cfg.Relay, libraryRoot)
+				cmd.PrintErrf("%stincan notes: serving as %s on %s, library %s\n", serviceStamp(), me.Name, cfg.Relay, libraryRoot)
 			} else {
-				cmd.PrintErrf("tincan notes: serving as %s on %s, notes in %s\n", me.Name, cfg.Relay, backend.Name())
+				cmd.PrintErrf("%stincan notes: serving as %s on %s, notes in %s\n", serviceStamp(), me.Name, cfg.Relay, backend.Name())
 				warnOpenAllowlists(cmd, readAllow, addAllow)
 			}
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
-				cmd.PrintErrln("tincan notes: stopped")
+				cmd.PrintErrf("%stincan notes: stopped\n", serviceStamp())
 				return nil
 			}
 			return err

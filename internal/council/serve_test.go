@@ -597,3 +597,18 @@ func TestServiceStorageDownSendsNoVerdict(t *testing.T) {
 		t.Fatalf("request status %s, want still claimed (no verdict sent)", st)
 	}
 }
+
+// Every log line starts with the service clock's local time, to the
+// millisecond, so it lines up with the relay's UTC trace.
+func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
+	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
+	var log bytes.Buffer
+	svc, err := NewService(ServiceConfig{Relay: &client.Relay{}, Store: &Store{}, ReportDir: t.TempDir(), Log: &log, Now: func() time.Time { return at }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.logf("request %s: queued", "r1")
+	if got, want := log.String(), "2026-11-08T21:55:07.137-08:00 tincan council: request r1: queued\n"; got != want {
+		t.Fatalf("log = %q, want %q", got, want)
+	}
+}

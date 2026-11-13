@@ -236,14 +236,9 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	stamp := s.now().Format(logStamp)
+	stamp := s.now().Format(client.LogStamp)
 	_, _ = fmt.Fprintf(w, stamp+" tincan notes: "+format+"\n", args...)
 }
-
-// logStamp is the local time at the start of every log line, to the
-// millisecond, with its zone offset so it lines up with the relay's UTC
-// trace.
-const logStamp = "2006-01-02T15:04:05.000Z07:00"
 
 // Run retries everything spooled once in the background, then keeps
 // retrying: decided replies as their backoff runs out, undecided adds
@@ -462,7 +457,7 @@ func (s *Service) failedAttempt(id string, err error, hold bool) {
 	p.due = now.Add(wait)
 	failures, due := p.failures, p.due
 	s.mu.Unlock()
-	s.logf("request %s: reply kept after %d failed attempts, next retry at %s (in %s)", id, failures, due.Format(logStamp), wait)
+	s.logf("request %s: reply kept after %d failed attempts, next retry at %s (in %s)", id, failures, due.Format(client.LogStamp), wait)
 }
 
 func (s *Service) forgetPending(id string) {

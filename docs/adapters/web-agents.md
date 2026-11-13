@@ -126,7 +126,7 @@ The ChatGPT and Claude send operations need extension version 0.3.0 or later (0.
 - "... The message was sent to ChatGPT (conversation X), but the reply could not be read": the send worked but the detail read failed for good (logged out, API changed). The answer is in the conversation on the site.
 - "No ChatGPT conversation with id X was found": the id is wrong or the conversation was deleted. Use `new chat`.
 - Background tabs: Chrome throttles hidden tabs. Nothing waits on the page after the send; the answer is read through the site's API.
-- No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.web.chatgpt`) and read its log. A "403" there means the config is not joined.
+- No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.web.chatgpt`) and read its log. A "403" there means the config is not joined. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so the two line up.
 
 ### Selectors
 

@@ -380,12 +380,12 @@ func historyServeCmd() *cobra.Command {
 			if me.Name != "history" {
 				return wrongHistoryAgent("the relay knows the machine using "+configPath+" as", me.Name)
 			}
-			cmd.PrintErrf("tincan history: serving as %s on %s (%s)\n", me.Name, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
+			cmd.PrintErrf("%stincan history: serving as %s on %s (%s)\n", serviceStamp(), me.Name, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
 			w, werr := history.LoadWindow(windowPath)
 			cmd.PrintErrf("tincan history: %s\n", history.DescribeWindow(windowPath, w, werr))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
-				cmd.PrintErrln("tincan history: stopped")
+				cmd.PrintErrf("%stincan history: stopped\n", serviceStamp())
 				return nil
 			}
 			return err

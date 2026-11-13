@@ -229,6 +229,11 @@ func UTCClock(t, now time.Time) string {
 	return t.Format("Jan 2 15:04 UTC")
 }
 
+// LogStamp is the layout of the local time that starts every line a
+// service logs, to the millisecond, with its zone offset so it lines up
+// with the relay's UTC trace.
+const LogStamp = "2006-01-02T15:04:05.000Z07:00"
+
 // LimitNote is "out of messages until 14:00" (on the local clock) for a
 // web agent whose site's usage limit has not reset by now, and empty
 // otherwise.
