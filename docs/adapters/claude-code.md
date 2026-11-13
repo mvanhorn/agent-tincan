@@ -134,7 +134,7 @@ Give it a good-at line so teammates know when to use it, for example so `cc <tas
 tincan good-at claude-window "cc <task>: send <task> as the ask; opens a new Claude Code window on the Mac and types it in"
 ```
 
-`install` writes the LaunchAgent `com.agenttincan.window`, which runs `tincan window serve` at login and keeps it running; `--start` loads it now. It logs to `~/Library/Logs/tincan-window.log`. Then from any teammate:
+`install` writes the LaunchAgent `com.agenttincan.window`, which runs `tincan window serve` at login and keeps it running; `--start` loads it now. It logs to `~/Library/Logs/tincan-window.log`, each line starting with its local time. Then from any teammate:
 
 ```bash
 tincan ask claude-window "summarize what changed on main this week"

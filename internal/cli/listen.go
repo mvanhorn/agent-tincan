@@ -50,6 +50,7 @@ as usual, and notifies and replies stay for the agent's inbox. --worktree runs
 each process in its own new git worktree of a repository, removed afterwards
 unless the process left changes or commits in it.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			if err := needsShell(runtime.GOOS, "tincan listen"); err != nil {
 				return err
 			}
@@ -263,5 +264,5 @@ func nudge(ctx context.Context, r *client.Relay, execCmd string, n int, once boo
 }
 
 func listenLogf(format string, args ...any) {
-	_, _ = fmt.Fprintf(listenLog, "tincan listen: "+format+"\n", args...)
+	_, _ = io.WriteString(listenLog, client.LogLines(time.Now(), fmt.Sprintf("tincan listen: "+format, args...)))
 }

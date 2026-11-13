@@ -50,7 +50,7 @@ func pingCmd() *cobra.Command {
 						return err
 					}
 				} else if result.Reply != nil {
-					cmd.Printf("%s: %s in %s\n", args[0], result.Reply.Body, elapsed.Round(time.Millisecond))
+					cmd.Print(forTerminal(cmd.OutOrStdout(), fmt.Sprintf("%s: %s in %s\n", args[0], result.Reply.Body, elapsed.Round(time.Millisecond))))
 				}
 				if result.Status != envelope.StatusAnswered {
 					return fmt.Errorf("ping %s (request %s) ended: %s", args[0], req.ID, result.Status)

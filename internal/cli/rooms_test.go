@@ -71,3 +71,34 @@ func TestRoomAddWarnsAndRefuses(t *testing.T) {
 		t.Fatalf("add council: %v", err)
 	}
 }
+
+// tincan room read shows posts as data on a terminal and exactly anywhere
+// else.
+func TestRoomReadIsTerminalSafeOnlyOnATerminal(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	admin := m.URL("admin")
+	if _, err := run(t, roomCmd(), "create", "launch", "--relay", admin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, roomCmd(), "add", "launch", "grokbot", "--relay", admin); err != nil {
+		t.Fatal(err)
+	}
+	const post = "plan \u202eis\x1b[2J up"
+	if _, err := run(t, roomCmd(), "post", "launch", post); err != nil {
+		t.Fatal(err)
+	}
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, err := run(t, roomCmd(), "read", "launch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "room read on a terminal", out)
+	if !strings.Contains(out, "plan  is [2J up") {
+		t.Fatalf("room read on a terminal = %q", out)
+	}
+	fakeTerminal(t, noWriterIsTerminal)
+	if out, err = run(t, roomCmd(), "read", "launch"); err != nil || !strings.Contains(out, post) {
+		t.Fatalf("room read to a pipe = %q, %v", out, err)
+	}
+}

@@ -149,7 +149,7 @@ func roomReadCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cmd.Print(client.FormatRoomThread(th, time.Now()))
+			cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatRoomThread(th, time.Now())))
 			return nil
 		},
 	}

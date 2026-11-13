@@ -173,3 +173,37 @@ func TestRelayWatchInstall(t *testing.T) {
 		t.Fatalf("install output %q should name %s and how to start it", out.String(), path)
 	}
 }
+
+// relay-watch's start, alert and stop lines each carry one service stamp.
+func TestRelayWatchLogLinesAreStampedOnce(t *testing.T) {
+	skipOnWindows(t, skipNoShell)
+	noNetmap(t)
+	t.Setenv("JOURNAL_STREAM", "")
+	cfg := filepath.Join(t.TempDir(), "hermes.json")
+	if err := client.SaveConfigTo(cfg, client.Config{Relay: goneURL(t), Agent: "hermes", RelayKey: "k-relay"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	root := Root()
+	var stderr syncBuffer
+	root.SetArgs([]string{"relay-watch", "--config", cfg, "--alert-cmd", "true", "--every", "50ms", "--after", "1ms"})
+	root.SetOut(new(strings.Builder))
+	root.SetErr(&stderr)
+	if err := root.ExecuteContext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	var want []string
+	for _, l := range lines {
+		_, rest, _ := strings.Cut(l, " ")
+		want = append(want, rest)
+	}
+	assertStampedLines(t, stderr.String(), want...)
+	all := strings.Join(want, "\n")
+	for _, w := range []string{"tincan relay-watch: watching", "relay-watch: sent down alert", "tincan relay-watch: stopped"} {
+		if !strings.Contains(all, w) {
+			t.Fatalf("relay-watch log lacks %q:\n%s", w, stderr.String())
+		}
+	}
+}

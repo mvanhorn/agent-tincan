@@ -176,6 +176,7 @@ func passServeCmd() *cobra.Command {
 			"definition tincan pass install writes. See docs/adapters/pass.md.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			if configPath == "" {
 				configPath = serviceConfigPath(pass.DefaultAgentName)
 			}
@@ -237,7 +238,7 @@ func passServeCmd() *cobra.Command {
 			cmd.PrintErrf("%stincan pass: serving as %s on %s (%s; %s)\n", serviceStamp(), me.Name, cfg.Relay,
 				history.DescribeAllowlist(allowPath, allowed), history.DescribeAllowlist(historyAllowPath, historyAllowed))
 			w, werr := history.LoadWindow(windowPath)
-			cmd.PrintErrf("tincan pass: %s\n", history.DescribeWindow(windowPath, w, werr))
+			cmd.PrintErrf("%stincan pass: %s\n", serviceStamp(), history.DescribeWindow(windowPath, w, werr))
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
 				cmd.PrintErrf("%stincan pass: stopped\n", serviceStamp())

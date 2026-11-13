@@ -314,7 +314,7 @@ func (s *Service) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	_, _ = fmt.Fprintf(w, s.now().Format(client.LogStamp)+" tincan history: "+format+"\n", args...)
+	_, _ = io.WriteString(w, client.LogLines(s.now(), fmt.Sprintf("tincan history: "+format, args...)))
 }
 
 func (s *Service) now() time.Time {

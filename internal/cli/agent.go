@@ -607,7 +607,7 @@ instead, as a new request with every send check applied at that time.
 			if res.Status == envelope.StatusHeld {
 				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
 			} else {
-				cmd.Print(client.FormatResult(res))
+				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatResult(res)))
 			}
 			if thenTo != "" {
 				cmd.Println(client.ThenNote(thenTo, res.Status))
@@ -679,7 +679,7 @@ func getCmd() *cobra.Command {
 			if res.Status == envelope.StatusHeld {
 				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
 			} else {
-				cmd.Print(client.FormatResult(res))
+				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatResult(res)))
 			}
 			return nil
 		},
@@ -835,7 +835,7 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 	}
 	in, retry, _ := client.AnswerPings(ctx, r, in, "inbox")
 	defer retry(ctx)
-	if _, err := io.WriteString(out, client.FormatInbox(ctx, r, in)); err != nil {
+	if _, err := io.WriteString(out, forTerminal(out, client.FormatInbox(ctx, r, in))); err != nil {
 		return err
 	}
 	if err := r.AckReplies(ctx, nil, in.ReplyAcks()...); err != nil {
@@ -1018,7 +1018,7 @@ flaky tailnet path does not end the wait.`,
 			if err != nil {
 				return err
 			}
-			cmd.Print(formatWait(cmd.Context(), r, in))
+			cmd.Print(forTerminal(cmd.OutOrStdout(), formatWait(cmd.Context(), r, in)))
 			return nil
 		},
 	}
@@ -1180,7 +1180,7 @@ func printGroup(cmd *cobra.Command, g client.GroupResult, asJSON, notify bool) e
 			return err
 		}
 	} else {
-		cmd.Print(client.FormatGroup(g))
+		cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatGroup(g)))
 	}
 	if code != 0 {
 		return &ExitError{Code: code, Silent: true}

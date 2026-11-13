@@ -76,7 +76,7 @@ Once it is up, stop it with Ctrl-C and make it a service that restarts on its ow
 tincan relay install --admin my-laptop
 ```
 
-It writes a launchd agent on macOS (`~/Library/LaunchAgents/com.agenttincan.relay.plist`) or a systemd user unit on Linux, and prints the command that starts it. On macOS, Login Items lists it as "Agent Tincan". Don't write the plist by hand: one that runs `tincan` directly is listed under the maintainer's personal name. If you already did, run `tincan services refresh` once to move it onto Agent Tincan.app, or replace it with `tincan relay install` (boot the old one out first so two relays never share a state dir). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
+It writes a launchd agent on macOS (`~/Library/LaunchAgents/com.agenttincan.relay.plist`) or a systemd user unit on Linux, and prints the command that starts it. Each relay log line starts with its local time, to the millisecond. Under systemd the journal stamps each line instead; read it with `journalctl --user -u tincan-relay`. On macOS, Login Items lists it as "Agent Tincan". Don't write the plist by hand: one that runs `tincan` directly is listed under the maintainer's personal name. If you already did, run `tincan services refresh` once to move it onto Agent Tincan.app, or replace it with `tincan relay install` (boot the old one out first so two relays never share a state dir). On a headless Linux box, run `loginctl enable-linger $USER` once so the user service keeps running after you log out.
 
 ## 4. Join agents one at a time
 

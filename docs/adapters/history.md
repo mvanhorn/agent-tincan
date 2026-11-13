@@ -76,7 +76,7 @@ Both fields are optional; a missing one keeps its default. `days` is 1 to 3650 a
 
 With no file, the service uses the default window. A file that is present but cannot be read, is not that JSON shape (unknown fields included), or has a value out of bounds fails every history request with "The history agent could not use its window file (history-window.json)" until you fix it, and the log says why. It never falls back to the default, so a window you narrowed never silently widens.
 
-On the command line, `tincan history <source>` takes the same bounds as flags: `--days N` (applies to `--list` too) and `--max N`.
+On the command line, `tincan history <source>` takes the same bounds as flags: `--days N` (applies to `--list` too) and `--max N`. The full view printed to a terminal shows titles, paths and messages with control and bidi characters replaced by spaces, since they hold model output and page text. Piped or with `--json` they are exact.
 
 When the window cut an answer short, the answer says so. A search that found fewer matches than it wanted, or a latest lookup that could not be sure it saw the newest prompt, gets one extra line in the reply, such as "Only ChatGPT conversations from the last 30 days were searched, so older ones may be missing." (or "Only the last 50 ... conversations were searched" when the count ran out). On the command line the same note goes to stderr, in text and `--json` modes; `--json` output stays a bare array. A complete answer has no note.
 
@@ -186,7 +186,7 @@ Replies and what to do:
 - "No matching ... conversation in the recent window": nothing inside the window the reply names matched. Try other words, or widen the window (see [Window](#window)).
 - "The history agent could not use its window file": `~/.config/tincan/history-window.json` is unreadable, not `{"days": N, "max": N}`, or out of bounds. Fix or delete it. The log says which.
 - "... were searched, so older ones may be missing": the window stopped the lookup before it was complete. Widen the window if the conversation is older.
-- No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.history`) and read `~/Library/Logs/tincan-history.log`. A "403" there means the config is not joined as an agent. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so the two line up.
+- No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.history`) and read `~/Library/Logs/tincan-history.log`. A "403" there means the config is not joined as an agent. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so the two line up. Under systemd the journal's own time is used instead (`journalctl --user -u tincan-history`), so each line still carries one time.
 
 ## Release zip installation fallback
 

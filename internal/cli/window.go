@@ -629,6 +629,7 @@ the windows you already have open. "tincan window install" keeps it running.
 Windows always open in --dir; a teammate cannot choose the directory.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			if runtime.GOOS != "darwin" {
 				return errors.New("tincan window opens cmux windows, so it works on macOS only")
 			}

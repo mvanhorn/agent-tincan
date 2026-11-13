@@ -168,5 +168,5 @@ Replies and what to do:
 - "No note with id ... was found.": the id is wrong, or the note is archived or trashed.
 - "No note contains every word of ...": the search fell back to single words; see [how search works](#notes-agent).
 - "The notes agent finished this search, but the relay refused its reply (HTTP 413)": the reply was too large for the relay. Ask for fewer results.
-- A late reply: run `tincan notes doctor` and look at undelivered replies. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so you can tell time spent searching from time spent waiting to deliver.
+- A late reply: run `tincan notes doctor` and look at undelivered replies. Each log line starts with its local time, and `tincan trace <id>` shows the relay's time for each event, so you can tell time spent searching from time spent waiting to deliver. Under systemd the journal's own time is used instead (`journalctl --user -u tincan-notes`), so each line still carries one time.
 - No reply at all: check the service is loaded (`launchctl print gui/$(id -u)/com.agenttincan.notes`) and read `~/Library/Logs/tincan-notes.log`.

@@ -60,25 +60,27 @@ const (
 )
 
 // notesLibraryRoot is the Agent Notes library: the flag, else the one
-// Agent Notes has open.
-func notesLibraryRoot(cmd *cobra.Command, libraryRoot string) (string, error) {
+// Agent Notes has open. stamp starts the line that names a found library
+// (serviceStamp() in the service's log, "" for a command run by hand).
+func notesLibraryRoot(cmd *cobra.Command, libraryRoot, stamp string) (string, error) {
 	if libraryRoot != "" {
 		return libraryRoot, nil
 	}
 	if libraryRoot = notes.DiscoverLibraryRoot(); libraryRoot == "" {
 		return "", errors.New("no Agent Notes library found: open Agent Notes once, or pass --library-root with the library folder the notes agent saves into")
 	}
-	cmd.PrintErrf("tincan notes: using the Agent Notes library at %s (pass --library-root to choose another)\n", libraryRoot)
+	cmd.PrintErrf("%stincan notes: using the Agent Notes library at %s (pass --library-root to choose another)\n", stamp, libraryRoot)
 	return libraryRoot, nil
 }
 
 // warnOpenAllowlists warns when an allowlist file is missing. Bear and
 // Apple Notes hold everything the owner ever wrote, not one library made
-// for agents, so letting every joined agent in deserves a word.
-func warnOpenAllowlists(cmd *cobra.Command, readAllow, addAllow string) {
+// for agents, so letting every joined agent in deserves a word. stamp
+// starts each warning, as for notesLibraryRoot.
+func warnOpenAllowlists(cmd *cobra.Command, readAllow, addAllow, stamp string) {
 	for _, f := range []struct{ path, who string }{{readAllow, "search and read"}, {addAllow, "add"}} {
 		if _, err := os.Stat(expandHome(f.path)); errors.Is(err, fs.ErrNotExist) {
-			cmd.PrintErrf("tincan notes: warning: %s does not exist, so every joined agent may %s your notes; list the agents allowed, one per line\n", f.path, f.who)
+			cmd.PrintErrf("%stincan notes: warning: %s does not exist, so every joined agent may %s your notes; list the agents allowed, one per line\n", stamp, f.path, f.who)
 		}
 	}
 }
@@ -97,12 +99,13 @@ func notesServeCmd() *cobra.Command {
 			"Normally started by the service definition tincan notes install writes. See docs/adapters/notes.md.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			if err := notes.CheckBackendName(backendName); err != nil {
 				return err
 			}
 			if backendName == notes.BackendAgentNotes {
 				var err error
-				if libraryRoot, err = notesLibraryRoot(cmd, libraryRoot); err != nil {
+				if libraryRoot, err = notesLibraryRoot(cmd, libraryRoot, serviceStamp()); err != nil {
 					return err
 				}
 			} else if runtime.GOOS != "darwin" {
@@ -130,7 +133,9 @@ func notesServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			logf := func(format string, args ...any) { cmd.PrintErrf("tincan notes: "+format+"\n", args...) }
+			logf := func(format string, args ...any) {
+				cmd.PrintErr(client.LogLines(time.Now(), fmt.Sprintf("tincan notes: "+format, args...)))
+			}
 			backend := notes.NewBackend(backendName, appSupport, logf)
 			svc, err := notes.New(notes.Config{
 				Relay:             r,
@@ -162,13 +167,13 @@ func notesServeCmd() *cobra.Command {
 				return wrongServeAgent("notes serve", notes.DefaultAgentName, "the relay knows the machine using "+configPath+" as", me.Name)
 			}
 			if me.Kind != notes.DefaultAgentName {
-				cmd.PrintErrf("tincan notes: warning: the relay stores kind %q for this agent, not \"notes\", so adds wait only 24 hours for this Mac; fix it with: tincan kind notes notes\n", me.Kind)
+				cmd.PrintErrf("%stincan notes: warning: the relay stores kind %q for this agent, not \"notes\", so adds wait only 24 hours for this Mac; fix it with: tincan kind notes notes\n", serviceStamp(), me.Kind)
 			}
 			if backend == nil {
 				cmd.PrintErrf("%stincan notes: serving as %s on %s, library %s\n", serviceStamp(), me.Name, cfg.Relay, libraryRoot)
 			} else {
 				cmd.PrintErrf("%stincan notes: serving as %s on %s, notes in %s\n", serviceStamp(), me.Name, cfg.Relay, backend.Name())
-				warnOpenAllowlists(cmd, readAllow, addAllow)
+				warnOpenAllowlists(cmd, readAllow, addAllow, serviceStamp())
 			}
 			err = svc.Run(ctx)
 			if ctx.Err() != nil {
@@ -205,7 +210,7 @@ func notesInstallCmd() *cobra.Command {
 			}
 			opts := notes.ServiceOptions{Binary: binary, Backend: backendName}
 			if backendName == notes.BackendAgentNotes {
-				root, err := notesLibraryRoot(cmd, libraryRoot)
+				root, err := notesLibraryRoot(cmd, libraryRoot, "")
 				if err != nil {
 					return err
 				}
@@ -225,7 +230,7 @@ func notesInstallCmd() *cobra.Command {
 				cmd.Printf("the notes agent is not joined yet; first run:\n  TINCAN_CONFIG=%s tincan join <code> --relay <relay url>\n", cfgPath)
 			}
 			if backendName != notes.BackendAgentNotes {
-				warnOpenAllowlists(cmd, defaultReadAllowlist, defaultAddAllowlist)
+				warnOpenAllowlists(cmd, defaultReadAllowlist, defaultAddAllowlist, "")
 			}
 			cmd.Printf("start it with:\n  %s\n", res.Next)
 			cmd.Println("then check it with: tincan notes doctor")

@@ -601,6 +601,7 @@ func TestServiceStorageDownSendsNoVerdict(t *testing.T) {
 // Every log line starts with the service clock's local time, to the
 // millisecond, so it lines up with the relay's UTC trace.
 func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
+	t.Setenv("JOURNAL_STREAM", "")
 	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
 	var log bytes.Buffer
 	svc, err := NewService(ServiceConfig{Relay: &client.Relay{}, Store: &Store{}, ReportDir: t.TempDir(), Log: &log, Now: func() time.Time { return at }})

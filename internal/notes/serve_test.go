@@ -1540,6 +1540,7 @@ func (r *rig) lineWith(t *testing.T, id, want string) string {
 }
 
 func TestLogLinesAreTimestampedWithTheServiceClock(t *testing.T) {
+	t.Setenv("JOURNAL_STREAM", "")
 	r := newRig(t, relay.Config{})
 	at := time.Date(2026, 11, 8, 21, 55, 7, 137_000_000, time.FixedZone("PST", -8*3600))
 	r.cfg.Now = func() time.Time { return at }

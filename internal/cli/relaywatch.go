@@ -69,6 +69,7 @@ func relayWatchCmd() *cobra.Command {
 			"device other than the relay's; tincan relay-watch install sets it up as a service.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer useServiceLog()()
 			path, err := f.check()
 			if err != nil {
 				return err
@@ -95,13 +96,13 @@ func relayWatchCmd() *cobra.Command {
 				After: f.after,
 				Probe: relayProbe(r),
 				Alert: watch.Command(f.alertCmd),
-				Logf:  log.New(cmd.ErrOrStderr(), "", log.LstdFlags).Printf,
+				Logf:  log.New(client.NewLogWriter(cmd.ErrOrStderr(), time.Now), "", 0).Printf,
 			}
-			cmd.PrintErrf("tincan relay-watch: watching %s every %s, alerting after %s\n", cfg.Relay, f.every, f.after)
+			cmd.PrintErrf("%stincan relay-watch: watching %s every %s, alerting after %s\n", serviceStamp(), cfg.Relay, f.every, f.after)
 			if err := w.Run(ctx, f.every); ctx.Err() == nil {
 				return err
 			}
-			cmd.PrintErrln("tincan relay-watch: stopped")
+			cmd.PrintErrf("%stincan relay-watch: stopped\n", serviceStamp())
 			return nil
 		},
 	}
