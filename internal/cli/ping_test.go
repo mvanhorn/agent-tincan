@@ -286,6 +286,10 @@ func TestPingIsTerminalSafeOnATerminal(t *testing.T) {
 	target := m.Client(t, "muse")
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	// The relay refuses a ping to an agent that has not polled yet.
+	if _, err := target.Peek(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
 	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
 	go func() {
 		for ctx.Err() == nil {
