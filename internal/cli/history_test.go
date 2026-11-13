@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/history"
@@ -641,5 +644,101 @@ func TestServeLearnsRelayKeyIntoItsOwnConfig(t *testing.T) {
 				t.Fatalf("the default config was written: %v", err)
 			}
 		})
+	}
+}
+
+// rigHistoryText puts terminal control and bidi runes into the fox logo
+// conversation's title, cwd and reply, and returns the reply text as stored.
+func rigHistoryText(t *testing.T, codexHome string) (title, cwd, reply string) {
+	t.Helper()
+	title = "Fox\x1b]0;pwned\x07 logo for landing page"
+	cwd = "/Users/matt/\x1b[2Jfox\u202elogo"
+	reply = "Ears\x1b[8m enlarged.\nsecond\t\u202eline\x07"
+	rewrite := func(path string, pairs ...string) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		for i := 0; i < len(pairs); i += 2 {
+			old := pairs[i]
+			enc, err := json.Marshal(pairs[i+1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(s, old) {
+				t.Fatalf("%s lacks %q", path, old)
+			}
+			s = strings.ReplaceAll(s, old, strings.Trim(string(enc), `"`))
+		}
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewrite(filepath.Join(codexHome, "session_index.jsonl"), "Fox logo for landing page", title)
+	rewrite(filepath.Join(codexHome, "sessions", "2026", "09", "21", "rollout-2026-09-21T02-00-00-01a0c000-0000-7000-8000-00000000000a.jsonl"),
+		"/Users/matt/Documents/Codex/fox-logo", cwd, "Ears enlarged.", reply)
+	return title, cwd, reply
+}
+
+// Printed to a terminal, a conversation's title, cwd and messages are data:
+// they cannot send escape sequences, and the messages keep their layout.
+// Printed anywhere else they are exact, and --json is always exact.
+func TestHistoryDetailIsTerminalSafeOnlyOnATerminal(t *testing.T) {
+	codexHome, _ := historyEnv(t)
+	title, cwd, reply := rigHistoryText(t, codexHome)
+
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, err := run(t, Root(), "history", "codex")
+	if err != nil {
+		t.Fatalf("history codex: %v\n%s", err, out)
+	}
+	assertTerminalSafe(t, "history on a terminal", out)
+	for _, want := range []string{"Fox ]0;pwned  logo for landing page", "cwd: /Users/matt/ [2Jfox logo\n", "Ears [8m enlarged.\nsecond\t line \n"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("history on a terminal lacks %q:\n%q", want, out)
+		}
+	}
+
+	var convs []history.Conversation
+	jsonOut, err := run(t, Root(), "history", "codex", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &convs); err != nil {
+		t.Fatalf("json: %v\n%s", err, jsonOut)
+	}
+	if len(convs) == 0 || convs[0].Title != title || convs[0].Cwd != cwd || !slices.ContainsFunc(convs[0].Messages, func(m history.Message) bool { return m.Text == reply }) {
+		t.Fatalf("--json on a terminal changed the text: %+v", convs)
+	}
+
+	fakeTerminal(t, noWriterIsTerminal)
+	out, err = run(t, Root(), "history", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{title, "cwd: " + cwd + "\n", reply + "\n"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("history to a pipe lacks %q:\n%q", want, out)
+		}
+	}
+}
+
+// The listing shows every field on one line as data, terminal or not.
+func TestHistoryListingIsAlwaysTerminalSafe(t *testing.T) {
+	conv := history.Conversation{
+		Source: history.SourceCodex, ID: "id\x1b[2J1", Title: "t\u202eitle", Cwd: "/tmp/\x1b]0;pwned\x07x",
+		Originator: "codex_exec\x1b[8m", Automated: true,
+	}
+	for _, isTerm := range []func(io.Writer) bool{everyWriterIsTerminal, noWriterIsTerminal} {
+		fakeTerminal(t, isTerm)
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		printHistory(cmd, []history.Conversation{conv}, true)
+		assertTerminalSafe(t, "listing", out.String())
+		if !strings.Contains(out.String(), "id [2J1  /tmp/ ]0;pwned x  t itle  [codex_exec [8m]") {
+			t.Fatalf("listing = %q", out.String())
+		}
 	}
 }

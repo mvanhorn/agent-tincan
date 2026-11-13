@@ -444,40 +444,44 @@ func printHistory(cmd *cobra.Command, convs []history.Conversation, listing bool
 	}
 	for i, c := range convs {
 		if listing {
-			cwd := c.Cwd
+			cwd := client.TerminalSafe(c.Cwd)
 			if cwd == "" {
 				cwd = "-"
 			}
 			flag := ""
 			if c.Automated {
-				flag = "  [" + c.Originator + "]"
+				flag = "  [" + client.TerminalSafe(c.Originator) + "]"
 			}
 			when := "-               "
 			if !c.UpdatedAt.IsZero() {
 				when = c.UpdatedAt.Local().Format("2006-01-02 15:04")
 			}
-			cmd.Printf("%s  %s  %s  %s%s\n", when, c.ID, cwd, oneLine(c.Title), flag)
+			cmd.Printf("%s  %s  %s  %s%s\n", when, client.TerminalSafe(c.ID), cwd, oneLine(c.Title), flag)
 			continue
 		}
 		if i > 0 {
 			cmd.Println()
 		}
-		cmd.Printf("%s  %s  %s\n", c.Source, c.ID, c.Title)
+		// Titles, paths and messages come from chats and agent sessions,
+		// so they hold model output and page text from anywhere.
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s  %s  %s\n", c.Source, c.ID, c.Title)
 		if c.Cwd != "" {
-			cmd.Printf("cwd: %s\n", c.Cwd)
+			fmt.Fprintf(&b, "cwd: %s\n", c.Cwd)
 		}
 		if c.Automated {
-			cmd.Printf("originator: %s (unattended)\n", c.Originator)
+			fmt.Fprintf(&b, "originator: %s (unattended)\n", c.Originator)
 		}
 		for _, m := range c.Messages {
 			ts := ""
 			if !m.Time.IsZero() {
 				ts = " " + m.Time.Local().Format("2006-01-02 15:04")
 			}
-			cmd.Printf("[%s%s] %s\n", m.Role, ts, m.Text)
+			fmt.Fprintf(&b, "[%s%s] %s\n", m.Role, ts, m.Text)
 			for _, im := range m.Images {
-				cmd.Printf("  image: %s (%s, %d bytes)\n", im.Path, im.MIME, im.Size)
+				fmt.Fprintf(&b, "  image: %s (%s, %d bytes)\n", im.Path, im.MIME, im.Size)
 			}
 		}
+		cmd.Print(forTerminal(cmd.OutOrStdout(), b.String()))
 	}
 }
