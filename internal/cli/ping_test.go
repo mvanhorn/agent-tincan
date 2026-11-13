@@ -294,7 +294,7 @@ func TestPingIsTerminalSafeOnATerminal(t *testing.T) {
 				continue
 			}
 			if _, err := target.Claim(ctx, in.Requests[0].ID); err == nil {
-				target.Reply(ctx, in.Requests[0].ID, "pong\x1b]0;pwned\x07 ‮ok", envelope.StatusAnswered)
+				target.Reply(ctx, in.Requests[0].ID, "pong\x1b]0;pwned\x07 \u202eok", envelope.StatusAnswered)
 			}
 			return
 		}

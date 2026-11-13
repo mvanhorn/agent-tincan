@@ -40,7 +40,7 @@ func assertTerminalSafe(t *testing.T, what, s string) {
 }
 
 func TestForTerminalOnlyChangesTerminalOutput(t *testing.T) {
-	const s = "a\x1b]0;pwned\x07‮b\n\tc"
+	const s = "a\x1b]0;pwned\x07\u202eb\n\tc"
 	fakeTerminal(t, everyWriterIsTerminal)
 	if got := forTerminal(io.Discard, s); got != "a ]0;pwned  b\n\tc" {
 		t.Fatalf("terminal = %q", got)

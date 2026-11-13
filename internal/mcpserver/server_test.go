@@ -1482,7 +1482,7 @@ func TestListAgentsLeavesOutGuests(t *testing.T) {
 func TestGetReplyKeepsControlRunes(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})
 	ctx := t.Context()
-	const body = "done\x1b]0;pwned\x07 ‮evil"
+	const body = "done\x1b]0;pwned\x07 \u202eevil"
 	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "check the title", envelope.KindAsk, "", false)
 	if err != nil {
 		t.Fatal(err)

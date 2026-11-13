@@ -467,7 +467,7 @@ func TestResumeReplyWakesAfterRestart(t *testing.T) {
 
 // hostileReply is teammate text that would retitle the window and reverse
 // the line if a terminal acted on it.
-const hostileReply = "done\x1b]0;pwned\x07 ‮evil\nnext line"
+const hostileReply = "done\x1b]0;pwned\x07 \u202eevil\nnext line"
 
 // hostileOnTerminal is hostileReply as a terminal shows it.
 const hostileOnTerminal = "done ]0;pwned   evil\nnext line"

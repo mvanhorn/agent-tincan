@@ -517,7 +517,7 @@ func TestCouncilHTMLOnlyFromCouncilKind(t *testing.T) {
 // JSON on stdout, a pipe, stays exact.
 func TestCouncilProgressNoteIsTerminalSafeOnTerminalStderr(t *testing.T) {
 	_, c := ownerMesh(t, "council", "owner", true)
-	const note = "Answers\x1b]0;pwned\x07 ‮3 of 3"
+	const note = "Answers\x1b]0;pwned\x07 \u202e3 of 3"
 	block := `{"request_id":"x","status":"answered","state":"s\u001b"}`
 	took := fakeCouncil(t, c, []string{note}, "Council says.\n\n```council-result\n"+block+"\n```\n", envelope.StatusAnswered)
 	cmd := councilCmd()
@@ -544,7 +544,7 @@ func TestCouncilProgressNoteIsTerminalSafeOnTerminalStderr(t *testing.T) {
 // Without --json, the council's reply is data on a terminal.
 func TestCouncilReplyIsTerminalSafeOnATerminal(t *testing.T) {
 	_, c := ownerMesh(t, "council", "owner", true)
-	took := fakeCouncil(t, c, nil, "Recommendation:\x1b[2J use ‮Postgres.\n", envelope.StatusAnswered)
+	took := fakeCouncil(t, c, nil, "Recommendation:\x1b[2J use \u202ePostgres.\n", envelope.StatusAnswered)
 	fakeTerminal(t, everyWriterIsTerminal)
 	out, _, err := runSplit(t, councilCmd(), "Which database?")
 	<-took

@@ -84,7 +84,7 @@ func TestRoomReadIsTerminalSafeOnlyOnATerminal(t *testing.T) {
 	if _, err := run(t, roomCmd(), "add", "launch", "grokbot", "--relay", admin); err != nil {
 		t.Fatal(err)
 	}
-	const post = "plan ‮is\x1b[2J up"
+	const post = "plan \u202eis\x1b[2J up"
 	if _, err := run(t, roomCmd(), "post", "launch", post); err != nil {
 		t.Fatal(err)
 	}
