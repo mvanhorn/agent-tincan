@@ -24,7 +24,7 @@ tincan invite cursor-cli --kind cursor-cli
 (On a relay that does not know the `cursor-cli` kind yet, invite without `--kind`.) On the machine that runs Cursor, with a config of its own:
 
 ```bash
-TINCAN_CONFIG="$HOME/.config/tincan/cursor-cli.json" tincan join <code> --relay http://<relay>:8787
+TINCAN_CONFIG="$HOME/.config/tincan/cursor-cli.json" tincan join <code> --relay http://tincan-relay
 ```
 
 Log in once with `cursor-agent login`, or put a `CURSOR_API_KEY` in the listener's environment (a launchd plist or systemd unit readable only by you). A run that fails for authentication backs off at once, leaves requests queued and tells the operator teammate once (`TINCAN_WAKE_OPERATOR`).

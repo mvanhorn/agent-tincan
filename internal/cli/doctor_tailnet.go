@@ -46,14 +46,17 @@ func deviceRoleOf(ctx context.Context, r *client.Relay) deviceRole {
 }
 
 // tailnetChecks reports each tailscaled on this machine, or one skip line when
-// there is none to ask. r is the joined relay, nil before a join. The relay
+// there is none to ask. r is the joined relay, nil unless the relay answered
+// this run. configured is the relay from the saved config, nil when there is
+// none; it says whether tincan goes through a remote proxy even when the relay
+// did not answer. The relay
 // answers for the node that reached it. With several tailscaleds running that
 // could be any of them, and through a remote proxy it is the proxy's node, so
 // it is asked only when one is running and no remote proxy is in the way. A
 // guest need not ask: the relay refuses it the admin route as it does an
 // agent, but its machine is on another account's tailnet, out of the owner's
 // tag rule.
-func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
+func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool) []check {
 	selves := tailnetSelves(ctx)
 	if len(selves) == 0 {
 		return []check{{"tailnet", "ok", "skipped: no tailscaled tincan can reach on this machine", ""}}
@@ -71,11 +74,34 @@ func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
 	case r != nil && running == 1 && !r.ThroughRemoteProxy():
 		role = deviceRoleOf(ctx, r)
 	}
+	// Only when the relay did not answer: a relay that answered is reached
+	// some other way (a managed connector, another daemon), and a remote
+	// proxy means this machine does not use its own Tailscale at all.
+	stopped := running == 0 && r == nil && (configured == nil || !configured.ThroughRemoteProxy())
 	checks := make([]check, len(selves))
 	for i, s := range selves {
 		checks[i] = tailnetCheck(s, role)
+		if stopped {
+			checks[i] = stoppedTailnet(checks[i])
+		}
 	}
 	return checks
+}
+
+// stoppedTailnet marks a tailscaled check when no tailscaled on this machine
+// is running, the relay did not answer, and tincan does not reach it through
+// a remote proxy. Then
+// this machine cannot see the relay or any teammate, which the relay check
+// alone reports only as unreachable.
+func stoppedTailnet(c check) check {
+	c.Status = "warn"
+	c.Detail += "; Tailscale is not running on this machine"
+	fix := "Start Tailscale (open the Tailscale app and turn it on, or run tailscale up with the flags you used before) and run tincan doctor again."
+	if c.Fix != "" {
+		fix = c.Fix + " " + fix
+	}
+	c.Fix = fix
+	return c
 }
 
 // tailnetCheck judges one tailscaled. Tailscale is the security boundary, so
@@ -121,12 +147,12 @@ func tailnetCheck(s client.TailnetSelf, role deviceRole) check {
 	case len(s.Tags) > 0:
 		detail = append(detail, "tagged "+strings.Join(s.Tags, ", "))
 	case role == roleAdmin:
-		detail = append(detail, "untagged, as an admin device is by design")
+		detail = append(detail, "untagged, as an admin device is by design; agents on this machine have the owner's admin power, including approving held requests")
 	case role == roleGuest:
 		detail = append(detail, "untagged, which is fine for a guest: tags are for the owner's own machines")
 	case role == roleAgent:
 		warn("this agent machine is untagged",
-			"Tag it (for example tag:agent) in the Tailscale admin console: a tagged node is never an admin device, whatever it is called. See docs/trust-model.md.")
+			"Tag it (for example tag:agent) in the Tailscale admin console: a tagged node is never an admin device, whatever it is called. Before tagging a personal laptop, see What lives where in docs/quickstart.md.")
 	default:
 		detail = append(detail, "untagged, tag check skipped: could not tell whether this is an admin device")
 	}

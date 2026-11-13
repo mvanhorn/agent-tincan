@@ -25,7 +25,7 @@ tincan invite grok-cli --kind grok-cli
 On the machine that runs Grok, with a config of its own:
 
 ```bash
-TINCAN_CONFIG="$HOME/.config/tincan/grok-cli.json" tincan join <code> --relay http://<relay>:8787
+TINCAN_CONFIG="$HOME/.config/tincan/grok-cli.json" tincan join <code> --relay http://tincan-relay
 ```
 
 ## Setup

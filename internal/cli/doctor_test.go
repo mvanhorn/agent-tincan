@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
+	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
 
 func TestLaunchCheck(t *testing.T) {
@@ -28,6 +31,8 @@ func TestLaunchCheck(t *testing.T) {
 		{"stopped on error", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", Ended: ago(time.Minute), Error: "not a joined agent"}}, "fail", "not a joined agent"},
 		{"closed before initialize", []mcpserver.Launch{{Started: ago(time.Minute), Ended: ago(time.Minute)}}, "fail", "without ever sending initialize"},
 		{"connected, no tools/list", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", Initialized: ago(time.Minute), Framing: "content-length"}}, "fail", "never asked for the tool list"},
+		{"listed tools, then ended", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", Initialized: ago(time.Minute), ToolsListed: ago(time.Minute), Ended: ago(time.Second)}}, "warn", "that process ended"},
+		{"started, no initialize yet", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", PID: 7}}, "warn", "has not sent initialize yet"},
 		{"healthy", []mcpserver.Launch{{Started: ago(time.Minute), Client: "host 1", Initialized: ago(time.Minute), ToolsListed: ago(time.Minute), Version: Version}}, "ok", "listed the tools"},
 	}
 	for _, c := range cases {
@@ -37,6 +42,47 @@ func TestLaunchCheck(t *testing.T) {
 				t.Fatalf("got %s %q, want %s containing %q", got.Status, got.Detail, c.status, c.want)
 			}
 		})
+	}
+}
+
+// The numbered repair steps are for an app that is really not running tincan.
+// A process that listed its tools and exited, or a config warning with its own
+// fix line, must not tell a healthy machine to remove and re-add its server.
+func TestHostFixNeeded(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	listedThenEnded := []mcpserver.Launch{{Started: now.Add(-time.Minute), Initialized: now.Add(-time.Minute), ToolsListed: now.Add(-time.Minute), Ended: now.Add(-time.Second)}}
+	waiting := []mcpserver.Launch{{Started: now.Add(-time.Minute), PID: 7}}
+	for _, tc := range []struct {
+		name     string
+		checks   []check
+		launches []mcpserver.Launch
+		want     bool
+	}{
+		{"just-exited process", []check{launchCheck(listedThenEnded, now), {"mcp config", "ok", "", ""}}, listedThenEnded, false},
+		{"no launch records", []check{launchCheck(nil, now), {"mcp config", "ok", "", ""}}, nil, true},
+		{"not initialized yet", []check{launchCheck(waiting, now)}, waiting, false},
+		{"app launches failed", []check{{"app launches", "fail", "", ""}}, waiting, true},
+		{"mcp config failed", []check{{"app launches", "ok", "", ""}, {"mcp config", "fail", "", ""}}, listedThenEnded, true},
+		{"mcp config warning alone", []check{{"app launches", "ok", "", ""}, {"mcp config", "warn", "", ""}}, listedThenEnded, false},
+		{"another check failed", []check{{"relay", "fail", "", ""}, {"app launches", "ok", "", ""}}, listedThenEnded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostFixNeeded(tc.checks, tc.launches); got != tc.want {
+				t.Fatalf("hostFixNeeded = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Setup docs, wake notices and permission patterns all use agent-tincan, so a
+// repair must not rename the server and strand them.
+func TestHostFixNamesAgentTincan(t *testing.T) {
+	text := strings.Join(hostFix("/bin/tincan"), "\n")
+	if !strings.Contains(text, "named agent-tincan") || !strings.Contains(text, `"agent-tincan":{`) {
+		t.Fatalf("repair does not name agent-tincan:\n%s", text)
+	}
+	if strings.Contains(text, "named tincan") || strings.Contains(text, `"tincan":{`) {
+		t.Fatalf("repair still names the server tincan:\n%s", text)
 	}
 }
 
@@ -189,6 +235,41 @@ func setVersion(t *testing.T, v string) {
 	old := Version
 	Version = v
 	t.Cleanup(func() { Version = old })
+}
+
+// A relay started without --dist cannot say which release is current. The fix
+// is for whoever runs the relay, and only that error should earn it.
+func TestVersionCheckRelayWithoutDist(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	exe, _ := fakeExe(t)
+	c := versionCheck(t.Context(), m.Client(t, "muse"), exe)
+	if c.Status != "warn" || !strings.Contains(c.Detail, "does not say which release is current") {
+		t.Fatalf("got %+v", c)
+	}
+	for _, w := range []string{"--dist", "--release-url", "relay"} {
+		if !strings.Contains(c.Fix, w) {
+			t.Errorf("fix lacks %q: %q", w, c.Fix)
+		}
+	}
+}
+
+func TestDistErrorFix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"relay says no upgrades", &client.APIError{Code: 404, Message: "this relay does not serve upgrades (start it with --dist <dir>)"}, true},
+		{"bare 404 from an older relay", &client.APIError{Code: 404, Message: "404 page not found"}, false},
+		{"server error", &client.APIError{Code: 500, Message: "boom"}, false},
+		{"network error", errors.New("dial tcp: connection refused"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := distErrorFix(tc.err) != ""; got != tc.want {
+				t.Fatalf("distErrorFix(%v) non-empty = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 // A binary that differs from the relay's release is only a failure when the

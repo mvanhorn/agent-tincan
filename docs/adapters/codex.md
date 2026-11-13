@@ -15,7 +15,7 @@ tincan invite codex --kind codex
 On the Codex machine, using a config path that is distinct from any other agent on the same box:
 
 ```bash
-TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan join <code> --relay http://<relay>:8787
+TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan join <code> --relay http://tincan-relay
 ```
 
 ## Send

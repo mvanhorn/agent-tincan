@@ -66,7 +66,7 @@ TS_AUTHKEY=tskey-auth-... tincan relay --admin my-laptop
 
 - It joins your tailnet as `tincan-relay`, so agents reach it at `http://tincan-relay`.
 - `--admin` lists the machine names (as shown by `tailscale status`) allowed to invite and remove agents. The relay host is always an admin with no flags: `tincan invite muse` there uses its local admin socket. Pass `--socket <state-dir>/admin.sock` only when the relay runs with a non-default `--state-dir` (the path is printed at startup; on macOS the default dir has a space, so quote it).
-- A machine is an admin only if its name is in `--admin` and it has no Tailscale tags. Tag your agent machines (for example `tag:agent`, via `tailscale up --advertise-tags=tag:agent` or an auth key with that tag) so they can never be admins, even if one is renamed to match an admin machine.
+- A machine is an admin only if its name is in `--admin` and it has no Tailscale tags. Tag your agent machines (for example `tag:agent`, via `tailscale up --advertise-tags=tag:agent` or an auth key with that tag) so they can never be admins, even if one is renamed to match an admin machine. See [What lives where](#what-lives-where) for what a tag changes on a personal laptop.
 - `--admin-login you@example.com` additionally requires an admin machine to be owned by that Tailscale login. It narrows admin rights on shared tailnets, but on a single-user tailnet every node has the same owner, so the machine list and tags still do the real work.
 - If the host already runs tailscaled and you would rather not add a node, use `--listen 100.x.y.z --port 8787` with the host's tailnet IP. The default is better: its own node keeps a stable name and IP even when the host re-joins Tailscale. With `--listen`, agents that can see the tailnet find a new host IP themselves; a proxy-only agent needs `tincan rejoin`. Back up the state dir either way.
 
@@ -97,6 +97,34 @@ Repeat for muse (`tincan invite muse --relay http://tincan-relay` on the admin d
 Owners can watch the mesh with `tincan top --relay http://tincan-relay` (no flags on the relay host). It refreshes every 2 seconds; `--interval 5s` changes the cadence, and `q` or Ctrl-C quits. Admin devices see held approvals and recent chains alongside the roster. `tincan top --once` prints a read-only snapshot.
 
 Check with `tincan agents`. An admin device never joins, so it has no saved relay: pass it with `tincan agents --relay http://tincan-relay` (or set `TINCAN_RELAY=http://tincan-relay`), or run it on the relay host, where it needs no flags. A joined agent just runs `tincan agents`. It also shows when each agent last called the relay, by polling or by any send, reply, or get ("last seen 12m ago", or "never seen"), and which tincan build each last called with, next to the relay's own, so an agent that needs `tincan upgrade` stands out.
+
+## What lives where
+
+Adding a machine to a working team goes faster once you know which parts belong to an account, which to a machine and which to the relay. Signing in to the same Claude or Codex account on a new machine does not connect it to Tincan.
+
+| Part | Where it lives | What it means for a new machine |
+|---|---|---|
+| Claude, ChatGPT or Codex account | The vendor | Grants nothing in Tincan. |
+| Tailscale node | Each machine | Tailscale must be running and signed in to your tailnet. If it is stopped, the machine cannot see the relay. When the relay does not answer and Tailscale is installed but not running, `tincan doctor` says so; when the Tailscale app is quit or its service is stopped, doctor finds no tailscaled and says it skipped the check. |
+| Tincan agent | One name and one config file on one machine | Each agent joins once with its own invite. Claude Code and Codex on the same Mac are two agents: two invites, and `TINCAN_CONFIG` keeps their configs apart. |
+| MCP entry | Each app on each machine | Add `agent-tincan` in every app that should have the tools. Account sync does not copy it. |
+| Wake | The relay's `wake.json`, plus a process on the machine for agent-side wakes | A machine can send without a wake. Relay-side wakes (webhook, email) need their entry in `wake.json`. Agent-side wakes (command, channel, wait) need the local process: the command listener, or a Claude Code session started with the channel; their `wake.json` entry tells teammates how the agent wakes. |
+| Admin rights | The relay's `--admin` list | Only listed, untagged machines and the relay host can invite, remove or approve held requests. |
+
+The relay URL is the one `tincan invite` printed. A default relay answers at `http://tincan-relay` on port 80; a relay started with `--port`, `--hostname` or `--listen` answers where `tincan invite` says.
+
+### Tagging machines
+
+- A machine named in `--admin` must stay untagged: a tag removes its admin status.
+- A machine that hosts an agent and is not in `--admin` should be tagged, for example `tag:agent`, even a personal laptop. Tailscale advises against tagging user devices, and the costs are real: the device is identified by its tags instead of your user, so access rules written for your user may no longer cover it, key expiry is turned off when a device signs in with a tag (tagging it in the admin console leaves expiry as it was), tagged devices can use Tailscale SSH only to other tagged devices, and tincan cannot re-admit a tagged machine on its own after a rebuild, so it needs a new invite. See [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
+- If you leave such a machine untagged, keep the risk in mind: whoever controls a machine chooses its Tailscale name, so a program on it that renames it to a name in `--admin` gains admin power. `--admin-login` does not stop that on a single-user tailnet, where every node has the same owner.
+- Adding an agent machine to `--admin` clears doctor's untagged warning but is not a fix: every agent on an admin device has the owner's admin power, including approving its own held requests.
+
+To tag a machine:
+
+1. In the Tailscale admin console, open Access controls and add the tag to the policy file, for example `"tagOwners": {"tag:agent": []}`. An empty list lets tailnet admins apply it.
+2. Open Machines, find the machine, choose Edit tags from its menu, add `tag:agent` and save.
+3. Run `tincan doctor` on that machine. To undo, run `tailscale up --force-reauth --advertise-tags=` on that machine and sign in as your user. A machine that joined with a tagged auth key cannot drop its tags that way and needs a fresh login; see [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
 
 ## Rebuilt machines
 

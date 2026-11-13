@@ -212,6 +212,10 @@ B2. Join, with the code and relay address from your message (the relay is
     Linux uses ${XDG_CONFIG_HOME:-~/.config}/tincan/client.json. Paths under
     ~/.config/tincan/<name>.json in this guide are explicit per-agent overrides,
     including on macOS; set that override before join, MCP and listeners alike.
+    Each agent on a machine needs its own invite and config; signing in to the
+    same Claude or Codex account elsewhere does not join this machine. What is
+    per account, per machine and per agent:
+    https://github.com/mvanhorn/agent-tincan/blob/main/docs/quickstart.md#what-lives-where
 
     - Proxy-only sandbox whose default proxy cannot reach the tailnet: add
       `--proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>` (ask your owner

@@ -107,8 +107,11 @@ func TestTailnetCheckTags(t *testing.T) {
 		status, want string
 		fix          string
 	}{
-		{"untagged agent", tailnetSelf("1.104.4", false), roleAgent, "warn", "this agent machine is untagged", "tag:agent"},
+		{"untagged agent", tailnetSelf("1.104.4", false), roleAgent, "warn", "this agent machine is untagged", "never an admin device"},
+		{"untagged agent guidance", tailnetSelf("1.104.4", false), roleAgent, "warn", "this agent machine is untagged", "What lives where"},
 		{"untagged admin", tailnetSelf("1.104.4", false), roleAdmin, "ok", "admin device", ""},
+		{"untagged admin power", tailnetSelf("1.104.4", false), roleAdmin, "ok", "the owner's admin power", ""},
+		{"untagged admin holds", tailnetSelf("1.104.4", false), roleAdmin, "ok", "held requests", ""},
 		{"untagged, role unknown", tailnetSelf("1.104.4", false), roleUnknown, "ok", "tag check skipped", ""},
 		{"tagged agent", tailnetSelf("1.104.4", false, "tag:agent", "tag:ci"), roleAgent, "ok", "tagged tag:agent, tag:ci", ""},
 		{"not running", stopped, roleAgent, "ok", "tags unknown", ""},
@@ -143,7 +146,7 @@ func TestTailnetCheckNeverFails(t *testing.T) {
 
 func TestTailnetChecksNoTailscale(t *testing.T) {
 	stubTailnet(t)
-	got := tailnetChecks(t.Context(), nil, false)
+	got := tailnetChecks(t.Context(), nil, nil, false)
 	if len(got) != 1 || got[0].Name != "tailnet" || got[0].Status != "ok" || !strings.HasPrefix(got[0].Detail, "skipped:") || got[0].Fix != "" {
 		t.Fatalf("got %+v", got)
 	}
@@ -154,7 +157,7 @@ func TestTailnetChecksEachDaemon(t *testing.T) {
 	second := tailnetSelf("1.104.3", false, "tag:agent")
 	second.Socket = "/run/other/tailscaled.sock"
 	stubTailnet(t, tailnetSelf("1.104.4", false, "tag:agent"), second)
-	got := tailnetChecks(t.Context(), nil, false)
+	got := tailnetChecks(t.Context(), nil, nil, false)
 	if len(got) != 2 || got[0].Status != "ok" || got[1].Status != "warn" || !strings.Contains(got[1].Detail, second.Socket) {
 		t.Fatalf("got %+v", got)
 	}
@@ -192,7 +195,7 @@ func TestTailnetChecksRole(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := tailnetChecks(t.Context(), r, false)
+			got := tailnetChecks(t.Context(), r, r, false)
 			if len(got) != 1 || got[0].Status != tc.status || !strings.Contains(got[0].Detail, tc.want) {
 				t.Fatalf("got %+v, want %s containing %q", got, tc.status, tc.want)
 			}
@@ -248,7 +251,7 @@ func TestTailnetChecksSeveralDaemonsSkipRole(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := tailnetChecks(t.Context(), r, false)
+			got := tailnetChecks(t.Context(), r, r, false)
 			if len(got) != 2 {
 				t.Fatalf("got %+v", got)
 			}
@@ -277,7 +280,7 @@ func TestTailnetChecksRoleForTheRunningDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := tailnetChecks(t.Context(), r, false)
+	got := tailnetChecks(t.Context(), r, r, false)
 	if len(got) != 2 || got[0].Status != "ok" || !strings.Contains(got[0].Detail, "tags unknown") ||
 		got[1].Status != "warn" || !strings.Contains(got[1].Detail, "untagged") {
 		t.Fatalf("got %+v", got)
@@ -298,7 +301,7 @@ func TestTailnetChecksRemoteProxySkipsRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := tailnetChecks(t.Context(), r, false)
+	got := tailnetChecks(t.Context(), r, r, false)
 	if len(got) != 1 || got[0].Status != "ok" || !strings.Contains(got[0].Detail, "tag check skipped") {
 		t.Fatalf("got %+v", got)
 	}
@@ -321,9 +324,58 @@ func TestTailnetChecksLoopbackProxyKeepsRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := tailnetChecks(t.Context(), r, false)
+	got := tailnetChecks(t.Context(), r, r, false)
 	if len(got) != 1 || got[0].Status != "warn" || !strings.Contains(got[0].Detail, "untagged") {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// A stopped Tailscale is the first thing to rule out on a machine that cannot
+// see the relay. One running daemon or a remote proxy means it is not the cause.
+func TestTailnetChecksStopped(t *testing.T) {
+	stopped := tailnetSelf("1.104.4", false)
+	stopped.Running = false
+
+	stubTailnet(t, stopped)
+	got := tailnetChecks(t.Context(), nil, nil, false)
+	if len(got) != 1 || got[0].Status != "warn" || !strings.Contains(got[0].Fix, "Start Tailscale") {
+		t.Fatalf("stopped daemon: %+v", got)
+	}
+
+	stubTailnet(t, stopped, tailnetSelf("1.104.4", false))
+	for _, c := range tailnetChecks(t.Context(), nil, nil, false) {
+		if strings.Contains(c.Fix, "Start Tailscale") {
+			t.Fatalf("one daemon is running: %+v", c)
+		}
+	}
+
+	stubTailnet(t, stopped)
+	r, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://hatch-egress-proxy:3130"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range tailnetChecks(t.Context(), nil, r, false) {
+		if strings.Contains(c.Fix, "Start Tailscale") {
+			t.Fatalf("relay unreachable, but this machine uses a remote proxy, not local Tailscale: %+v", c)
+		}
+	}
+
+	// The relay answered, so it is reached some other way (a managed
+	// connector, say) and a stopped local daemon is not the problem.
+	stubTailnet(t, stopped)
+	direct, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range tailnetChecks(t.Context(), direct, direct, false) {
+		if strings.Contains(c.Fix, "Start Tailscale") {
+			t.Fatalf("relay answered: %+v", c)
+		}
+	}
+	// The relay did not answer and no remote proxy is in the way.
+	got = tailnetChecks(t.Context(), nil, direct, false)
+	if len(got) != 1 || !strings.Contains(got[0].Fix, "Start Tailscale") {
+		t.Fatalf("relay unreachable, daemon stopped: %+v", got)
 	}
 }
 

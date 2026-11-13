@@ -440,7 +440,7 @@ func configCheck(es []mcpConfigEntry, exe string) check {
 			continue
 		}
 		if strings.Contains(e.Name, " ") {
-			e.Problems = append(e.Problems, "the name has a space; name it tincan")
+			e.Problems = append(e.Problems, "the name has a space; name it agent-tincan")
 			e.broken = true
 		}
 		if strings.HasPrefix(e.Command, "http") {
