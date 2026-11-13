@@ -44,7 +44,7 @@ The destination web agent lists every conversation a pass opened in `~/.config/t
 
 1. Upgrade the relay, then the web teammates (`tincan upgrade`, then restart them). An older relay refuses the `pass` kind and would never hold passes, so `tincan pass serve` refuses to run until the relay stores kind `pass` for it.
 2. `tincan invite pass --kind pass` on an admin device, then on the Mac: `TINCAN_CONFIG=~/.config/tincan/pass.json tincan join <code> --relay <relay url>`. If it joined without the kind, run `tincan kind pass pass` on an admin device. The service runs only as the agent named `pass`.
-3. `tincan pass install` writes `~/Library/LaunchAgents/com.agenttincan.pass.plist` (logging to `~/Library/Logs/tincan-pass.log`, each line starting with its local time; a systemd user unit on Linux) and prints the command that starts it.
+3. `tincan pass install` writes `~/Library/LaunchAgents/com.agenttincan.pass.plist` (logging to `~/Library/Logs/tincan-pass.log`, each line starting with its local time; a systemd user unit on Linux, `tincan-pass`, whose journal stamps each line instead: `journalctl --user -u tincan-pass`) and prints the command that starts it.
 4. In the relay's `wake.json`, set `pass` to `{"method": "wait"}`.
 
 Each send of a seed is audited on the relay as `pass_sent`, with the request ids, the destination, the byte count and, for an agent's pass, the chat's source and id; never its text.
