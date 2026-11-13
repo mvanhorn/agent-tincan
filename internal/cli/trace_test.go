@@ -167,6 +167,38 @@ func TestTraceTextIsTerminalSafe(t *testing.T) {
 	}
 }
 
+// Markdown printed to the terminal is terminal safe too, and keeps its line
+// layout; written to a file it keeps the bodies exactly as sent.
+func TestTraceMarkdownToTerminalIsTerminalSafe(t *testing.T) {
+	tr := traceFixture()
+	tr.Steps[0].Request.Body = "line one\n\x1b]0;owned\x07\u202eline two\r\tend"
+	url := serveTrace(t, tr)
+	got, err := runTrace(t, "r1", "--format", "md", "--relay", url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"\x1b", "\x07", "\u202e", "\r"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("md trace on the terminal kept %q: %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "line one\n ]0;owned  line two \tend") {
+		t.Fatalf("md trace lost its layout: %q", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "trace.md")
+	if _, err := runTrace(t, "r1", "--format", "md", "--out", path, "--relay", url); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), tr.Steps[0].Request.Body) {
+		t.Fatalf("md export changed the body: %q", data)
+	}
+}
+
 // Markdown carries what the terminal view cuts: full bodies, statuses,
 // times and attachment names, for a moved request and a failed reply alike.
 func TestTraceMarkdownCarriesTheWholeChain(t *testing.T) {

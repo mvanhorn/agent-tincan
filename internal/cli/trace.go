@@ -108,6 +108,11 @@ that only you can read:
 				return err
 			}
 			if out == "" {
+				if format == "md" {
+					// Printed to the terminal, the full bodies are data too.
+					// A file export keeps them exactly as sent.
+					text = terminalSafeLines(text)
+				}
 				cmd.Print(text)
 				return nil
 			}
@@ -274,6 +279,21 @@ func writeAttachments(b *strings.Builder, atts []envelope.Attachment) {
 		fmt.Fprintf(&names, "%s (%s, %d bytes)\n", a.Name, a.MIME, a.Size)
 	}
 	writeFenced(b, "Attachments", names.String())
+}
+
+// terminalSafeLines is client.TerminalSafe for multi-line text: control
+// and bidi runes become spaces, except the newlines and tabs that lay the
+// text out, so relay text cannot send escape sequences to the terminal.
+func terminalSafeLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		parts := strings.Split(l, "\t")
+		for j, p := range parts {
+			parts[j] = client.TerminalSafe(p)
+		}
+		lines[i] = strings.Join(parts, "\t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // writeFenced writes text in a backtick fence one longer than any run of
