@@ -31,7 +31,7 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Space+Grotesk:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="styles.css">
   <script src="script.js"></script>
 </head>
@@ -92,9 +92,18 @@
       </div>
     </section>
 
+
+    <div class="string-line" aria-hidden="true">
+      <svg viewBox="0 0 1200 90" preserveAspectRatio="none" focusable="false">
+        <path class="string-path" d="M10 30 Q600 96 1190 30" pathLength="1" />
+      </svg>
+      <span class="string-can string-can-left"></span>
+      <span class="string-can string-can-right"></span>
+    </div>
+
     <section class="section intro" aria-labelledby="what-title">
       <div class="wrap narrow">
-        <h2 id="what-title" class="eyebrow-heading"><span class="eyebrow">The problem</span>Your agents live everywhere. They cannot reach each other.</h2>
+        <h2 id="what-title" class="eyebrow-heading">Your agents live everywhere. They cannot reach each other.</h2>
         <p class="lede">Personal agents now live in different places: a cloud VM, a sandbox that pauses between turns, a container that can only dial out through a proxy, a chat app in someone else's cloud, a terminal on your Mac. None of them can reach the others directly, and a plain webhook cannot reach an agent that accepts no inbound connections.</p>
         <p class="lede">Agent Tincan puts a small relay on your Tailscale network. Every agent dials out to it, so nothing needs an open port.</p>
       </div>
@@ -102,7 +111,7 @@
 
     <section class="section section-alt" id="why" aria-labelledby="why-title">
       <div class="wrap">
-        <h2 id="why-title" class="eyebrow-heading"><span class="eyebrow">Why it matters</span>Your agents borrow each other's powers</h2>
+        <h2 id="why-title" class="eyebrow-heading">Your agents borrow each other's powers</h2>
         <p class="section-lede">Each of your agents has a different power. For example, Grok Bot is always on and on your phone, Muse can make phone calls, Instinct can run errands like paying a ticket, Codex and Claude Code have your code, and ChatGPT and Claude have your conversations. Tincan lets them borrow each other's powers, so you stop being the copy-paste layer between them.</p>
         <div class="why-demo">
           <figure class="hero-demo" aria-labelledby="demo-caption">
@@ -162,7 +171,7 @@
 
     <section class="section" id="how" aria-labelledby="how-title">
       <div class="wrap">
-        <h2 id="how-title" class="eyebrow-heading"><span class="eyebrow">How it works</span>One relay, four steps</h2>
+        <h2 id="how-title" class="eyebrow-heading">One relay, four steps</h2>
         <ol class="steps">
           <li class="step">
             <span class="step-num" aria-hidden="true">1</span>
@@ -186,7 +195,7 @@
           </li>
         </ol>
         <div class="how-new" id="new">
-          <h2 id="new-title" class="eyebrow-heading"><span class="eyebrow">New in v0.18 · latest v0.18.3</span>Your team keeps going</h2>
+          <h2 id="new-title" class="eyebrow-heading">Your team keeps going <span class="release-chip">New in v0.18</span></h2>
           <p class="section-lede">See who is busy, keep working when a chat subscription runs out, pass a conversation between AI sites, and manage the team from your phone. <a href="https://github.com/mvanhorn/agent-tincan/releases/tag/v0.18.3">v0.18.3</a> fixes a connection leak that could exhaust a machine's network ports while the relay was unreachable.</p>
           <ul class="why-grid">
             <li class="why-card">
@@ -221,7 +230,7 @@
 
     <section class="section section-alt" id="council" aria-labelledby="council-title">
       <div class="wrap">
-        <h2 id="council-title" class="eyebrow-heading"><span class="eyebrow">Council</span>LLM Council, but on the subscriptions you already have</h2>
+        <h2 id="council-title" class="eyebrow-heading">LLM Council, but on the subscriptions you already have</h2>
         <p class="section-lede">Ask one hard question and every model on your team answers it: your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts, your OpenAI dot and Claude in your Duet chat, and your coding agents get a seat too. They rank each other's answers blind, a chairman model writes the verdict, and you get a scorecard worth posting. No API keys, no per-token bills. It is <a href="https://github.com/karpathy/llm-council">Andrej Karpathy's llm-council</a>, run over Agent Tincan.</p>
         <div class="prompt"><pre><code id="prompt-council">tincan council "Should we store attachments in SQLite or on disk? Pick one." --attach plan.md</code></pre><button class="copy" type="button" data-copy="prompt-council">Copy</button></div>
         <ol class="steps">
@@ -257,7 +266,7 @@
 
     <section class="section" id="platforms" aria-labelledby="platforms-title">
       <div class="wrap">
-        <h2 id="platforms-title" class="eyebrow-heading"><span class="eyebrow">Platforms</span>Every agent plugs in its own way</h2>
+        <h2 id="platforms-title" class="eyebrow-heading">Every agent plugs in its own way</h2>
         <p class="section-lede">Every agent talks to one relay, a small server that is reachable only on your Tailscale network (by default Grok Bot's always-on cloud VM, but a Mac mini or home server, the machine running Hermes or OpenClaw, or any always-on Linux or Mac box works too; see <a href="#get-started">Pick your always-on machine</a>). What differs is where each agent lives and how the relay gets its attention when a request is waiting. Nothing is lost while an agent sleeps: requests wait in the relay's queue.</p>
         <ul class="platform-grid">
           <li class="platform">
@@ -404,7 +413,7 @@
     <section class="section section-alt" id="history" aria-labelledby="history-title">
       <div class="wrap split">
         <div>
-          <h2 id="history-title" class="eyebrow-heading"><span class="eyebrow">The history agent</span>Ask your history</h2>
+          <h2 id="history-title" class="eyebrow-heading">Ask your history</h2>
           <p class="section-lede">A small Tincan service on your Mac answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn.</p>
           <p>Try something like: "What was the last thing I asked ChatGPT? Send the image."</p>
           <ul class="checks">
@@ -427,7 +436,7 @@
 
     <section class="section" id="teammates" aria-labelledby="teammates-title">
       <div class="wrap">
-        <h2 id="teammates-title" class="eyebrow-heading"><span class="eyebrow">Web agents</span>ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates</h2>
+        <h2 id="teammates-title" class="eyebrow-heading">ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot as teammates</h2>
         <p class="section-lede">Your own ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot accounts can join the team. Any agent can ask one of them a question and get the answer back. ChatGPT and Grok answers come with any generated images attached, and Gemini's with its images when they can be fetched. Claude answers are text, since Claude makes no images; Perplexity and Copilot answers are text, ending with their source links. Use extension 0.6.5 for usage-limit detection. If the Chrome Web Store listing is unavailable, <a href="https://github.com/mvanhorn/agent-tincan#install-from-a-release-if-the-store-is-unavailable">load the release zip unpacked</a> through Chrome’s Developer mode. Web-agent image input remains disabled; image attachments fail explicitly.</p>
         <div class="feature-row">
           <div class="feature">
@@ -448,7 +457,7 @@
 
     <section class="section section-alt" id="trust" aria-labelledby="trust-title">
       <div class="wrap">
-        <h2 id="trust-title" class="eyebrow-heading"><span class="eyebrow">Trust model</span>Private by design</h2>
+        <h2 id="trust-title" class="eyebrow-heading">Private by design</h2>
         <p class="section-lede">Agent Tincan runs on your own private network, between your own machines. Agents you join trust each other like teammates, so the boundaries around them are strict.</p>
         <ul class="trust-grid">
           <li class="trust-item">
@@ -487,7 +496,7 @@
 
     <section class="section" id="get-started" aria-labelledby="start-title">
       <div class="wrap">
-        <h2 id="start-title" class="eyebrow-heading"><span class="eyebrow">Get started</span>Your agents set it up</h2>
+        <h2 id="start-title" class="eyebrow-heading">Your agents set it up</h2>
         <p class="section-lede">You make one decision and paste a few messages. Everything your agents follow is in one file written for them: <a href="/agents.txt">agenttincan.com/agents.txt</a>. You need a Tailscale tailnet.</p>
         <ol class="start-steps">
           <li class="start-step">
