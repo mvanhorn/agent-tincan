@@ -186,9 +186,9 @@ func convene(cmd *cobra.Command, verb, to string, form any, attach []string, asJ
 		return nil
 	}
 	if res.Reply != nil {
-		cmd.Print(strings.TrimRight(res.Reply.Body, "\n") + "\n")
+		cmd.Print(forTerminal(cmd.OutOrStdout(), strings.TrimRight(res.Reply.Body, "\n")+"\n"))
 	} else {
-		cmd.Print(client.FormatResult(res))
+		cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatResult(res)))
 	}
 	for _, p := range saved {
 		cmd.Printf("Saved %s\n", p)
@@ -263,7 +263,7 @@ func waitCouncil(ctx context.Context, r *client.Relay, id string, w io.Writer) (
 		failed = 0
 		if p := res.Progress; p != nil && (p.Note != last.Note || !p.At.Equal(last.At)) {
 			last = *p
-			fmt.Fprintf(w, "Council: %s\n", p.Note)
+			io.WriteString(w, forTerminal(w, "Council: "+p.Note+"\n"))
 		}
 		if res.Done() {
 			return res, nil

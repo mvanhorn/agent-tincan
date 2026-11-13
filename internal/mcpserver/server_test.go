@@ -1475,3 +1475,26 @@ func TestListAgentsLeavesOutGuests(t *testing.T) {
 		t.Fatalf("list_agents = %q", out)
 	}
 }
+
+// get_reply hands the agent a teammate's reply exactly as sent, control
+// runes included: only the CLI makes text terminal-safe, and only on a
+// terminal.
+func TestGetReplyKeepsControlRunes(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	const body = "done\x1b]0;pwned\x07 ‮evil"
+	req, err := m.Client(t, "grokbot").Send(ctx, "muse", "check the title", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	muse := m.Client(t, "muse")
+	if _, err := muse.Claim(ctx, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := muse.Reply(ctx, req.ID, body, envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if got := call(t, session(t, m, "grokbot"), "get_reply", map[string]any{"request_id": req.ID}); !strings.Contains(got, body) {
+		t.Fatalf("get_reply = %q", got)
+	}
+}

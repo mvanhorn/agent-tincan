@@ -464,3 +464,135 @@ func TestResumeReplyWakesAfterRestart(t *testing.T) {
 		t.Fatalf("wakes after restart = %q, want one reply nudge for grokbot", msgs)
 	}
 }
+
+// hostileReply is teammate text that would retitle the window and reverse
+// the line if a terminal acted on it.
+const hostileReply = "done\x1b]0;pwned\x07 ‮evil\nnext line"
+
+// hostileOnTerminal is hostileReply as a terminal shows it.
+const hostileOnTerminal = "done ]0;pwned   evil\nnext line"
+
+// tincan get shows a reply as data on a terminal and exactly anywhere else;
+// --json is exact on a terminal too.
+func TestGetIsTerminalSafeOnlyOnATerminal(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	req := answered(t, m, "check the title", hostileReply)
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, err := run(t, Root(), "get", req.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "get on a terminal", out)
+	if !strings.Contains(out, hostileOnTerminal) {
+		t.Fatalf("get on a terminal = %q", out)
+	}
+	out, _, err = runSplit(t, Root(), "get", req.ID, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeOutcome(t, out); got.Result.Reply == nil || got.Result.Reply.Body != hostileReply {
+		t.Fatalf("get --json on a terminal changed the reply: %s", out)
+	}
+
+	fakeTerminal(t, noWriterIsTerminal)
+	if out, err = run(t, Root(), "get", req.ID); err != nil || !strings.Contains(out, hostileReply) {
+		t.Fatalf("get to a pipe = %q, %v", out, err)
+	}
+}
+
+// A group's replies, from ask to several agents or get on a group id, are
+// data on a terminal too.
+func TestGroupGetIsTerminalSafeOnlyOnATerminal(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	g, err := m.Client(t, "grokbot").SendGroup(ctx, []string{"muse", "instinct"}, "check the title", envelope.KindAsk, "", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range g.Results {
+		c := m.Client(t, e.Request.To)
+		if _, err := c.Claim(ctx, e.Request.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Reply(ctx, e.Request.ID, hostileReply, envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+	}
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, err := run(t, Root(), "get", g.Group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "group get on a terminal", out)
+	if !strings.Contains(out, hostileOnTerminal) {
+		t.Fatalf("group get on a terminal = %q", out)
+	}
+	fakeTerminal(t, noWriterIsTerminal)
+	if out, err = run(t, Root(), "get", g.Group); err != nil || !strings.Contains(out, hostileReply) {
+		t.Fatalf("group get to a pipe = %q, %v", out, err)
+	}
+}
+
+// tincan ask prints the reply it waited for as data on a terminal.
+func TestAskWaitIsTerminalSafeOnATerminal(t *testing.T) {
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	muse := m.Client(t, "muse")
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			in, err := muse.Poll(ctx, time.Second)
+			if err != nil || len(in.Requests) == 0 {
+				continue
+			}
+			if _, err := muse.Claim(ctx, in.Requests[0].ID); err == nil {
+				muse.Reply(ctx, in.Requests[0].ID, hostileReply, envelope.StatusAnswered)
+			}
+			return
+		}
+	}()
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, err := run(t, Root(), "ask", "muse", "check the title", "--wait", "10s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "ask on a terminal", out)
+	if !strings.Contains(out, hostileOnTerminal) {
+		t.Fatalf("ask on a terminal = %q", out)
+	}
+}
+
+// tincan inbox and tincan wait show a teammate's request as data on a
+// terminal and exactly anywhere else.
+func TestInboxAndWaitAreTerminalSafeOnlyOnATerminal(t *testing.T) {
+	for _, command := range []string{"inbox", "wait"} {
+		for _, onTerminal := range []bool{true, false} {
+			m := testrelay.New(t, relay.Config{PollHold: time.Second})
+			if _, err := m.Client(t, "instinct").Send(t.Context(), "grokbot", hostileReply, envelope.KindAsk, "", false); err != nil {
+				t.Fatal(err)
+			}
+			useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+			if onTerminal {
+				fakeTerminal(t, everyWriterIsTerminal)
+			} else {
+				fakeTerminal(t, noWriterIsTerminal)
+			}
+			out, err := run(t, Root(), command)
+			if err != nil {
+				t.Fatalf("%s: %v", command, err)
+			}
+			if onTerminal {
+				assertTerminalSafe(t, command+" on a terminal", out)
+				if !strings.Contains(out, hostileOnTerminal) {
+					t.Fatalf("%s on a terminal = %q", command, out)
+				}
+			} else if !strings.Contains(out, hostileReply) {
+				t.Fatalf("%s to a pipe = %q", command, out)
+			}
+		}
+	}
+}

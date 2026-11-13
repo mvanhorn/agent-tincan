@@ -279,3 +279,33 @@ func TestChannelAnswersPingsWithoutNotice(t *testing.T) {
 		t.Fatalf("pushes = %v", got)
 	}
 }
+
+// A pong's body is data on a terminal.
+func TestPingIsTerminalSafeOnATerminal(t *testing.T) {
+	m := testrelay.New(t, relay.Config{PollHold: time.Second})
+	target := m.Client(t, "muse")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	go func() {
+		for ctx.Err() == nil {
+			in, err := target.Poll(ctx, time.Second)
+			if err != nil || len(in.Requests) == 0 {
+				continue
+			}
+			if _, err := target.Claim(ctx, in.Requests[0].ID); err == nil {
+				target.Reply(ctx, in.Requests[0].ID, "pong\x1b]0;pwned\x07 ‮ok", envelope.StatusAnswered)
+			}
+			return
+		}
+	}()
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, err := run(t, pingCmd(), "muse", "--wait", "5s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "ping on a terminal", out)
+	if !strings.Contains(out, "muse: pong ]0;pwned   ok in ") {
+		t.Fatalf("ping on a terminal = %q", out)
+	}
+}

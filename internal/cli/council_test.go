@@ -512,3 +512,47 @@ func TestCouncilHTMLOnlyFromCouncilKind(t *testing.T) {
 		t.Fatalf("saved as .html from a non-council agent:\n%s", out)
 	}
 }
+
+// With --json, a progress note on a terminal's stderr is data, while the
+// JSON on stdout, a pipe, stays exact.
+func TestCouncilProgressNoteIsTerminalSafeOnTerminalStderr(t *testing.T) {
+	_, c := ownerMesh(t, "council", "owner", true)
+	const note = "Answers\x1b]0;pwned\x07 ‮3 of 3"
+	block := `{"request_id":"x","status":"answered","state":"s\u001b"}`
+	took := fakeCouncil(t, c, []string{note}, "Council says.\n\n```council-result\n"+block+"\n```\n", envelope.StatusAnswered)
+	cmd := councilCmd()
+	var stdout, stderr bytes.Buffer
+	fakeTerminal(t, func(w io.Writer) bool { return w == &stderr })
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"Which database?", "--json"})
+	err := cmd.ExecuteContext(t.Context())
+	<-took
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "council stderr on a terminal", stderr.String())
+	if !strings.Contains(stderr.String(), "Council: Answers ]0;pwned   3 of 3\n") {
+		t.Fatalf("stage line = %q", stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != block {
+		t.Fatalf("stdout is not the exact block: %q", stdout.String())
+	}
+}
+
+// Without --json, the council's reply is data on a terminal.
+func TestCouncilReplyIsTerminalSafeOnATerminal(t *testing.T) {
+	_, c := ownerMesh(t, "council", "owner", true)
+	took := fakeCouncil(t, c, nil, "Recommendation:\x1b[2J use ‮Postgres.\n", envelope.StatusAnswered)
+	fakeTerminal(t, everyWriterIsTerminal)
+	out, _, err := runSplit(t, councilCmd(), "Which database?")
+	<-took
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTerminalSafe(t, "council on a terminal", out)
+	if !strings.Contains(out, "Recommendation: [2J use  Postgres.\n") {
+		t.Fatalf("council on a terminal = %q", out)
+	}
+}
