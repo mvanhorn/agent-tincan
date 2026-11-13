@@ -169,7 +169,7 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	if joined {
 		joinedRelay = r
 	}
-	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, guest)...)
+	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, r, guest)...)
 
 	// 3. Self-test of tincan mcp in both framings.
 	if exe != "" {

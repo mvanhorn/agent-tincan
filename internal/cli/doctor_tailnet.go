@@ -46,14 +46,17 @@ func deviceRoleOf(ctx context.Context, r *client.Relay) deviceRole {
 }
 
 // tailnetChecks reports each tailscaled on this machine, or one skip line when
-// there is none to ask. r is the joined relay, nil before a join. The relay
+// there is none to ask. r is the joined relay, nil unless the relay answered
+// this run. configured is the relay from the saved config, nil when there is
+// none; it says whether tincan goes through a remote proxy even when the relay
+// did not answer. The relay
 // answers for the node that reached it. With several tailscaleds running that
 // could be any of them, and through a remote proxy it is the proxy's node, so
 // it is asked only when one is running and no remote proxy is in the way. A
 // guest need not ask: the relay refuses it the admin route as it does an
 // agent, but its machine is on another account's tailnet, out of the owner's
 // tag rule.
-func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
+func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool) []check {
 	selves := tailnetSelves(ctx)
 	if len(selves) == 0 {
 		return []check{{"tailnet", "ok", "skipped: no tailscaled tincan can reach on this machine", ""}}
@@ -71,7 +74,10 @@ func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
 	case r != nil && running == 1 && !r.ThroughRemoteProxy():
 		role = deviceRoleOf(ctx, r)
 	}
-	stopped := running == 0 && (r == nil || !r.ThroughRemoteProxy())
+	// Only when the relay did not answer: a relay that answered is reached
+	// some other way (a managed connector, another daemon), and a remote
+	// proxy means this machine does not use its own Tailscale at all.
+	stopped := running == 0 && r == nil && (configured == nil || !configured.ThroughRemoteProxy())
 	checks := make([]check, len(selves))
 	for i, s := range selves {
 		checks[i] = tailnetCheck(s, role)
@@ -83,7 +89,8 @@ func tailnetChecks(ctx context.Context, r *client.Relay, guest bool) []check {
 }
 
 // stoppedTailnet marks a tailscaled check when no tailscaled on this machine
-// is running and tincan does not reach the relay through a remote proxy. Then
+// is running, the relay did not answer, and tincan does not reach it through
+// a remote proxy. Then
 // this machine cannot see the relay or any teammate, which the relay check
 // alone reports only as unreachable.
 func stoppedTailnet(c check) check {

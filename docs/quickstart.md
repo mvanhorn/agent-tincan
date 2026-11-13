@@ -105,13 +105,13 @@ Adding a machine to a working team goes faster once you know which parts belong 
 | Part | Where it lives | What it means for a new machine |
 |---|---|---|
 | Claude, ChatGPT or Codex account | The vendor | Grants nothing in Tincan. |
-| Tailscale node | Each machine | Tailscale must be running and signed in to your tailnet. If it is stopped, the machine cannot see the relay; `tincan doctor` says so. |
+| Tailscale node | Each machine | Tailscale must be running and signed in to your tailnet. If it is stopped, the machine cannot see the relay. When the relay does not answer and Tailscale is installed but not running, `tincan doctor` says so; when the Tailscale app is quit or its service is stopped, doctor finds no tailscaled and says it skipped the check. |
 | Tincan agent | One name and one config file on one machine | Each agent joins once with its own invite. Claude Code and Codex on the same Mac are two agents: two invites, and `TINCAN_CONFIG` keeps their configs apart. |
 | MCP entry | Each app on each machine | Add `agent-tincan` in every app that should have the tools. Account sync does not copy it. |
-| Wake | The relay's `wake.json`, plus a listener process on the machine for command wakes such as Codex | A machine can send without a wake. To be woken it needs its method in `wake.json`, and a command wake also needs the local listener running. |
+| Wake | The relay's `wake.json`, plus a process on the machine for agent-side wakes | A machine can send without a wake. Relay-side wakes (webhook, email) need their entry in `wake.json`. Agent-side wakes (command, channel, wait) need the local process: the command listener, or a Claude Code session started with the channel; their `wake.json` entry tells teammates how the agent wakes. |
 | Admin rights | The relay's `--admin` list | Only listed, untagged machines and the relay host can invite, remove or approve held requests. |
 
-The relay URL is the one `tincan invite` printed. A default relay answers at `http://tincan-relay` on port 80; a port appears only when the relay was started with `--listen` and `--port`.
+The relay URL is the one `tincan invite` printed. A default relay answers at `http://tincan-relay` on port 80; a relay started with `--port`, `--hostname` or `--listen` answers where `tincan invite` says.
 
 ### Tagging machines
 
@@ -124,7 +124,7 @@ To tag a machine:
 
 1. In the Tailscale admin console, open Access controls and add the tag to the policy file, for example `"tagOwners": {"tag:agent": []}`. An empty list lets tailnet admins apply it.
 2. Open Machines, find the machine, choose Edit tags from its menu, add `tag:agent` and save.
-3. Run `tincan doctor` on that machine. To undo, re-authenticate it as your user (`tailscale up --force-reauth`).
+3. Run `tincan doctor` on that machine. To undo, run `tailscale up --force-reauth --advertise-tags=` on that machine and sign in as your user. A machine that joined with a tagged auth key cannot drop its tags that way and needs a fresh login; see [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
 
 ## Rebuilt machines
 
