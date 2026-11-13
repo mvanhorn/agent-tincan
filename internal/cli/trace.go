@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -107,6 +108,11 @@ that only you can read:
 				return err
 			}
 			if out == "" {
+				if format == "md" {
+					// Printed to the terminal, the full bodies are data too.
+					// A file export keeps them exactly as sent.
+					text = terminalSafeLines(text)
+				}
 				cmd.Print(text)
 				return nil
 			}
@@ -275,6 +281,21 @@ func writeAttachments(b *strings.Builder, atts []envelope.Attachment) {
 	writeFenced(b, "Attachments", names.String())
 }
 
+// terminalSafeLines is client.TerminalSafe for multi-line text: control
+// and bidi runes become spaces, except the newlines and tabs that lay the
+// text out, so relay text cannot send escape sequences to the terminal.
+func terminalSafeLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		parts := strings.Split(l, "\t")
+		for j, p := range parts {
+			parts[j] = client.TerminalSafe(p)
+		}
+		lines[i] = strings.Join(parts, "\t")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // writeFenced writes text in a backtick fence one longer than any run of
 // backticks in it, after an optional label.
 func writeFenced(b *strings.Builder, label, text string) {
@@ -294,12 +315,20 @@ func writeFenced(b *strings.Builder, label, text string) {
 	fmt.Fprintf(b, "\n%stext\n%s\n%s\n", fence, strings.TrimSuffix(text, "\n"), fence)
 }
 
+// oneLine is s on one line, cut to at most 80 bytes on a rune boundary.
+// Relay text is data, including when it contains terminal control
+// sequences, so control and bidi runes become spaces: a body cannot rewrite
+// or hide what a listing shows the owner.
 func oneLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 80 {
-		return s[:77] + "..."
+	s = strings.Join(strings.Fields(client.TerminalSafe(s)), " ")
+	if len(s) <= 80 {
+		return s
 	}
-	return s
+	n := 77
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "..."
 }
 
 func auditCmd() *cobra.Command {

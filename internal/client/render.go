@@ -391,9 +391,10 @@ func compactSeconds(n int) string {
 
 // FormatProgress renders the latest note with its author and age, on one
 // line: a note with newlines must not pass for another request or event in
-// a trace.
+// a trace, and control and bidi runes become spaces, so it cannot rewrite
+// the listing it is shown in.
 func FormatProgress(p *envelope.Progress) string {
-	note := strings.Join(strings.Fields(p.Note), " ")
+	note := strings.Join(strings.Fields(TerminalSafe(p.Note)), " ")
 	return fmt.Sprintf("claimed by %s, %s ago: %s", p.By, max(time.Duration(0), time.Since(p.At)).Truncate(time.Second), note)
 }
 

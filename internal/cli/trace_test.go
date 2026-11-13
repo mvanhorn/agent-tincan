@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
@@ -130,6 +131,71 @@ func TestTraceDefaultOutputUnchanged(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("tincan trace:\n%q\nwant\n%q", got, want)
+	}
+}
+
+// The text view shows teammates' text as data: control and bidi runes
+// cannot rewrite or hide what the owner reads, and a cut never splits a
+// character.
+func TestTraceTextIsTerminalSafe(t *testing.T) {
+	tr := traceFixture()
+	tr.Steps[0].Request.Body = "\x1b[2K\x1b[1A\u202efake row\x07"
+	tr.Steps[0].Progress = &envelope.Progress{By: "gemini-web", Note: "\x1b]0;owned\x07working", At: traceFixtureTime}
+	tr.Steps[1].Request.Body = strings.Repeat("界", 40)
+	tr.Steps[1].Reply.Body = "the site refused\r\x1b[8mhidden"
+	got, err := runTrace(t, "r1", "--relay", serveTrace(t, tr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"\x1b", "\r", "\x07", "\u202e"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("trace kept %q: %q", bad, got)
+		}
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("trace split a character: %q", got)
+	}
+	for _, want := range []string{
+		"[answered]  ask [2K [1A fake row\n",
+		": ]0;owned working\n",
+		"[failed]  ask " + strings.Repeat("界", 24) + "...\n",
+		"reply from hermes: the site refused [8mhidden (status failed)\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("trace lacks %q: %q", want, got)
+		}
+	}
+}
+
+// Markdown printed to the terminal is terminal safe too, and keeps its line
+// layout; written to a file it keeps the bodies exactly as sent.
+func TestTraceMarkdownToTerminalIsTerminalSafe(t *testing.T) {
+	tr := traceFixture()
+	tr.Steps[0].Request.Body = "line one\n\x1b]0;owned\x07\u202eline two\r\tend"
+	url := serveTrace(t, tr)
+	got, err := runTrace(t, "r1", "--format", "md", "--relay", url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"\x1b", "\x07", "\u202e", "\r"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("md trace on the terminal kept %q: %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "line one\n ]0;owned  line two \tend") {
+		t.Fatalf("md trace lost its layout: %q", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "trace.md")
+	if _, err := runTrace(t, "r1", "--format", "md", "--out", path, "--relay", url); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), tr.Steps[0].Request.Body) {
+		t.Fatalf("md export changed the body: %q", data)
 	}
 }
 
