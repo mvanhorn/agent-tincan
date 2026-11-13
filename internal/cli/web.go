@@ -185,7 +185,7 @@ func webServeCmd() *cobra.Command {
 			// gets the matching reply.
 			native := history.NewClient()
 			if err := waitForSiteGrant(ctx, native, src, cmd.ErrOrStderr(), name); err != nil {
-				cmd.PrintErrf("tincan web %s: stopped\n", name)
+				cmd.PrintErrf("%stincan web %s: stopped\n", serviceStamp(), name)
 				return nil
 			}
 			// A thread the site refuses (a Duet channel shared with someone
@@ -211,7 +211,7 @@ func webServeCmd() *cobra.Command {
 				LegacyPassedPath: history.LegacyWebPassedPath(name),
 				Log:              cmd.ErrOrStderr(),
 			}
-			cmd.PrintErrf("tincan web %s: serving %s on %s (%s)\n", name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
+			cmd.PrintErrf("%stincan web %s: serving %s on %s (%s)\n", serviceStamp(), name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
 			if history.WebSiteTakesThread(src) {
 				// The dot (or Claude in a Duet channel) asks teammates by
 				// writing "@tincan ask <agent>"; the watcher asks them and
@@ -222,14 +222,14 @@ func webServeCmd() *cobra.Command {
 				agent.SendAllowlistPath = sendPath
 				agent.Teach = teach
 				if sendAllowed, err := history.LoadAllowlist(sendPath); err != nil {
-					cmd.PrintErrf("tincan web %s: send allowlist: %v; @tincan asks are refused until it is fixed\n", name, err)
+					cmd.PrintErrf("%stincan web %s: send allowlist: %v; @tincan asks are refused until it is fixed\n", serviceStamp(), name, err)
 				} else {
-					cmd.PrintErrf("tincan web %s: watching %s for @tincan asks (send %s)\n", name, history.ConversationName(src), history.DescribeAllowlist(sendPath, sendAllowed))
+					cmd.PrintErrf("%stincan web %s: watching %s for @tincan asks (send %s)\n", serviceStamp(), name, history.ConversationName(src), history.DescribeAllowlist(sendPath, sendAllowed))
 				}
 			}
 			err = agent.Run(ctx)
 			if ctx.Err() != nil {
-				cmd.PrintErrf("tincan web %s: stopped\n", name)
+				cmd.PrintErrf("%stincan web %s: stopped\n", serviceStamp(), name)
 				return nil
 			}
 			return err
@@ -259,7 +259,7 @@ func waitForSiteGrant(ctx context.Context, native *history.Client, src history.S
 	if err == nil {
 		return nil
 	}
-	fmt.Fprintf(log, "tincan web %s: waiting for the site grant, checking every %s: %v\n", name, webGrantRecheck, err)
+	fmt.Fprintf(log, "%stincan web %s: waiting for the site grant, checking every %s: %v\n", serviceStamp(), name, webGrantRecheck, err)
 	t := time.NewTicker(webGrantRecheck)
 	defer t.Stop()
 	for {
@@ -272,7 +272,7 @@ func waitForSiteGrant(ctx context.Context, native *history.Client, src history.S
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			fmt.Fprintf(log, "tincan web %s: %s is granted (or no extension is connected); starting\n", name, src)
+			fmt.Fprintf(log, "%stincan web %s: %s is granted (or no extension is connected); starting\n", serviceStamp(), name, src)
 			return nil
 		}
 	}
