@@ -129,7 +129,13 @@ func shortNativeDir(t *testing.T) string {
 // host.status with status(), as a native host would.
 func fakeHostStatus(t *testing.T, dir string, status func() history.ExtensionStatus) {
 	t.Helper()
-	ln, err := history.ListenSocket(filepath.Join(dir, "host.sock"))
+	fakeHostStatusAt(t, filepath.Join(dir, "host.sock"), status)
+}
+
+// fakeHostStatusAt is fakeHostStatus on the socket at sock.
+func fakeHostStatusAt(t *testing.T, sock string, status func() history.ExtensionStatus) {
+	t.Helper()
+	ln, err := history.ListenSocket(sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +369,7 @@ func TestWebInstallDotsFindsThePrimaryDotsThread(t *testing.T) {
 func stubDotPrimary(t *testing.T, p history.DotPrimary, err error) {
 	t.Helper()
 	saved := dotPrimary
-	dotPrimary = func(context.Context) (history.DotPrimary, error) { return p, err }
+	dotPrimary = func(context.Context, string) (history.DotPrimary, error) { return p, err }
 	t.Cleanup(func() { dotPrimary = saved })
 }
 
@@ -489,7 +495,7 @@ func TestWebServeDuetRefusesASharedChannel(t *testing.T) {
 	shortNativeDir(t)
 	setHome(t, t.TempDir())
 	saved := checkWebThread
-	checkWebThread = func(context.Context, history.Source, string) error {
+	checkWebThread = func(context.Context, history.Source, string, string) error {
 		return &history.UnavailableError{Source: history.SourceDuet, Kind: history.ErrRefused, Detail: "the Duet channel #team is shared"}
 	}
 	t.Cleanup(func() { checkWebThread = saved })
@@ -527,7 +533,7 @@ func TestWebInstallDuetChecksTheChannel(t *testing.T) {
 	const channel = "chan_0000000000000000chan01"
 	stub := func(err error) {
 		saved := checkWebThread
-		checkWebThread = func(context.Context, history.Source, string) error { return err }
+		checkWebThread = func(context.Context, history.Source, string, string) error { return err }
 		t.Cleanup(func() { checkWebThread = saved })
 	}
 	stub(nil)

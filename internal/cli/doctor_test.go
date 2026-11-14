@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/history"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
@@ -383,5 +384,46 @@ func TestUnansweredWakeCheck(t *testing.T) {
 				t.Errorf("non-admin check names agents: %q", text)
 			}
 		})
+	}
+}
+
+// doctor lists each running native host with its profile and build, and
+// warns when one waits because another host holds its socket.
+func TestNativeHostsCheck(t *testing.T) {
+	if c := nativeHostsCheck(nil); c.Status != "ok" || !strings.Contains(c.Detail, "no Tincan extension native host") {
+		t.Fatalf("none: %+v", c)
+	}
+	serving := []history.NativeHostPresence{
+		{PID: 11, Profile: "", Build: "store", Version: "0.8.0", Socket: "/n/host.sock", State: "serving"},
+		{PID: 12, Profile: "work", Build: "store", Version: "0.8.0", Socket: "/n/host-work.sock", State: "serving"},
+	}
+	c := nativeHostsCheck(serving)
+	if c.Status != "ok" || !strings.Contains(c.Detail, "unnamed profile (store build 0.8.0, host.sock, pid 11)") || !strings.Contains(c.Detail, "profile work (store build 0.8.0, host-work.sock, pid 12)") {
+		t.Fatalf("serving: %+v", c)
+	}
+	waiting := append(serving, history.NativeHostPresence{PID: 13, Build: "store", Socket: "/n/host.sock", State: "waiting", Reason: "another native host serves host.sock (two Chrome profiles are unnamed: name one in the extension's options page)"})
+	c = nativeHostsCheck(waiting)
+	if c.Status != "warn" || !strings.Contains(c.Detail, "waiting: unnamed profile (store build, host.sock, pid 13): another native host serves host.sock") || !strings.Contains(c.Fix, "Name every profile but one") {
+		t.Fatalf("waiting: %+v", c)
+	}
+}
+
+// Presence files whose host is gone are dropped.
+func TestReadNativeHostsDropsDeadHosts(t *testing.T) {
+	dir := t.TempDir()
+	write := func(pid int, state string) {
+		b, _ := json.Marshal(history.NativeHostPresence{PID: pid, Build: "store", Socket: "/n/host.sock", State: state})
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", pid)), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(os.Getpid(), "serving")
+	write(1<<22+7, "waiting") // no such process
+	hosts := history.ReadNativeHosts(dir)
+	if len(hosts) != 1 || hosts[0].PID != os.Getpid() {
+		t.Fatalf("hosts %+v", hosts)
+	}
+	if c := nativeHostsCheck(hosts); c.Status != "ok" {
+		t.Fatalf("dead waiting host still warned: %+v", c)
 	}
 }

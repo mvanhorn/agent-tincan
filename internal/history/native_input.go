@@ -328,6 +328,10 @@ func (h *NativeHost) serveInput(ctx context.Context, conn net.Conn, first Native
 			return
 		}
 		clientID := req.ID
+		if !h.mayForward(ctx) {
+			handedOver(conn, clientID)
+			return
+		}
 		ch := make(chan []byte, 64)
 		h.mu.Lock()
 		h.seq++

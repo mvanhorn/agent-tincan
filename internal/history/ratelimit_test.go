@@ -399,6 +399,7 @@ func TestNativeHostRateLimitCooldown(t *testing.T) {
 	})
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, RequestTimeout: 5 * time.Second}
 	go func() { _ = host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	defer chromeToHostW.Close()
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 	// A fresh client each time, so only the host's cooldown can hold a
@@ -528,6 +529,7 @@ func TestNativeHostRechecksExtensionFiles(t *testing.T) {
 	var logBuf lockedBuffer
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, ExtensionDir: extDir, Log: &logBuf, RecheckInterval: 30 * time.Millisecond}
 	go func() { _ = host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	defer chromeToHostW.Close()
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 	fromHost := make(chan NativeRequest, 8)
@@ -609,6 +611,7 @@ func TestNativeHostRecheckDoesNotRepeatRecordedDrift(t *testing.T) {
 	var logBuf lockedBuffer
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, ExtensionDir: extDir, ReloadStatePath: statePath, Log: &logBuf, RecheckInterval: 20 * time.Millisecond}
 	go func() { _ = host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	defer chromeToHostW.Close()
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 	fromHost := make(chan NativeRequest, 64)

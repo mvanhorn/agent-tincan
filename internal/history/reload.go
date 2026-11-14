@@ -29,6 +29,9 @@ type Hello struct {
 	Unpacked   bool                 `json:"unpacked"`
 	Files      map[string]string    `json:"files"`
 	Granted    []string             `json:"granted"`
+	// Profile is the Chrome profile name the owner gave in the extension's
+	// options page, empty when unnamed (and from builds before names).
+	Profile string `json:"profile,omitempty"`
 }
 
 // ExtensionDirEnv names the unpacked extension directory for the native

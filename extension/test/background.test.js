@@ -3,15 +3,19 @@ import assert from 'node:assert/strict';
 
 // A fake chrome.runtime native port and alarms API.
 function fakeChrome() {
-  const listeners = { message: [], disconnect: [], startup: [], installed: [], alarm: [], permAdded: [], permRemoved: [] };
-  const state = { connects: [], posted: [], alarms: [], port: null, reloads: 0, granted: new Set(['https://claude.ai/*']) };
+  const listeners = { message: [], disconnect: [], startup: [], installed: [], alarm: [], permAdded: [], permRemoved: [], storage: [] };
+  const state = { connects: [], posted: [], alarms: [], port: null, ports: [], reloads: 0, granted: new Set(['https://claude.ai/*']), stored: {} };
   const makePort = () => {
     const port = {
-      postMessage: (m) => state.posted.push(JSON.parse(JSON.stringify(m))),
+      posted: [],
+      disconnected: false,
+      disconnect: () => { port.disconnected = true; },
+      postMessage: (m) => { const copy = JSON.parse(JSON.stringify(m)); state.posted.push(copy); port.posted.push(copy); },
       onMessage: { addListener: (fn) => listeners.message.push(fn) },
       onDisconnect: { addListener: (fn) => listeners.disconnect.push(fn) },
     };
     state.port = port;
+    state.ports.push(port);
     return port;
   };
   globalThis.chrome = {
@@ -30,6 +34,10 @@ function fakeChrome() {
       contains: async ({ origins }) => origins.every((o) => state.granted.has(o)),
       onAdded: { addListener: (fn) => listeners.permAdded.push(fn) },
       onRemoved: { addListener: (fn) => listeners.permRemoved.push(fn) },
+    },
+    storage: {
+      local: { get: async (key) => (key in state.stored ? { [key]: state.stored[key] } : {}) },
+      onChanged: { addListener: (fn) => listeners.storage.push(fn) },
     },
     alarms: {
       create: (name, info) => state.alarms.push({ name, info }),
@@ -51,6 +59,7 @@ test('background connects to the native host and answers only valid requests', a
     return new Response(JSON.stringify({ items: [] }), { headers: { 'content-type': 'application/json' } });
   };
   await import('../background.js');
+  await settle();
   assert.deepEqual(state.connects, ['com.agenttincan.history']);
   assert.ok(state.alarms.some((a) => a.name === 'tincan-reconnect'));
 
@@ -118,14 +127,15 @@ test('background connects to the native host and answers only valid requests', a
   };
   listeners.disconnect.forEach((fn) => fn());
   listeners.alarm.forEach((fn) => fn({ name: 'tincan-reconnect' }));
-  assert.equal(state.connects.length, 2);
   await settle();
+  assert.equal(state.connects.length, 2);
   const hellos = state.posted.filter((m) => m.hello);
   assert.equal(hellos.length, 4);
   assert.deepEqual(hellos[3].hello.files, hello.hello.files, 'hello reports the loaded files, not the ones on disk now');
   // Already connected: no duplicate port.
   listeners.alarm.forEach((fn) => fn({ name: 'tincan-reconnect' }));
   listeners.startup.forEach((fn) => fn());
+  await settle();
   assert.equal(state.connects.length, 2);
 });
 
@@ -160,4 +170,98 @@ test('an older hello that finishes last is dropped', async () => {
   const hellos = state.posted.filter((m) => m.hello).map((m) => m.hello.granted);
   assert.deepEqual(hellos.at(-1), ['claudeai'], `last hello the host saw: ${JSON.stringify(hellos)}`);
   assert.ok(!hellos.slice(1).some((g) => g.includes('chatgpt')), 'the stale hello was not sent');
+});
+
+// The first frame on every port names the Chrome profile, before the
+// hello (whose files take a while to hash): the native host binds no
+// socket until it comes. Unnamed is null and the hello carries no profile.
+test('the profile frame is the first message on a new port', async () => {
+  const { state } = fakeChrome();
+  let release;
+  const slow = new Promise((r) => { release = r; });
+  globalThis.fetch = async (url) => { await slow; return new Response('file ' + url); };
+  await import('../background.js?unnamed');
+  await settle();
+  assert.deepEqual(state.ports[0].posted, [{ id: 0, profile: null }], 'only the profile frame before hashing ends');
+  release();
+  await settle();
+  const hello = state.ports[0].posted[1];
+  assert.ok(hello.hello);
+  assert.ok(!('profile' in hello.hello));
+});
+
+test('a named profile is in the first frame and the hello; a rename reconnects', async () => {
+  const { listeners, state } = fakeChrome();
+  state.stored.profile = 'work';
+  globalThis.fetch = async (url) => new Response('file ' + url);
+  await import('../background.js?named');
+  await settle();
+  assert.deepEqual(state.ports[0].posted[0], { id: 0, profile: 'work' });
+  assert.equal(state.ports[0].posted[1].hello.profile, 'work');
+
+  // A change to another key, or to the same name, keeps the port.
+  listeners.storage.forEach((fn) => fn({ other: { newValue: 1 } }, 'local'));
+  listeners.storage.forEach((fn) => fn({ profile: { oldValue: 'work', newValue: 'work' } }, 'local'));
+  await settle();
+  assert.equal(state.connects.length, 1);
+
+  // The options page clears the name: the port is closed and a new one
+  // says unnamed, so a new host serves host.sock.
+  delete state.stored.profile;
+  listeners.storage.forEach((fn) => fn({ profile: { oldValue: 'work' } }, 'local'));
+  await settle();
+  assert.equal(state.ports[0].disconnected, true);
+  assert.equal(state.connects.length, 2);
+  assert.deepEqual(state.ports[1].posted[0], { id: 0, profile: null });
+  assert.ok(!('profile' in state.ports[1].posted[1].hello));
+
+  // A stored value that is not a valid name is passed on for the host to
+  // refuse, never turned into unnamed.
+  state.stored.profile = 'Work!';
+  listeners.storage.forEach((fn) => fn({ profile: { newValue: 'Work!' } }, 'local'));
+  await settle();
+  assert.deepEqual(state.ports[2].posted[0], { id: 0, profile: 'Work!' });
+});
+
+// A storage read that fails never connects as unnamed (that would serve
+// the unnamed profile's socket from this account); the alarm retries.
+test('a failed storage read does not connect', async () => {
+  const { listeners, state } = fakeChrome();
+  let fail = true;
+  globalThis.chrome.storage.local.get = async (key) => {
+    if (fail) throw new Error('storage unavailable');
+    return { [key]: 'work' };
+  };
+  globalThis.fetch = async (url) => new Response('file ' + url);
+  await import('../background.js?storage-fails');
+  await settle();
+  assert.equal(state.connects.length, 0);
+  assert.deepEqual(state.posted, []);
+  fail = false;
+  listeners.alarm.forEach((fn) => fn({ name: 'tincan-reconnect' }));
+  await settle();
+  assert.equal(state.connects.length, 1);
+  assert.deepEqual(state.ports[0].posted[0], { id: 0, profile: 'work' });
+});
+
+// A name saved while a connect is still reading storage is not lost: the
+// connect reads again and opens with the new name.
+test('a rename during an in-flight connect opens with the new name', async () => {
+  const { listeners, state } = fakeChrome();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let reads = 0;
+  globalThis.chrome.storage.local.get = async (key) => {
+    reads++;
+    if (reads === 1) { await gate; return {}; }
+    return { [key]: 'work' };
+  };
+  globalThis.fetch = async (url) => new Response('file ' + url);
+  await import('../background.js?rename-in-flight');
+  await settle();
+  listeners.storage.forEach((fn) => fn({ profile: { newValue: 'work' } }, 'local'));
+  release();
+  await settle();
+  assert.equal(state.connects.length, 1);
+  assert.deepEqual(state.ports[0].posted[0], { id: 0, profile: 'work' });
 });

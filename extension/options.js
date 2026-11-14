@@ -12,8 +12,14 @@
 // grants from Chrome each time. A grant or revocation also reaches the
 // worker (chrome.permissions.onAdded/onRemoved), which tells the native
 // host.
+//
+// Below the sites, the owner can name this Chrome profile. The name is
+// kept in chrome.storage.local (this profile only); the worker sees the
+// change, reconnects, and its native host serves host-<name>.sock, which
+// tincan web serve --profile <name> uses. A name that does not fit the
+// pattern is refused here and never saved.
 
-import { SITE_ACCESS, siteGranted } from './ops.js';
+import { PROFILE_KEY, SITE_ACCESS, siteGranted, storedProfile, validProfileName } from './ops.js';
 
 // siteStates lists every site with whether all its origins are granted,
 // and partial when only its page origins are (its operations work, but
@@ -104,6 +110,63 @@ export function renderOptions({ document, permissions }) {
   return { ready: refresh() };
 }
 
+function describeProfile(name) {
+  return name
+    ? `This profile is named ${name}: its web agents run with --profile ${name}.`
+    : 'This profile is unnamed: its web agents run without --profile.';
+}
+
+// renderProfile fills the profile name field from storage (a
+// chrome.storage area) and saves it on Save: an empty field clears the
+// name, an invalid one is refused. It returns {ready}, a promise for the
+// first read.
+export function renderProfile({ document, storage }) {
+  const input = document.getElementById('profile-name');
+  const save = document.getElementById('profile-save');
+  const status = document.getElementById('profile-status');
+  if (!input || !save || !status) return { ready: Promise.resolve() };
+  const show = (text, className = 'status') => {
+    status.textContent = text;
+    status.className = className;
+  };
+  // Editing and saving stay off until the first read succeeds, so a Save
+  // before the stored name is on screen cannot erase it; a failed read
+  // keeps them off.
+  input.disabled = true;
+  save.disabled = true;
+  const ready = Promise.resolve()
+    .then(() => storage.get(PROFILE_KEY))
+    .then((got) => {
+      const name = storedProfile(got && got[PROFILE_KEY]);
+      input.value = name || '';
+      show(describeProfile(name));
+      input.disabled = false;
+      save.disabled = false;
+    })
+    .catch((e) => show(`Could not read the profile name: ${(e && e.message) || e}`, 'status error'));
+  save.addEventListener('click', () => {
+    if (save.disabled) return;
+    const name = String(input.value || '').trim();
+    if (name !== '' && !validProfileName(name)) {
+      show('Not saved: use 1 to 32 lowercase letters, digits and dashes, starting with a letter or digit.', 'status error');
+      return;
+    }
+    save.disabled = true;
+    Promise.resolve()
+      .then(() => (name === '' ? storage.remove(PROFILE_KEY) : storage.set({ [PROFILE_KEY]: name })))
+      .then(() => {
+        input.value = name;
+        show(`Saved. ${describeProfile(name)}`, 'status granted');
+      })
+      .catch((e) => show(`Not saved: ${(e && e.message) || e}`, 'status error'))
+      .finally(() => {
+        save.disabled = false;
+      });
+  });
+  return { ready };
+}
+
 if (typeof document !== 'undefined' && typeof chrome !== 'undefined' && chrome.permissions) {
   renderOptions({ document, permissions: chrome.permissions });
+  if (chrome.storage) renderProfile({ document, storage: chrome.storage.local });
 }
