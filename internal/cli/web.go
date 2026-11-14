@@ -66,10 +66,19 @@ func webThreadFlag(src history.Source, thread string) (string, error) {
 // checkWebThread reads a one-thread site's thread once through the
 // extension (tests replace it), so web install and web serve refuse a
 // thread the site refuses (a shared Duet channel) up front.
-var checkWebThread = func(ctx context.Context, src history.Source, thread string) error {
+var checkWebThread = func(ctx context.Context, src history.Source, thread, profile string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	return history.NewClient().CheckWebThread(ctx, src, thread)
+	return history.NewClientFor(profile).CheckWebThread(ctx, src, thread)
+}
+
+// webProfileFlag checks --profile: empty (the unnamed Chrome profile) or a
+// name the extension's options page accepts.
+func webProfileFlag(profile string) error {
+	if profile != "" && !history.ValidProfileName(profile) {
+		return fmt.Errorf("--profile %q: %w", profile, history.ErrBadProfileName)
+	}
+	return nil
 }
 
 // serviceConfigPath is a service agent's own client config (web agents,
@@ -86,7 +95,7 @@ func serviceConfigPath(agent string) string {
 }
 
 func webServeCmd() *cobra.Command {
-	var site, configPath, allowPath, statePath, name, thread string
+	var site, configPath, allowPath, statePath, name, thread, profile string
 	var teach bool
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -103,6 +112,8 @@ func webServeCmd() *cobra.Command {
 			"  3. the Tincan Chrome extension types it into the site in a background tab and sends it; the service then reads the conversation until the reply is finished;\n" +
 			"  4. the reply text (capped) comes back; ChatGPT and Grok attach their generated images, Gemini's when they can be fetched,\n" +
 			"     and Perplexity's and Copilot's answers end with their source links.\n" +
+			"With two Chrome profiles signed in to different accounts, name a profile in the extension's options page and pass\n" +
+			"--profile <name>: the agent then uses only that profile's browser, and waits at startup until it is connected.\n" +
 			"Normally started by the service definition tincan web install writes.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -117,6 +128,9 @@ func webServeCmd() *cobra.Command {
 			}
 			if teach && !history.WebSiteTakesThread(src) {
 				return fmt.Errorf("--teach applies only to --site %s, not %s", history.WebThreadSites(), src)
+			}
+			if err := webProfileFlag(profile); err != nil {
+				return err
 			}
 			if name == "" {
 				name = history.WebAgentName(src)
@@ -184,7 +198,15 @@ func webServeCmd() *cobra.Command {
 			// seconds, forever). With no extension connected (launchd starts
 			// this at login, often before Chrome) it starts, and each request
 			// gets the matching reply.
-			native := history.NewClient()
+			native := history.NewClientFor(profile)
+			// A named profile's host is the only one this agent may use, so
+			// it waits for that host rather than starting without it.
+			if profile != "" {
+				if err := waitForProfileHost(ctx, native, profile, cmd.ErrOrStderr(), name); err != nil {
+					cmd.PrintErrf("%stincan web %s: stopped\n", serviceStamp(), name)
+					return nil
+				}
+			}
 			if err := waitForSiteGrant(ctx, native, src, cmd.ErrOrStderr(), name); err != nil {
 				cmd.PrintErrf("%stincan web %s: stopped\n", serviceStamp(), name)
 				return nil
@@ -193,7 +215,7 @@ func webServeCmd() *cobra.Command {
 			// else) is never served; any other failure (no extension yet)
 			// is left to each request's own reply.
 			if history.WebSiteTakesThread(src) && !history.WebSiteHasPrimary(src) {
-				if err := checkWebThread(ctx, src, thread); errors.Is(err, history.ErrRefused) {
+				if err := checkWebThread(ctx, src, thread, profile); errors.Is(err, history.ErrRefused) {
 					return fmt.Errorf("web serve: %w", err)
 				}
 			}
@@ -212,7 +234,7 @@ func webServeCmd() *cobra.Command {
 				LegacyPassedPath: history.LegacyWebPassedPath(name),
 				Log:              cmd.ErrOrStderr(),
 			}
-			cmd.PrintErrf("%stincan web %s: serving %s on %s (%s)\n", serviceStamp(), name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed))
+			cmd.PrintErrf("%stincan web %s: serving %s on %s (%s)%s\n", serviceStamp(), name, src, cfg.Relay, history.DescribeAllowlist(allowPath, allowed), profileNote(profile))
 			if history.WebSiteTakesThread(src) {
 				// The dot (or Claude in a Duet channel) asks teammates by
 				// writing "@tincan ask <agent>"; the watcher asks them and
@@ -242,6 +264,7 @@ func webServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&allowPath, "allowlist", "", "file of agents allowed to ask, one per line (default ~/.config/tincan/<name>-allow.txt; missing or * means every joined agent)")
 	cmd.Flags().StringVar(&statePath, "state", "", "where each asker's last conversation id is kept (default ~/.config/tincan/<name>-state.json)")
 	cmd.Flags().StringVar(&thread, "thread", "", "--site dots or duet only (required there): the dot's thread id, which tincan web install --site dots finds and keeps in the service, or the Duet channel's id or address")
+	cmd.Flags().StringVar(&profile, "profile", "", "the Chrome profile to use, by the name given in the extension's options page (default: the unnamed profile)")
 	cmd.Flags().BoolVar(&teach, "teach", false, "--site dots or duet only: type the setup message that teaches the dot or Claude to ask teammates into its conversation again (it is sent once per thread on its own)")
 	return cmd
 }
@@ -249,6 +272,44 @@ func webServeCmd() *cobra.Command {
 // webGrantRecheck is how often web serve asks the extension again while
 // it waits for a missing site grant. Tests shorten it.
 var webGrantRecheck = time.Minute
+
+// webProfileRecheck is how often web serve with --profile checks again
+// for that profile's native host at startup. Tests shorten it.
+var webProfileRecheck = 10 * time.Second
+
+func profileNote(profile string) string {
+	if profile == "" {
+		return ""
+	}
+	return " through Chrome profile " + profile
+}
+
+// waitForProfileHost returns once the native host for the Chrome profile
+// named profile answers, logging once while it waits. It never tries
+// another profile's host. It fails only when ctx ends first.
+func waitForProfileHost(ctx context.Context, native *history.Client, profile string, log io.Writer, name string) error {
+	if _, err := native.ExtensionStatus(ctx); err == nil {
+		return nil
+	}
+	fmt.Fprintf(log, "%stincan web %s: waiting for Chrome profile %s (its native host socket %s does not answer yet), checking every %s. Open Chrome in that profile, and check that the extension's options page names it %s; tincan doctor lists the profiles that are connected.\n",
+		serviceStamp(), name, profile, history.ProfileSocketPath(profile), webProfileRecheck, profile)
+	t := time.NewTicker(webProfileRecheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+		if _, err := native.ExtensionStatus(ctx); err == nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(log, "%stincan web %s: Chrome profile %s is connected\n", serviceStamp(), name, profile)
+			return nil
+		}
+	}
+}
 
 // waitForSiteGrant returns once src can be served: at once when the
 // extension grants it or no extension answers, else after logging the
@@ -299,14 +360,14 @@ func wrongServeAgent(command, name, who, agent string) error {
 
 // dotPrimary names the account's primary dot through the extension
 // (tests replace it).
-var dotPrimary = func(ctx context.Context) (history.DotPrimary, error) {
+var dotPrimary = func(ctx context.Context, profile string) (history.DotPrimary, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	return history.NewClient().DotPrimary(ctx)
+	return history.NewClientFor(profile).DotPrimary(ctx)
 }
 
 func webInstallCmd() *cobra.Command {
-	var site, binary, thread, name, configPath string
+	var site, binary, thread, name, configPath, profile string
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Write the service definition for a web agent (never starts it)",
@@ -319,10 +380,13 @@ func webInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := webProfileFlag(profile); err != nil {
+				return err
+			}
 			if thread == "" && history.WebSiteHasPrimary(src) {
 				// The dot's address no longer shows a thread, so the
 				// extension names the account's primary dot.
-				p, err := dotPrimary(cmd.Context())
+				p, err := dotPrimary(cmd.Context(), profile)
 				if err != nil {
 					return fmt.Errorf("web install: could not find your dot's thread through the Tincan Chrome extension (%w); update the extension and restart Chrome, then try again, or pass --thread <id>", err)
 				}
@@ -336,7 +400,7 @@ func webInstallCmd() *cobra.Command {
 			if history.WebSiteTakesThread(src) && !history.WebSiteHasPrimary(src) {
 				// A channel the site refuses is never installed; without the
 				// extension the check waits for web serve.
-				switch err := checkWebThread(cmd.Context(), src, thread); {
+				switch err := checkWebThread(cmd.Context(), src, thread, profile); {
 				case errors.Is(err, history.ErrRefused):
 					return fmt.Errorf("web install: %w", err)
 				case err != nil:
@@ -360,7 +424,7 @@ func webInstallCmd() *cobra.Command {
 			if cfg.Agent != "" && cfg.Agent != name {
 				return wrongServeAgent("web install", name, configPath+" is joined as", cfg.Agent)
 			}
-			res, err := history.InstallWebService(src, history.ServiceOptions{Binary: binary, Thread: thread, AgentName: name, ConfigPath: configPath})
+			res, err := history.InstallWebService(src, history.ServiceOptions{Binary: binary, Thread: thread, AgentName: name, ConfigPath: configPath, Profile: profile})
 			if err != nil {
 				return err
 			}
@@ -381,6 +445,7 @@ func webInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "invited agent name (default: site web agent name)")
 	cmd.Flags().StringVar(&configPath, "config", "", "client config saved into the service (default: TINCAN_CONFIG or ~/.config/tincan/<name>.json)")
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
+	cmd.Flags().StringVar(&profile, "profile", "", "the Chrome profile the service uses, by the name given in the extension's options page (default: the unnamed profile); kept in the service definition")
 	cmd.Flags().StringVar(&thread, "thread", "", "--site dots or duet only: the dot's thread id (default: the thread of the account's primary dot, from the Chrome extension), or the Duet channel's id or https://claude.ai/duet/<id> address (required); kept in the service definition")
 	return cmd
 }

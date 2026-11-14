@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/history"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 )
 
@@ -58,8 +59,10 @@ the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
 tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
 actually been starting tincan mcp (every tincan mcp records its launch),
-and whether a running tincan mcp is on a different build than this
-binary, as after tincan upgrade until the app reloads it.
+whether a running tincan mcp is on a different build than this
+binary, as after tincan upgrade until the app reloads it, and the Tincan
+Chrome extension's native hosts: the Chrome profile each one serves, and
+any host waiting because another holds its socket.
 
 Exit status is 1 when a check fails.`,
 		Args: cobra.NoArgs,
@@ -192,6 +195,9 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 
 	// 6. tincan mcp servers left on another build by an upgrade.
 	add(buildCheck(launches, mcpserver.LaunchRunning))
+
+	// 7. The Tincan extension's native hosts, one per Chrome profile.
+	add(nativeHostsCheck(history.ReadNativeHosts(history.NativeHostsDir())))
 	if runtime.GOOS == "darwin" && exe != "" {
 		if env, err := defaultLoginItemsEnv(exe); err == nil {
 			add(loginItemsCheck(env))
@@ -681,4 +687,46 @@ func relayMovesCheck(ctx context.Context) check {
 			"Check that tailscaled is logged in to the tailnet the relay is on (tailscale status), and if more than one tailscaled runs here, set TS_SOCKET to the one on that tailnet. Then run tincan doctor again."}
 	}
 	return check{"relay moves", "ok", fmt.Sprintf("the relay key is saved and this machine lists %d tailnet addresses through %s, so it finds the relay by itself if its address changes", n, via), ""}
+}
+
+// nativeHostsCheck lists the running native hosts, one per Chrome profile
+// with the extension, from the presence file each keeps. A waiting host is
+// a warning: two profiles that are both unnamed (or share a name) leave
+// the second one's account unreachable until one is renamed.
+func nativeHostsCheck(hosts []history.NativeHostPresence) check {
+	const name = "chrome profiles"
+	if len(hosts) == 0 {
+		return check{name, "ok", "no Tincan extension native host is running (Chrome is closed, or no profile has the extension connected); web agents and live history reads need one", ""}
+	}
+	var serving, waiting []string
+	storeYield := false
+	for _, h := range hosts {
+		label := "unnamed profile"
+		if h.Profile != "" {
+			label = "profile " + client.TerminalSafe(h.Profile)
+		}
+		build := client.TerminalSafe(h.Build) + " build"
+		if h.Version != "" {
+			build += " " + client.TerminalSafe(h.Version)
+		}
+		line := fmt.Sprintf("%s (%s, %s, pid %d)", label, build, filepath.Base(h.Socket), h.PID)
+		if h.State != "waiting" {
+			serving = append(serving, line)
+			continue
+		}
+		waiting = append(waiting, line+": "+client.TerminalSafe(h.Reason))
+		storeYield = storeYield || strings.Contains(h.Reason, "store build") || strings.Contains(h.Reason, "unpacked build")
+	}
+	detail := "serving: none"
+	if len(serving) > 0 {
+		detail = "serving: " + strings.Join(serving, "; ")
+	}
+	if len(waiting) == 0 {
+		return check{name, "ok", detail, ""}
+	}
+	fix := "Two Chrome profiles are both unnamed or share a name, so only one of them is reachable. Name every profile but one in the extension's options page (" + history.OptionsPageHint + "), and run each named profile's web agents with --profile <name>."
+	if storeYield {
+		fix += " A host from the unpacked build waits while the store build's host runs; with both builds installed that is expected, and removing one of them stops the wait."
+	}
+	return check{name, "warn", detail + "; waiting: " + strings.Join(waiting, "; "), fix}
 }

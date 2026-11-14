@@ -121,6 +121,9 @@ type ServiceOptions struct {
 	// name. Default: install the app this build embeds and use it; builds
 	// without it write the plain plist.
 	Launcher string
+	// Profile is the Chrome profile a web agent uses (--profile), empty
+	// for the unnamed profile.
+	Profile string
 }
 
 // ServiceResult says what InstallService wrote and the command that
@@ -423,7 +426,7 @@ const webLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>web</string>
     <string>serve</string>
     <string>--site</string>
-    <string>__SITE__</string>__NAMEARGS____THREADARGS__
+    <string>__SITE__</string>__NAMEARGS____THREADARGS____PROFILEARGS__
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -454,7 +457,7 @@ Description=Agent Tincan web agent (__AGENT__)
 After=network-online.target
 
 [Service]
-ExecStart="__TINCAN_BINARY__" web serve --site __SITE____NAMEARGS____THREADARGS__
+ExecStart="__TINCAN_BINARY__" web serve --site __SITE____NAMEARGS____THREADARGS____PROFILEARGS__
 Environment="TINCAN_CONFIG=__CONFIG__"
 Environment="PATH=__PATH__"
 Restart=always
@@ -497,6 +500,16 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 	}
 	launchd = strings.Replace(launchd, "__THREADARGS__", launchdThread, 1)
 	systemd = strings.Replace(systemd, "__THREADARGS__", systemdThread, 1)
+	launchdProfile, systemdProfile := "", ""
+	if o.Profile != "" {
+		if !ValidProfileName(o.Profile) {
+			return ServiceResult{}, fmt.Errorf("--profile %q: %w", o.Profile, ErrBadProfileName)
+		}
+		launchdProfile = "\n    <string>--profile</string>\n    <string>__PROFILE__</string>"
+		systemdProfile = " --profile __PROFILE__"
+	}
+	launchd = strings.Replace(launchd, "__PROFILEARGS__", launchdProfile, 1)
+	systemd = strings.Replace(systemd, "__PROFILEARGS__", systemdProfile, 1)
 	agent := WebAgentName(site)
 	label := WebServiceLabel(site)
 	launchdName, systemdName := "", ""
@@ -534,7 +547,7 @@ func InstallWebService(site Source, o ServiceOptions) (ServiceResult, error) {
 		Unit:        "tincan-" + agent + ".service",
 		Launchd:     launchd,
 		Systemd:     systemd,
-		Vars:        []string{"__SITE__", string(site), "__AGENT__", agent, "__THREAD__", thread, "__CONFIG__", config},
+		Vars:        []string{"__SITE__", string(site), "__AGENT__", agent, "__THREAD__", thread, "__PROFILE__", o.Profile, "__CONFIG__", config},
 		Unsupported: "no web agent service definition for " + goos + "; run tincan web serve under your own service manager",
 	})
 }

@@ -602,4 +602,32 @@ TINCAN_CONFIG=~/.config/tincan/dayward.json tincan web install --site claude-ai 
 
 Every submitted message starts with `[tincan request <id> from <sender>]`, using the relay's request identity. Threading directives are parsed before this line is added. The line counts toward the 32 KB message limit. It identifies relay delivery; the model should still assess the request itself.
 
+## Two accounts on one Mac
+
+Each Chrome profile with the Tincan extension starts its own native host, and Chrome does not tell a host which profile started it. So you name the profile yourself, once, in the extension's options page (`chrome://extensions` > Agent Tincan History > Details > Extension options, under "Chrome profile name"). The name is kept in that profile only. Names are 1 to 32 lowercase letters, digits and dashes, starting with a letter or digit.
+
+- An unnamed profile's host serves `host.sock`, as every host did before profile names. A single-profile setup needs no change: no name, no flag, no reinstall.
+- A profile named `work` gets its own socket, `host-work.sock`. A web agent started with `--profile work` uses only that socket.
+
+Give every profile but one a name, and leave one unnamed. Live history reads (`tincan history`) and any web agent without `--profile` use the unnamed profile. If every profile has a name, there is no `host.sock`, and those reads find no extension.
+
+For two claude.ai accounts, one in a profile named `work` and one in an unnamed profile:
+
+```bash
+tincan invite claude-web-1 --kind claude-web
+tincan invite claude-web-2 --kind claude-web
+TINCAN_CONFIG=~/.config/tincan/claude-web-1.json tincan join <code-1> --relay <relay-url>
+TINCAN_CONFIG=~/.config/tincan/claude-web-2.json tincan join <code-2> --relay <relay-url>
+tincan web install --site claude-ai --name claude-web-1 --profile work
+tincan web install --site claude-ai --name claude-web-2
+```
+
+`web install --profile` keeps `--profile work` in the service it writes. With `--profile`, `web serve` waits at startup until that profile's host answers and logs that it is waiting. While it runs, a request that finds the profile's host gone (that Chrome profile closed) fails with the usual "extension not connected" reply. It is never sent through another profile's host.
+
+A host never takes over a socket another live host is serving. If two profiles are both unnamed, or share a name, the second one's host waits instead, and its account cannot be reached until you rename one of them. `tincan doctor` lists every running host with its profile name and build, and warns about a host that is waiting. With both the store build and an unpacked build installed, an unpacked build's host waits while the store build's host runs, because the profile name is stored per build.
+
+Profile names need extension 0.8.0 and this tincan release (or later) as the native host. An older native host ignores the name and serves `host.sock` for every profile, so upgrade tincan (`tincan upgrade`, then `tincan history install`) before you name a profile, and check with `tincan doctor` that each profile shows up under its name.
+
+Renaming a profile in the options page makes the extension reconnect, and the new host serves the new name's socket. Update the matching `--profile` too.
+
 For extension installation when the store is unavailable, see [the release-zip instructions](../../README.md#install-from-a-release-if-the-store-is-unavailable).
