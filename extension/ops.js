@@ -510,16 +510,46 @@ export async function hashFiles({ getURL, fetch }) {
   return files;
 }
 
+// PROFILE_KEY is the chrome.storage.local key holding the owner's name for
+// this Chrome profile. chrome.storage.local belongs to one profile, so
+// each profile keeps its own.
+export const PROFILE_KEY = 'profile';
+
+// PROFILE_NAME is the shape of a profile name; the native host checks the
+// same pattern.
+export const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+export function validProfileName(name) {
+  return typeof name === 'string' && PROFILE_NAME.test(name);
+}
+
+// storedProfile is the profile name kept in storage, null when unnamed.
+// A stored value that is not a valid name is passed on as it is, so the
+// native host refuses it rather than serving the unnamed profile's socket
+// from this account.
+export function storedProfile(value) {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+// profileFrame is the first message the worker posts on a new native port,
+// before the slower hello: the host chooses its socket from it (host.sock
+// for null, host-<name>.sock for a name) and binds nothing until it comes.
+export function profileFrame(profile) {
+  return { id: 0, profile: storedProfile(profile) };
+}
+
 // helloMessage is what the worker tells the native host when it connects
 // and when a site grant changes: its version, whether it is unpacked (only
 // an unpacked extension picks up new files on reload), the sha256 of each
 // of its files as Chrome loaded them (files when given, hashFiles from
-// worker start, else hashed now), and, given permissions, the sites whose
-// access Chrome has granted.
-export async function helloMessage({ manifest, getURL, fetch, files, permissions }) {
+// worker start, else hashed now), its Chrome profile name when it has one,
+// and, given permissions, the sites whose access Chrome has granted.
+export async function helloMessage({ manifest, getURL, fetch, files, permissions, profile }) {
   const hashes = files && typeof files === 'object' ? files : await hashFiles({ getURL, fetch });
   const m = manifest && typeof manifest === 'object' ? manifest : {};
   const hello = { version: typeof m.version === 'string' ? m.version : '', unpacked: !('update_url' in m), files: hashes };
+  const name = storedProfile(profile);
+  if (name !== null) hello.profile = name;
   if (permissions) hello.granted = await grantedSites(permissions);
   hello.image_input = { version: 1, sites: [...IMAGE_INPUT_SITES] };
   return { id: 0, hello };

@@ -8,8 +8,14 @@
 // Chrome's site settings) sends the hello again on the same port. An open
 // native port keeps the worker alive; if the host is missing or exits, an
 // alarm retries.
+//
+// Before the hello, the first frame on every port names this Chrome
+// profile (the owner's name from the options page, kept in
+// chrome.storage.local, or null): the host serves that profile's socket,
+// so web agents for two accounts in two profiles never mix. A changed name
+// reconnects, and the new host serves the new socket.
 
-import { NATIVE_HOST, createRunner, errorFrame, hashFiles, helloMessage, validate } from './ops.js';
+import { NATIVE_HOST, PROFILE_KEY, createRunner, errorFrame, hashFiles, helloMessage, profileFrame, storedProfile, validate } from './ops.js';
 import { createSender } from './send.js';
 
 const RECONNECT_ALARM = 'tincan-reconnect';
@@ -57,7 +63,38 @@ async function onHostMessage(msg, p) {
   }
 }
 
-function connect() {
+// portProfile is the profile name the open port was started with.
+let portProfile = null;
+let connecting = false;
+// profileGen counts profile changes, so a connect whose storage read
+// started before a change reads again rather than opening with the old
+// name.
+let profileGen = 0;
+
+// readProfile is the stored profile name, null when none is stored. It
+// throws when storage cannot be read: guessing unnamed would let a named
+// profile's host serve the unnamed profile's socket from this account.
+async function readProfile() {
+  const got = await chrome.storage.local.get(PROFILE_KEY);
+  return storedProfile(got && got[PROFILE_KEY]);
+}
+
+async function connect() {
+  if (port || connecting) return;
+  connecting = true;
+  let profile;
+  try {
+    let gen;
+    do {
+      gen = profileGen;
+      profile = await readProfile();
+    } while (gen !== profileGen);
+  } catch {
+    // Storage could not be read: stay disconnected; the alarm retries.
+    return;
+  } finally {
+    connecting = false;
+  }
   if (port) return;
   let p;
   try {
@@ -66,6 +103,7 @@ function connect() {
     return;
   }
   port = p;
+  portProfile = profile;
   p.onMessage.addListener((msg) => {
     if (port === p) onHostMessage(msg, p);
   });
@@ -74,7 +112,29 @@ function connect() {
     void chrome.runtime.lastError;
     if (port === p) { port = null; runner.clearInputs(); }
   });
+  // The profile frame goes first, before the files are hashed: the host
+  // binds no socket until it arrives.
+  post(profileFrame(profile));
   hello(p);
+}
+
+// profileChanged reconnects when the options page saves a new name, so a
+// new host serves the new name's socket (a host never moves sockets).
+function profileChanged(changes, area) {
+  if (area !== 'local' || !changes || !(PROFILE_KEY in changes)) return;
+  profileGen++;
+  if (port && storedProfile(changes[PROFILE_KEY].newValue) === portProfile) return;
+  const p = port;
+  port = null;
+  runner.clearInputs();
+  if (p) {
+    try {
+      p.disconnect();
+    } catch {
+      // Already gone.
+    }
+  }
+  connect();
 }
 
 // helloSeq numbers the hellos this worker starts. The host keeps the last
@@ -88,8 +148,9 @@ let helloSeq = 0;
 // may serve.
 function hello(p) {
   const seq = ++helloSeq;
+  const profile = portProfile;
   loadedFiles
-    .then((files) => helloMessage({ manifest: chrome.runtime.getManifest(), files, permissions: chrome.permissions }))
+    .then((files) => helloMessage({ manifest: chrome.runtime.getManifest(), files, permissions: chrome.permissions, profile }))
     .then((m) => {
       if (port === p && seq === helloSeq) post(m);
     })
@@ -104,6 +165,7 @@ chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.permissions.onAdded.addListener(grantsChanged);
 chrome.permissions.onRemoved.addListener(grantsChanged);
+chrome.storage.onChanged.addListener(profileChanged);
 chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECONNECT_ALARM) connect();

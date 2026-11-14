@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Agent Tincan History: site access</title>
+<title>Agent Tincan History: options</title>
 <style>
   body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; min-width: 360px; color: #1f1f1f; background: #fff; }
   h1 { font-size: 16px; margin: 0 0 8px; }
@@ -13,12 +13,17 @@
   .status { color: #5f6368; }
   .status.granted { color: #137333; }
   .status.partial { color: #b06000; }
+  .status.error { color: #c5221f; }
+  ul + h1 { margin-top: 24px; }
+  .profile { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .profile input { font: inherit; padding: 4px 6px; width: 16em; }
   @media (prefers-color-scheme: dark) {
     body { color: #e3e3e3; background: #202124; }
     p, .status { color: #bdc1c6; }
     li { border-top-color: #3c4043; }
     .status.granted { color: #81c995; }
     .status.partial { color: #fdd663; }
+    .status.error { color: #f28b82; }
   }
 </style>
 </head>
@@ -26,6 +31,13 @@
 <h1>Site access</h1>
 <p>Agent Tincan reads and sends only on sites Chrome has granted it. Grant a site here before its web agent or history reads can use it; Chrome asks you to confirm.</p>
 <ul id="sites"></ul>
+<h1>Chrome profile name</h1>
+<p>Leave this empty if you use Agent Tincan in one Chrome profile. If two Chrome profiles are signed in to different accounts, give every profile but one a name here, then run that profile's web agents with <code>tincan web serve --profile &lt;name&gt;</code>. The name stays in this profile only.</p>
+<div class="profile">
+  <input id="profile-name" type="text" maxlength="32" placeholder="unnamed" autocomplete="off" spellcheck="false" aria-label="Chrome profile name">
+  <button id="profile-save" type="button">Save</button>
+  <span id="profile-status" class="status"></span>
+</div>
 <script type="module" src="options.js"></script>
 </body>
 </html>

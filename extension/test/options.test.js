@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SITE_ACCESS } from '../ops.js';
-import { renderOptions, siteStates } from '../options.js';
+import { renderOptions, renderProfile, siteStates } from '../options.js';
 
 // A minimal DOM: elements with children, text, attributes and click
 // listeners. The page builds everything with createElement and
@@ -233,4 +233,51 @@ test('the options page is CSP-safe: no inline script, no main-world code', () =>
   for (const banned of [/innerHTML/, /outerHTML/, /insertAdjacentHTML/, /document\.write/, /executeScript/, /chrome\.(tabs|scripting)/]) {
     assert.ok(!banned.test(js), `options.js matches ${banned}`);
   }
+});
+
+function profileDocument() {
+  const els = { 'profile-name': new FakeElement('input'), 'profile-save': new FakeElement('button'), 'profile-status': new FakeElement('span') };
+  els['profile-name'].value = '';
+  return { els, getElementById: (id) => els[id] || null };
+}
+
+function fakeStorage(initial = {}) {
+  const st = { data: { ...initial }, writes: [] };
+  st.get = async (key) => (key in st.data ? { [key]: st.data[key] } : {});
+  st.set = async (obj) => { st.writes.push(['set', obj]); Object.assign(st.data, obj); };
+  st.remove = async (key) => { st.writes.push(['remove', key]); delete st.data[key]; };
+  return st;
+}
+
+test('the options page names this Chrome profile, refusing a bad name', async () => {
+  const doc = profileDocument();
+  const storage = fakeStorage();
+  await renderProfile({ document: doc, storage }).ready;
+  assert.equal(doc.els['profile-name'].value, '');
+  assert.match(doc.els['profile-status'].textContent, /unnamed/);
+
+  for (const bad of ['Work!', '-work', 'a'.repeat(33), '../x']) {
+    doc.els['profile-name'].value = bad;
+    doc.els['profile-save'].click();
+    await settle();
+    assert.match(doc.els['profile-status'].textContent, /^Not saved/, bad);
+    assert.equal(doc.els['profile-status'].className, 'status error');
+  }
+  assert.deepEqual(storage.writes, [], 'a bad name is never stored');
+
+  doc.els['profile-name'].value = ' work ';
+  doc.els['profile-save'].click();
+  await settle();
+  assert.deepEqual(storage.data, { profile: 'work' });
+  assert.match(doc.els['profile-status'].textContent, /--profile work/);
+
+  // A second page load shows the stored name; clearing it removes the key.
+  const again = profileDocument();
+  await renderProfile({ document: again, storage }).ready;
+  assert.equal(again.els['profile-name'].value, 'work');
+  again.els['profile-name'].value = '';
+  again.els['profile-save'].click();
+  await settle();
+  assert.deepEqual(storage.data, {});
+  assert.deepEqual(storage.writes.at(-1), ['remove', 'profile']);
 });
