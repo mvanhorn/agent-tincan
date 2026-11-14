@@ -129,15 +129,23 @@ export function renderProfile({ document, storage }) {
     status.textContent = text;
     status.className = className;
   };
+  // Editing and saving stay off until the first read succeeds, so a Save
+  // before the stored name is on screen cannot erase it; a failed read
+  // keeps them off.
+  input.disabled = true;
+  save.disabled = true;
   const ready = Promise.resolve()
     .then(() => storage.get(PROFILE_KEY))
     .then((got) => {
       const name = storedProfile(got && got[PROFILE_KEY]);
       input.value = name || '';
       show(describeProfile(name));
+      input.disabled = false;
+      save.disabled = false;
     })
     .catch((e) => show(`Could not read the profile name: ${(e && e.message) || e}`, 'status error'));
   save.addEventListener('click', () => {
+    if (save.disabled) return;
     const name = String(input.value || '').trim();
     if (name !== '' && !validProfileName(name)) {
       show('Not saved: use 1 to 32 lowercase letters, digits and dashes, starting with a letter or digit.', 'status error');

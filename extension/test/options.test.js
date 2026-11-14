@@ -281,3 +281,29 @@ test('the options page names this Chrome profile, refusing a bad name', async ()
   assert.deepEqual(storage.data, {});
   assert.deepEqual(storage.writes.at(-1), ['remove', 'profile']);
 });
+
+test('the profile field cannot be saved before the stored name is read', async () => {
+  const doc = profileDocument();
+  const storage = fakeStorage({ profile: 'work' });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const get = storage.get;
+  storage.get = async (key) => { await gate; return get(key); };
+  const { ready } = renderProfile({ document: doc, storage });
+  assert.equal(doc.els['profile-save'].disabled, true);
+  assert.equal(doc.els['profile-name'].disabled, true);
+  doc.els['profile-save'].click();
+  await settle();
+  assert.deepEqual(storage.writes, [], 'a Save before the read stores nothing');
+  release();
+  await ready;
+  assert.equal(doc.els['profile-name'].value, 'work');
+  assert.equal(doc.els['profile-save'].disabled, false);
+
+  const failed = profileDocument();
+  const broken = fakeStorage();
+  broken.get = async () => { throw new Error('boom'); };
+  await renderProfile({ document: failed, storage: broken }).ready;
+  assert.equal(failed.els['profile-save'].disabled, true, 'a failed read keeps saving off');
+  assert.match(failed.els['profile-status'].textContent, /Could not read/);
+});

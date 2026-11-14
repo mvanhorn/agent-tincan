@@ -1357,6 +1357,12 @@ func (h *NativeHost) serveSocket(ctx context.Context, socket string) (handoff bo
 	defer ln.Close()
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
+	// Connections accepted here live only as long as this socket is
+	// served: a handoff cancels sctx, which closes them, and each request
+	// checks again before it reaches the extension (mayForward), so none
+	// accepted before a store build's host appeared is sent afterwards.
+	sctx, cancel := context.WithCancel(context.WithValue(ctx, servingSocketKey{}, socket))
+	defer cancel()
 	// An unpacked build's host checks before each request, as well as on
 	// a timer, so no request reaches it once a store build's host runs.
 	yield := make(chan string, 1)
@@ -1376,7 +1382,7 @@ func (h *NativeHost) serveSocket(ctx context.Context, socket string) (handoff bo
 					continue
 				}
 			}
-			go h.serve(ctx, conn)
+			go h.serve(sctx, conn)
 		}
 	}()
 	h.setState("serving", "")
@@ -1492,8 +1498,31 @@ func (h *NativeHost) forget(id int64) {
 	h.mu.Unlock()
 }
 
+// servingSocketKey carries, in a served connection's context, the socket
+// it was accepted on.
+type servingSocketKey struct{}
+
+// mayForward reports whether a request on a connection served under ctx
+// may still go to the extension: not once ctx ends (the socket was handed
+// over or the host is stopping), and for an unpacked build's host not once
+// a store build's host serves or waits.
+func (h *NativeHost) mayForward(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	s, _ := ctx.Value(servingSocketKey{}).(string)
+	return s == "" || h.unpackedMustYield(s) == ""
+}
+
+// handedOver answers a request this host may no longer forward.
+func handedOver(conn net.Conn, id int64) {
+	_ = WriteMessage(conn, NativeResponse{ID: id, Error: &NativeError{Code: "http_error", Message: "this native host handed its socket to another; retry"}}, MaxHostMessage)
+}
+
 func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	closeOnEnd := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer closeOnEnd()
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	body, err := ReadMessage(conn, maxServiceRequest)
 	if err != nil {
@@ -1532,6 +1561,10 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 		return
 	}
 	clientID := req.ID
+	if !h.mayForward(ctx) {
+		handedOver(conn, clientID)
+		return
+	}
 	ch := make(chan []byte, 64)
 	h.mu.Lock()
 	h.seq++
