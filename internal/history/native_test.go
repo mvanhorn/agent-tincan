@@ -382,6 +382,7 @@ func TestNativeHostBridge(t *testing.T) {
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, RequestTimeout: 5 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 
 	c := &Client{Channel: &SocketChannel{Path: sock, ChromeRunning: func() bool { return true }}, Timeout: 5 * time.Second}
@@ -476,6 +477,7 @@ func TestNativeHostRelaysSendRefusesReload(t *testing.T) {
 	})
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, RequestTimeout: 100 * time.Millisecond, SendTimeout: 5 * time.Second}
 	go func() { _ = host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	defer chromeToHostW.Close()
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 
@@ -609,6 +611,7 @@ func TestNativeHostHelloTriggersReload(t *testing.T) {
 	var logBuf lockedBuffer
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, ExtensionDir: extDir, Log: &logBuf}
 	go func() { _ = host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	defer chromeToHostW.Close()
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 
@@ -779,6 +782,7 @@ func statusHost(t *testing.T) (c *Client, hello func(v map[string]any), stop fun
 	})
 	host := &NativeHost{SocketPath: sock, In: chromeToHostR, Out: hostToChromeW, RequestTimeout: 5 * time.Second}
 	go func() { _ = host.Run(context.Background()) }()
+	nameProfile(t, chromeToHostW, nil)
 	waitFor(t, func() bool { _, err := os.Stat(sock); return err == nil })
 	var mu sync.Mutex
 	hello = func(v map[string]any) {
@@ -914,5 +918,15 @@ func TestExchangeSocketTimeoutAtCallerDeadline(t *testing.T) {
 	_, err := (&Client{Channel: ch}).Request(pastDeadline{context.Background()}, OpChatGPTList, OpArgs{Count: 5})
 	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTimeout) {
 		t.Fatalf("got %v, want context.DeadlineExceeded and not ErrTimeout", err)
+	}
+}
+
+// nameProfile posts the frame the extension sends first on a new port,
+// naming its Chrome profile (nil for unnamed); the host binds no socket
+// before it.
+func nameProfile(t *testing.T, toHost io.Writer, profile any) {
+	t.Helper()
+	if err := WriteMessage(toHost, map[string]any{"id": 0, "profile": profile}, MaxChromeMessage); err != nil {
+		t.Fatal(err)
 	}
 }

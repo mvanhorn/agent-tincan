@@ -822,10 +822,9 @@ func (c *Client) CheckSiteGrant(ctx context.Context, src Source) error {
 	return unavailable(src, ErrPermissionMissing, "")
 }
 
-// NewClient returns a client for the local native host socket.
-func NewClient() *Client {
-	return &Client{Channel: &SocketChannel{Path: DefaultSocketPath()}}
-}
+// NewClient returns a client for the unnamed Chrome profile's native host
+// socket.
+func NewClient() *Client { return NewClientFor("") }
 
 var requestSeq atomic.Int64
 
@@ -1090,7 +1089,8 @@ func (c *Client) File(ctx context.Context, op Op, args OpArgs) ([]byte, string, 
 // $TINCAN_HISTORY_NATIVE_DIR or ~/.config/tincan/history-native.
 func NativeDir() string { return configPath("TINCAN_HISTORY_NATIVE_DIR", "history-native") }
 
-// DefaultSocketPath is the native host's socket.
+// DefaultSocketPath is the unnamed Chrome profile's native host socket
+// (ProfileSocketPath has a named one's).
 func DefaultSocketPath() string { return filepath.Join(NativeDir(), "host.sock") }
 
 // SocketChannel reaches the native host over its unix socket, one
@@ -1183,7 +1183,8 @@ func chromeRunning() bool {
 
 // ListenSocket listens on a unix socket at path with mode 0600, creating
 // its directory with mode 0700 (and tightening an existing one). A stale
-// socket at path is replaced; any other file is left alone and refused.
+// socket at path is replaced; a socket a live host answers on is left
+// alone and refused (ErrSocketInUse), as is any other file.
 func ListenSocket(path string) (net.Listener, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -1195,6 +1196,9 @@ func ListenSocket(path string) (net.Listener, error) {
 	if st, err := os.Lstat(path); err == nil {
 		if st.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("%s exists and is not a socket", path)
+		}
+		if socketAnswers(path) {
+			return nil, fmt.Errorf("%s: %w", path, ErrSocketInUse)
 		}
 		if err := os.Remove(path); err != nil {
 			return nil, err
@@ -1242,6 +1246,9 @@ type NativeHost struct {
 	// (DefaultRecheckInterval when zero), so an update is picked up
 	// without waiting for a reconnect.
 	RecheckInterval time.Duration
+	// SocketRecheck is how often a host waiting for its socket checks
+	// again (DefaultSocketRecheck when zero).
+	SocketRecheck time.Duration
 
 	outMu   sync.Mutex
 	mu      sync.Mutex
@@ -1249,6 +1256,13 @@ type NativeHost struct {
 	seq     int64
 	// hello is the last hello from the extension (under mu).
 	hello *Hello
+	// chosen carries the profile the extension's first frame names.
+	chosen chan profileChoice
+	// presence is what this host records in its presence file once it
+	// knows its socket (under mu).
+	presence *NativeHostPresence
+	// pid overrides the process id in the presence file (tests).
+	pid int
 	// reloadMu serializes reload decisions (a hello and a recheck).
 	reloadMu sync.Mutex
 	// cooldown answers a site's requests itself for a while after the
@@ -1262,6 +1276,10 @@ type NativeHost struct {
 const DefaultRecheckInterval = 10 * time.Minute
 
 // Run serves until Chrome closes In or ctx ends, then removes the socket.
+// It binds no socket until the extension's first frame names its Chrome
+// profile (or, from a build older than profile names, its hello says it
+// is unnamed), and never on a timeout: a guess could serve one account's
+// requests from another account's browser.
 func (h *NativeHost) Run(ctx context.Context) error {
 	if h.RequestTimeout <= 0 {
 		h.RequestTimeout = 2 * time.Minute
@@ -1270,66 +1288,119 @@ func (h *NativeHost) Run(ctx context.Context) error {
 		h.SendTimeout = SendHostTimeout
 	}
 	h.pending = map[int64]chan []byte{}
+	h.chosen = make(chan profileChoice, 1)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	readErr := make(chan error, 1)
 	go func() { readErr <- h.readChrome(); cancel() }()
-
-	// With both builds installed, the store build serves: an unpacked
-	// build's host waits while a store host holds the socket, and takes
-	// over only if that host goes away.
-	for !h.fromStore() && storeHostAlive(h.SocketPath) {
+	finish := func() error {
+		<-ctx.Done()
 		select {
-		case <-ctx.Done():
+		case err := <-readErr:
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		default:
 			return nil
-		case <-time.After(storeYieldRecheck):
 		}
 	}
-	ln, err := ListenSocket(h.SocketPath)
-	if err != nil {
-		return err
+
+	var choice profileChoice
+	select {
+	case <-ctx.Done():
+		return finish()
+	case choice = <-h.chosen:
 	}
-	originFile := h.SocketPath + ".origin"
+	if choice.bad || (choice.name != "" && !ValidProfileName(choice.name)) {
+		h.logf("%s", refuseProfile(choice))
+		return finish()
+	}
+	socket := profileSocket(h.SocketPath, choice.name)
+	h.startPresence(choice.name, socket)
+	defer h.removePresence()
+	if h.ExtensionDir != "" {
+		go h.recheck(ctx)
+	}
+	for {
+		release := h.waitForSocket(ctx.Done(), socket)
+		if release == nil {
+			return finish()
+		}
+		handoff, err := h.serveSocket(ctx, socket)
+		release()
+		if err != nil {
+			return err
+		}
+		if !handoff {
+			return finish()
+		}
+	}
+}
+
+// serveSocket serves socket until ctx ends, then removes it. An unpacked
+// build's host also stops, reporting handoff, once a store build's host
+// runs or waits for this socket, so the store build serves.
+func (h *NativeHost) serveSocket(ctx context.Context, socket string) (handoff bool, err error) {
+	ln, err := ListenSocket(socket)
+	if err != nil {
+		return false, err
+	}
+	originFile := socket + ".origin"
 	_ = os.WriteFile(originFile, []byte(h.Origin), 0o600)
 	defer func() {
 		if b, err := os.ReadFile(originFile); err == nil && string(b) == h.Origin {
 			_ = os.Remove(originFile)
 		}
 	}()
-	defer os.Remove(h.SocketPath)
+	defer os.Remove(socket)
 	defer ln.Close()
 	stop := context.AfterFunc(ctx, func() { _ = ln.Close() })
 	defer stop()
-	if h.ExtensionDir != "" {
-		go h.recheck(ctx)
-	}
+	// An unpacked build's host checks before each request, as well as on
+	// a timer, so no request reaches it once a store build's host runs.
+	yield := make(chan string, 1)
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			if !h.fromStore() {
+				if why := h.unpackedMustYield(socket); why != "" {
+					_ = conn.Close()
+					select {
+					case yield <- why:
+					default:
+					}
+					continue
+				}
+			}
 			go h.serve(ctx, conn)
 		}
 	}()
-	<-ctx.Done()
-	select {
-	case err := <-readErr:
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		return err
-	default:
-		return nil
+	h.setState("serving", "")
+	h.logf("serving %s", socket)
+	if h.fromStore() {
+		<-ctx.Done()
+		return false, nil
 	}
-}
-
-// storeYieldRecheck is how often an unpacked build's host checks whether the
-// store build's host is still serving.
-var storeYieldRecheck = 30 * time.Second
-
-func (h *NativeHost) fromStore() bool {
-	return strings.Contains(h.Origin, StoreExtensionID)
+	t := time.NewTicker(h.socketRecheck())
+	defer t.Stop()
+	for {
+		why := ""
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case why = <-yield:
+		case <-t.C:
+			why = h.unpackedMustYield(socket)
+		}
+		if why != "" {
+			h.logf("handing %s over: %s", socket, why)
+			return true, nil
+		}
+	}
 }
 
 // storeHostAlive reports whether the socket is held by a live host that the
@@ -1339,26 +1410,41 @@ func storeHostAlive(socket string) bool {
 	if err != nil || !strings.Contains(string(b), StoreExtensionID) {
 		return false
 	}
-	c, err := net.DialTimeout("unix", socket, time.Second)
-	if err != nil {
-		return false
-	}
-	_ = c.Close()
-	return true
+	return socketAnswers(socket)
+}
+
+func (h *NativeHost) fromStore() bool {
+	return strings.Contains(h.Origin, StoreExtensionID)
 }
 
 // readChrome routes frames from the extension to the waiting request.
 func (h *NativeHost) readChrome() error {
+	chose := false
 	for {
 		body, err := ReadMessage(h.In, MaxChromeMessage)
 		if err != nil {
 			return err
 		}
 		var head struct {
-			ID    int64  `json:"id"`
-			Hello *Hello `json:"hello"`
+			ID      int64           `json:"id"`
+			Hello   *Hello          `json:"hello"`
+			Profile json.RawMessage `json:"profile"`
 		}
 		if json.Unmarshal(body, &head) != nil {
+			continue
+		}
+		// The first profile frame or hello chooses the socket, once: a
+		// host never moves sockets, and a renamed profile reconnects.
+		if !chose {
+			if c, ok := profileFrameChoice(head.ID, head.Profile, head.Hello); ok {
+				chose = true
+				select {
+				case h.chosen <- c:
+				default: // nothing waits (a host not started with Run)
+				}
+			}
+		}
+		if head.Hello == nil && head.ID == 0 && len(head.Profile) > 0 {
 			continue
 		}
 		if head.Hello != nil {
@@ -1366,6 +1452,11 @@ func (h *NativeHost) readChrome() error {
 			h.mu.Lock()
 			h.hello = &hello
 			h.mu.Unlock()
+			h.setPresence(func(p *NativeHostPresence) bool {
+				changed := p.Version != hello.Version
+				p.Version = hello.Version
+				return changed
+			})
 			h.onHello(hello)
 			continue
 		}

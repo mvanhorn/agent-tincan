@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // An install from before the store listing gains the store origin once,
@@ -45,9 +44,6 @@ func TestUnpackedHostYieldsToStoreHost(t *testing.T) {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "h.sock")
-	storeRecheck := storeYieldRecheck
-	storeYieldRecheck = 20 * time.Millisecond
-	t.Cleanup(func() { storeYieldRecheck = storeRecheck })
 
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
