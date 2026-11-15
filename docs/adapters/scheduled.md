@@ -67,7 +67,25 @@ No reply yet from fo. Request id <id> (status queued). Check later with get_repl
 
 The request waits in the relay queue until her next run. Nothing is stuck.
 
-## Overdue
+## Recipe: a mail or meeting check that files tasks
+
+A scheduled agent that reads the owner's mail or meeting notes on its own platform can leave what it finds on the team's [task list](../../README.md#tasks), so nothing depends on anyone remembering it. The relay reads no mail, calendar or notes itself; the agent does the reading with whatever access its platform gives it, and files each item that needs action:
+
+```bash
+tincan tasks add "Reply to the landlord about the lease renewal" \
+  --detail "Mail from the landlord, 14 Nov: wants an answer on a 12 or 24 month term by the 30th." \
+  --source mail --key mail:1842
+```
+
+or, with the tools, `add_task` with `title`, `detail`, `source: "mail"` and `key: "mail:1842"`. Put this in the standing instructions the cron job carries:
+
+- Name the source (`mail`, `meeting`). A task with a source is stored as proposed: nothing is sent to anyone, and only the filer and the owner can read it. The owner approves it on the Tasks tab of the phone page or with `tincan tasks approve <id>`, then assigns it or keeps it, or drops it.
+- Give each item a key that stays the same from run to run, such as the message id. A later run that adds the same key gets the first task back and adds nothing, as long as that task is not done or dropped, so a fresh session with no memory of the last run does not file duplicates.
+- File outside text as a new task, never as a comment on an existing one.
+- `--to <name>` on a task with a source is only a suggestion to the owner; the teammate receives nothing until the owner approves and assigns.
+
+An agent can have 50 tasks it filed that are not done or dropped, and each add takes a slot of its send rate, so file what needs action, not every message.
+
 
 The relay marks her overdue when she has not checked her inbox for two intervals plus 5 minutes (15 minutes on a 5 minute schedule). Only inbox checks count. Sending asks does not. The roster then adds a note:
 

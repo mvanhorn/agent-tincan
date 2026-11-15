@@ -26,6 +26,7 @@ The relay answers 403 to any request whose `Host` is not one of its own addresse
 | `exchanges` | relay | Optional clarification history: `[{"question", "answer", "at"}]`. `at` is the question's timestamp; `answer` is absent until answered. Client-supplied exchanges are ignored. |
 | `resumed` | relay | Optional boolean, true after the asker has supplied clarification. Retained on subsequent deliveries and claims. |
 | `then` | client | Optional follow-on, `{"to", "body"}`: one ask the relay sends once this one is answered. See Follow-on asks. |
+| `task_id` | relay | Optional. Set on an ask that is one attempt at a task on the shared list: the id of that task. A send cannot set it, and older clients ignore it and see an ordinary ask. See [Tasks](#tasks). |
 | `moved_from` | relay | Optional list, oldest first, of the agents the request moved off: web agents whose site was out of messages before it was sent there (see Failover), or a target that left it untaken when the owner set a fallback (see Fallback). `to` is then the agent that took it. A client-supplied value is ignored. |
 
 ## Reply
@@ -596,7 +597,7 @@ A scheduled ask is an ask the relay sends later, once or on a repeat. The relay 
 
 One of `at` and `every_seconds` is required. `parent_id`, `group`, `also`, `attachments`, `project`, `then` and any `kind` but `ask` are refused with 400: a fire starts a new chain, goes to one teammate, and carries no files, no project label and no follow-on. A caller with an open claim is refused with 409, by the lookup a send uses to continue a chain (the session's own claim, else the agent's one claim). So is a caller with an open marked ask (see Guests) that has reached it, one `queued`, `delivered`, `claimed` or `needs_input` but not `held`, however many other claims it holds, because a fire carries no mark. An agent has at most 32 live schedules; the 33rd is refused with 409. Nothing is checked against `approval.json` here: the owner's holds apply at fire time.
 
-A schedule is `{"id", "from", "to", "body", "urgent", "next_at", "every_seconds", "created_at", "last_request", "blocked"}`. `urgent`, `every_seconds`, `last_request` (the request its latest fire made) and `blocked` (its latest fire was rejected) are left out when empty. Ids are never reused.
+A schedule is `{"id", "from", "to", "body", "urgent", "next_at", "every_seconds", "created_at", "last_request", "blocked"}`. `urgent`, `every_seconds`, `last_request` (the request its latest fire made) and `blocked` (its latest fire was rejected) are left out when empty. Ids are never reused. A schedule that is a task's repeat also carries `task_id`, and a listing shows `Repeats task #<id>.` as its body; it is made by adding a task, not by this route (see [Tasks](#tasks)).
 
 `GET /v1/schedules` answers `{"schedules": [...]}` with the caller's schedules, and with `?all=1` every agent's, for an admin device or the local admin socket (403 otherwise), oldest first. A client that sends `?after=<id>` (0 to start) reads it in pages of at most 500 schedules, each carrying `"next_after": <id>` when more follow; without `after` the whole listing comes back in one response. Each `body` in a listing is a preview, the first 200 characters of the text on one line with control and bidi characters mapped to spaces, so a page stays inside what a client reads of a response at any number of agents; a fire sends the whole text. `DELETE /v1/schedules/{id}` stops one and answers 200 with it, whole text included. A joined agent can stop only its own: anything else answers 404, as an unknown id does. An admin device or the local admin socket can stop any. A request a fire already sent is not touched; cancel it by its id.
 
@@ -610,7 +611,98 @@ Occurrences missed while the relay was down fire once, then the next time lands 
 
 A rejected fire is not retried. A one-shot is gone and its owner gets a relay notice naming the schedule, the target and the reason, never the text. A recurring schedule stays, sets `blocked`, and tries again at its next time; the notice goes out once per run of rejections, and a fire that goes through ends the run.
 
-Removing the owner or the target deletes the schedule. Audit rows `schedule_created`, `schedule_fired`, `schedule_skipped`, `schedule_blocked` and `schedule_cancelled` carry ids, agent names, times and the reason, never the text. Schedules live in a `schedules` table with no foreign key to `agents`; an older relay opening the database ignores it, and nothing fires until the newer relay is back.
+Removing the owner or the target deletes the schedule; a task that repeated on it stays and no longer repeats. Audit rows `schedule_created`, `schedule_fired`, `schedule_skipped`, `schedule_blocked` and `schedule_cancelled` carry ids, agent names, times and the reason, never the text. Schedules live in a `schedules` table with no foreign key to `agents`; an older relay opening the database ignores it, and nothing fires until the newer relay is back.
+
+## Tasks
+
+A task is one item on the team's shared list: what is wanted, who has it, and what came back. The relay advertises `"tasks": true` in `GET /v1/capabilities`. Clients check it before every task call and refuse without it (`this relay has no task list; upgrade the relay`). Nothing about tasks is added to `/v1/send` or `/v1/poll`: each attempt at a task is an ordinary `ask` that carries `task_id`, so claims, leases, wakes, progress, clarification and replies work on it as on any ask, and a client that knows nothing of tasks can do the work.
+
+A task is `{"id", "title", "detail", "status", "filer", "assignee", "key", "result", "result_request", "current_request", "ask_status", "agent_assigns", "source", "suggested_assignee", "created_at", "repeat_schedule", "repeat_every_seconds", "repeat_to"}`; everything but `id`, `title`, `status`, `filer` and `created_at` is left out when empty. Ids are never reused and a task is never deleted.
+
+| Field | Meaning |
+|---|---|
+| `status` | `proposed` (waits for the owner's approval), `open` (no ask under it; can be assigned), `working` (an ask is open under it), `question` (that ask's target needs input), `returned` (it carries a result nobody has acted on), `done` or `dropped`. |
+| `filer`, `assignee` | An agent name, or `@owner` for the owner. No agent can hold that name, since an agent name starts with a lowercase letter or a digit. An unassigned task has no `assignee`. |
+| `key` | The filer's own key. An add with a key the same filer already has on a task that is not done or dropped stores nothing and returns that task. |
+| `result`, `result_request` | The latest answer, and the request that produced it. A reply with files adds a line naming them and that request; the files stay on the request, with its retention. |
+| `current_request`, `ask_status` | The one ask open under the task, and that ask's status as the task was read (`held`, `queued`, `delivered`, `claimed` or `needs_input`). The ask's status is read from the request, not stored on the task. |
+| `agent_assigns` | How many times agents assigned the task since the owner last reset the count. |
+| `source` | The outside source its filer declared for its text, such as `mail` or `meeting`: 1 to 32 lowercase letters, digits or dashes, starting with a letter or digit. |
+| `suggested_assignee` | Whom the filer asked to have a proposed task go to. Nothing was sent to that agent. |
+| `repeat_schedule`, `repeat_every_seconds`, `repeat_to` | For a task that repeats: its schedule's id, its interval, and the teammate each fire assigns it to. They are read from the schedule, not stored on the task. |
+
+A history entry is `{"id", "task_id", "actor", "kind", "body", "status", "at"}`. `actor` is an agent name, `@owner`, or `relay` for a change the relay made itself. `kind` is `added`, `assigned` (`body` is the teammate), `status` (`body` is the reason or note), `comment` (`body` is the comment), `progress` (a progress note on the open ask) or `assigns_reset`. `status` is the task's status after an entry that changed it. Entries are appended in id order and never edited or deleted.
+
+A title is at most 200 bytes, a detail 64 KiB, a key 200 bytes, and a comment or note 16 KiB, all UTF-8.
+
+### Agent routes
+
+Any joined agent calls these as itself. A guest gets 403 on every task route.
+
+- `POST /v1/tasks` with `{"title", "detail", "assignee", "key", "source", "every_seconds"}` files a task as the caller; only `title` is required. `assignee` is a teammate, `@owner` for a task that is the owner's own to do, or left out. It answers 201 with `{"task": {...}}`, or 200 with `"existing": true` when the caller's key matched a live task and nothing was stored. An add takes one slot of the caller's send rate (429 when none is left), and an agent with 50 tasks it filed that are not done or dropped is refused with 409. A task that names a teammate is assigned at once, as below; when the relay refuses that assign the task is still stored, open and unassigned, and the answer carries the reason in `assign_error`. A task is stored as `proposed`, with nothing sent and the teammate kept in `suggested_assignee`, when it declares a `source` or when an ask marked as a guest's work (see Guests) that has reached the caller is open.
+- `GET /v1/tasks` answers `{"tasks": [...]}` with the tasks the caller may read, oldest first, in pages of at most 200; a page that is not the last carries `"next_after": <id>`, and `?after=<id>` reads the next. Each `detail` and `result` in a listing is cut to its first 200 characters.
+- `GET /v1/tasks/{id}` answers `{"task": {...}, "events": [...]}` with the task whole and its history, oldest first: at most 200 entries and 2 MiB of their text, with `next_after` when more follow and `?after=<entry id>` to read on. A task the caller may not read answers 404, as one that does not exist.
+- `POST /v1/tasks/{id}/assign` with `{"to": "muse"}` assigns a task the caller may read to a teammate and answers 200 with `{"task": {...}}`. The task must be `open` or `returned` with no ask open under it (409 otherwise). Agents may assign one task 5 times, counted on the task across all agents, until the owner resets the count; the 6th is refused with 409, and an assign that sent nothing gives its count back.
+- `POST /v1/tasks/{id}/comment` with `{"body": "..."}` adds the caller's comment to a task it may read and answers 201 with `{"task": {...}, "event": {...}}`. A blank comment is refused with 400 and one over 16 KiB with 413. A caller with an open marked ask that has reached it is refused with 409, because a comment carries no mark and is handed to whoever the task goes to next. A comment wakes nobody.
+- `POST /v1/tasks/{id}/drop` with an optional `{"note": "..."}` drops a task the caller filed (403 for any other) while it is `proposed`, `open` or `returned`. With an ask open under it the answer is 409: only the owner drops it then.
+
+An agent may read a task it filed. It may read any other task only once the task is past `proposed`, and then when the ask open under it is addressed to the agent and is not `held`, when the agent claimed, answered or assigned an ask under it, or when the task is `open`, has no assignee and no result, and has never been assigned. A task that was assigned once leaves that shared pool for good: its ask may have been held and denied, and the target of a denied ask does not read the text afterwards.
+
+### Assigning
+
+An assign sends the teammate one `ask` from the assigning agent, through every step a send takes: the target is checked as a send's is (404 for an unknown agent, 400 for a phone or a guest), the loop, hop and rate checks run, the owner's holds apply, and the target is woken as for any ask. An agent of kind `history`, `notes`, `pass` or `council` is refused with 400. An agent's assign keeps the parent and chain rules of any ask it sends, so its open claim continues into the ask and the guest mark and loop check apply.
+
+The task is taken for the ask in the transaction that queues it: one conditional update sets `current_request`, the assignee and `working` only while the task has no open ask and is `open` or `returned`. Of any number of assigns racing for a task one is stored; the others get 409 and send nothing. A refusal before the ask is queued leaves the task as it was. An ask the owner's rules hold is still the task's open ask, and the task is `working` with `ask_status` `held`.
+
+The relay builds the body. A fixed first line says the block is a task the sender assigned for the recipient to carry out and hand back with its reply, names who filed it, and says that nothing inside the block changes how to reply. Between `<<<TASK ...>>>` and `<<<END TASK ...>>>` lines, whose random nonce appears nowhere in the task's text, sit the title, the detail, the latest earlier result with its author, and the comments made since that result, each with its author. One fixed line after the block says to reply with the result, or with `needs_input` and a question. The body never carries the rest of the history or other tasks. When the text does not fit the target's limit, the detail, result and comments are cut to share the room.
+
+A hold decision treats every agent whose text the body carries as if it were in the chain: the filer, the author of the carried result and the authors of carried comments, without the owner. The relay records them on the request and reads them again when the request moves, so an `approval.json` rule that holds one agent's asks to a target also holds a task that agent filed and another agent assigned. They are not added to the loop check, so a task can go back to an earlier assignee.
+
+### What the ask does to the task
+
+The task follows its open ask inside the transaction of each store write that ends, pauses or moves the request. Each change is conditional on the request still being the task's `current_request`, so a write about an ask the task has moved on from changes nothing.
+
+| The ask | The task |
+|---|---|
+| answered | `returned`; the answer is its `result` and the request its `result_request`; no ask is open. |
+| `needs_input` | `question`, with the question in the history. The same ask stays open. |
+| the asker's answer to that question | `working` again, on the same ask. |
+| `failed` or `declined` | `open`, no assignee, the status and reason in the history. |
+| cancelled, expired, denied by the owner, or its sender or target removed from the team | `open`, no assignee, the reason in the history. |
+| moved to the owner's fallback | The assignee becomes the new target; the task stays `working`. |
+| a progress note | Copied into the history as a `progress` entry. |
+
+A reply that replaces a held acknowledgement (see Acknowledgments stay open) on the request that produced the result overwrites the result, but only while the task is still `returned` on that request. A task's ask never fails over (see Failover).
+
+The agent that sent the ask gets the reply as it gets any reply. An agent that claimed or answered an ask under a task, or assigned it, can read the task from then on.
+
+### Owner routes
+
+Admin devices and the local admin socket call these (403 otherwise); no agent route and no MCP tool does what they do.
+
+- `GET /v1/admin/tasks` and `GET /v1/admin/tasks/{id}` read every task, in the same shapes and pages as the agent routes.
+- `POST /v1/admin/tasks` files a task as the owner, with the fields of the agent's add except `source` (400): the owner's task is never proposed. The owner has no limit of 50.
+- `POST /v1/admin/tasks/{id}/assign` with `{"to": "muse"}` is the owner's assign: any task that can take an ask, whoever has it, with no count taken. A task with an ask open under it is taken from its assignee first: that ask is cancelled and the task released in one transaction, then the new teammate is assigned. The target is checked before that, so a target that takes no task cancels nothing; a send the relay refuses afterwards leaves the task `open` with no assignee.
+- `POST /v1/admin/tasks/{id}/comment` adds the owner's comment to any task.
+- `POST /v1/admin/tasks/{id}/approve` opens a `proposed` task. `.../done` closes an `open` or `returned` one, and is refused with 409 while an ask is open under it. `.../reopen` puts a `done` or `dropped` task back to `open`. `.../drop` drops any task that is not done or dropped, cancelling the ask open under it in the same transaction, so its target's later reply is refused as a reply to any cancelled request is. `.../reset` sets `agent_assigns` back to 0. Each takes an optional `{"note": "..."}` for the history (`reset` records none) and answers 200 with `{"task": {...}}`; a task in a status the decision does not allow answers 409.
+
+An owner's assign, and an owner's add that names a teammate, send an ask, and an ask needs a sender: it goes out as the agent the request names on the admin device (`X-Tincan-Agent`, as for any agent call), while the task's history names `@owner`. A device with no joined agent is refused with 403 before anything is stored or cancelled, and the CLI makes these two calls over the tailnet, never through the local admin socket. Adding without a teammate, commenting and the five decisions need only the admin check.
+
+From a browser (the owner page), each of the five decisions also needs a one-time nonce. A tailnet caller of `GET /v1/admin/tasks` gets, with each task, one nonce for each decision the task's status allows: `approve_nonce` for a proposed task, `done_nonce` for an open or returned one, `drop_nonce` for any task not done or dropped, `reopen_nonce` for a done or dropped one, `reset_nonce` when `agent_assigns` is above 0, and `nonce_expires_at`. A nonce is bound to the task, the decision and the caller's device, lasts 10 minutes, is used once, and is voided with the task's other nonces by any decision that lands. A browser-marked decision sends it as `{"nonce": "..."}`; one that is missing, used, expired, or issued for another task, decision or device answers 409 (`this task button has expired; reload the task list and try again`). This listing is the only place task nonces are issued. The local admin socket gets none, and the CLI sends none.
+
+### Repeating tasks
+
+`every_seconds` on either add route, from 900 (15 minutes) to 31622400 (366 days), makes the task repeat. It needs a teammate as `assignee` (400 otherwise). The relay stores a schedule (see Scheduled asks) with the task in one transaction, so a task whose schedule is refused is not stored either: the schedule belongs to the agent the task's asks are sent as, counts toward that agent's 32, and is refused with 409 while that agent holds a claim or has a marked ask open, as any schedule from it would be. The add itself is the first attempt, and the first fire is one interval later. An add that returns an existing task for its key makes no schedule.
+
+A fire assigns the task to the schedule's own target, as the schedule's owner, in a new chain, whoever the task names as assignee then, so a task a failed attempt left unassigned goes back to the same teammate. It takes none of the task's agent assigns. A fire is skipped, with a `schedule_skipped` audit row, while an ask is open under the task or the task is `proposed`. A fire the relay rejects sets `blocked` and notifies the schedule's owner once per run of rejections, as for any recurring schedule.
+
+Assigning the task to a different teammate changes the schedule's target in the same transaction; a move to a fallback does not. Marking the task done or dropping it deletes the schedule in the same transaction. `DELETE /v1/schedules/{id}` stops the repeat and leaves the task, and so does removing the schedule's owner or target. Reopening a task does not restore a repeat.
+
+### Audit and storage
+
+Audit rows `task_added` (status, assignee and the byte count of the title and detail), `task_assigned` (the teammate, and for the owner's the agent it was sent as), `task_commented` (the byte count), `task_dropped`, `task_approved`, `task_done`, `task_reopened` and `task_assigns_reset` carry the task id and never its text; an owner's row names the device. An ask cancelled by a drop or a reassign is audited as `cancelled` with reason `task_dropped` or `task_reassigned`. The `schedule_*` rows of a repeat also carry the task id.
+
+Tasks live in `tasks`, `task_events` and `task_claimants` tables, with no foreign key to `agents`, since a rebind re-inserts the agent row, plus a nullable `task_id` column on `requests` and on `schedules` and a `contributors` column on `requests`. An older relay opening the database ignores them, and tasks stop following their asks until the newer relay is back.
 
 ## Follow-on asks
 
@@ -728,7 +820,8 @@ at two points only:
 
 An ask never moves when it is to or from `dot-web` or `duet-web`, from a `council`, was ever
 held for approval, is a `notify` or `ping`, is in a group, came from a room
-mention, carries attachments, starts with a `conversation:` line, has a
+mention, is an attempt at a task (it carries `task_id`; its body holds
+teammates' text that nobody chose a vendor for), carries attachments, starts with a `conversation:` line, has a
 clarification exchange or was resumed, was moved by the owner's fallback (see
 Fallback), or was ever claimed and then requeued (it may have been typed into a site), or
 when its target is not a web chat agent. Such an ask is delivered as before, and
@@ -788,7 +881,7 @@ The owner can name, per agent, a fallback agent (`tincan fallback set claude-cod
 
 Otherwise the ask stays and gets the untaken note, and the relay audits `reroute_skipped` (ids, from, to, reason). The untaken note marks the request, so it is not tried again.
 
-The move is the same single conditional update as a failover move, with more conditions: `id`, the old `to_agent`, `status = 'queued'`, `kind = 'ask'`, not expired, `claimed_at = 0`, `resumed = 0`, `claim_lapsed = 0`, `moved_from = ''` and `deliver_after` not ahead. A claim, reply or cancel that lands after the sweep read the ask leaves no row to change, and the ask is neither moved nor noted. The request keeps its id, trace, chain, hop, sender, body, attachments, urgency, guest mark and expiry; like a failover move it appends the old target to `moved_from`, drops its `project` label and deletes its pending wake note. Its `queued_at` restarts, so the new target gets a full grace before its own untaken note. The relay audits `rerouted` (ids, from, to, reason `untaken`), notes the asker once, and wakes the new target as a send does (its inbox and `Events.Queued`). The move sets a relay-only `rerouted` column on the request, and failover never moves a rerouted ask (its move statement requires `rerouted = 0`), so the ask cannot travel past the fallback that way either.
+The move is the same single conditional update as a failover move, with more conditions: `id`, the old `to_agent`, `status = 'queued'`, `kind = 'ask'`, not expired, `claimed_at = 0`, `resumed = 0`, `claim_lapsed = 0`, `moved_from = ''` and `deliver_after` not ahead. A claim, reply or cancel that lands after the sweep read the ask leaves no row to change, and the ask is neither moved nor noted. The request keeps its id, trace, chain, hop, sender, body, attachments, urgency, guest mark and expiry; like a failover move it appends the old target to `moved_from`, drops its `project` label and deletes its pending wake note. Its `queued_at` restarts, so the new target gets a full grace before its own untaken note. When the ask is an attempt at a task, the task's assignee becomes the fallback in the same transaction (see [Tasks](#tasks)). The relay audits `rerouted` (ids, from, to, reason `untaken`), notes the asker once, and wakes the new target as a send does (its inbox and `Events.Queued`). The move sets a relay-only `rerouted` column on the request, and failover never moves a rerouted ask (its move statement requires `rerouted = 0`), so the ask cannot travel past the fallback that way either.
 
 It covers only agents that wake themselves (any wake method but `webhook`, `email` and `schedule`). An agent the relay wakes gets the wake follow-up and notice instead, and its asks never move this way.
 
