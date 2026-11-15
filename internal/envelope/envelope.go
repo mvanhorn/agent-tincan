@@ -765,20 +765,25 @@ const (
 // AskStatus that ask's status as the task was read. Result is the latest
 // answer and ResultRequest the ask that produced it. AgentAssigns counts
 // the times an agent assigned the task since the owner last reset it.
+// Source is the outside source its filer declared for its text ("mail",
+// "meeting"), and SuggestedAssignee whom the filer asked to have a proposed
+// task go to: the owner decides, and nothing was sent.
 type Task struct {
-	ID             int64      `json:"id"`
-	Title          string     `json:"title"`
-	Detail         string     `json:"detail,omitempty"`
-	Status         TaskStatus `json:"status"`
-	Filer          string     `json:"filer"`
-	Assignee       string     `json:"assignee,omitempty"`
-	Key            string     `json:"key,omitempty"`
-	Result         string     `json:"result,omitempty"`
-	ResultRequest  string     `json:"result_request,omitempty"`
-	CurrentRequest string     `json:"current_request,omitempty"`
-	AskStatus      Status     `json:"ask_status,omitempty"`
-	AgentAssigns   int        `json:"agent_assigns,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID                int64      `json:"id"`
+	Title             string     `json:"title"`
+	Detail            string     `json:"detail,omitempty"`
+	Status            TaskStatus `json:"status"`
+	Filer             string     `json:"filer"`
+	Assignee          string     `json:"assignee,omitempty"`
+	Key               string     `json:"key,omitempty"`
+	Result            string     `json:"result,omitempty"`
+	ResultRequest     string     `json:"result_request,omitempty"`
+	CurrentRequest    string     `json:"current_request,omitempty"`
+	AskStatus         Status     `json:"ask_status,omitempty"`
+	AgentAssigns      int        `json:"agent_assigns,omitempty"`
+	Source            string     `json:"source,omitempty"`
+	SuggestedAssignee string     `json:"suggested_assignee,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 // What a task history entry records.
@@ -788,6 +793,9 @@ const (
 	TaskEventStatus   = "status"
 	TaskEventComment  = "comment"
 	TaskEventProgress = "progress"
+	// TaskEventAssignsReset is the owner setting the count of agent assigns
+	// back to zero.
+	TaskEventAssignsReset = "assigns_reset"
 )
 
 // TaskEvent is one entry in a task's history: who did what, and when. A

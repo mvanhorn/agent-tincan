@@ -2,6 +2,8 @@ package relay_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/policy"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/store"
@@ -810,5 +813,696 @@ func TestTaskAssignKeepsChainRules(t *testing.T) {
 	}
 	if got := m.task(t, task.ID); got.Status != envelope.TaskWorking || got.Assignee != "muse" {
 		t.Fatalf("task after the repeat fire = %+v", got)
+	}
+}
+
+// taskReply is what a task route answers with.
+type taskReply struct {
+	Task        envelope.Task        `json:"task"`
+	Events      []envelope.TaskEvent `json:"events"`
+	Event       *envelope.TaskEvent  `json:"event"`
+	Existing    bool                 `json:"existing"`
+	AssignError string               `json:"assign_error"`
+}
+
+// listedTask is one row of a task listing; only the admin listing fills the
+// nonces.
+type listedTask struct {
+	envelope.Task
+	ApproveNonce   string    `json:"approve_nonce"`
+	DoneNonce      string    `json:"done_nonce"`
+	ReopenNonce    string    `json:"reopen_nonce"`
+	DropNonce      string    `json:"drop_nonce"`
+	ResetNonce     string    `json:"reset_nonce"`
+	NonceExpiresAt time.Time `json:"nonce_expires_at"`
+}
+
+type taskListing struct {
+	Tasks     []listedTask `json:"tasks"`
+	NextAfter int64        `json:"next_after"`
+}
+
+// taskCall makes one task route call as c.
+func taskCall(t *testing.T, c *client.Relay, method, path string, in any) (taskReply, error) {
+	t.Helper()
+	var out taskReply
+	err := c.Raw(t.Context(), method, path, in, &out)
+	return out, err
+}
+
+// taskDo is taskCall for a call the relay must accept.
+func taskDo(t *testing.T, c *client.Relay, method, path string, in any) taskReply {
+	t.Helper()
+	out, err := taskCall(t, c, method, path, in)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return out
+}
+
+func taskPath(id int64, action string) string {
+	return fmt.Sprintf("/v1/tasks/%d%s", id, action)
+}
+
+func adminTaskPath(id int64, action string) string {
+	return fmt.Sprintf("/v1/admin/tasks/%d%s", id, action)
+}
+
+// refusedWith reports whether err is the relay's refusal with HTTP status
+// code and a message containing part.
+func refusedWith(err error, code int, part string) bool {
+	return client.IsStatus(err, code) && strings.Contains(err.Error(), part)
+}
+
+// listTasks returns the listing at path as c gets it.
+func listTasks(t *testing.T, c *client.Relay, path string) []listedTask {
+	t.Helper()
+	var out taskListing
+	if err := c.Raw(t.Context(), "GET", path, nil, &out); err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	return out.Tasks
+}
+
+// seesTask reports whether c's list holds task id, and fails the test
+// unless get agrees: a task off the list answers not found.
+func seesTask(t *testing.T, c *client.Relay, id int64) bool {
+	t.Helper()
+	inList := false
+	for _, task := range listTasks(t, c, "/v1/tasks") {
+		inList = inList || task.ID == id
+	}
+	_, err := taskCall(t, c, "GET", taskPath(id, ""), nil)
+	if inList != (err == nil) || err != nil && !refusedWith(err, http.StatusNotFound, store.ErrNoTask.Error()) {
+		t.Fatalf("task %d: in the list %v, get answers %v", id, inList, err)
+	}
+	return inList
+}
+
+// finish has c take the ask open under task id and end it with status.
+func (m *taskMesh) finish(t *testing.T, c *client.Relay, id int64, body string, status envelope.Status) {
+	t.Helper()
+	ask := m.task(t, id).CurrentRequest
+	claimOne(t, c, ask)
+	if _, err := c.Reply(t.Context(), ask, body, status); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An agent adds a task unassigned, handed to a teammate, or as the owner's
+// own, and each reads back as it was stored. Nothing of a task's text is
+// audited.
+func TestTaskRoutesAdd(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+
+	plain := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Renew the certificate", "detail": "It lapses in March."})
+	if got := plain.Task; got.ID == 0 || got.Status != envelope.TaskOpen || got.Assignee != "" || got.Filer != "grokbot" || got.Detail != "It lapses in March." {
+		t.Fatalf("unassigned task = %+v", got)
+	}
+	read := taskDo(t, m.grok, "GET", taskPath(plain.Task.ID, ""), nil)
+	if read.Task.Title != "Renew the certificate" || len(read.Events) != 1 || read.Events[0].Kind != envelope.TaskEventAdded || read.Events[0].Actor != "grokbot" {
+		t.Fatalf("read back = %+v", read)
+	}
+
+	handed := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Draft the notes", "assignee": "muse"})
+	if got := handed.Task; got.Status != envelope.TaskWorking || got.Assignee != "muse" || got.CurrentRequest == "" || handed.AssignError != "" {
+		t.Fatalf("assigned task = %+v", handed)
+	}
+	inbox, err := m.muse.Poll(ctx, time.Millisecond)
+	if err != nil || len(inbox.Requests) != 1 || inbox.Requests[0].ID != handed.Task.CurrentRequest || inbox.Requests[0].From != "grokbot" {
+		t.Fatalf("muse inbox = %+v, %v", inbox, err)
+	}
+	if got := taskDo(t, m.muse, "GET", taskPath(handed.Task.ID, ""), nil).Task; got.Status != envelope.TaskWorking || got.Assignee != "muse" {
+		t.Fatalf("the assignee reads %+v", got)
+	}
+
+	owners := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Call the bank", "assignee": envelope.TaskOwner})
+	if got := owners.Task; got.Status != envelope.TaskOpen || got.Assignee != envelope.TaskOwner || got.CurrentRequest != "" || m.asks(t, got.ID) != 0 {
+		t.Fatalf("the owner's own task = %+v", got)
+	}
+
+	// A key the filer already used on a live task returns that task.
+	first := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Answer the landlord", "key": "note-7"})
+	again := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Answer the landlord again", "key": "note-7"})
+	if again.Task.ID != first.Task.ID || !again.Existing || first.Existing {
+		t.Fatalf("second add with the key = %+v, first %+v", again, first)
+	}
+
+	if _, err := taskCall(t, m.grok, "POST", "/v1/tasks", map[string]string{"detail": "no title"}); !client.IsStatus(err, http.StatusBadRequest) {
+		t.Fatalf("add with no title: %v", err)
+	}
+	if _, err := taskCall(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "x", "assignee": "nobody"}); !refusedWith(err, http.StatusNotFound, "no such agent") {
+		t.Fatalf("add for an unknown teammate: %v", err)
+	}
+
+	events, err := m.Store.AuditEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := 0
+	for _, e := range events {
+		if e.Event == "task_added" {
+			added++
+		}
+		for _, text := range []string{"certificate", "March", "notes", "bank", "landlord"} {
+			if strings.Contains(e.Detail, text) {
+				t.Errorf("audit event %s carries task text: %s", e.Event, e.Detail)
+			}
+		}
+	}
+	if added != 4 {
+		t.Errorf("%d task_added audit events, want 4", added)
+	}
+}
+
+// Adding a task takes a slot of the filer's send rate, and the filer's
+// fifty-first live task is refused.
+func TestTaskAddIsRateLimitedAndCapped(t *testing.T) {
+	m := newTaskMesh(t)
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 2}))
+	for i := range 2 {
+		taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": fmt.Sprintf("job %d", i)})
+	}
+	if _, err := taskCall(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "one too many"}); !refusedWith(err, http.StatusTooManyRequests, policy.ErrRateLimited.Error()) {
+		t.Fatalf("third add in a minute: %v", err)
+	}
+	if _, err := m.grok.Send(t.Context(), "muse", "hello", envelope.KindAsk, "", false); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("an ask after two adds used the rate: %v", err)
+	}
+
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 100}))
+	for i := 2; i < store.MaxOpenTasks; i++ {
+		taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": fmt.Sprintf("job %d", i)})
+	}
+	if _, err := taskCall(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "over the cap"}); !refusedWith(err, http.StatusConflict, store.ErrTaskLimit.Error()) {
+		t.Fatalf("add over the cap: %v", err)
+	}
+}
+
+// A task whose filer declares an outside source waits for the owner: it is
+// proposed, nothing is sent, the teammate the filer named is kept as a
+// suggestion, and that teammate cannot read it.
+func TestTaskWithSourceIsProposed(t *testing.T) {
+	m := newTaskMesh(t)
+	out := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Reply to the vendor", "source": "mail", "assignee": "muse"})
+	if got := out.Task; got.Status != envelope.TaskProposed || got.Assignee != "" || got.SuggestedAssignee != "muse" || got.Source != "mail" || got.CurrentRequest != "" {
+		t.Fatalf("task with a source = %+v", got)
+	}
+	id := out.Task.ID
+	if n := m.asks(t, id); n != 0 {
+		t.Fatalf("%d requests under a proposed task", n)
+	}
+	if seesTask(t, m.muse, id) {
+		t.Fatal("the suggested teammate reads a proposed task")
+	}
+	if !seesTask(t, m.grok, id) {
+		t.Fatal("the filer cannot read its proposed task")
+	}
+	var shown *listedTask
+	for _, task := range listTasks(t, m.admin, "/v1/admin/tasks") {
+		if task.ID == id {
+			shown = &task
+		}
+	}
+	if shown == nil || shown.Status != envelope.TaskProposed || shown.SuggestedAssignee != "muse" || shown.Source != "mail" || shown.Filer != "grokbot" {
+		t.Fatalf("the owner's listing shows %+v", shown)
+	}
+	// It cannot be assigned until the owner approves it.
+	if _, err := taskCall(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("assign of a proposed task: %v", err)
+	}
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/approve"), nil).Task; got.Status != envelope.TaskOpen {
+		t.Fatalf("approved task = %+v", got)
+	}
+	if got := taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task; got.Status != envelope.TaskWorking || got.Assignee != "muse" {
+		t.Fatalf("assigned after approval = %+v", got)
+	}
+}
+
+// While a guest's ask is open with an agent, in any open state, a task the
+// agent files is proposed though it declares no source, and its comment on
+// any task is refused. Both end when the guest's ask does.
+func TestTaskFromAgentHoldingGuestAsk(t *testing.T) {
+	m, g := guestMesh(t, relay.Config{})
+	ctx := t.Context()
+	muse := m.Client(t, "muse")
+	before := taskDo(t, muse, "POST", "/v1/tasks", map[string]string{"title": "filed before the guest asked"})
+	if before.Task.Status != envelope.TaskOpen {
+		t.Fatalf("task before the guest's ask = %+v", before.Task)
+	}
+	comment := taskPath(before.Task.ID, "/comment")
+	if out := taskDo(t, muse, "POST", comment, map[string]string{"body": "starting on it"}); out.Event == nil || out.Event.Kind != envelope.TaskEventComment || out.Event.Actor != "muse" {
+		t.Fatalf("comment = %+v", out)
+	}
+
+	check := func(state string) {
+		t.Helper()
+		out := taskDo(t, muse, "POST", "/v1/tasks", map[string]string{"title": "while the guest's ask is " + state, "assignee": "instinct"})
+		if out.Task.Status != envelope.TaskProposed || out.Task.Source != "" || out.Task.SuggestedAssignee != "instinct" || out.Task.CurrentRequest != "" {
+			t.Fatalf("task filed with the guest's ask %s = %+v", state, out.Task)
+		}
+		if _, err := taskCall(t, muse, "POST", comment, map[string]string{"body": "the guest says hi"}); !refusedWith(err, http.StatusConflict, "a guest's ask") {
+			t.Fatalf("comment with the guest's ask %s: %v", state, err)
+		}
+	}
+	ask := guestAsk(t, g, "what is the wifi password?")
+	approve(t, m, ask.ID)
+	if in, err := muse.Poll(ctx, 0); err != nil || len(in.Requests) != 1 {
+		t.Fatalf("muse inbox = %+v, %v", in, err)
+	}
+	check("delivered")
+	if _, err := muse.Claim(ctx, ask.ID); err != nil {
+		t.Fatal(err)
+	}
+	check("claimed")
+	if _, err := muse.Reply(ctx, ask.ID, "which network?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	check("waiting on the guest")
+
+	if _, err := g.Answer(ctx, ask.ID, "the guest one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := muse.Reply(ctx, ask.ID, "ask the owner", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	taskDo(t, muse, "POST", comment, map[string]string{"body": "done with the guest"})
+	if out := taskDo(t, muse, "POST", "/v1/tasks", map[string]string{"title": "after the guest's ask closed"}); out.Task.Status != envelope.TaskOpen {
+		t.Fatalf("task after the guest's ask closed = %+v", out.Task)
+	}
+}
+
+// A task whose ask is held for the owner is not the target's to read: not
+// while it is held, not after the owner denies it, only once the owner
+// approves it.
+func TestTaskHeldAskHidesTaskFromTarget(t *testing.T) {
+	m := newTaskMesh(t)
+	m.gate(t, `{"gate":{"muse":{"from":["grokbot"]}},"hold_ttl":"1h"}`)
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Summarise the contract", "assignee": "instinct"}).Task.ID
+	m.finish(t, m.instinct, id, "Two pages; the notice period is short.", envelope.StatusAnswered)
+
+	held := taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task
+	if held.Status != envelope.TaskWorking || held.AskStatus != envelope.StatusHeld {
+		t.Fatalf("task with a held ask = %+v", held)
+	}
+	if seesTask(t, m.muse, id) {
+		t.Fatal("the target reads a task whose ask is held")
+	}
+	if err := m.admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+held.CurrentRequest+"/deny", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.wantOpen(t, id, "denied")
+	if seesTask(t, m.muse, id) {
+		t.Fatal("the target reads a task whose ask the owner denied")
+	}
+	held = taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task
+	if err := m.admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+held.CurrentRequest+"/approve", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !seesTask(t, m.muse, id) {
+		t.Fatal("the target cannot read the task after the owner approved its ask")
+	}
+}
+
+// A task whose first ask was held and then denied goes back to open with
+// no result. The denied target still must not read it.
+func TestTaskDeniedFirstAskStaysHiddenFromTarget(t *testing.T) {
+	m := newTaskMesh(t)
+	m.gate(t, `{"gate":{"muse":{"from":["grokbot"]}},"hold_ttl":"1h"}`)
+	held := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Read the offer letter", "assignee": "muse"}).Task
+	if held.AskStatus != envelope.StatusHeld {
+		t.Fatalf("task with a held first ask = %+v", held)
+	}
+	if err := m.admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+held.CurrentRequest+"/deny", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.wantOpen(t, held.ID, "denied")
+	if seesTask(t, m.muse, held.ID) {
+		t.Fatal("the target reads a fresh task whose only ask the owner denied")
+	}
+	if seesTask(t, m.instinct, held.ID) {
+		t.Fatal("an uninvolved agent reads a task that has left the shared pool")
+	}
+	if !seesTask(t, m.grok, held.ID) {
+		t.Fatal("the filer cannot read its own task")
+	}
+}
+
+// An open, unassigned task with no result is every agent's to read. One
+// that came back to open with a result is not, but an agent that claimed
+// an earlier attempt keeps reading it after it goes to someone else.
+func TestTaskVisibilityOfThePoolAndPastClaimants(t *testing.T) {
+	m := newTaskMesh(t)
+	pool := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Anyone: tidy the wiki"}).Task.ID
+	if !seesTask(t, m.instinct, pool) {
+		t.Fatal("an uninvolved agent cannot read an open, unassigned task")
+	}
+
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Price the trip", "assignee": "muse"}).Task.ID
+	if seesTask(t, m.instinct, id) {
+		t.Fatal("an uninvolved agent reads a working task")
+	}
+	m.finish(t, m.muse, id, "About 900 all in.", envelope.StatusAnswered)
+	taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"})
+	m.finish(t, m.muse, id, "cannot reach the airline", envelope.StatusFailed)
+	if got := m.task(t, id); got.Status != envelope.TaskOpen || got.Assignee != "" || got.Result == "" {
+		t.Fatalf("task back to open = %+v", got)
+	}
+	if seesTask(t, m.instinct, id) {
+		t.Fatal("an uninvolved agent reads an open task that carries a result")
+	}
+	if _, err := taskCall(t, m.instinct, "POST", taskPath(id, "/comment"), map[string]string{"body": "me too"}); !client.IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("comment on a task the caller cannot read: %v", err)
+	}
+	if _, err := taskCall(t, m.instinct, "POST", taskPath(id, "/assign"), map[string]string{"to": "scout"}); !client.IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("assign of a task the caller cannot read: %v", err)
+	}
+
+	taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "instinct"})
+	if !seesTask(t, m.muse, id) {
+		t.Fatal("an agent that claimed an earlier attempt lost the task when it was reassigned")
+	}
+	if seesTask(t, m.scout, id) {
+		t.Fatal("an uninvolved agent reads a reassigned task")
+	}
+}
+
+// The owner assigns through the admin route, as an agent on the admin
+// device: any task, as often as it takes, with the owner in the history.
+// With no agent on the device the relay says to join one.
+func TestTaskAdminAssign(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Book the venue", "assignee": "muse"}).Task.ID
+	m.finish(t, m.muse, id, "Booked for the 4th.", envelope.StatusAnswered)
+	counted := m.task(t, id).AgentAssigns
+
+	if _, err := taskCall(t, m.admin, "POST", adminTaskPath(id, "/assign"), map[string]string{"to": "instinct"}); !refusedWith(err, http.StatusForbidden, "join this device as an agent") {
+		t.Fatalf("admin assign with no agent on the device: %v", err)
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskReturned || got.Assignee != "muse" {
+		t.Fatalf("task after the refused assign = %+v", got)
+	}
+
+	phone := m.JoinOnMachineOf(t, "admin", "phone")
+	m.clk.advance(2 * time.Second)
+	out := taskDo(t, phone, "POST", adminTaskPath(id, "/assign"), map[string]string{"to": "instinct"}).Task
+	if out.Status != envelope.TaskWorking || out.Assignee != "instinct" || out.AgentAssigns != counted {
+		t.Fatalf("task after the owner's assign = %+v", out)
+	}
+	req, _, err := m.Store.Request(ctx, out.CurrentRequest)
+	if err != nil || req.From != "phone" || req.To != "instinct" || !strings.Contains(req.Body, "the owner assigned to you") {
+		t.Fatalf("the owner's ask = %+v, %v", req, err)
+	}
+	events := m.events(t, id)
+	if last := events[len(events)-1]; last.Kind != envelope.TaskEventAssigned || last.Actor != envelope.TaskOwner || last.Body != "instinct" {
+		t.Fatalf("history after the owner's assign = %+v", last)
+	}
+
+	// The owner takes a task from its assignee and hands it on, past any
+	// number an agent is held to.
+	for i := range store.MaxAgentAssigns + 2 {
+		to := []string{"muse", "instinct"}[i%2]
+		got := taskDo(t, phone, "POST", adminTaskPath(id, "/assign"), map[string]string{"to": to}).Task
+		if got.Status != envelope.TaskWorking || got.Assignee != to || got.AgentAssigns != counted || got.CurrentRequest == out.CurrentRequest {
+			t.Fatalf("owner's assign %d = %+v", i, got)
+		}
+		if _, st, err := m.Store.Request(ctx, out.CurrentRequest); err != nil || st != envelope.StatusCancelled {
+			t.Fatalf("the ask the owner took the task from is %s, %v", st, err)
+		}
+		out = got
+	}
+
+	owned := taskDo(t, phone, "POST", "/v1/admin/tasks", map[string]string{"title": "Water the plants", "assignee": "muse"}).Task
+	if owned.Filer != envelope.TaskOwner || owned.Status != envelope.TaskWorking || owned.Assignee != "muse" || owned.AgentAssigns != 0 {
+		t.Fatalf("the owner's added task = %+v", owned)
+	}
+}
+
+// The owner adds a task from an admin device with no agent on it, and
+// reads and comments on any task.
+func TestTaskAdminAddReadComment(t *testing.T) {
+	m := newTaskMesh(t)
+	own := taskDo(t, m.admin, "POST", "/v1/admin/tasks", map[string]string{"title": "Renew the passport", "assignee": envelope.TaskOwner}).Task
+	if own.Filer != envelope.TaskOwner || own.Assignee != envelope.TaskOwner || own.Status != envelope.TaskOpen {
+		t.Fatalf("the owner's own task = %+v", own)
+	}
+	if seesTask(t, m.grok, own.ID) {
+		t.Fatal("an agent reads the owner's own task")
+	}
+	if _, err := taskCall(t, m.admin, "POST", "/v1/admin/tasks", map[string]string{"title": "Sort the photos", "assignee": "muse"}); !refusedWith(err, http.StatusForbidden, "join this device as an agent") {
+		t.Fatalf("owner's add for a teammate with no agent on the device: %v", err)
+	}
+	if n := len(listTasks(t, m.admin, "/v1/admin/tasks")); n != 1 {
+		t.Fatalf("%d tasks after a refused add, want 1", n)
+	}
+
+	theirs := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Compare the quotes", "assignee": "muse"}).Task
+	if out := taskDo(t, m.admin, "POST", adminTaskPath(theirs.ID, "/comment"), map[string]string{"body": "Ignore the cheapest."}); out.Event == nil || out.Event.Actor != envelope.TaskOwner || out.Task.Status != envelope.TaskWorking {
+		t.Fatalf("the owner's comment = %+v", out)
+	}
+	read := taskDo(t, m.admin, "GET", adminTaskPath(theirs.ID, ""), nil)
+	if last := read.Events[len(read.Events)-1]; read.Task.Title != "Compare the quotes" || last.Kind != envelope.TaskEventComment || last.Body != "Ignore the cheapest." {
+		t.Fatalf("the owner reads %+v", read)
+	}
+}
+
+// No agent route marks a task done, approves it, reopens it or resets its
+// assign count, and every admin task route refuses an agent that is not on
+// an admin device.
+func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
+	m := newTaskMesh(t)
+	open := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "open"}).Task
+	proposed := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "proposed", "source": "meeting"}).Task
+	dropped := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "dropped"}).Task
+	taskDo(t, m.grok, "POST", taskPath(dropped.ID, "/drop"), nil)
+
+	admin := 0
+	for _, pattern := range m.Server.Routes() {
+		method, path, _ := strings.Cut(pattern, " ")
+		if !strings.Contains(path, "/tasks") {
+			continue
+		}
+		if strings.HasPrefix(path, "/v1/admin/") {
+			admin++
+			path = pathParam.ReplaceAllString(path, fmt.Sprint(open.ID))
+			if err := m.grok.Raw(t.Context(), method, path, map[string]any{}, nil); !refusedWith(err, http.StatusForbidden, identity.ErrNotAdmin.Error()) {
+				t.Errorf("%s as an agent: %v", pattern, err)
+			}
+			continue
+		}
+		for _, owners := range []string{"done", "approve", "reopen", "reset"} {
+			if strings.Contains(path, owners) {
+				t.Errorf("agent route %s", pattern)
+			}
+		}
+	}
+	if admin != 10 {
+		t.Errorf("%d admin task routes checked, want 10", admin)
+	}
+	for id, actions := range map[int64][]string{open.ID: {"done", "reset"}, proposed.ID: {"approve"}, dropped.ID: {"reopen"}} {
+		for _, action := range actions {
+			for _, method := range []string{"POST", "PUT", "DELETE"} {
+				if err := m.grok.Raw(t.Context(), method, taskPath(id, "/"+action), map[string]any{}, nil); err == nil {
+					t.Errorf("%s %s as an agent was accepted", method, taskPath(id, "/"+action))
+				}
+			}
+		}
+	}
+	for id, want := range map[int64]envelope.TaskStatus{open.ID: envelope.TaskOpen, proposed.ID: envelope.TaskProposed, dropped.ID: envelope.TaskDropped} {
+		if got := m.task(t, id); got.Status != want {
+			t.Errorf("task %d is %s after the agent's calls, want %s", id, got.Status, want)
+		}
+	}
+}
+
+// From a browser the owner's decisions on a task need a nonce the admin
+// listing issued for that task, that decision and that device, and each
+// works once. The CLI sends none.
+func TestTaskDecisionsNeedNonceFromBrowser(t *testing.T) {
+	m := newTaskMesh(t)
+	page := hardened(t, m.Mesh, "admin")
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Send the invoice"}).Task.ID
+	row := func() listedTask {
+		t.Helper()
+		var out taskListing
+		if code, body := pageCall(t, page, "GET", "/v1/admin/tasks", "", nil, &out); code != http.StatusOK {
+			t.Fatalf("admin listing from the page: %d %s", code, body)
+		}
+		for _, task := range out.Tasks {
+			if task.ID == id {
+				return task
+			}
+		}
+		t.Fatalf("task %d not in the admin listing", id)
+		return listedTask{}
+	}
+	decide := func(action, nonce string) int {
+		t.Helper()
+		code, _ := pageCall(t, page, "POST", adminTaskPath(id, "/"+action), "", map[string]string{"nonce": nonce}, nil)
+		return code
+	}
+
+	first := row()
+	if first.DoneNonce == "" || first.DropNonce == "" || first.NonceExpiresAt.IsZero() || first.ReopenNonce != "" || first.ApproveNonce != "" {
+		t.Fatalf("nonces for an open task = %+v", first)
+	}
+	if code := decide("done", ""); code != http.StatusConflict {
+		t.Fatalf("done from the page with no nonce: %d", code)
+	}
+	if code := decide("done", first.DropNonce); code != http.StatusConflict {
+		t.Fatalf("done from the page with the drop nonce: %d", code)
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskOpen {
+		t.Fatalf("task after refused decisions = %+v", got)
+	}
+	if code := decide("done", first.DoneNonce); code != http.StatusOK {
+		t.Fatalf("done from the page with a fresh nonce: %d", code)
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskDone {
+		t.Fatalf("task after done = %+v", got)
+	}
+
+	if code := decide("reopen", row().ReopenNonce); code != http.StatusOK {
+		t.Fatalf("reopen from the page: %d", code)
+	}
+	if code := decide("done", first.DoneNonce); code != http.StatusConflict {
+		t.Fatalf("done from the page with a used nonce: %d", code)
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskOpen {
+		t.Fatalf("task after a used nonce = %+v", got)
+	}
+
+	// The agent listing carries no nonce, and the CLI needs none.
+	var raw map[string]any
+	if err := m.grok.Raw(t.Context(), "GET", "/v1/tasks", nil, &raw); err != nil || strings.Contains(fmt.Sprint(raw), "nonce") {
+		t.Fatalf("agent listing = %v, %v", raw, err)
+	}
+	for _, step := range []struct {
+		action string
+		want   envelope.TaskStatus
+	}{{"done", envelope.TaskDone}, {"reopen", envelope.TaskOpen}, {"drop", envelope.TaskDropped}, {"reopen", envelope.TaskOpen}} {
+		if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/"+step.action), nil).Task; got.Status != step.want {
+			t.Fatalf("%s from the CLI = %+v", step.action, got)
+		}
+	}
+	events := m.events(t, id)
+	if last := events[len(events)-1]; last.Actor != envelope.TaskOwner || last.Status != envelope.TaskOpen {
+		t.Fatalf("history after the owner's decisions = %+v", last)
+	}
+}
+
+// Marking a task done while an ask is open under it is refused, and the
+// refusal says so.
+func TestTaskDoneRefusedWhileAskOpen(t *testing.T) {
+	m := newTaskMesh(t)
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Order the parts", "assignee": "muse"}).Task.ID
+	if _, err := taskCall(t, m.admin, "POST", adminTaskPath(id, "/done"), nil); !refusedWith(err, http.StatusConflict, "an ask is still open under the task") {
+		t.Fatalf("done on a working task: %v", err)
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskWorking {
+		t.Fatalf("task after the refused done = %+v", got)
+	}
+}
+
+// Agents may assign one task five times; the sixth is refused until the
+// owner resets the count. An assign that sent nothing is not counted.
+func TestTaskAgentAssignLimit(t *testing.T) {
+	m := newTaskMesh(t)
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Find the receipt"}).Task.ID
+	assign := taskPath(id, "/assign")
+	if _, err := taskCall(t, m.grok, "POST", assign, map[string]string{"to": "nobody"}); !client.IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("assign to an unknown agent: %v", err)
+	}
+	for i := range store.MaxAgentAssigns {
+		// Agents take turns, and the count is the task's. The second is
+		// one that worked on the task: once assigned, a task is no longer
+		// every agent's to read.
+		by, to, worker := m.grok, "muse", m.muse
+		if i%2 == 1 {
+			by, to, worker = m.muse, "instinct", m.instinct
+		}
+		if got := taskDo(t, by, "POST", assign, map[string]string{"to": to}).Task; got.AgentAssigns != i+1 {
+			t.Fatalf("assign %d = %+v", i+1, got)
+		}
+		m.finish(t, worker, id, "not found", envelope.StatusFailed)
+	}
+	if _, err := taskCall(t, m.grok, "POST", assign, map[string]string{"to": "muse"}); !refusedWith(err, http.StatusConflict, store.ErrTaskAssignLimit.Error()) {
+		t.Fatalf("sixth assign: %v", err)
+	}
+	if n := m.asks(t, id); n != store.MaxAgentAssigns {
+		t.Fatalf("%d requests under the task, want %d", n, store.MaxAgentAssigns)
+	}
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/reset"), nil).Task; got.AgentAssigns != 0 {
+		t.Fatalf("task after the owner's reset = %+v", got)
+	}
+	if got := taskDo(t, m.grok, "POST", assign, map[string]string{"to": "muse"}).Task; got.Status != envelope.TaskWorking || got.AgentAssigns != 1 {
+		t.Fatalf("assign after the reset = %+v", got)
+	}
+}
+
+// An agent drops a task it filed while no ask is open under it. Another
+// agent's task, and its own with an ask open, are the owner's to drop.
+func TestTaskAgentDrop(t *testing.T) {
+	m := newTaskMesh(t)
+	own := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Clean the inbox"}).Task.ID
+	if _, err := taskCall(t, m.instinct, "POST", taskPath(own, "/drop"), nil); !refusedWith(err, http.StatusForbidden, "filed") {
+		t.Fatalf("drop of another agent's task: %v", err)
+	}
+	if got := taskDo(t, m.grok, "POST", taskPath(own, "/drop"), map[string]string{"note": "no longer needed"}).Task; got.Status != envelope.TaskDropped {
+		t.Fatalf("dropped task = %+v", got)
+	}
+	events := m.events(t, own)
+	if last := events[len(events)-1]; last.Actor != "grokbot" || last.Status != envelope.TaskDropped || last.Body != "no longer needed" {
+		t.Fatalf("history after the drop = %+v", last)
+	}
+
+	working := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Chase the refund", "assignee": "muse"}).Task
+	if _, err := taskCall(t, m.grok, "POST", taskPath(working.ID, "/drop"), nil); !refusedWith(err, http.StatusConflict, "only the owner") {
+		t.Fatalf("drop of a working task by its filer: %v", err)
+	}
+	if got := m.task(t, working.ID); got.Status != envelope.TaskWorking {
+		t.Fatalf("task after the refused drop = %+v", got)
+	}
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(working.ID, "/drop"), nil).Task; got.Status != envelope.TaskDropped || got.CurrentRequest != "" {
+		t.Fatalf("task the owner dropped = %+v", got)
+	}
+	if _, st, err := m.Store.Request(t.Context(), working.CurrentRequest); err != nil || st != envelope.StatusCancelled {
+		t.Fatalf("the ask under the dropped task is %s, %v", st, err)
+	}
+}
+
+// A guest can call no task route.
+func TestGuestCannotCallTaskRoutes(t *testing.T) {
+	m, g := guestMesh(t, relay.Config{})
+	id := taskDo(t, m.Client(t, "muse"), "POST", "/v1/tasks", map[string]string{"title": "not for guests"}).Task.ID
+	n := 0
+	for _, pattern := range m.Server.Routes() {
+		method, path, _ := strings.Cut(pattern, " ")
+		if !strings.Contains(path, "/tasks") {
+			continue
+		}
+		n++
+		path = pathParam.ReplaceAllString(path, fmt.Sprint(id))
+		if err := g.Raw(t.Context(), method, path, map[string]any{"title": "from a guest", "body": "hi", "to": "muse"}, nil); !refusedWith(err, http.StatusForbidden, refusedRoute) {
+			t.Errorf("%s as a guest: %v", pattern, err)
+		}
+	}
+	if n != 16 {
+		t.Errorf("%d task routes checked, want 16", n)
+	}
+	if tasks := listTasks(t, m.Client(t, "admin"), "/v1/admin/tasks"); len(tasks) != 1 {
+		t.Errorf("%d tasks after the guest's calls, want 1", len(tasks))
+	}
+}
+
+// A relay with the task list says so, which is how a client tells it from
+// an older one.
+func TestCapabilitiesAdvertiseTasks(t *testing.T) {
+	m := newTaskMesh(t)
+	var caps client.Capabilities
+	if err := m.grok.Raw(t.Context(), "GET", "/v1/capabilities", nil, &caps); err != nil || !caps.Tasks {
+		t.Fatalf("capabilities = %+v, %v", caps, err)
 	}
 }

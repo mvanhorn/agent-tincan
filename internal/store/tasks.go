@@ -15,6 +15,10 @@ import (
 // MaxOpenTasks caps the tasks one agent filed that are not done or dropped.
 const MaxOpenTasks = 50
 
+// MaxAgentAssigns caps how many times agents may assign one task before the
+// owner resets its count.
+const MaxAgentAssigns = 5
+
 var (
 	// ErrNoTask means there is no such task, or none the caller may see.
 	ErrNoTask = errors.New("no such task")
@@ -29,6 +33,9 @@ var (
 	// ErrTaskAskOpen refuses marking a task done while an ask is open under
 	// it.
 	ErrTaskAskOpen = errors.New("an ask is still open under the task; drop the task or wait for the ask to end")
+	// ErrTaskAssignLimit refuses an agent's assign of a task agents have
+	// already assigned MaxAgentAssigns times since the owner's last reset.
+	ErrTaskAssignLimit = fmt.Errorf("agents have assigned this task %d times; the owner must assign it or reset the count", MaxAgentAssigns)
 )
 
 // migrateTasks creates the tasks, task_events and task_claimants tables and
@@ -73,9 +80,22 @@ CREATE TABLE IF NOT EXISTS task_claimants (
 	if err != nil {
 		return err
 	}
+	var has bool
+	// source is the outside source the filer declared for the task's text,
+	// and suggested_assignee whom the filer asked to have a proposed task
+	// go to; NULL for none.
+	for _, col := range []string{"source", "suggested_assignee"} {
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col).Scan(&has); err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN ` + col + ` TEXT`); err != nil {
+				return err
+			}
+		}
+	}
 	// task_id marks an ask that is an attempt at a task: the task it is
 	// for, NULL for every other request.
-	var has bool
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'task_id')`).Scan(&has); err != nil {
 		return err
 	}
@@ -103,18 +123,22 @@ CREATE TABLE IF NOT EXISTS task_claimants (
 
 // taskSelect reads tasks with the status of the ask open under each, which
 // is not copied onto the task.
-const taskSelect = `SELECT t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, t.created_at, COALESCE(q.status, '')
+const taskSelect = `SELECT t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(q.status, '')
 	FROM tasks t LEFT JOIN requests q ON q.id = t.current_request`
 
 // taskVisible is true for the tasks viewer ?1 may read; an empty
 // viewer is an admin's, every task. An agent reads a task it filed. It reads any other task only
 // once it is past proposed, and then when the ask open under it is
 // addressed to the agent and not held for the owner, when the agent claimed
-// an ask under it, or when it is open, unassigned and carries no result.
+// an ask under it, or when it is open, unassigned, carries no result and has
+// never been assigned. A task that was assigned once leaves that shared
+// pool for good: its ask may have been held and denied, and the target of
+// a denied ask must not read the text afterwards.
 const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed' AND (
 		q.to_agent = ?1 AND q.status != 'held'
 		OR EXISTS (SELECT 1 FROM task_claimants c WHERE c.task_id = t.id AND c.agent = ?1)
-		OR t.status = 'open' AND t.assignee = '' AND t.result = '' AND t.result_request = ''))`
+		OR t.status = 'open' AND t.assignee = '' AND t.result = '' AND t.result_request = ''
+			AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'assigned')))`
 
 const taskOpenStatuses = `status NOT IN ('done', 'dropped')`
 
@@ -151,8 +175,8 @@ func (s *Store) AddTask(ctx context.Context, t envelope.Task) (envelope.Task, bo
 	}
 	defer tx.Rollback()
 	now := s.now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, created_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`,
+		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, now)
 	if err != nil {
 		return envelope.Task{}, false, err
 	}
@@ -513,6 +537,52 @@ func (s *Store) SetTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 	return out, tx.Commit()
 }
 
+// CountTaskAssign takes one of task id's MaxAgentAssigns agent assigns, for
+// an assign an agent is about to make. The check and the count are one
+// statement, so racing assigns never take more than there are. A task with
+// none left gets ErrTaskAssignLimit.
+func (s *Store) CountTaskAssign(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET agent_assigns = agent_assigns + 1 WHERE id = ? AND agent_assigns < ?`, id, MaxAgentAssigns)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return err
+	}
+	if _, err := s.Task(ctx, id, ""); err != nil {
+		return err
+	}
+	return ErrTaskAssignLimit
+}
+
+// UncountTaskAssign gives back what CountTaskAssign took, for an assign
+// that sent nothing.
+func (s *Store) UncountTaskAssign(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET agent_assigns = agent_assigns - 1 WHERE id = ? AND agent_assigns > 0`, id)
+	return err
+}
+
+// ResetTaskAssigns sets task id's count of agent assigns back to zero as
+// actor's change, and says so in its history.
+func (s *Store) ResetTaskAssigns(ctx context.Context, id int64, actor string) (envelope.Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Task{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET agent_assigns = 0 WHERE id = ?`, id); err != nil {
+		return envelope.Task{}, err
+	}
+	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventAssignsReset}, s.now().UnixMilli()); err != nil {
+		return envelope.Task{}, err
+	}
+	out, err := getTask(ctx, tx, id, "")
+	if err != nil {
+		return envelope.Task{}, err
+	}
+	return out, tx.Commit()
+}
+
 // AppendTaskEvent adds ev to the history of task ev.TaskID, stamped now. It
 // returns ErrNoTask when there is no such task.
 func (s *Store) AppendTaskEvent(ctx context.Context, ev envelope.TaskEvent) (envelope.TaskEvent, error) {
@@ -577,7 +647,7 @@ func scanTask(sc scanner) (envelope.Task, error) {
 	var t envelope.Task
 	var status, ask string
 	var created int64
-	if err := sc.Scan(&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &created, &ask); err != nil {
+	if err := sc.Scan(&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &ask); err != nil {
 		return envelope.Task{}, err
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()

@@ -71,7 +71,9 @@ type Capabilities struct {
 	// GatewayGuests is set by a relay whose connect takes a guest's limits.
 	// A relay without it ignores them and binds a full teammate, so a client
 	// never sends one without this.
-	GatewayGuests      bool  `json:"gateway_guests,omitempty"`
+	GatewayGuests bool `json:"gateway_guests,omitempty"`
+	// Tasks is set by a relay that keeps the shared task list (/v1/tasks).
+	Tasks              bool  `json:"tasks,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`

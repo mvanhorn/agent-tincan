@@ -1,14 +1,23 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"maps"
 	"net/http"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/store"
 	"github.com/mvanhorn/agent-tincan/internal/textfit"
@@ -151,7 +160,7 @@ func taskStatusError(err error) error {
 		return err
 	case errors.Is(err, store.ErrNoTask):
 		return &StatusError{Code: http.StatusNotFound, Err: err}
-	case errors.Is(err, store.ErrTaskState), errors.Is(err, store.ErrTaskAskOpen):
+	case errors.Is(err, store.ErrTaskState), errors.Is(err, store.ErrTaskAskOpen), errors.Is(err, store.ErrTaskLimit), errors.Is(err, store.ErrTaskAssignLimit):
 		return &StatusError{Code: http.StatusConflict, Err: err}
 	}
 	return err
@@ -230,4 +239,772 @@ func taskBody(task envelope.Task, actor, resultBy string, comments []envelope.Ta
 	}
 	b.WriteString(tail)
 	return b.String(), contributors
+}
+
+const (
+	// MaxTaskPage is the most tasks one page of a listing returns. A listing
+	// carries the start of each detail and result, so a page stays well
+	// under the client's read limit.
+	MaxTaskPage = 200
+	// maxTaskEvents is the most history entries one read of a task returns,
+	// and taskEventsBudget the most text they carry together.
+	maxTaskEvents    = 200
+	taskEventsBudget = 2 << 20
+	// maxTaskTitle, maxTaskDetail, maxTaskKey and maxTaskComment cap a
+	// task's text in bytes. The title rides whole in every ask under the
+	// task. maxTaskComment also caps the note on a drop or an owner's
+	// decision.
+	maxTaskTitle   = 200
+	maxTaskDetail  = 64 << 10
+	maxTaskKey     = 200
+	maxTaskComment = envelope.MaxRoomPost
+)
+
+// taskSourceRE is what a declared source may look like: a short label such
+// as mail or meeting, the same shape as an agent name.
+var taskSourceRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+var (
+	// errTaskCommentDuringGuestAsk refuses a comment from a caller a guest's
+	// ask is open with. A comment carries no mark and is handed to whoever
+	// the task is assigned to next, so one written now would pass the
+	// guest's text on as the caller's own.
+	errTaskCommentDuringGuestAsk = errors.New("you have an open request that a guest's ask led to, and a comment on a task would not carry its mark; finish that request first")
+	// errTaskNeedsAgent refuses an owner's assign from a device with no
+	// agent: the ask an assignment sends has to come from one.
+	errTaskNeedsAgent = errors.New("assigning a task sends an ask as an agent on this device; join this device as an agent, then assign again")
+	// errStaleTaskNonce refuses a decision from a browser whose nonce is
+	// missing, used, expired, or issued for another task, decision or device.
+	errStaleTaskNonce = errors.New("this task button has expired; reload the task list and try again")
+	// errTaskNotFiler and errTaskDropAskOpen refuse an agent's drop.
+	errTaskNotFiler    = errors.New("only the agent that filed a task, or the owner, can drop it")
+	errTaskDropAskOpen = errors.New("an ask is open under the task, so only the owner can drop it now")
+)
+
+// The owner's decisions on a task that a nonce is issued for, beside
+// decisionApprove.
+const (
+	decisionDone   = "done"
+	decisionReopen = "reopen"
+	decisionDrop   = "drop"
+	decisionReset  = "reset"
+)
+
+// taskNonceID is the id a task's decision nonces are bound to. No request
+// id has this shape.
+func taskNonceID(id int64) string { return "task:" + strconv.FormatInt(id, 10) }
+
+// taskAdd is the body of an add. Assignee is a teammate, envelope.TaskOwner
+// for the owner's own, or empty. Source names where the text came from when
+// that is outside the team; only an agent declares one.
+type taskAdd struct {
+	Title    string `json:"title"`
+	Detail   string `json:"detail"`
+	Assignee string `json:"assignee"`
+	Key      string `json:"key"`
+	Source   string `json:"source"`
+}
+
+// taskReply is what a task route answers with: the task after the call.
+// Event is the comment a comment route stored. Existing marks an add that
+// stored nothing because the filer already has a live task with the key.
+// AssignError is why an add that named a teammate stored the task and sent
+// no ask; the task is open and unassigned.
+type taskReply struct {
+	Task        envelope.Task       `json:"task"`
+	Event       *envelope.TaskEvent `json:"event,omitempty"`
+	Existing    bool                `json:"existing,omitempty"`
+	AssignError string              `json:"assign_error,omitempty"`
+}
+
+// check refuses an add the relay would not store, and an assignee that
+// takes no task.
+func (in *taskAdd) check(ctx context.Context, s *Server) error {
+	in.Title = strings.TrimSpace(in.Title)
+	var err error
+	switch {
+	case in.Title == "":
+		err = errors.New("task: title is required")
+	case len(in.Title) > maxTaskTitle:
+		err = fmt.Errorf("task: title is %d bytes, over the %d byte limit", len(in.Title), maxTaskTitle)
+	case len(in.Detail) > maxTaskDetail:
+		err = fmt.Errorf("task: detail is %d bytes, over the %d byte limit", len(in.Detail), maxTaskDetail)
+	case len(in.Key) > maxTaskKey:
+		err = fmt.Errorf("task: key is %d bytes, over the %d byte limit", len(in.Key), maxTaskKey)
+	case !utf8.ValidString(in.Title) || !utf8.ValidString(in.Detail) || !utf8.ValidString(in.Key):
+		err = errors.New("task: text is not UTF-8")
+	case in.Source != "" && !taskSourceRE.MatchString(in.Source):
+		err = errors.New("task: source is a short label such as mail or meeting: lowercase letters, digits and dashes, at most 32")
+	}
+	if err != nil {
+		return &StatusError{Code: http.StatusBadRequest, Err: err}
+	}
+	if in.Assignee != "" && in.Assignee != envelope.TaskOwner {
+		return s.checkTaskTarget(ctx, in.Assignee)
+	}
+	return nil
+}
+
+// addTask stores in as filer's task and, when it names a teammate, assigns
+// it with assign. A proposed task is assigned to no one: the assignee is
+// kept as the filer's suggestion. An assign the relay refuses leaves the
+// task stored, open and unassigned, and the refusal in the reply.
+func (s *Server) addTask(ctx context.Context, in taskAdd, filer string, proposed bool, assign func(id int64) error) (taskReply, error) {
+	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source}
+	switch {
+	case proposed:
+		task.Status, task.SuggestedAssignee = envelope.TaskProposed, in.Assignee
+	case in.Assignee == envelope.TaskOwner:
+		task.Assignee = envelope.TaskOwner
+	}
+	task, created, err := s.store.AddTask(ctx, task)
+	if err != nil {
+		return taskReply{}, taskStatusError(err)
+	}
+	out := taskReply{Task: task, Existing: !created}
+	if !created || proposed || in.Assignee == "" || in.Assignee == envelope.TaskOwner {
+		return out, nil
+	}
+	if err := assign(task.ID); err != nil {
+		out.AssignError = err.Error()
+	}
+	if out.Task, err = s.store.Task(ctx, task.ID, ""); err != nil {
+		return taskReply{}, taskStatusError(err)
+	}
+	return out, nil
+}
+
+// agentAssign is assignTask for an agent's own assignment, which takes one
+// of the task's store.MaxAgentAssigns; an assign that sent nothing gives it
+// back.
+func (s *Server) agentAssign(ctx context.Context, a taskAssign) error {
+	if err := s.store.CountTaskAssign(ctx, a.TaskID); err != nil {
+		return taskStatusError(err)
+	}
+	if _, err := s.assignTask(ctx, a); err != nil {
+		if uerr := s.store.UncountTaskAssign(context.WithoutCancel(ctx), a.TaskID); uerr != nil {
+			log.Printf("task %d: uncount a refused assign: %v", a.TaskID, uerr)
+		}
+		return err
+	}
+	return nil
+}
+
+// recordTask audits a task action with the task's id and what fields adds,
+// never its text. An admin's is recorded with its device, as an approval
+// is.
+func (s *Server) recordTask(r *http.Request, event, actor string, id int64, fields map[string]any) {
+	detail := map[string]any{"task": id}
+	maps.Copy(detail, fields)
+	if actor == "" {
+		actor = s.remote(r)
+		if n := s.callerNode(r); !isLocalAdmin(r.Context()) && n.Name != "" {
+			detail["device"] = n.Name
+		}
+	}
+	s.record(r.Context(), event, "", "", actor, store.DetailJSON(detail))
+}
+
+// taskID reads the task id in r's path, or answers as for a task that does
+// not exist.
+func taskID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, store.ErrNoTask)
+		return 0, false
+	}
+	return id, true
+}
+
+// readTaskBody decodes a task route's body into v, writing the error and
+// returning false when it is bad. With optional, a caller may send none.
+func readTaskBody(w http.ResponseWriter, r *http.Request, v any, optional bool) bool {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusRequestEntityTooLarge, err)
+		return false
+	}
+	if optional && len(bytes.TrimSpace(raw)) == 0 {
+		return true
+	}
+	if err := decodeOne(bytes.NewReader(raw), v, "object"); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return false
+	}
+	return true
+}
+
+// checkTaskText refuses a comment or note the relay would not store.
+func checkTaskText(text string, required bool) error {
+	switch {
+	case required && strings.TrimSpace(text) == "":
+		return &StatusError{Code: http.StatusBadRequest, Err: errors.New("empty comment")}
+	case len(text) > maxTaskComment:
+		return &StatusError{Code: http.StatusRequestEntityTooLarge, Err: fmt.Errorf("text is %d bytes, over the %d byte limit", len(text), maxTaskComment)}
+	case !utf8.ValidString(text):
+		return &StatusError{Code: http.StatusBadRequest, Err: errors.New("text is not UTF-8")}
+	}
+	return nil
+}
+
+// writeTaskErr answers a task call that failed with err.
+func writeTaskErr(w http.ResponseWriter, err error) {
+	err = taskStatusError(err)
+	var se *StatusError
+	if !errors.As(err, &se) {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeErr(w, se.Code, err)
+}
+
+// handleAddTask files a task as the calling agent: unassigned, handed to a
+// teammate, or as the owner's own. A task whose text came from outside the
+// team waits for the owner as proposed, with nothing sent: one that
+// declares a source, and any filed while a guest's ask is open with the
+// caller, claimed or not, as a schedule made then is refused. An add takes
+// a slot of the caller's send rate, as an ask does.
+func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
+	from := s.agent(w, r)
+	if from == "" {
+		return
+	}
+	var in taskAdd
+	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := in.check(r.Context(), s); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	guestAsks, err := s.store.OpenGuestAsks(r.Context(), from)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	proposed := in.Source != "" || guestAsks > 0
+	if rp, ok := s.preparer().(RoomPolicy); ok {
+		if err := rp.Charge(from); err != nil {
+			writeErr(w, statusFor(err), err)
+			return
+		}
+	}
+	out, err := s.addTask(r.Context(), in, from, proposed, func(id int64) error {
+		return s.agentAssign(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Session: sess})
+	})
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if out.Existing {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	s.recordTask(r, "task_added", from, out.Task.ID, map[string]any{"status": out.Task.Status, "assignee": out.Task.Assignee, "bytes": len(in.Title) + len(in.Detail)})
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// handleTasks lists the tasks the calling agent may read, oldest first,
+// MaxTaskPage to a page; after is the last id of the page before.
+func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
+	viewer := s.agent(w, r)
+	if viewer == "" {
+		return
+	}
+	tasks, next, ok := s.taskPage(w, r, viewer)
+	if !ok {
+		return
+	}
+	out := map[string]any{"tasks": tasks}
+	if next != 0 {
+		out["next_after"] = next
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// taskPage reads one page of the tasks viewer may read, with each detail
+// and result cut to its start: the whole text is on the task's own route.
+// next is the after of the following page, 0 on the last.
+func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, viewer string) (tasks []envelope.Task, next int64, ok bool) {
+	after, err := nonNegIntParam(r, "after")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return nil, 0, false
+	}
+	tasks, err = s.store.Tasks(r.Context(), viewer, after, MaxTaskPage+1)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return nil, 0, false
+	}
+	if len(tasks) > MaxTaskPage {
+		tasks = tasks[:MaxTaskPage]
+		next = tasks[len(tasks)-1].ID
+	}
+	for i := range tasks {
+		tasks[i].Detail, tasks[i].Result = approvalPreview(tasks[i].Detail), approvalPreview(tasks[i].Result)
+	}
+	return tasks, next, true
+}
+
+// handleTask returns one task the calling agent may read, whole, with its
+// history. A task the caller may not read answers as one that does not
+// exist.
+func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
+	if viewer := s.agent(w, r); viewer != "" {
+		s.writeTask(w, r, viewer)
+	}
+}
+
+// writeTask answers with the task in r's path as viewer may read it and
+// its history, oldest first, from the entry after the after parameter: at
+// most maxTaskEvents entries and taskEventsBudget bytes of their text, with
+// next_after when there are more.
+func (s *Server) writeTask(w http.ResponseWriter, r *http.Request, viewer string) {
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	after, err := nonNegIntParam(r, "after")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	task, err := s.store.Task(r.Context(), id, viewer)
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	events, err := s.store.TaskEvents(r.Context(), id, after, maxTaskEvents+1)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := map[string]any{"task": task}
+	size := 0
+	for i, ev := range events {
+		if size += len(ev.Body); i == maxTaskEvents || i > 0 && size > taskEventsBudget {
+			events = events[:i]
+			out["next_after"] = events[i-1].ID
+			break
+		}
+	}
+	out["events"] = events
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleAssignTask assigns a task the calling agent may read to a
+// teammate, as the caller's own ask. Agents may assign one task
+// store.MaxAgentAssigns times until the owner resets the count.
+func (s *Server) handleAssignTask(w http.ResponseWriter, r *http.Request) {
+	from := s.agent(w, r)
+	if from == "" {
+		return
+	}
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		To string `json:"to"`
+	}
+	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, err := s.store.Task(r.Context(), id, from); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if err := s.agentAssign(r.Context(), taskAssign{TaskID: id, From: from, To: in.To, Session: sess}); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.recordTask(r, "task_assigned", from, id, map[string]any{"to": in.To})
+	s.writeTaskNow(w, r, id, http.StatusOK, nil)
+}
+
+// writeTaskNow answers a call that changed task id with the task as it now
+// stands. The caller acted on it, so it is read whole whoever may read it
+// from here on: an agent that assigns a task it did not file hands it on.
+func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, id int64, code int, ev *envelope.TaskEvent) {
+	task, err := s.store.Task(r.Context(), id, "")
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	writeJSON(w, code, taskReply{Task: task, Event: ev})
+}
+
+// handleCommentTask adds the calling agent's comment to a task it may
+// read. The next ask under the task carries it; nobody is woken for it. A
+// caller a guest's ask is open with is refused, as it is a schedule.
+func (s *Server) handleCommentTask(w http.ResponseWriter, r *http.Request) {
+	from := s.agent(w, r)
+	if from == "" {
+		return
+	}
+	s.commentTask(w, r, from, from)
+}
+
+// commentTask stores the comment in r's body on the task in its path as
+// actor's, when viewer may read the task; viewer "" is the owner's, any
+// task.
+func (s *Server) commentTask(w http.ResponseWriter, r *http.Request, viewer, actor string) {
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Body string `json:"body"`
+	}
+	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	if err := checkTaskText(in.Body, true); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if _, err := s.store.Task(r.Context(), id, viewer); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	audited := ""
+	if viewer != "" {
+		audited = viewer
+		if open, err := s.store.OpenGuestAsks(r.Context(), viewer); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		} else if open > 0 {
+			writeErr(w, http.StatusConflict, errTaskCommentDuringGuestAsk)
+			return
+		}
+	}
+	ev, err := s.store.AppendTaskEvent(r.Context(), envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventComment, Body: in.Body})
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.recordTask(r, "task_commented", audited, id, map[string]any{"bytes": len(in.Body)})
+	s.writeTaskNow(w, r, id, http.StatusCreated, &ev)
+}
+
+// handleDropTask gives up a task the calling agent filed, while no ask is
+// open under it. Any other drop is the owner's.
+func (s *Server) handleDropTask(w http.ResponseWriter, r *http.Request) {
+	from := s.agent(w, r)
+	if from == "" {
+		return
+	}
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Note string `json:"note"`
+	}
+	if !readTaskBody(w, r, &in, true) {
+		return
+	}
+	if err := checkTaskText(in.Note, false); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	task, err := s.store.Task(r.Context(), id, from)
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if task.Filer != from {
+		writeErr(w, http.StatusForbidden, errTaskNotFiler)
+		return
+	}
+	task, err = s.store.SetTaskStatus(r.Context(), id, envelope.TaskDropped, from, in.Note, envelope.TaskProposed, envelope.TaskOpen, envelope.TaskReturned)
+	if errors.Is(err, store.ErrTaskState) {
+		if now, terr := s.store.Task(r.Context(), id, ""); terr == nil && now.CurrentRequest != "" {
+			err = &StatusError{Code: http.StatusConflict, Err: errTaskDropAskOpen}
+		}
+	}
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.recordTask(r, "task_dropped", from, id, nil)
+	writeJSON(w, http.StatusOK, taskReply{Task: task})
+}
+
+// adminOnly answers 403 and returns false unless the caller is an admin
+// device or the local admin socket.
+func (s *Server) adminOnly(w http.ResponseWriter, r *http.Request) bool {
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return false
+	}
+	return true
+}
+
+// ownerAgent is the agent identity an owner's assignment is sent as: the
+// agent the request names on the admin device, as the owner page's asks
+// and room posts name theirs. With none it writes errTaskNeedsAgent and
+// returns "".
+func (s *Server) ownerAgent(w http.ResponseWriter, r *http.Request) string {
+	name, err := s.agentOf(r)
+	if err != nil {
+		writeErr(w, agentErrStatus(err), fmt.Errorf("%w (%v)", errTaskNeedsAgent, err))
+		return ""
+	}
+	return name
+}
+
+// handleAdminTasks lists every task for an admin device, a page at a time
+// as handleTasks does. A tailnet caller also gets, with each task, one
+// nonce for each decision the task's status allows, bound to its device; a
+// browser (the owner page) must send the nonce back to decide. This
+// listing is the only place they are issued. As with the held listing,
+// every tailnet caller gets them and the local admin socket, which has no
+// device, gets none.
+func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	tasks, next, ok := s.taskPage(w, r, "")
+	if !ok {
+		return
+	}
+	type adminTask struct {
+		envelope.Task
+		ApproveNonce   string    `json:"approve_nonce,omitempty"`
+		DoneNonce      string    `json:"done_nonce,omitempty"`
+		ReopenNonce    string    `json:"reopen_nonce,omitempty"`
+		DropNonce      string    `json:"drop_nonce,omitempty"`
+		ResetNonce     string    `json:"reset_nonce,omitempty"`
+		NonceExpiresAt time.Time `json:"nonce_expires_at,omitzero"`
+	}
+	var node string
+	if !isLocalAdmin(r.Context()) {
+		node = s.callerNode(r).ID
+	}
+	now := s.cfg.Now()
+	list := make([]adminTask, len(tasks))
+	for i, task := range tasks {
+		list[i].Task = task
+		if node == "" {
+			continue
+		}
+		row := &list[i]
+		issue := func(decision string) string {
+			var nonce string
+			nonce, row.NonceExpiresAt = s.nonces.issue(nonceKey{id: taskNonceID(task.ID), decision: decision, node: node}, now)
+			return nonce
+		}
+		switch task.Status {
+		case envelope.TaskDone, envelope.TaskDropped:
+			row.ReopenNonce = issue(decisionReopen)
+			continue
+		case envelope.TaskProposed:
+			row.ApproveNonce = issue(decisionApprove)
+		case envelope.TaskOpen, envelope.TaskReturned:
+			row.DoneNonce = issue(decisionDone)
+		}
+		row.DropNonce = issue(decisionDrop)
+		if task.AgentAssigns > 0 {
+			row.ResetNonce = issue(decisionReset)
+		}
+	}
+	out := map[string]any{"tasks": list}
+	if next != 0 {
+		out["next_after"] = next
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleAdminTask returns any task, whole, with its history.
+func (s *Server) handleAdminTask(w http.ResponseWriter, r *http.Request) {
+	if s.adminOnly(w, r) {
+		s.writeTask(w, r, "")
+	}
+}
+
+// handleAdminAddTask files a task as the owner: unassigned, the owner's
+// own, or handed to a teammate. Handing it on sends an ask, so that needs
+// an agent on the device, as handleAdminAssignTask does, and is refused
+// before anything is stored without one. The owner's task is never
+// proposed and declares no source.
+func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	var in taskAdd
+	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	if in.Source != "" {
+		writeErr(w, http.StatusBadRequest, errors.New("task: a source is an agent's to declare; the owner's task takes none"))
+		return
+	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := in.check(r.Context(), s); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	from := ""
+	if in.Assignee != "" && in.Assignee != envelope.TaskOwner {
+		if from = s.ownerAgent(w, r); from == "" {
+			return
+		}
+	}
+	out, err := s.addTask(r.Context(), in, envelope.TaskOwner, false, func(id int64) error {
+		_, err := s.assignTask(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner, Session: sess})
+		return err
+	})
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if out.Existing {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	s.recordTask(r, "task_added", "", out.Task.ID, map[string]any{"status": out.Task.Status, "assignee": out.Task.Assignee, "bytes": len(in.Title) + len(in.Detail)})
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// handleAdminAssignTask is the owner's assign: any task, whoever has it,
+// with no count taken. The ask is sent as the agent the request names on
+// the admin device, and the task's history names the owner. A task with an
+// ask open is taken from its assignee first, and that ask cancelled.
+func (s *Server) handleAdminAssignTask(w http.ResponseWriter, r *http.Request) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		To string `json:"to"`
+	}
+	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	from := s.ownerAgent(w, r)
+	if from == "" {
+		return
+	}
+	task, err := s.store.Task(r.Context(), id, "")
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	a := taskAssign{TaskID: id, From: from, To: in.To, Actor: envelope.TaskOwner, Session: sess}
+	if task.CurrentRequest != "" {
+		_, err = s.reassignTask(r.Context(), a)
+	} else {
+		_, err = s.assignTask(r.Context(), a)
+	}
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.recordTask(r, "task_assigned", "", id, map[string]any{"to": in.To, "as": from})
+	s.writeTaskNow(w, r, id, http.StatusOK, nil)
+}
+
+// handleAdminCommentTask adds the owner's comment to any task.
+func (s *Server) handleAdminCommentTask(w http.ResponseWriter, r *http.Request) {
+	if s.adminOnly(w, r) {
+		s.commentTask(w, r, "", envelope.TaskOwner)
+	}
+}
+
+// decideTask runs one of the owner's decisions on the task in r's path and
+// answers with the task. A browser must send the nonce the admin listing
+// issued to this device for this task and decision; the CLI and the local
+// admin socket send none. A decision that lands voids every nonce issued
+// for the task, since they were issued for the status it has left.
+func (s *Server) decideTask(w http.ResponseWriter, r *http.Request, decision, event string, act func(id int64, note string) (envelope.Task, error)) {
+	if !s.adminOnly(w, r) {
+		return
+	}
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Nonce string `json:"nonce"`
+		Note  string `json:"note"`
+	}
+	if !readTaskBody(w, r, &in, true) {
+		return
+	}
+	if err := checkTaskText(in.Note, false); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if browserMarked(r) && !s.takeDecisionNonce(r, taskNonceID(id), decision, in.Nonce) {
+		writeErr(w, http.StatusConflict, errStaleTaskNonce)
+		return
+	}
+	task, err := act(id, in.Note)
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.nonces.void(taskNonceID(id))
+	s.recordTask(r, event, "", id, nil)
+	writeJSON(w, http.StatusOK, taskReply{Task: task})
+}
+
+// handleApproveTask opens a proposed task, so it can be assigned.
+func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
+	s.decideTask(w, r, decisionApprove, "task_approved", func(id int64, note string) (envelope.Task, error) {
+		return s.store.SetTaskStatus(r.Context(), id, envelope.TaskOpen, envelope.TaskOwner, note, envelope.TaskProposed)
+	})
+}
+
+// handleDoneTask closes an open or returned task. One with an ask open
+// under it is refused.
+func (s *Server) handleDoneTask(w http.ResponseWriter, r *http.Request) {
+	s.decideTask(w, r, decisionDone, "task_done", func(id int64, note string) (envelope.Task, error) {
+		return s.store.MarkTaskDone(r.Context(), id, envelope.TaskOwner, note)
+	})
+}
+
+// handleReopenTask puts a done or dropped task back to open.
+func (s *Server) handleReopenTask(w http.ResponseWriter, r *http.Request) {
+	s.decideTask(w, r, decisionReopen, "task_reopened", func(id int64, note string) (envelope.Task, error) {
+		return s.store.SetTaskStatus(r.Context(), id, envelope.TaskOpen, envelope.TaskOwner, note, envelope.TaskDone, envelope.TaskDropped)
+	})
+}
+
+// handleAdminDropTask is the owner's drop: any task, and an ask open under
+// it is cancelled.
+func (s *Server) handleAdminDropTask(w http.ResponseWriter, r *http.Request) {
+	s.decideTask(w, r, decisionDrop, "task_dropped", func(id int64, note string) (envelope.Task, error) {
+		return s.dropTask(r.Context(), id, envelope.TaskOwner, note)
+	})
+}
+
+// handleResetTask sets a task's count of agent assigns back to zero.
+func (s *Server) handleResetTask(w http.ResponseWriter, r *http.Request) {
+	s.decideTask(w, r, decisionReset, "task_assigns_reset", func(id int64, _ string) (envelope.Task, error) {
+		return s.store.ResetTaskAssigns(r.Context(), id, envelope.TaskOwner)
+	})
 }
