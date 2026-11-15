@@ -1137,3 +1137,137 @@ func TestPlainScheduleNamesNoTask(t *testing.T) {
 		t.Fatalf("schedules = %+v", list)
 	}
 }
+
+// An assign of a repeating task that is held for the owner leaves the
+// repeat where it was: denied, the next fire still goes to the original
+// teammate. The repeat follows the assign once the owner approves the ask.
+func TestRepeatingTaskFollowsHeldAssignOnlyOnceApproved(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	task := m.repeating(t, time.Hour)
+	m.finish(t, m.muse, task.ID, "ran", envelope.StatusAnswered)
+	m.gate(t, `{"gate":{"instinct":{"from":["muse"]}},"hold_ttl":"1h"}`)
+
+	held := taskDo(t, m.muse, "POST", taskPath(task.ID, "/assign"), map[string]string{"to": "instinct"}).Task
+	if held.AskStatus != envelope.StatusHeld || held.Assignee != "instinct" || held.RepeatTo != "muse" {
+		t.Fatalf("task with a held assign = %+v, want its repeat still for muse", held)
+	}
+	if err := m.admin.Raw(ctx, "POST", "/v1/admin/requests/"+held.CurrentRequest+"/deny", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.task(t, task.ID); got.Status != envelope.TaskOpen || got.RepeatTo != "muse" {
+		t.Fatalf("task after the denial = %+v", got)
+	}
+	m.fire(t, time.Hour)
+	got := m.task(t, task.ID)
+	req, _, err := m.Store.Request(ctx, got.CurrentRequest)
+	if err != nil || got.Status != envelope.TaskWorking || req.From != "grokbot" || req.To != "muse" || req.Status == envelope.StatusHeld {
+		t.Fatalf("the fire after the denial = %+v, %v (task %+v)", req, err, got)
+	}
+	if sent := m.sentTo(t, "instinct"); len(sent) != 0 {
+		t.Fatalf("instinct got %+v", sent)
+	}
+
+	m.finish(t, m.muse, task.ID, "ran again", envelope.StatusAnswered)
+	held = taskDo(t, m.muse, "POST", taskPath(task.ID, "/assign"), map[string]string{"to": "instinct"}).Task
+	if held.AskStatus != envelope.StatusHeld || held.RepeatTo != "muse" {
+		t.Fatalf("task with a second held assign = %+v", held)
+	}
+	if err := m.admin.Raw(ctx, "POST", "/v1/admin/requests/"+held.CurrentRequest+"/approve", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.task(t, task.ID); got.Status != envelope.TaskWorking || got.Assignee != "instinct" || got.RepeatTo != "instinct" || got.RepeatSchedule != task.RepeatSchedule {
+		t.Fatalf("task after the approval = %+v, want its repeat for instinct", got)
+	}
+	if list := m.list(t, m.grok); len(list) != 1 || list[0].From != "grokbot" || list[0].To != "instinct" {
+		t.Fatalf("schedule after the approval = %+v", list)
+	}
+}
+
+// An assign of a repeating task to the agent its repeat is sent as leaves
+// the repeat's target alone: a schedule never asks its own sender.
+func TestRepeatingTaskAssignToItsSenderKeepsRepeatTarget(t *testing.T) {
+	m := newTaskMesh(t)
+	task := m.repeating(t, time.Hour)
+	m.finish(t, m.muse, task.ID, "ran", envelope.StatusAnswered)
+	got := taskDo(t, m.muse, "POST", taskPath(task.ID, "/assign"), map[string]string{"to": "grokbot"}).Task
+	if got.Status != envelope.TaskWorking || got.Assignee != "grokbot" || got.RepeatTo != "muse" {
+		t.Fatalf("task assigned to its repeat's sender = %+v, want its repeat still for muse", got)
+	}
+	m.finish(t, m.grok, task.ID, "did it myself", envelope.StatusAnswered)
+	m.fire(t, time.Hour)
+	if got := m.task(t, task.ID); got.Status != envelope.TaskWorking || got.Assignee != "muse" || len(m.audited(t, "schedule_blocked")) != 0 {
+		t.Fatalf("the next fire = %+v with %d blocked rows", got, len(m.audited(t, "schedule_blocked")))
+	}
+}
+
+// A repeat whose fire the relay refuses is audited as blocked each time and
+// tells its sender once, naming the task, until a fire goes through. The
+// task is left as it was.
+func TestRepeatingTaskBlockedFireTellsSenderOnce(t *testing.T) {
+	m := newTaskMesh(t)
+	task := m.repeating(t, time.Hour)
+	m.finish(t, m.muse, task.ID, "ran", envelope.StatusAnswered)
+	if _, err := m.Store.SetAgentKind(t.Context(), "muse", onboard.KindPhone); err != nil {
+		t.Fatal(err)
+	}
+	m.fire(t, time.Hour)
+	if n := len(m.audited(t, "schedule_blocked")); n != 1 {
+		t.Fatalf("blocked rows after one refused fire = %d", n)
+	}
+	notices := m.relayNotices(t, "grokbot")
+	if len(notices) != 1 || !strings.Contains(notices[0].Body, fmt.Sprintf("Repeat #%d of task #%d for muse was not sent", task.RepeatSchedule, task.ID)) {
+		t.Fatalf("notices after one refused fire = %+v", notices)
+	}
+	if strings.Contains(notices[0].Body, "Check the backups") {
+		t.Fatalf("the notice carries the task's text: %s", notices[0].Body)
+	}
+	m.fire(t, time.Hour)
+	if rows, told := len(m.audited(t, "schedule_blocked")), len(m.relayNotices(t, "grokbot")); rows != 2 || told != 1 {
+		t.Fatalf("after a second refused fire: %d blocked rows, %d notices; want 2 and 1", rows, told)
+	}
+	if got := m.task(t, task.ID); got.Status != envelope.TaskReturned || got.CurrentRequest != "" || got.RepeatTo != "muse" || m.asks(t, task.ID) != 1 || m.skips(t, task.ID) != 0 {
+		t.Fatalf("task after the refused fires = %+v, %d asks, %d skips", got, m.asks(t, task.ID), m.skips(t, task.ID))
+	}
+	if left := m.list(t, m.grok); len(left) != 1 || !left[0].Blocked {
+		t.Fatalf("schedule = %+v", left)
+	}
+}
+
+// assignsFirst has another agent assign the task of the first repeat fire it
+// sees, before that fire's own ask is stored, in front of the real policy.
+type assignsFirst struct {
+	relay.Preparer
+	once   sync.Once
+	assign func(task int64)
+}
+
+func (a *assignsFirst) Prepare(ctx context.Context, req *envelope.Request) error {
+	if req.TaskID != 0 && req.NoParent {
+		a.once.Do(func() { a.assign(req.TaskID) })
+	}
+	return a.Preparer.Prepare(ctx, req)
+}
+
+// A fire that loses the task to an assign made after it read the task is
+// skipped: nothing is sent for it, and it is not a blocked fire.
+func TestRepeatingTaskFireSkipsWhenAnAssignLandsFirst(t *testing.T) {
+	m := newTaskMesh(t)
+	task := m.repeating(t, time.Hour)
+	m.finish(t, m.muse, task.ID, "ran", envelope.StatusAnswered)
+	var won envelope.Request
+	m.Server.SetPreparer(&assignsFirst{Preparer: policy.New(m.Store, policy.Config{Now: m.clk.now}), assign: func(id int64) {
+		won = m.assign(t, id, "muse", "scout")
+	}})
+	m.fire(t, time.Hour)
+	if won.ID == "" {
+		t.Fatal("the fire never reached the send checks")
+	}
+	got := m.task(t, task.ID)
+	if got.Status != envelope.TaskWorking || got.CurrentRequest != won.ID || got.Assignee != "scout" || m.asks(t, task.ID) != 2 {
+		t.Fatalf("task after the lost fire = %+v with %d asks", got, m.asks(t, task.ID))
+	}
+	if skips, blocked, told := m.skips(t, task.ID), len(m.audited(t, "schedule_blocked")), len(m.relayNotices(t, "grokbot")); skips != 1 || blocked != 0 || told != 0 {
+		t.Fatalf("the lost fire: %d skips, %d blocked rows, %d notices; want 1, 0 and 0", skips, blocked, told)
+	}
+}

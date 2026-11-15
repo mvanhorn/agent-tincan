@@ -119,7 +119,7 @@ an admin device (or the relay host).`,
 	cmd.AddCommand(taskAddCmd(), taskShowCmd(), taskAssignCmd(), taskCommentCmd(), taskDropCmd(),
 		taskDecideCmd(client.TaskDone, "Mark an open or returned task done"),
 		taskDecideCmd(client.TaskApprove, "Approve a proposed task, so it can be assigned"),
-		taskDecideCmd(client.TaskReopen, "Put a done or dropped task back to open"),
+		taskDecideCmd(client.TaskReopen, "Put a done or dropped task back to open, or to proposed if it was never approved"),
 		taskDecideCmd(client.TaskReset, "Set a task's count of agent assigns back to zero"))
 	return cmd
 }

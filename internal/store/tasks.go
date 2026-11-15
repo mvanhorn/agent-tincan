@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -46,7 +47,8 @@ var (
 // result. task_events is the task's history, read in id order, which is
 // also time order. task_claimants holds every agent that claimed, answered
 // or assigned an ask under the task, which is what lets it keep reading
-// the task afterwards. source is the outside source the filer declared for
+// the task afterwards; the target of an ask that ended while held for the
+// owner is taken out again. source is the outside source the filer declared for
 // the task's text, and suggested_assignee whom the filer asked to have a
 // proposed task go to; NULL for none.
 func (s *Store) migrateTasks() error {
@@ -110,6 +112,17 @@ CREATE TABLE IF NOT EXISTS task_claimants (
 			return err
 		}
 	}
+	// chain is the JSON list of agents in the chain of the request the
+	// entry's actor held a claim on as it wrote the entry's text; NULL for
+	// none. Only an added entry and a comment carry one.
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'chain')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN chain TEXT`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -122,13 +135,17 @@ const taskSelect = `SELECT t.id, t.title, t.detail, t.status, t.filer, t.assigne
 // taskVisible is true for the tasks viewer ?1 may read; an empty
 // viewer is an admin's, every task. An agent reads a task it filed. It reads any other task only
 // once it is past proposed, and then when the ask open under it is
-// addressed to the agent and not held for the owner, when the agent claimed
-// an ask under it, or when it is open, unassigned, carries no result and has
-// never been assigned. A task that was assigned once leaves that shared
-// pool for good: its ask may have been held and denied, and the target of
-// a denied ask must not read the text afterwards.
-const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed' AND (
-		q.to_agent = ?1 AND q.status != 'held'
+// addressed to the agent, when the agent claimed an ask under it, or when
+// it is open, unassigned, carries no result and has never been assigned.
+// While the ask open under a task is held for the owner, its target reads
+// the task only if it filed it, whatever part it took in the task before:
+// the COALESCEs keep a task with no open ask, whose q columns are NULL, out
+// of that test. A task that was assigned once leaves the shared pool for
+// good: its ask may have been held and denied, and the target of a denied
+// ask must not read the text afterwards.
+const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed'
+		AND NOT (COALESCE(q.to_agent, '') = ?1 AND COALESCE(q.status, '') = 'held') AND (
+		q.to_agent = ?1
 		OR EXISTS (SELECT 1 FROM task_claimants c WHERE c.task_id = t.id AND c.agent = ?1)
 		OR t.status = 'open' AND t.assignee = '' AND t.result = '' AND t.result_request = ''
 			AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'assigned')))`
@@ -152,7 +169,7 @@ func getTask(ctx context.Context, q queryer, id int64, viewer string) (envelope.
 }
 
 // AddTask stores a new task filed by t.Filer, open unless t.Status says
-// proposed, and starts its history. A task with a key the same filer
+// proposed, and starts its history; t.Chain is kept on the first entry. A task with a key the same filer
 // already has on a task that is not done or dropped is not stored: that
 // task is returned, with false. An agent with MaxOpenTasks such tasks gets
 // ErrTaskLimit; the owner has no limit. Both checks run in the insert's
@@ -210,7 +227,7 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 			return envelope.Task{}, false, ErrTaskLimit
 		}
 	}
-	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: t.Filer, Kind: envelope.TaskEventAdded, Status: t.Status}, now); err != nil {
+	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: t.Filer, Kind: envelope.TaskEventAdded, Status: t.Status, Chain: t.Chain}, now); err != nil {
 		return envelope.Task{}, false, err
 	}
 	if repeat != nil {
@@ -258,8 +275,10 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 // no open ask and being open or returned, so of any number of asks racing
 // for a task one is stored; the others, and an ask under a task that is
 // missing or in any other status, get ErrTaskBusy. A task that repeats
-// repeats for req's target from now on: its schedule's target follows the
-// assignment here, and nowhere else, so a move to a fallback leaves it.
+// repeats for req's target from now on, unless req is stored as held for
+// the owner: then the repeat follows only when the owner approves the ask
+// (Release), so one that is denied, expires or is cancelled leaves the
+// repeat where it was. A move to a fallback leaves it too.
 func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Request) error {
 	res, err := tx.ExecContext(ctx, `UPDATE tasks SET current_request = ?, assignee = ?, status = ?
 		WHERE id = ? AND current_request = '' AND status IN (?, ?)`,
@@ -273,14 +292,54 @@ func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Reques
 		}
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE schedules SET to_agent = ? WHERE task_id = ? AND to_agent != ?`, req.To, req.TaskID, req.To); err != nil {
-		return err
+	if req.Status != envelope.StatusHeld {
+		if err := moveTaskRepeatTx(ctx, tx, req.TaskID, req.To); err != nil {
+			return err
+		}
 	}
 	actor := req.From
 	if req.TaskActor != "" {
 		actor = req.TaskActor
 	}
 	_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: req.TaskID, Actor: actor, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}, s.now().UnixMilli())
+	return err
+}
+
+// moveTaskRepeatTx makes the schedule task id repeats on, if it has one,
+// send to to from now on. A schedule never targets its own sender, a pair
+// no schedule may be made with, so an assign to that agent leaves the
+// repeat where it was.
+func moveTaskRepeatTx(ctx context.Context, tx *sql.Tx, id int64, to string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE schedules SET to_agent = ?1 WHERE task_id = ?2 AND to_agent != ?1 AND from_agent != ?1`, to, id)
+	return err
+}
+
+// taskAskApprovedTx is for reqID, a held request the owner just approved in
+// tx: when it is the ask open under a task that repeats, the repeat follows
+// it to its target, as it would have at once had the ask not been held.
+func taskAskApprovedTx(ctx context.Context, tx *sql.Tx, reqID string) error {
+	var task int64
+	var to string
+	err := tx.QueryRowContext(ctx, `SELECT t.id, q.to_agent FROM requests q JOIN tasks t ON t.id = q.task_id AND t.current_request = q.id WHERE q.id = ?`, reqID).Scan(&task, &to)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return moveTaskRepeatTx(ctx, tx, task, to)
+}
+
+// forgetHeldTargetTx is for reqID, a request that just ended in tx with no
+// result. When it was an attempt at a task that was held for the owner and
+// never approved, its target is no longer one of the task's claimants,
+// whatever part it took in the task before: the owner let none of what the
+// ask carried reach it, so it does not read the task afterwards. The agent
+// that filed the task still reads its own. One statement, which removes
+// nothing for any other request.
+func forgetHeldTargetTx(ctx context.Context, tx *sql.Tx, reqID string) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM task_claimants WHERE (task_id, agent) IN
+		(SELECT task_id, to_agent FROM requests WHERE id = ? AND task_id IS NOT NULL AND was_held = 1 AND approved = 0)`, reqID)
 	return err
 }
 
@@ -313,8 +372,12 @@ func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string,
 
 // taskReleasedTx is followTaskTx for an ask that ended with no result: the
 // task is open again with no assignee, and its history says why, as
-// actor's change.
+// actor's change. The target of an ask that ended while still held is
+// forgotten (forgetHeldTargetTx).
 func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, note string) error {
+	if err := forgetHeldTargetTx(ctx, tx, reqID); err != nil {
+		return err
+	}
 	return s.followTaskTx(ctx, tx, reqID, `status = ?, assignee = '', current_request = ''`, []any{string(envelope.TaskOpen)},
 		envelope.TaskEvent{Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskOpen})
 }
@@ -398,7 +461,8 @@ func taskProgressTx(ctx context.Context, tx *sql.Tx, reqID, claimer, note string
 }
 
 // cancelTaskAskTx cancels the ask open under task id inside tx, whatever
-// open state it is in, and closes the relay's queued notices about it. It
+// open state it is in, and closes the relay's queued notices about it. The
+// target of an ask cancelled while held is forgotten (forgetHeldTargetTx). It
 // returns the ids it cancelled, none for a task with no open ask. The task
 // row is the caller's to change in the same transaction.
 func (s *Store) cancelTaskAskTx(ctx context.Context, tx *sql.Tx, id int64) ([]string, error) {
@@ -411,6 +475,9 @@ func (s *Store) cancelTaskAskTx(ctx context.Context, tx *sql.Tx, id int64) ([]st
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := forgetHeldTargetTx(ctx, tx, ask); err != nil {
 		return nil, err
 	}
 	closed, err := s.closeNoticesTx(ctx, tx, ask)
@@ -508,29 +575,81 @@ func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) 
 }
 
 // TaskCarry returns what the next ask under task id carries beside the
-// task's own text: who wrote its stored result ("" when it has none), and
-// the comments made since that result, oldest first.
-func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, comments []envelope.TaskEvent, err error) {
+// task's own text: who wrote its stored result ("" when it has none), the
+// chain its filer held a claim under as it filed the task (filedUnder, nil
+// for none), and the comments made since that result, oldest first, each
+// with the chain its author held.
+func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, filedUnder []string, comments []envelope.TaskEvent, err error) {
 	var last int64
 	err = s.db.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? ORDER BY id DESC LIMIT 1`,
 		id, envelope.TaskEventStatus, string(envelope.TaskReturned)).Scan(&last, &resultBy)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", nil, err
+		return "", nil, nil, err
+	}
+	var chain string
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(chain, '') FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id LIMIT 1`, id, envelope.TaskEventAdded).Scan(&chain)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", nil, nil, err
+	}
+	if chain != "" {
+		if err := json.Unmarshal([]byte(chain), &filedUnder); err != nil {
+			return "", nil, nil, err
+		}
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+taskEventCols+` FROM task_events WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id`,
 		id, envelope.TaskEventComment, last)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		ev, err := scanTaskEvent(rows)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		comments = append(comments, ev)
 	}
-	return resultBy, comments, rows.Err()
+	return resultBy, filedUnder, comments, rows.Err()
+}
+
+// ReopenTask puts a done or dropped task back as actor's change, with note
+// in its history, and returns ErrTaskState for a task in any other status.
+// It goes back to open, except a task that was filed as proposed and that
+// the owner never approved: that one was dropped before the owner's
+// decision, and returns to proposed to wait for it. The owner's approval is
+// the one entry by the owner that opens a proposed task, so its absence is
+// what marks one. The check and the change are one statement.
+func (s *Store) ReopenTask(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Task{}, err
+	}
+	defer tx.Rollback()
+	var to string
+	err = tx.QueryRowContext(ctx, `UPDATE tasks SET status = CASE
+			WHEN EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.id AND e.kind = ?1 AND e.status = ?2)
+				AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = tasks.id AND e.kind = ?3 AND e.status = ?4 AND e.actor = ?5)
+			THEN ?2 ELSE ?4 END
+		WHERE id = ?6 AND status IN (?7, ?8) RETURNING status`,
+		envelope.TaskEventAdded, string(envelope.TaskProposed), envelope.TaskEventStatus, string(envelope.TaskOpen), envelope.TaskOwner,
+		id, string(envelope.TaskDone), string(envelope.TaskDropped)).Scan(&to)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := getTask(ctx, tx, id, ""); err != nil {
+			return envelope.Task{}, err
+		}
+		return envelope.Task{}, ErrTaskState
+	}
+	if err != nil {
+		return envelope.Task{}, err
+	}
+	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskStatus(to)}, s.now().UnixMilli()); err != nil {
+		return envelope.Task{}, err
+	}
+	out, err := getTask(ctx, tx, id, "")
+	if err != nil {
+		return envelope.Task{}, err
+	}
+	return out, tx.Commit()
 }
 
 // SetTaskStatus moves task id to status to and records it in the task's
@@ -634,12 +753,20 @@ func (s *Store) AppendTaskEvent(ctx context.Context, ev envelope.TaskEvent) (env
 	return addTaskEvent(ctx, s.db, ev, s.now().UnixMilli())
 }
 
-// addTaskEvent writes one history entry. The task check and the insert are
-// one statement.
+// addTaskEvent writes one history entry, with ev.Chain when it has one. The
+// task check and the insert are one statement.
 func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at)
-		SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, ev.TaskID)
+	var chain sql.NullString
+	if len(ev.Chain) > 0 {
+		b, err := json.Marshal(ev.Chain)
+		if err != nil {
+			return envelope.TaskEvent{}, err
+		}
+		chain = sql.NullString{String: string(b), Valid: true}
+	}
+	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain)
+		SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.TaskID)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -696,14 +823,19 @@ func scanTask(sc scanner) (envelope.Task, error) {
 	return t, nil
 }
 
-const taskEventCols = `id, task_id, actor, kind, body, status, created_at`
+const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, '')`
 
 func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
 	var ev envelope.TaskEvent
-	var status string
+	var status, chain string
 	var at int64
-	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at); err != nil {
+	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain); err != nil {
 		return envelope.TaskEvent{}, err
+	}
+	if chain != "" {
+		if err := json.Unmarshal([]byte(chain), &ev.Chain); err != nil {
+			return envelope.TaskEvent{}, err
+		}
 	}
 	ev.Status, ev.At = envelope.TaskStatus(status), time.UnixMilli(at).UTC()
 	return ev, nil

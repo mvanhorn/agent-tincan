@@ -30,6 +30,11 @@ import (
 // who reads the task.
 var errTaskAssignee = errors.New("history, notes, pass and council agents do not take tasks")
 
+// errTaskToSender refuses taking a task from its assignee to give it to the
+// agent the new ask would be sent as. No agent can ask itself, so the send
+// would be refused as a loop after the open ask was already cancelled.
+var errTaskToSender = errors.New("this is the agent the assignment is sent as, and an agent cannot ask itself; nothing was changed, name another teammate")
+
 // taskAssign is one assignment of a task: the ask that starts an attempt
 // at it.
 type taskAssign struct {
@@ -78,7 +83,7 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	if err := s.checkTaskTarget(ctx, a.To); err != nil {
 		return envelope.Request{}, err
 	}
-	resultBy, comments, err := s.store.TaskCarry(ctx, a.TaskID)
+	resultBy, filedUnder, comments, err := s.store.TaskCarry(ctx, a.TaskID)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -87,7 +92,7 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 		return envelope.Request{}, err
 	}
 	actor := a.actor()
-	body, contributors := taskBody(task, actor, resultBy, comments, limit)
+	body, contributors := taskBody(task, actor, resultBy, filedUnder, comments, limit)
 	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
 		TaskID: a.TaskID, TaskActor: actor, Contributors: contributors, NoParent: a.Repeat})
 	if err != nil {
@@ -112,13 +117,17 @@ func (s *Server) checkTaskTarget(ctx context.Context, name string) error {
 // reassignTask gives task a.TaskID to a.To whoever has it now: the ask open
 // under it, if any, is cancelled and the task released in one transaction,
 // then a.To is assigned as assignTask assigns. The target is checked first,
-// so a target that can take no task cancels nothing. A send the relay
-// refuses after that (a loop, the rate limit, a racing assign) leaves the
-// task open with no assignee. Taking a task from its assignee is the
-// owner's to do; the caller has checked that.
+// so a target that can take no task, or is the agent the ask would be sent
+// as, cancels nothing. A send the relay refuses after that (a loop through
+// a claim, the rate limit, a racing assign) leaves the task open with no
+// assignee. Taking a task from its assignee is the owner's to do; the
+// caller has checked that.
 func (s *Server) reassignTask(ctx context.Context, a taskAssign) (envelope.Request, error) {
 	if err := s.checkTaskTarget(ctx, a.To); err != nil {
 		return envelope.Request{}, err
+	}
+	if a.To == a.From {
+		return envelope.Request{}, &StatusError{Code: http.StatusConflict, Err: fmt.Errorf("%s: %w", a.To, errTaskToSender)}
 	}
 	cancelled, err := s.store.ReleaseTask(ctx, a.TaskID, a.actor(), "reassigned to "+a.To)
 	if err != nil {
@@ -186,8 +195,11 @@ const taskReturnLine = "To hand the task back, reply to this request with the re
 //
 // The contributors are the filer, the author of a carried result and the
 // authors of carried comments, without the owner, whose text needs no
-// approval of the owner's.
-func taskBody(task envelope.Task, actor, resultBy string, comments []envelope.TaskEvent, limit int) (string, []string) {
+// approval of the owner's. With them go the agents in the chain the filer
+// held a claim under as it filed the task (filedUnder), and those in the
+// chain each carried comment's author held as it wrote: text written while
+// working a request may hold what that request's chain sent.
+func taskBody(task envelope.Task, actor, resultBy string, filedUnder []string, comments []envelope.TaskEvent, limit int) (string, []string) {
 	var contributors []string
 	carries := func(agent string) {
 		if agent != "" && agent != envelope.TaskOwner && !slices.Contains(contributors, agent) {
@@ -195,10 +207,16 @@ func taskBody(task envelope.Task, actor, resultBy string, comments []envelope.Ta
 		}
 	}
 	carries(task.Filer)
+	for _, name := range filedUnder {
+		carries(name)
+	}
 	var thread strings.Builder
 	for _, c := range comments {
 		fmt.Fprintf(&thread, "[%s]\n%s\n", envelope.TaskWho(c.Actor), c.Body)
 		carries(c.Actor)
+		for _, name := range c.Chain {
+			carries(name)
+		}
 	}
 	if task.Result != "" {
 		carries(resultBy)
@@ -346,9 +364,10 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 // schedule is from's, the agent the task's asks are sent as, and counts
 // toward its store.MaxSchedules; its first fire is one interval from now,
 // the add itself being the first attempt. The caller has run
-// checkScheduleCaller for from.
-func (s *Server) addTask(ctx context.Context, in taskAdd, filer, from string, proposed bool, assign func(id int64) error) (taskReply, error) {
-	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source}
+// checkScheduleCaller for from. chain is the chain of the request the filer
+// holds a claim on, nil for none, which the task keeps (envelope.Task).
+func (s *Server) addTask(ctx context.Context, in taskAdd, filer, from string, chain []string, proposed bool, assign func(id int64) error) (taskReply, error) {
+	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source, Chain: chain}
 	switch {
 	case proposed:
 		task.Status, task.SuggestedAssignee = envelope.TaskProposed, in.Assignee
@@ -473,7 +492,9 @@ func writeTaskErr(w http.ResponseWriter, err error) {
 // teammate, or as the owner's own. A task whose text came from outside the
 // team waits for the owner as proposed, with nothing sent: one that
 // declares a source, and any filed while a guest's ask is open with the
-// caller, claimed or not, as a schedule made then is refused. An add takes
+// caller, claimed or not, as a schedule made then is refused. A task filed
+// while the caller holds a claim keeps that request's chain, which every
+// ask under the task then names as contributors. An add takes
 // a slot of the caller's send rate, as an ask does. A repeating task makes
 // a schedule, so it is refused when a schedule from the caller would be.
 func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
@@ -506,13 +527,18 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	chain, err := s.claimChain(r.Context(), from, sess)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 	if rp, ok := s.preparer().(RoomPolicy); ok {
 		if err := rp.Charge(from); err != nil {
 			writeErr(w, statusFor(err), err)
 			return
 		}
 	}
-	out, err := s.addTask(r.Context(), in, from, from, proposed, func(id int64) error {
+	out, err := s.addTask(r.Context(), in, from, from, chain, proposed, func(id int64) error {
 		return s.agentAssign(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Session: sess})
 	})
 	if err != nil {
@@ -663,7 +689,9 @@ func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, id int64, 
 
 // handleCommentTask adds the calling agent's comment to a task it may
 // read. The next ask under the task carries it; nobody is woken for it. A
-// caller a guest's ask is open with is refused, as it is a schedule.
+// caller a guest's ask is open with is refused, as it is a schedule. A
+// comment written while the caller holds a claim keeps that request's
+// chain, which an ask that carries the comment names as contributors.
 func (s *Server) handleCommentTask(w http.ResponseWriter, r *http.Request) {
 	from := s.agent(w, r)
 	if from == "" {
@@ -695,6 +723,7 @@ func (s *Server) commentTask(w http.ResponseWriter, r *http.Request, viewer, act
 		return
 	}
 	audited := ""
+	var chain []string
 	if viewer != "" {
 		audited = viewer
 		if open, err := s.store.OpenGuestAsks(r.Context(), viewer); err != nil {
@@ -704,8 +733,17 @@ func (s *Server) commentTask(w http.ResponseWriter, r *http.Request, viewer, act
 			writeErr(w, http.StatusConflict, errTaskCommentDuringGuestAsk)
 			return
 		}
+		sess, err := session(r)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		if chain, err = s.claimChain(r.Context(), viewer, sess); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
-	ev, err := s.store.AppendTaskEvent(r.Context(), envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventComment, Body: in.Body})
+	ev, err := s.store.AppendTaskEvent(r.Context(), envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventComment, Body: in.Body, Chain: chain})
 	if err != nil {
 		writeTaskErr(w, err)
 		return
@@ -889,7 +927,7 @@ func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	out, err := s.addTask(r.Context(), in, envelope.TaskOwner, from, false, func(id int64) error {
+	out, err := s.addTask(r.Context(), in, envelope.TaskOwner, from, nil, false, func(id int64) error {
 		_, err := s.assignTask(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner, Session: sess})
 		return err
 	})
@@ -1011,10 +1049,13 @@ func (s *Server) handleDoneTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleReopenTask puts a done or dropped task back to open.
+// handleReopenTask puts a done or dropped task back to open. A task that
+// was dropped while still proposed goes back to proposed instead: reopening
+// undoes the drop and does not stand in for the owner's approval, which
+// the next listing issues a nonce for as for any proposed task.
 func (s *Server) handleReopenTask(w http.ResponseWriter, r *http.Request) {
 	s.decideTask(w, r, decisionReopen, "task_reopened", func(id int64, note string) (envelope.Task, error) {
-		return s.store.SetTaskStatus(r.Context(), id, envelope.TaskOpen, envelope.TaskOwner, note, envelope.TaskDone, envelope.TaskDropped)
+		return s.store.ReopenTask(r.Context(), id, envelope.TaskOwner, note)
 	})
 }
 

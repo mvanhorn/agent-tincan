@@ -91,13 +91,30 @@ func (s *Server) scheduleCreated(ctx context.Context, sch envelope.Schedule) {
 // claim, the way policy.Prepare decides it: the session's own claim, or else
 // the agent-wide one, which a session cannot step out of.
 func (s *Server) holdsClaim(ctx context.Context, agent, session string) (bool, error) {
+	_, ok, err := s.heldClaim(ctx, agent, session)
+	return ok, err
+}
+
+// heldClaim is holdsClaim with the claimed request.
+func (s *Server) heldClaim(ctx context.Context, agent, session string) (envelope.Request, bool, error) {
 	if session != "" {
-		if _, ok, err := s.store.OpenClaimFor(ctx, agent, session); ok || err != nil {
-			return ok, err
+		if req, ok, err := s.store.OpenClaimFor(ctx, agent, session); ok || err != nil {
+			return req, ok, err
 		}
 	}
-	_, ok, err := s.store.OpenClaim(ctx, agent)
-	return ok, err
+	return s.store.OpenClaim(ctx, agent)
+}
+
+// claimChain returns the chain of the request agent holds a claim on in
+// session, nil when it holds none. Text the agent stores now, to be sent on
+// later, is kept with it: a send made now would carry that chain, and the
+// stored text must not shed it.
+func (s *Server) claimChain(ctx context.Context, agent, session string) ([]string, error) {
+	req, ok, err := s.heldClaim(ctx, agent, session)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return req.Chain, nil
 }
 
 // handleCreateSchedule records an ask from the calling agent to fire later

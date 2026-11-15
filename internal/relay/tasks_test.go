@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1527,5 +1528,246 @@ func TestCapabilitiesAdvertiseTasks(t *testing.T) {
 	var caps client.Capabilities
 	if err := m.grok.Raw(t.Context(), "GET", "/v1/capabilities", nil, &caps); err != nil || !caps.Tasks {
 		t.Fatalf("capabilities = %+v, %v", caps, err)
+	}
+}
+
+// A held ask hides the task from its target even when the target worked an
+// earlier attempt at it, and a target the owner denied, or whose hold ran
+// out or was cancelled, does not read it afterwards. The filer does, and so
+// does the target once the owner approves an ask to it.
+func TestTaskHeldAskHidesTaskFromEarlierClaimant(t *testing.T) {
+	ends := map[string]func(t *testing.T, m *taskMesh, ask string){
+		"denied": func(t *testing.T, m *taskMesh, ask string) {
+			if err := m.admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+ask+"/deny", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"expired": func(t *testing.T, m *taskMesh, _ string) {
+			m.fire(t, 61*time.Minute)
+		},
+		"cancelled": func(t *testing.T, m *taskMesh, ask string) {
+			if err := m.grok.Cancel(t.Context(), ask); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			m := newTaskMesh(t)
+			id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Draft the renewal terms", "assignee": "muse"}).Task.ID
+			m.finish(t, m.muse, id, "Draft one is in the shared folder.", envelope.StatusAnswered)
+			if !seesTask(t, m.muse, id) {
+				t.Fatal("the agent that answered cannot read the task")
+			}
+			m.gate(t, `{"gate":{"muse":{"from":["grokbot"]}},"hold_ttl":"1h"}`)
+			held := taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task
+			if held.Status != envelope.TaskWorking || held.AskStatus != envelope.StatusHeld {
+				t.Fatalf("task with a held ask = %+v", held)
+			}
+			if seesTask(t, m.muse, id) {
+				t.Fatal("an earlier claimant reads the task while its new ask is held")
+			}
+			if !seesTask(t, m.grok, id) {
+				t.Fatal("the filer cannot read its task while the ask is held")
+			}
+			end(t, m, held.CurrentRequest)
+			if got := m.task(t, id); got.Status != envelope.TaskOpen || got.CurrentRequest != "" {
+				t.Fatalf("task after its held ask ended = %+v", got)
+			}
+			if seesTask(t, m.muse, id) {
+				t.Fatal("an earlier claimant reads the task after its held ask ended unapproved")
+			}
+			if !seesTask(t, m.grok, id) {
+				t.Fatal("the filer cannot read its task after the held ask ended")
+			}
+
+			held = taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task
+			if seesTask(t, m.muse, id) {
+				t.Fatal("the target reads the task while its second ask is held")
+			}
+			if err := m.admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+held.CurrentRequest+"/approve", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !seesTask(t, m.muse, id) {
+				t.Fatal("the target cannot read the task after the owner approved its ask")
+			}
+		})
+	}
+}
+
+// The agent that filed a task reads it whatever happens to an ask that
+// brings it back to that agent.
+func TestTaskFilerReadsItsTaskThroughHeldAsk(t *testing.T) {
+	m := newTaskMesh(t)
+	m.gate(t, `{"gate":{"muse":{"from":["grokbot"]}},"hold_ttl":"1h"}`)
+	id := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Check my own notes"}).Task.ID
+	held := taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task
+	if held.AskStatus != envelope.StatusHeld {
+		t.Fatalf("task with a held ask = %+v", held)
+	}
+	if !seesTask(t, m.muse, id) {
+		t.Fatal("the filer cannot read its own task while an ask to it is held")
+	}
+	if err := m.admin.Raw(t.Context(), "POST", "/v1/admin/requests/"+held.CurrentRequest+"/deny", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !seesTask(t, m.muse, id) {
+		t.Fatal("the filer cannot read its own task after the ask to it was denied")
+	}
+}
+
+// Reopening a task that was dropped while still proposed returns it to
+// proposed: it stays out of the shared pool and the owner's approval is
+// still to come. A task the owner approved reopens to open.
+func TestTaskReopenOfNeverApprovedTaskStaysProposed(t *testing.T) {
+	m := newTaskMesh(t)
+	page := hardened(t, m.Mesh, "admin")
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Reply to the vendor's mail", "source": "mail"}).Task.ID
+	if got := taskDo(t, m.grok, "POST", taskPath(id, "/drop"), nil).Task; got.Status != envelope.TaskDropped {
+		t.Fatalf("the filer's drop of its proposed task = %+v", got)
+	}
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/reopen"), nil).Task; got.Status != envelope.TaskProposed {
+		t.Fatalf("reopened, never approved task = %+v, want proposed", got)
+	}
+	events := m.events(t, id)
+	if last := events[len(events)-1]; last.Actor != envelope.TaskOwner || last.Status != envelope.TaskProposed {
+		t.Fatalf("history after the reopen = %+v", last)
+	}
+	if seesTask(t, m.instinct, id) {
+		t.Fatal("the shared pool shows a task the owner never approved")
+	}
+	if !seesTask(t, m.grok, id) {
+		t.Fatal("the filer cannot read its reopened task")
+	}
+	if _, err := m.Server.AssignTask(t.Context(), relay.TaskAssign{TaskID: id, From: "grokbot", To: "muse"}); !relayStatus(err, 409, store.ErrTaskBusy.Error()) {
+		t.Fatalf("assign of a reopened, never approved task: %v", err)
+	}
+	var listing taskListing
+	if code, body := pageCall(t, page, "GET", "/v1/admin/tasks", "", nil, &listing); code != http.StatusOK {
+		t.Fatalf("admin listing from the page: %d %s", code, body)
+	}
+	if len(listing.Tasks) != 1 || listing.Tasks[0].ApproveNonce == "" || listing.Tasks[0].ReopenNonce != "" || listing.Tasks[0].DoneNonce != "" {
+		t.Fatalf("nonces for the reopened task = %+v", listing.Tasks)
+	}
+
+	// Dropped and reopened again it is still waiting for the approval.
+	taskDo(t, m.admin, "POST", adminTaskPath(id, "/drop"), nil)
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/reopen"), nil).Task; got.Status != envelope.TaskProposed {
+		t.Fatalf("reopened a second time = %+v, want proposed", got)
+	}
+	if code, _ := pageCall(t, page, "POST", adminTaskPath(id, "/approve"), "", map[string]string{"nonce": listing.Tasks[0].ApproveNonce}, nil); code != http.StatusConflict {
+		t.Fatalf("approve with a nonce from before the drop: %d", code)
+	}
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/approve"), nil).Task; got.Status != envelope.TaskOpen {
+		t.Fatalf("approved task = %+v", got)
+	}
+	if !seesTask(t, m.instinct, id) {
+		t.Fatal("the shared pool does not show the approved task")
+	}
+	taskDo(t, m.admin, "POST", adminTaskPath(id, "/drop"), nil)
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(id, "/reopen"), nil).Task; got.Status != envelope.TaskOpen {
+		t.Fatalf("reopened after an approval = %+v, want open", got)
+	}
+}
+
+// An owner's reassign to the agent the ask would be sent as is refused
+// before anything is cancelled: the open ask and the task stay as they were.
+func TestReassignTaskToSenderChangesNothing(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: envelope.TaskOwner, Title: "ship it"})
+	first := m.assign(t, task.ID, "grokbot", "muse")
+	if _, err := m.muse.Claim(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := m.events(t, task.ID)
+	if _, err := m.Server.ReassignTask(ctx, relay.TaskAssign{TaskID: task.ID, From: "grokbot", To: "grokbot", Actor: envelope.TaskOwner}); !relayStatus(err, 409, "an agent cannot ask itself") {
+		t.Fatalf("reassign to the sending agent: %v", err)
+	}
+	if got := m.task(t, task.ID); got.Status != envelope.TaskWorking || got.CurrentRequest != first.ID || got.Assignee != "muse" {
+		t.Fatalf("task after the refused reassign = %+v", got)
+	}
+	if _, st, err := m.Store.Request(ctx, first.ID); err != nil || st != envelope.StatusClaimed {
+		t.Fatalf("the open ask after the refused reassign is %s, %v", st, err)
+	}
+	if after := m.events(t, task.ID); len(after) != len(before) || m.asks(t, task.ID) != 1 {
+		t.Fatalf("history grew from %d to %d entries, with %d asks", len(before), len(after), m.asks(t, task.ID))
+	}
+	if _, err := m.muse.Reply(ctx, first.ID, "shipped", envelope.StatusAnswered); err != nil {
+		t.Fatalf("the assignee's reply after the refused reassign: %v", err)
+	}
+}
+
+// A comment or a task written while its author holds a claim keeps the
+// chain of the claimed request, so a rule that holds asks from an agent in
+// that chain holds an ask that carries the text. Written with no claim, the
+// same text is not held.
+func TestTaskTextWrittenUnderClaimKeepsItsChain(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	m.gate(t, `{"gate":{"muse":{"from":["scout"]}},"hold_ttl":"1h"}`)
+	// underClaim has instinct do write while it holds a claim on an ask
+	// from scout, then answer that ask.
+	underClaim := func(write func()) {
+		t.Helper()
+		parent, err := m.scout.Send(ctx, "instinct", "what did the vendor say?", envelope.KindAsk, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimOne(t, m.instinct, parent.ID)
+		write()
+		if _, err := m.instinct.Reply(ctx, parent.ID, "noted", envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// assigned has grokbot, which holds no claim, assign task id to muse.
+	assigned := func(id int64) envelope.Request {
+		t.Helper()
+		ask := taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task.CurrentRequest
+		req, status, err := m.Store.Request(ctx, ask)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Status = status
+		return req
+	}
+	comment := func(id int64) {
+		t.Helper()
+		taskDo(t, m.instinct, "POST", taskPath(id, "/comment"), map[string]string{"body": "The vendor wants net 30."})
+	}
+	add := func() int64 {
+		t.Helper()
+		return taskDo(t, m.instinct, "POST", "/v1/tasks", map[string]string{"title": "Answer the vendor"}).Task.ID
+	}
+
+	plain := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Pay the vendor"}).Task.ID
+	comment(plain)
+	if req := assigned(plain); req.Status == envelope.StatusHeld || slices.Contains(req.Contributors, "scout") {
+		t.Fatalf("ask carrying a comment written with no claim = %+v", req)
+	}
+	if req := assigned(add()); req.Status == envelope.StatusHeld || slices.Contains(req.Contributors, "scout") {
+		t.Fatalf("ask under a task filed with no claim = %+v", req)
+	}
+
+	commented := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Pay the vendor again"}).Task.ID
+	underClaim(func() { comment(commented) })
+	req := assigned(commented)
+	if req.Status != envelope.StatusHeld || !slices.Contains(req.Contributors, "scout") || slices.Contains(req.Chain, "scout") {
+		t.Fatalf("ask carrying a comment written under scout's ask = %+v, want it held for its contributor", req)
+	}
+	events := m.events(t, commented)
+	if ev := events[1]; ev.Kind != envelope.TaskEventComment || !slices.Equal(ev.Chain, []string{"scout"}) {
+		t.Fatalf("stored comment = %+v", ev)
+	}
+
+	var filed int64
+	underClaim(func() { filed = add() })
+	if req := assigned(filed); req.Status != envelope.StatusHeld || !slices.Contains(req.Contributors, "scout") {
+		t.Fatalf("ask under a task filed under scout's ask = %+v, want it held for its contributor", req)
+	}
+	// The chain is kept for the relay's checks and is in no reply.
+	var raw map[string]any
+	if err := m.grok.Raw(ctx, "GET", taskPath(commented, ""), nil, &raw); err != nil || strings.Contains(fmt.Sprint(raw), "chain") {
+		t.Fatalf("task read = %v, %v", raw, err)
 	}
 }

@@ -1851,15 +1851,27 @@ func (s *Store) CountHeld(ctx context.Context) (int, error) {
 
 // Release queues a held request with a fresh delivery TTL and its original
 // creation time. Time held is not time queued, so its fallback clock starts
-// here.
+// here. A repeating task whose open ask this is repeats for the ask's target
+// from now on, in the same transaction.
 func (s *Store) Release(ctx context.Context, id string, ttl time.Duration) (envelope.Request, error) {
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, approved = 1, guest_approved = from_guest, updated_at = ?, queued_at = ?, fallback_woken = 0, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, approved = 1, guest_approved = from_guest, updated_at = ?, queued_at = ?, fallback_woken = 0, expires_at = ? WHERE id = ? AND status = ? AND expires_at > ?`, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), id, string(envelope.StatusHeld), now.UnixMilli())
 	if err != nil {
 		return envelope.Request{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return envelope.Request{}, ErrWrongState
+	}
+	if err := taskAskApprovedTx(ctx, tx, id); err != nil {
+		return envelope.Request{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return envelope.Request{}, err
 	}
 	req, _, err := s.lookup(ctx, id)
 	return req, err

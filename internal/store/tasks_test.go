@@ -735,7 +735,7 @@ func TestTaskCarry(t *testing.T) {
 		}
 	}
 	comment("codex", "before the result")
-	by, comments, err := s.TaskCarry(ctx, task.ID)
+	by, _, comments, err := s.TaskCarry(ctx, task.ID)
 	if err != nil || by != "" || len(comments) != 1 || comments[0].Body != "before the result" {
 		t.Fatalf("carry with no result = %q, %+v, %v", by, comments, err)
 	}
@@ -745,7 +745,7 @@ func TestTaskCarry(t *testing.T) {
 	}
 	comment("hermes", "needs a test")
 	comment(envelope.TaskOwner, "and a changelog line")
-	by, comments, err = s.TaskCarry(ctx, task.ID)
+	by, _, comments, err = s.TaskCarry(ctx, task.ID)
 	if err != nil || by != "muse" || len(comments) != 2 || comments[0].Actor != "hermes" || comments[0].Body != "needs a test" || comments[1].Actor != envelope.TaskOwner {
 		t.Fatalf("carry = %q, %+v, %v", by, comments, err)
 	}
