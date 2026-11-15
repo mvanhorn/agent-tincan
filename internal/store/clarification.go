@@ -76,6 +76,10 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 			return envelope.Reply{}, err
 		}
 	}
+	if err := s.followTaskTx(ctx, tx, id, `status = ?`, []any{string(envelope.TaskQuestion)},
+		envelope.TaskEvent{Actor: agent, Kind: envelope.TaskEventStatus, Body: rep.Body, Status: envelope.TaskQuestion}); err != nil {
+		return envelope.Reply{}, err
+	}
 	return rep, tx.Commit()
 }
 
@@ -136,6 +140,10 @@ func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool) 
 		return envelope.Request{}, ErrWrongState
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM replies WHERE request_id = ?`, id); err != nil {
+		return envelope.Request{}, err
+	}
+	if err := s.followTaskTx(ctx, tx, id, `status = ?`, []any{string(envelope.TaskWorking)},
+		envelope.TaskEvent{Actor: agent, Kind: envelope.TaskEventStatus, Body: "answered the question", Status: envelope.TaskWorking}); err != nil {
 		return envelope.Request{}, err
 	}
 	req.Resumed = true

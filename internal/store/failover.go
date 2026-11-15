@@ -150,6 +150,12 @@ func (s *Store) move(ctx context.Context, id, from, to, set string, setArgs []an
 	if _, err := tx.ExecContext(ctx, `DELETE FROM relay_notes WHERE request_id = ? AND kind = ?`, id, NoteWake); err != nil {
 		return envelope.Request{}, err
 	}
+	// A task goes with the ask under it: its assignee is whoever holds
+	// that ask now.
+	if err := s.followTaskTx(ctx, tx, id, `assignee = ?`, []any{to},
+		envelope.TaskEvent{Actor: TaskRelay, Kind: envelope.TaskEventAssigned, Body: to, Status: envelope.TaskWorking}); err != nil {
+		return envelope.Request{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return envelope.Request{}, err
 	}

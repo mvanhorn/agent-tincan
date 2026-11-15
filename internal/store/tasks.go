@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +26,9 @@ var (
 	ErrTaskBusy = errors.New("the task has an ask open under it or is not open to one")
 	// ErrTaskState means a task was not in a status the change allows.
 	ErrTaskState = errors.New("the task is not in a status that allows this")
+	// ErrTaskAskOpen refuses marking a task done while an ask is open under
+	// it.
+	ErrTaskAskOpen = errors.New("an ask is still open under the task; drop the task or wait for the ask to end")
 )
 
 // migrateTasks creates the tasks, task_events and task_claimants tables and
@@ -79,8 +84,21 @@ CREATE TABLE IF NOT EXISTS task_claimants (
 			return err
 		}
 	}
-	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_task ON requests(task_id) WHERE task_id IS NOT NULL`)
-	return err
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_task ON requests(task_id) WHERE task_id IS NOT NULL`); err != nil {
+		return err
+	}
+	// contributors is the JSON list of agents, beside the sender and the
+	// chain, whose text the request's body carries; '' for none. The owner's
+	// approval rules read it again when the request moves to a new target.
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'contributors')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN contributors TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // taskSelect reads tasks with the status of the ask open under each, which
@@ -218,8 +236,238 @@ func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Reques
 		}
 		return err
 	}
-	_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: req.TaskID, Actor: req.From, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}, s.now().UnixMilli())
+	actor := req.From
+	if req.TaskActor != "" {
+		actor = req.TaskActor
+	}
+	_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: req.TaskID, Actor: actor, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}, s.now().UnixMilli())
 	return err
+}
+
+// followTaskTx keeps a task in step with request reqID, the ask open under
+// it, inside tx, the transaction that changes the request: it applies set
+// (with args) to the task and writes ev to its history. It returns at once
+// for a request that is no attempt at a task, and changes nothing unless
+// the request is still the task's open ask, so a write about an ask the
+// task has moved on from leaves the task alone. Every store write that
+// ends, pauses or moves a request calls it, or a wrapper of it.
+func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string, args []any, ev envelope.TaskEvent) error {
+	var task sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM requests WHERE id = ?`, reqID).Scan(&task); err != nil || !task.Valid {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		}
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE tasks SET `+set+` WHERE id = ? AND current_request = ?`, append(slices.Clone(args), task.Int64, reqID)...)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	ev.TaskID = task.Int64
+	_, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
+	return err
+}
+
+// taskReleasedTx is followTaskTx for an ask that ended with no result: the
+// task is open again with no assignee, and its history says why, as
+// actor's change.
+func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, note string) error {
+	return s.followTaskTx(ctx, tx, reqID, `status = ?, assignee = '', current_request = ''`, []any{string(envelope.TaskOpen)},
+		envelope.TaskEvent{Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskOpen})
+}
+
+// taskRepliedTx is followTaskTx for rep, a terminal reply just written in
+// tx. An answer hands the task back: it is returned, and the answer is its
+// result. A failure or a decline releases it, with the reason in its
+// history. A reply that replaces a held acknowledgement finds its request
+// closed and the task returned with the acknowledgement: it becomes the
+// result instead, but only while the task is still returned on that
+// request, so a task assigned again since keeps what it has.
+func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
+	if rep.Replaced {
+		res, err := tx.ExecContext(ctx, `UPDATE tasks SET result = ? WHERE result_request = ? AND status = ? AND current_request = ''
+			AND id = (SELECT task_id FROM requests WHERE id = ?)`, taskResult(rep), rep.RequestID, string(envelope.TaskReturned), rep.RequestID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at)
+			SELECT task_id, ?, ?, ?, ?, ? FROM requests WHERE id = ?`,
+			rep.From, envelope.TaskEventStatus, taskNote(string(rep.Status), "replaced the earlier acknowledgement"), string(envelope.TaskReturned), s.now().UnixMilli(), rep.RequestID)
+		return err
+	}
+	if rep.Status != envelope.StatusAnswered {
+		return s.taskReleasedTx(ctx, tx, rep.RequestID, rep.From, taskNote(string(rep.Status), rep.Body))
+	}
+	return s.followTaskTx(ctx, tx, rep.RequestID, `status = ?, result = ?, result_request = ?, current_request = ''`,
+		[]any{string(envelope.TaskReturned), taskResult(rep), rep.RequestID},
+		envelope.TaskEvent{Actor: rep.From, Kind: envelope.TaskEventStatus, Body: "answered on request " + rep.RequestID, Status: envelope.TaskReturned})
+}
+
+// taskNote is a history note: what happened, and the reason given, if any.
+func taskNote(what, reason string) string {
+	if reason == "" {
+		return what
+	}
+	return what + ": " + reason
+}
+
+// taskResult is the result a task keeps of rep: its body, and for a reply
+// with files a line naming them and the request that keeps them. The files
+// stay on the request.
+func taskResult(rep envelope.Reply) string {
+	if len(rep.Attachments) == 0 {
+		return rep.Body
+	}
+	names := make([]string, len(rep.Attachments))
+	for i, a := range rep.Attachments {
+		names[i] = a.Name
+	}
+	return strings.TrimPrefix(rep.Body+fmt.Sprintf("\n[%d attachment(s) on request %s: %s]", len(names), rep.RequestID, strings.Join(names, ", ")), "\n")
+}
+
+// taskProgressTx copies a progress note claimer just set on request reqID
+// into the history of the task the request is an attempt at. One statement,
+// which writes nothing for any other request.
+func taskProgressTx(ctx context.Context, tx *sql.Tx, reqID, claimer, note string, at int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, created_at)
+		SELECT q.task_id, ?, ?, ?, ? FROM requests q JOIN tasks t ON t.id = q.task_id AND t.current_request = q.id WHERE q.id = ?`,
+		claimer, envelope.TaskEventProgress, note, at, reqID)
+	return err
+}
+
+// cancelTaskAskTx cancels the ask open under task id inside tx, whatever
+// open state it is in, and closes the relay's queued notices about it. It
+// returns the ids it cancelled, none for a task with no open ask. The task
+// row is the caller's to change in the same transaction.
+func (s *Store) cancelTaskAskTx(ctx context.Context, tx *sql.Tx, id int64) ([]string, error) {
+	var ask string
+	err := tx.QueryRowContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+		WHERE id = (SELECT current_request FROM tasks WHERE id = ?) AND status IN (?, ?, ?, ?, ?) RETURNING id`,
+		string(envelope.StatusCancelled), s.now().UnixMilli(), id,
+		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusHeld)).Scan(&ask)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	closed, err := s.closeNoticesTx(ctx, tx, ask)
+	return append([]string{ask}, closed...), err
+}
+
+// DropTask gives task id up as actor's change, with note in its history,
+// from any status but done or dropped. An ask open under it is cancelled
+// in the same transaction, claimed or not, so its target's later reply is
+// refused as a reply to any cancelled request is; the task then has no
+// assignee. It returns the dropped task and the ids of the requests it
+// cancelled. Dropping with an ask open is the owner's to do: a caller
+// acting for an agent uses SetTaskStatus from the statuses with no ask.
+func (s *Store) DropTask(ctx context.Context, id int64, actor, note string) (envelope.Task, []string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Task{}, nil, err
+	}
+	defer tx.Rollback()
+	cancelled, err := s.cancelTaskAskTx(ctx, tx, id)
+	if err != nil {
+		return envelope.Task{}, nil, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE tasks SET status = ?, assignee = CASE WHEN current_request = '' THEN assignee ELSE '' END, current_request = ''
+		WHERE id = ? AND `+taskOpenStatuses, string(envelope.TaskDropped), id)
+	if err != nil {
+		return envelope.Task{}, nil, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		if err == nil {
+			if _, err = getTask(ctx, tx, id, ""); err == nil {
+				err = ErrTaskState
+			}
+		}
+		return envelope.Task{}, nil, err
+	}
+	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskDropped}, s.now().UnixMilli()); err != nil {
+		return envelope.Task{}, nil, err
+	}
+	out, err := getTask(ctx, tx, id, "")
+	if err != nil {
+		return envelope.Task{}, nil, err
+	}
+	return out, cancelled, tx.Commit()
+}
+
+// ReleaseTask takes task id back from its assignee as actor's change, with
+// note in its history: the ask open under it is cancelled in the same
+// transaction, claimed or not, and the task is open with no assignee, ready
+// to be assigned to someone else. It returns the ids of the requests it
+// cancelled. A task with no open ask is left as it is, with nothing
+// cancelled; ErrNoTask when there is no such task.
+func (s *Store) ReleaseTask(ctx context.Context, id int64, actor, note string) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	cancelled, err := s.cancelTaskAskTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(cancelled) == 0 {
+		_, err := getTask(ctx, tx, id, "")
+		return nil, err
+	}
+	// cancelled[0] is the ask that was open under the task.
+	if err := s.taskReleasedTx(ctx, tx, cancelled[0], actor, note); err != nil {
+		return nil, err
+	}
+	return cancelled, tx.Commit()
+}
+
+// MarkTaskDone closes task id as actor's change, with note in its history.
+// Only an open or returned task can be done: one with an ask open under it
+// gets ErrTaskAskOpen, and any other status ErrTaskState.
+func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
+	out, err := s.SetTaskStatus(ctx, id, envelope.TaskDone, actor, note, envelope.TaskOpen, envelope.TaskReturned)
+	if errors.Is(err, ErrTaskState) {
+		if t, terr := s.Task(ctx, id, ""); terr == nil && (t.Status == envelope.TaskWorking || t.Status == envelope.TaskQuestion) {
+			err = ErrTaskAskOpen
+		}
+	}
+	return out, err
+}
+
+// TaskCarry returns what the next ask under task id carries beside the
+// task's own text: who wrote its stored result ("" when it has none), and
+// the comments made since that result, oldest first.
+func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, comments []envelope.TaskEvent, err error) {
+	var last int64
+	err = s.db.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? ORDER BY id DESC LIMIT 1`,
+		id, envelope.TaskEventStatus, string(envelope.TaskReturned)).Scan(&last, &resultBy)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, actor, kind, body, status, created_at FROM task_events WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id`,
+		id, envelope.TaskEventComment, last)
+	if err != nil {
+		return "", nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ev envelope.TaskEvent
+		var status string
+		var at int64
+		if err := rows.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at); err != nil {
+			return "", nil, err
+		}
+		ev.Status, ev.At = envelope.TaskStatus(status), time.UnixMilli(at).UTC()
+		comments = append(comments, ev)
+	}
+	return resultBy, comments, rows.Err()
 }
 
 // SetTaskStatus moves task id to status to and records it in the task's
@@ -315,7 +563,13 @@ func (s *Store) TaskEvents(ctx context.Context, id, after int64, limit int) ([]e
 // RecordTaskClaimant notes that agent claimed an ask under task id, so the
 // agent can read the task from then on. Recording it again changes nothing.
 func (s *Store) RecordTaskClaimant(ctx context.Context, id int64, agent string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO task_claimants (task_id, agent) VALUES (?, ?) ON CONFLICT DO NOTHING`, id, agent)
+	return recordTaskClaimant(ctx, s.db, id, agent)
+}
+
+// recordTaskClaimant is RecordTaskClaimant on x, which may be the
+// transaction of the claim itself.
+func recordTaskClaimant(ctx context.Context, x execer, id int64, agent string) error {
+	_, err := x.ExecContext(ctx, `INSERT INTO task_claimants (task_id, agent) VALUES (?, ?) ON CONFLICT DO NOTHING`, id, agent)
 	return err
 }
 
@@ -329,3 +583,7 @@ func scanTask(sc scanner) (envelope.Task, error) {
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()
 	return t, nil
 }
+
+// TaskRelay is the actor a task's history names for a change the relay
+// made itself: an expiry, a removal, a move.
+const TaskRelay = "relay"

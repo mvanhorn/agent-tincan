@@ -160,7 +160,10 @@ func (a *Approval) load() (*approvalConfig, time.Duration, error) {
 	return a.good, a.ttl, err
 }
 
-// Held evaluates the relay-recorded chain and sender. On reload failure it
+// Held evaluates the relay-recorded chain and sender, and with them the
+// relay-recorded contributors: the agents whose text a task's ask carries,
+// which a rule holds or passes exactly as if they were in the chain. A plain
+// ask has none. On reload failure it
 // holds all last-known gated targets; without a valid copy callers must reject.
 // HoldTTL and ApprovalNotify are internal metadata, never accepted from clients.
 func (a *Approval) Held(req *envelope.Request) (bool, error) {
@@ -184,7 +187,7 @@ func (a *Approval) Held(req *envelope.Request) (bool, error) {
 	if len(rule.From) > 0 {
 		_ = json.Unmarshal(rule.From, &names)
 	}
-	for _, name := range append(slices.Clone(req.Chain), req.From) {
+	for _, name := range append(append(slices.Clone(req.Chain), req.From), req.Contributors...) {
 		match := slices.Contains(names, name)
 		if (rule.Unless != nil && !match) || (rule.Unless == nil && match) {
 			return true, nil

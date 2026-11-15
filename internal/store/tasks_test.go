@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,7 +49,7 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 	req := ask(t, s, "codex", "muse", "hi")
 	// A database from before tasks: drop what this version added.
 	if _, err := s.DB().Exec(`DROP TABLE task_claimants; DROP TABLE task_events; DROP TABLE tasks;
-		DROP INDEX requests_task; ALTER TABLE requests DROP COLUMN task_id;`); err != nil {
+		DROP INDEX requests_task; ALTER TABLE requests DROP COLUMN task_id; ALTER TABLE requests DROP COLUMN contributors;`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -360,5 +362,455 @@ func TestTasksVisibility(t *testing.T) {
 	// Paging: after a cursor, up to a limit.
 	if tasks, err := s.Tasks(ctx, "", filed.ID, 2); err != nil || !same(taskIDs(tasks), assigned.ID, pool.ID) {
 		t.Fatalf("page = %v, %v", taskIDs(tasks), err)
+	}
+}
+
+// taskUnderAsk files a task as codex and sends muse one ask under it.
+func taskUnderAsk(t *testing.T, s *Store, held bool) (envelope.Task, envelope.Request) {
+	t.Helper()
+	task := addTask(t, s, envelope.Task{Filer: "codex", Title: "ship it"})
+	req, err := attempt(s, task.ID, "codex", "muse", held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task, req
+}
+
+func claimAsk(t *testing.T, s *Store, id, agent string) {
+	t.Helper()
+	if _, err := s.Claim(context.Background(), id, agent, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func lastTaskEvent(t *testing.T, s *Store, id int64) envelope.TaskEvent {
+	t.Helper()
+	events, err := s.TaskEvents(context.Background(), id, 0, 100)
+	if err != nil || len(events) == 0 {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+	return events[len(events)-1]
+}
+
+// Every store write that ends, pauses or moves a request moves the task the
+// request is an attempt at: one request per way, each checked on the task.
+func TestTaskFollowsEveryRequestChange(t *testing.T) {
+	ctx := context.Background()
+	answered := envelope.Reply{Status: envelope.StatusAnswered, Body: "the answer"}
+	type want struct {
+		status   envelope.TaskStatus
+		assignee string
+		open     bool   // the ask is still the task's open ask
+		result   string // the stored result
+		actor    string // who the last history entry names
+		note     string // text the last history entry carries
+	}
+	released := func(actor, note string) want {
+		return want{status: envelope.TaskOpen, actor: actor, note: note}
+	}
+	cases := []struct {
+		name string
+		held bool
+		end  func(t *testing.T, s *Store, c *clock, req envelope.Request) error
+		want want
+	}{
+		{name: "answered", end: func(t *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			_, err := s.Reply(ctx, req.ID, "muse", answered)
+			return err
+		}, want: want{status: envelope.TaskReturned, assignee: "muse", result: "the answer", actor: "muse"}},
+		{name: "answered by email", end: func(_ *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			_, err := s.ReplyByEmail(ctx, "<m1>", req.ID, "muse", 0, answered)
+			return err
+		}, want: want{status: envelope.TaskReturned, assignee: "muse", result: "the answer", actor: "muse"}},
+		{name: "failed", end: func(t *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			_, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusFailed, Body: "no access to the repo"})
+			return err
+		}, want: released("muse", "failed: no access to the repo")},
+		{name: "declined", end: func(_ *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			_, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusDeclined, Body: "not mine"})
+			return err
+		}, want: released("muse", "declined: not mine")},
+		{name: "failed while held back", end: func(_ *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			_, err := s.FailHeld(ctx, req.ID, "muse", false, envelope.Reply{Status: envelope.StatusFailed, Body: "out of messages"})
+			return err
+		}, want: released("muse", "failed: out of messages")},
+		{name: "needs input", end: func(t *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			_, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which branch?"})
+			return err
+		}, want: want{status: envelope.TaskQuestion, assignee: "muse", open: true, actor: "muse", note: "which branch?"}},
+		{name: "answered by sender", end: func(t *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which branch?"}); err != nil {
+				return err
+			}
+			_, err := s.Answer(ctx, req.ID, "codex", "main")
+			return err
+		}, want: want{status: envelope.TaskWorking, assignee: "muse", open: true, actor: "codex", note: "answered the question"}},
+		{name: "cancelled by sender", end: func(_ *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			_, err := s.Cancel(ctx, req.ID, "codex")
+			return err
+		}, want: released("codex", "cancelled")},
+		{name: "target removed", end: func(t *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			_, err := s.CancelAllFor(ctx, "muse")
+			return err
+		}, want: released(TaskRelay, "muse was removed")},
+		{name: "sender removed", end: func(_ *testing.T, s *Store, _ *clock, _ envelope.Request) error {
+			_, err := s.CancelAllFor(ctx, "codex")
+			return err
+		}, want: released(TaskRelay, "codex was removed")},
+		{name: "expired in the queue", end: func(_ *testing.T, s *Store, c *clock, _ envelope.Request) error {
+			c.advance(2 * time.Hour)
+			_, err := s.Sweep(ctx)
+			return err
+		}, want: released(TaskRelay, "expired")},
+		{name: "expired while claimed", end: func(t *testing.T, s *Store, c *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			c.advance(2 * time.Hour)
+			_, err := s.Sweep(ctx)
+			return err
+		}, want: released(TaskRelay, "expired")},
+		{name: "expired waiting for input", end: func(t *testing.T, s *Store, c *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which branch?"}); err != nil {
+				return err
+			}
+			c.advance(2 * time.Hour)
+			_, err := s.Sweep(ctx)
+			return err
+		}, want: released(TaskRelay, "expired")},
+		{name: "hold timed out", held: true, end: func(_ *testing.T, s *Store, c *clock, _ envelope.Request) error {
+			c.advance(2 * time.Hour)
+			_, err := s.Sweep(ctx)
+			return err
+		}, want: released(TaskRelay, "expired while held for the owner's approval")},
+		{name: "denied by owner", held: true, end: func(_ *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			_, err := s.DenyHeld(ctx, req.ID, "not this one")
+			return err
+		}, want: released(envelope.TaskOwner, "denied: not this one")},
+		{name: "reply replaces a held acknowledgement", end: func(t *testing.T, s *Store, c *clock, req envelope.Request) error {
+			claimAsk(t, s, req.ID, "muse")
+			if err := s.HoldAck(ctx, req.ID, "muse", "on it", 30*time.Minute, 30*time.Minute); err != nil {
+				return err
+			}
+			c.advance(31 * time.Minute)
+			if reps, err := s.CloseHeldAcks(ctx, func(string, string) bool { return true }); err != nil || len(reps) != 1 {
+				t.Fatalf("close held acks = %+v, %v", reps, err)
+			}
+			task, err := s.Task(ctx, req.TaskID, "")
+			if err != nil || task.Status != envelope.TaskReturned || task.Result != "on it" || task.ResultRequest != req.ID {
+				t.Fatalf("task after the acknowledgement closed its ask = %+v, %v", task, err)
+			}
+			_, err = s.Reply(ctx, req.ID, "muse", answered)
+			return err
+		}, want: want{status: envelope.TaskReturned, assignee: "muse", result: "the answer", actor: "muse"}},
+		{name: "moved by the owner's fallback", end: func(_ *testing.T, s *Store, _ *clock, req envelope.Request) error {
+			_, err := s.RerouteUntaken(ctx, req.ID, "muse", "scout")
+			return err
+		}, want: want{status: envelope.TaskWorking, assignee: "scout", open: true, actor: TaskRelay, note: "scout"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c := open(t, ":memory:")
+			task, req := taskUnderAsk(t, s, tc.held)
+			if err := tc.end(t, s, c, req); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.Task(ctx, task.ID, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			current := ""
+			if tc.want.open {
+				current = req.ID
+			}
+			if got.Status != tc.want.status || got.Assignee != tc.want.assignee || got.CurrentRequest != current || got.Result != tc.want.result {
+				t.Fatalf("task = %+v, want status %s, assignee %q, open ask %q, result %q", got, tc.want.status, tc.want.assignee, current, tc.want.result)
+			}
+			if tc.want.result != "" && got.ResultRequest != req.ID {
+				t.Fatalf("result request = %q, want %q", got.ResultRequest, req.ID)
+			}
+			if ev := lastTaskEvent(t, s, task.ID); ev.Actor != tc.want.actor || !strings.Contains(ev.Body, tc.want.note) || ev.Status != tc.want.status {
+				t.Fatalf("last history entry = %+v, want actor %q and note %q", ev, tc.want.actor, tc.want.note)
+			}
+		})
+	}
+}
+
+// A reply with files leaves them on its request: the task's result ends
+// with a line naming the request and the files.
+func TestTaskResultPointsAtAttachments(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	claimAsk(t, s, req.ID, "muse")
+	a, b := upload(t, s, "muse", "report.pdf", 10), upload(t, s, "muse", "chart.png", 10)
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "see the files", Attachments: []envelope.Attachment{{ID: a}, {ID: b}}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Task(ctx, task.ID, "")
+	want := "see the files\n[2 attachment(s) on request " + req.ID + ": report.pdf, chart.png]"
+	if err != nil || got.Result != want || got.Status != envelope.TaskReturned {
+		t.Fatalf("task = %+v, %v; want result %q", got, err, want)
+	}
+}
+
+// Done is refused while an ask is open under the task, working or waiting
+// on a question, and allowed once the task is returned.
+func TestMarkTaskDoneRefusedWhileAskOpen(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskAskOpen) {
+		t.Fatalf("done while working: %v", err)
+	}
+	claimAsk(t, s, req.ID, "muse")
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which branch?"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskAskOpen) {
+		t.Fatalf("done while a question is open: %v", err)
+	}
+	if got, err := s.Task(ctx, task.ID, ""); err != nil || got.Status != envelope.TaskQuestion || got.CurrentRequest != req.ID {
+		t.Fatalf("task after refused done = %+v, %v", got, err)
+	}
+	if _, err := s.Answer(ctx, req.ID, "codex", "main"); err != nil {
+		t.Fatal(err)
+	}
+	claimAsk(t, s, req.ID, "muse")
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "shipped"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, "good")
+	if err != nil || got.Status != envelope.TaskDone || got.Result != "shipped" {
+		t.Fatalf("done after return = %+v, %v", got, err)
+	}
+	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskState) {
+		t.Fatalf("done twice: %v", err)
+	}
+	if _, err := s.MarkTaskDone(ctx, task.ID+9, envelope.TaskOwner, ""); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("done on no task: %v", err)
+	}
+}
+
+// Dropping a task cancels the ask open under it in the same transaction,
+// claimed or not, so the assignee's later reply is refused as a reply to a
+// cancelled request is. A task with no ask keeps its assignee.
+func TestDropTaskCancelsOpenAsk(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	claimAsk(t, s, req.ID, "muse")
+	got, cancelled, err := s.DropTask(ctx, task.ID, envelope.TaskOwner, "not needed")
+	if err != nil || got.Status != envelope.TaskDropped || got.CurrentRequest != "" || got.Assignee != "" || !slices.Equal(cancelled, []string{req.ID}) {
+		t.Fatalf("drop = %+v, %v, %v", got, cancelled, err)
+	}
+	if _, st, err := s.Request(ctx, req.ID); err != nil || st != envelope.StatusCancelled {
+		t.Fatalf("request after drop = %s, %v", st, err)
+	}
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "too late"}); !errors.Is(err, ErrWrongState) {
+		t.Fatalf("reply after drop: %v", err)
+	}
+	if after, err := s.Task(ctx, task.ID, ""); err != nil || after.Status != envelope.TaskDropped || after.Result != "" {
+		t.Fatalf("task after the late reply = %+v, %v", after, err)
+	}
+	if ev := lastTaskEvent(t, s, task.ID); ev.Actor != envelope.TaskOwner || ev.Body != "not needed" || ev.Status != envelope.TaskDropped {
+		t.Fatalf("history = %+v", ev)
+	}
+	if _, _, err := s.DropTask(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskState) {
+		t.Fatalf("drop twice: %v", err)
+	}
+	if _, _, err := s.DropTask(ctx, task.ID+9, envelope.TaskOwner, ""); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("drop of no task: %v", err)
+	}
+	own := addTask(t, s, envelope.Task{Filer: envelope.TaskOwner, Assignee: envelope.TaskOwner, Title: "call the bank"})
+	got, cancelled, err = s.DropTask(ctx, own.ID, envelope.TaskOwner, "")
+	if err != nil || got.Status != envelope.TaskDropped || got.Assignee != envelope.TaskOwner || len(cancelled) != 0 {
+		t.Fatalf("drop with no ask = %+v, %v, %v", got, cancelled, err)
+	}
+}
+
+// Releasing a task cancels the ask open under it and leaves the task open
+// with no assignee, ready for another ask; with no ask open it changes
+// nothing.
+func TestReleaseTaskCancelsOpenAsk(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	claimAsk(t, s, req.ID, "muse")
+	cancelled, err := s.ReleaseTask(ctx, task.ID, envelope.TaskOwner, "reassigned to hermes")
+	if err != nil || !slices.Equal(cancelled, []string{req.ID}) {
+		t.Fatalf("release = %v, %v", cancelled, err)
+	}
+	got, err := s.Task(ctx, task.ID, "")
+	if err != nil || got.Status != envelope.TaskOpen || got.Assignee != "" || got.CurrentRequest != "" {
+		t.Fatalf("task = %+v, %v", got, err)
+	}
+	if _, st, _ := s.Request(ctx, req.ID); st != envelope.StatusCancelled {
+		t.Fatalf("request = %s", st)
+	}
+	if ev := lastTaskEvent(t, s, task.ID); ev.Actor != envelope.TaskOwner || ev.Body != "reassigned to hermes" || ev.Status != envelope.TaskOpen {
+		t.Fatalf("history = %+v", ev)
+	}
+	next, err := attempt(s, task.ID, "codex", "hermes", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Task(ctx, task.ID, ""); err != nil || got.Assignee != "hermes" || got.CurrentRequest != next.ID {
+		t.Fatalf("task after the next ask = %+v, %v", got, err)
+	}
+	idle := addTask(t, s, envelope.Task{Filer: "codex", Title: "idle"})
+	before, _ := s.TaskEvents(ctx, idle.ID, 0, 10)
+	if cancelled, err := s.ReleaseTask(ctx, idle.ID, envelope.TaskOwner, "x"); err != nil || len(cancelled) != 0 {
+		t.Fatalf("release with no ask = %v, %v", cancelled, err)
+	}
+	if after, _ := s.TaskEvents(ctx, idle.ID, 0, 10); len(after) != len(before) {
+		t.Fatalf("release with no ask wrote history: %+v", after)
+	}
+	if _, err := s.ReleaseTask(ctx, idle.ID+9, envelope.TaskOwner, "x"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("release of no task: %v", err)
+	}
+}
+
+// Claiming a task's ask records the claimer on the task, so it still reads
+// the task once the ask is gone, and its progress notes join the task's
+// history. A plain ask writes neither.
+func TestTaskAskClaimAndProgress(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	plain := ask(t, s, "codex", "muse", "hi")
+	claimAsk(t, s, plain.ID, "muse")
+	if err := s.SetProgress(ctx, plain.ID, "muse", "on the plain one", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := s.DB().QueryRow(`SELECT (SELECT COUNT(*) FROM task_claimants) + (SELECT COUNT(*) FROM task_events WHERE kind = 'progress')`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a plain ask wrote %d task rows, %v", n, err)
+	}
+	claimAsk(t, s, req.ID, "muse")
+	if err := s.SetProgress(ctx, req.ID, "muse", "halfway", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if ev := lastTaskEvent(t, s, task.ID); ev.Kind != envelope.TaskEventProgress || ev.Actor != "muse" || ev.Body != "halfway" {
+		t.Fatalf("history = %+v", ev)
+	}
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusFailed, Body: "stuck"}); err != nil {
+		t.Fatal(err)
+	}
+	// Open, unassigned, no result: anyone reads it. A result closes that
+	// door, and the claim keeps muse's open.
+	if _, err := s.DB().Exec(`UPDATE tasks SET result = 'x', result_request = 'r' WHERE id = ?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Task(ctx, task.ID, "muse"); err != nil {
+		t.Fatalf("claimer reads the task: %v", err)
+	}
+	if _, err := s.Task(ctx, task.ID, "hermes"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("a stranger reads the task: %v", err)
+	}
+}
+
+// The next ask carries the comments made since the stored result, and who
+// wrote that result.
+func TestTaskCarry(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	comment := func(actor, body string) {
+		t.Helper()
+		if _, err := s.AppendTaskEvent(ctx, envelope.TaskEvent{TaskID: task.ID, Actor: actor, Kind: envelope.TaskEventComment, Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	comment("codex", "before the result")
+	by, comments, err := s.TaskCarry(ctx, task.ID)
+	if err != nil || by != "" || len(comments) != 1 || comments[0].Body != "before the result" {
+		t.Fatalf("carry with no result = %q, %+v, %v", by, comments, err)
+	}
+	claimAsk(t, s, req.ID, "muse")
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "first pass"}); err != nil {
+		t.Fatal(err)
+	}
+	comment("hermes", "needs a test")
+	comment(envelope.TaskOwner, "and a changelog line")
+	by, comments, err = s.TaskCarry(ctx, task.ID)
+	if err != nil || by != "muse" || len(comments) != 2 || comments[0].Actor != "hermes" || comments[0].Body != "needs a test" || comments[1].Actor != envelope.TaskOwner {
+		t.Fatalf("carry = %q, %+v, %v", by, comments, err)
+	}
+}
+
+// A late reply that replaces a held acknowledgement changes nothing on a
+// task that was assigned again since.
+func TestReplacedReplyLeavesMovedOnTask(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	claimAsk(t, s, req.ID, "muse")
+	if err := s.HoldAck(ctx, req.ID, "muse", "on it", 30*time.Minute, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(31 * time.Minute)
+	if reps, err := s.CloseHeldAcks(ctx, func(string, string) bool { return true }); err != nil || len(reps) != 1 {
+		t.Fatalf("close held acks = %+v, %v", reps, err)
+	}
+	next, err := attempt(s, task.ID, "codex", "hermes", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.TaskEvents(ctx, task.ID, 0, 100)
+	rep, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "the real answer"})
+	if err != nil || !rep.Replaced {
+		t.Fatalf("late reply = %+v, %v", rep, err)
+	}
+	got, err := s.Task(ctx, task.ID, "")
+	if err != nil || got.Status != envelope.TaskWorking || got.Assignee != "hermes" || got.CurrentRequest != next.ID || got.Result != "on it" {
+		t.Fatalf("task = %+v, %v", got, err)
+	}
+	if after, _ := s.TaskEvents(ctx, task.ID, 0, 100); len(after) != len(before) {
+		t.Fatalf("the late reply wrote history: %+v", after[len(before):])
+	}
+}
+
+// A relay stopped between a task's ask and its reply finds the task
+// working with its ask open, and the reply still hands it back.
+func TestTaskAskSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, _ := open(t, path)
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	s.Close()
+	s, _ = open(t, path)
+	got, err := s.Task(ctx, task.ID, "")
+	if err != nil || got.Status != envelope.TaskWorking || got.CurrentRequest != req.ID || got.AskStatus != envelope.StatusQueued {
+		t.Fatalf("task after restart = %+v, %v", got, err)
+	}
+	claimAsk(t, s, req.ID, "muse")
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Task(ctx, task.ID, ""); err != nil || got.Status != envelope.TaskReturned || got.Result != "done" {
+		t.Fatalf("task after the reply = %+v, %v", got, err)
+	}
+}
+
+// The agents whose text a request carries are stored with it and read back;
+// a plain request has none.
+func TestRequestKeepsContributors(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	req, err := s.Enqueue(ctx, envelope.Request{From: "codex", To: "muse", Kind: envelope.KindAsk, Body: "x", Hop: 1, Chain: []string{}, Contributors: []string{"hermes", "scout"}}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := s.Request(ctx, req.ID); err != nil || !slices.Equal(got.Contributors, []string{"hermes", "scout"}) {
+		t.Fatalf("request = %+v, %v", got, err)
+	}
+	plain := ask(t, s, "codex", "muse", "hi")
+	if got, _, err := s.Request(ctx, plain.ID); err != nil || got.Contributors != nil {
+		t.Fatalf("plain request = %+v, %v", got, err)
 	}
 }

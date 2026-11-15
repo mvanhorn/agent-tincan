@@ -131,6 +131,16 @@ type Request struct {
 	// the id of that task. Only the relay sets it (a send cannot); older
 	// clients ignore it and see an ordinary ask.
 	TaskID int64 `json:"task_id,omitempty"`
+	// TaskActor is who the task's history names for assigning it, when that
+	// is not From: the owner, whose assign goes out as one of the owner's
+	// agents. Relay-only, and not stored on the request.
+	TaskActor string `json:"-"`
+	// Contributors names the agents, beside the sender and the chain, whose
+	// text the body carries: on a task's ask, the agent that filed the task
+	// and the authors of the result and comments sent along. Relay-only.
+	// The owner's approval rules read them as they read the chain; the loop
+	// check does not.
+	Contributors []string `json:"-"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
 
@@ -777,6 +787,7 @@ const (
 	TaskEventAssigned = "assigned"
 	TaskEventStatus   = "status"
 	TaskEventComment  = "comment"
+	TaskEventProgress = "progress"
 )
 
 // TaskEvent is one entry in a task's history: who did what, and when. A

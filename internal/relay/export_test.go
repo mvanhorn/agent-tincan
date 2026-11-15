@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -47,3 +49,20 @@ func DialPushForTest(ctx context.Context, hostPort string) error {
 func (s *Server) Routes() []string { return s.routes().patterns }
 
 var GuestAllowed = guestRoutes
+
+// TaskAssign is taskAssign, for tests outside the package.
+type TaskAssign = taskAssign
+
+// AssignTask, ReassignTask and DropTask let tests drive the task paths
+// that the task routes call.
+func (s *Server) AssignTask(ctx context.Context, a TaskAssign) (envelope.Request, error) {
+	return s.assignTask(ctx, a)
+}
+
+func (s *Server) ReassignTask(ctx context.Context, a TaskAssign) (envelope.Request, error) {
+	return s.reassignTask(ctx, a)
+}
+
+func (s *Server) DropTask(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
+	return s.dropTask(ctx, id, actor, note)
+}

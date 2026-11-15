@@ -919,15 +919,23 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, err
 		}
 	}
+	contributors := ""
+	if len(req.Contributors) > 0 {
+		b, err := json.Marshal(req.Contributors)
+		if err != nil {
+			return envelope.Request{}, err
+		}
+		contributors = string(b)
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0})
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1280,7 +1288,12 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 		string(envelope.StatusClaimed), now.UnixMilli(), string(envelope.StatusClaimed), session, now.UnixMilli(), id, agent,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli(),
 		string(envelope.StatusQueued), now.UnixMilli()}
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
 		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
 		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL
 		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?) AND expires_at > ? AND (status != ? OR deliver_after <= ?)`+filter, append(args, filterArgs...)...)
@@ -1288,7 +1301,18 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 		return envelope.Request{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		_ = tx.Rollback() // wrongState reads on the one connection
 		return envelope.Request{}, s.wrongState(ctx, id, agent)
+	}
+	if req.TaskID != 0 {
+		// With the claim, so an agent that claimed a task's ask can read the
+		// task from the moment it holds the ask.
+		if err := recordTaskClaimant(ctx, tx, req.TaskID, agent); err != nil {
+			return envelope.Request{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return envelope.Request{}, err
 	}
 	req, _, err = s.lookup(ctx, id)
 	return req, err
@@ -1306,7 +1330,12 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return envelope.ErrBodyTooLarge
 	}
 	now := s.now()
-	res, err := s.db.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?, lease_lapsed_at = NULL,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?, lease_lapsed_at = NULL,
 		lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END
 		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
 		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
@@ -1319,9 +1348,13 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return err
 	}
 	if n == 0 {
+		_ = tx.Rollback() // wrongState reads on the one connection
 		return s.wrongState(ctx, id, claimer)
 	}
-	return nil
+	if err := taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Reply stores the target's reply, closing the request or pausing its lease
@@ -1400,6 +1433,9 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 		return envelope.Reply{}, err
 	}
 	if err := s.mirrorReplyTx(ctx, tx, rep); err != nil {
+		return envelope.Reply{}, err
+	}
+	if err := s.taskRepliedTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
 	if !rep.Replaced { // the ack already set any follow-on off
@@ -1513,6 +1549,9 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
+	if err := s.taskReleasedTx(ctx, tx, id, agent, "cancelled the ask"); err != nil {
+		return nil, err
+	}
 	return closed, tx.Commit()
 }
 
@@ -1554,6 +1593,9 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 			return nil, err
 		}
 		ids = append(ids, closed...)
+		if err := s.taskReleasedTx(ctx, tx, id, TaskRelay, agent+" was removed from the team"); err != nil {
+			return nil, err
+		}
 	}
 	return ids, tx.Commit()
 }
@@ -1575,12 +1617,21 @@ type Transition struct {
 }
 
 // Sweep expires requests past their TTL and returns requests whose delivery
-// or claim lease ran out to the queue.
+// or claim lease ran out to the queue. The expiries commit together with
+// what they do to the tasks those requests were attempts at.
 func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	now := s.now().UnixMilli()
 	var out []Transition
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var db interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	} = tx
 	collect := func(prev envelope.Status, query string, args ...any) error {
-		rows, err := s.db.QueryContext(ctx, query+` RETURNING id, trace_id, from_agent, to_agent, kind, status, urgent, claimed_at`, args...)
+		rows, err := db.QueryContext(ctx, query+` RETURNING id, trace_id, from_agent, to_agent, kind, status, urgent, claimed_at`, args...)
 		if err != nil {
 			return err
 		}
@@ -1622,6 +1673,19 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		string(envelope.StatusExpired), now, string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
 	}
+	for _, t := range out {
+		note := "the ask expired"
+		if t.Held {
+			note = "the ask expired while held for the owner's approval"
+		}
+		if err := s.taskReleasedTx(ctx, tx, t.ID, TaskRelay, note); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	db = s.db
 	// A claim that ran out of lease is marked lapsed, so the roster can say
 	// so until the agent claims or answers the request again, and for good
 	// in claim_lapsed, which keeps failover from moving it; a delivery
@@ -1675,17 +1739,17 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var r envelope.Request
-	var chain, kind, status, atts, exchanges, movedFrom string
+	var chain, kind, status, atts, exchanges, movedFrom, contributors string
 	var created, progressAt int64
 	var note string
 	var roomPost, task sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID, r.TaskID = roomPost.Int64, task.Int64
@@ -1699,6 +1763,11 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	}
 	if err := json.Unmarshal([]byte(exchanges), &r.Exchanges); err != nil {
 		return envelope.Request{}, "", err
+	}
+	if contributors != "" {
+		if err := json.Unmarshal([]byte(contributors), &r.Contributors); err != nil {
+			return envelope.Request{}, "", err
+		}
 	}
 	var err error
 	if r.Attachments, err = decodeAttachments(atts); err != nil {
@@ -1801,6 +1870,9 @@ func (s *Store) DenyHeld(ctx context.Context, id, reason string) (envelope.Reque
 		return envelope.Request{}, ErrWrongState
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO replies (request_id,from_agent,status,body,created_at) VALUES (?,?,?,?,?)`, id, "relay", string(envelope.StatusDeclined), reason, now); err != nil {
+		return envelope.Request{}, err
+	}
+	if err := s.taskReleasedTx(ctx, tx, id, envelope.TaskOwner, taskNote("denied", reason)); err != nil {
 		return envelope.Request{}, err
 	}
 	if err := tx.Commit(); err != nil {
