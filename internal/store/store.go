@@ -1293,12 +1293,18 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 		string(envelope.StatusClaimed), now.UnixMilli(), string(envelope.StatusClaimed), session, now.UnixMilli(), id, agent,
 		string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusClaimed), now.UnixMilli(),
 		string(envelope.StatusQueued), now.UnixMilli()}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return envelope.Request{}, err
+	// The claim of a task's ask commits with its claimant. Any other claim
+	// is one statement.
+	var x execer = s.db
+	var tx *sql.Tx
+	if req.TaskID != 0 {
+		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
+			return envelope.Request{}, err
+		}
+		defer tx.Rollback()
+		x = tx
 	}
-	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
+	res, err := x.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
 		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
 		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL
 		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?) AND expires_at > ? AND (status != ? OR deliver_after <= ?)`+filter, append(args, filterArgs...)...)
@@ -1306,18 +1312,20 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 		return envelope.Request{}, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		_ = tx.Rollback() // wrongState reads on the one connection
+		if tx != nil {
+			_ = tx.Rollback() // wrongState reads on the one connection
+		}
 		return envelope.Request{}, s.wrongState(ctx, id, agent)
 	}
-	if req.TaskID != 0 {
+	if tx != nil {
 		// With the claim, so an agent that claimed a task's ask can read the
 		// task from the moment it holds the ask.
 		if err := recordTaskClaimant(ctx, tx, req.TaskID, agent); err != nil {
 			return envelope.Request{}, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return envelope.Request{}, err
+		if err := tx.Commit(); err != nil {
+			return envelope.Request{}, err
+		}
 	}
 	req, _, err = s.lookup(ctx, id)
 	return req, err
@@ -1340,24 +1348,23 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?, lease_lapsed_at = NULL,
+	var task sql.NullInt64
+	err = tx.QueryRowContext(ctx, `UPDATE requests SET progress_note = ?, progress_at = ?, updated_at = ?, lease_lapsed_at = NULL,
 		lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END
-		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?)`,
+		WHERE id = ? AND to_agent = ? AND status = ? AND (lease_until = 0 OR lease_until > ?) RETURNING task_id`,
 		note, now.UnixMilli(), now.UnixMilli(), string(envelope.KindNotify), now.Add(urgentLease).UnixMilli(), now.Add(lease).UnixMilli(),
-		id, claimer, string(envelope.StatusClaimed), now.UnixMilli())
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+		id, claimer, string(envelope.StatusClaimed), now.UnixMilli()).Scan(&task)
+	if errors.Is(err, sql.ErrNoRows) {
 		_ = tx.Rollback() // wrongState reads on the one connection
 		return s.wrongState(ctx, id, claimer)
 	}
-	if err := taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
+	if err != nil {
 		return err
+	}
+	if task.Valid {
+		if err := taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1632,10 +1639,10 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	var db interface {
+	type rowsQueryer interface {
 		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-	} = tx
-	collect := func(prev envelope.Status, query string, args ...any) error {
+	}
+	collect := func(db rowsQueryer, prev envelope.Status, query string, args ...any) error {
 		rows, err := db.QueryContext(ctx, query+` RETURNING id, trace_id, from_agent, to_agent, kind, status, urgent, claimed_at`, args...)
 		if err != nil {
 			return err
@@ -1656,7 +1663,7 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 		}
 		return rows.Err()
 	}
-	if err := collect(envelope.StatusHeld, `UPDATE requests SET status = ?, updated_at = ? WHERE status = ? AND expires_at <= ?`,
+	if err := collect(tx, envelope.StatusHeld, `UPDATE requests SET status = ?, updated_at = ? WHERE status = ? AND expires_at <= ?`,
 		string(envelope.StatusExpired), now, string(envelope.StatusHeld), now); err != nil {
 		return nil, err
 	}
@@ -1668,12 +1675,12 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	// Deliver rejects. Each starting status is its own pass so the relay
 	// knows what the request left.
 	for _, prev := range []envelope.Status{envelope.StatusQueued, envelope.StatusDelivered, envelope.StatusNeedsInput} {
-		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ? WHERE status = ? AND expires_at <= ?`,
+		if err := collect(tx, prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ? WHERE status = ? AND expires_at <= ?`,
 			string(envelope.StatusExpired), now, string(prev), now); err != nil {
 			return nil, err
 		}
 	}
-	if err := collect(envelope.StatusClaimed, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
+	if err := collect(tx, envelope.StatusClaimed, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
 		WHERE status = ? AND lease_until > 0 AND lease_until <= ? AND expires_at <= ?`,
 		string(envelope.StatusExpired), now, string(envelope.StatusClaimed), now, now); err != nil {
 		return nil, err
@@ -1690,13 +1697,12 @@ func (s *Store) Sweep(ctx context.Context) ([]Transition, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	db = s.db
 	// A claim that ran out of lease is marked lapsed, so the roster can say
 	// so until the agent claims or answers the request again, and for good
 	// in claim_lapsed, which keeps failover from moving it; a delivery
 	// lease running out is not the agent's lapse.
 	for _, prev := range []envelope.Status{envelope.StatusDelivered, envelope.StatusClaimed} {
-		if err := collect(prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0,
+		if err := collect(s.db, prev, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?, progress_note = '', progress_at = 0,
 		lease_lapsed_at = CASE WHEN status = ? THEN ? ELSE lease_lapsed_at END,
 		claim_lapsed = CASE WHEN status = ? THEN 1 ELSE claim_lapsed END
 		WHERE status = ? AND lease_paused = 0 AND lease_until > 0 AND lease_until <= ? AND held_ack = ''`,

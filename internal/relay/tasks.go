@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
@@ -50,6 +51,14 @@ type taskAssign struct {
 	Repeat bool
 }
 
+// actor is who the task's history names for the assignment.
+func (a taskAssign) actor() string {
+	if a.Actor != "" {
+		return a.Actor
+	}
+	return a.From
+}
+
 // assignTask sends a.To one ask that is an attempt at task a.TaskID, as
 // a.From. The target must be a joined agent that takes requests (no phone,
 // no guest) and not a history, notes, pass or council agent. The ask goes
@@ -77,10 +86,7 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	if err != nil {
 		return envelope.Request{}, err
 	}
-	actor := a.Actor
-	if actor == "" {
-		actor = a.From
-	}
+	actor := a.actor()
 	body, contributors := taskBody(task, actor, resultBy, comments, limit)
 	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
 		TaskID: a.TaskID, TaskActor: actor, Contributors: contributors, NoParent: a.Repeat})
@@ -114,11 +120,7 @@ func (s *Server) reassignTask(ctx context.Context, a taskAssign) (envelope.Reque
 	if err := s.checkTaskTarget(ctx, a.To); err != nil {
 		return envelope.Request{}, err
 	}
-	actor := a.Actor
-	if actor == "" {
-		actor = a.From
-	}
-	cancelled, err := s.store.ReleaseTask(ctx, a.TaskID, actor, "reassigned to "+a.To)
+	cancelled, err := s.store.ReleaseTask(ctx, a.TaskID, a.actor(), "reassigned to "+a.To)
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
@@ -170,14 +172,6 @@ const taskFraming = "Agent Tincan task #%[2]d. Between the line <<<TASK %[1]s>>>
 
 const taskReturnLine = "To hand the task back, reply to this request with the result; if you cannot go on without a detail, reply needs_input with your question."
 
-// taskWho is how a task's text names actor: the owner, or the agent.
-func taskWho(actor string) string {
-	if actor == envelope.TaskOwner {
-		return "the owner"
-	}
-	return actor
-}
-
 // taskBody is the ask an assignment of task becomes, at most limit bytes,
 // and the agents whose text it carries. A fixed preamble says what the
 // block is, who assigned it (actor) and who filed it. Between delimiters
@@ -203,7 +197,7 @@ func taskBody(task envelope.Task, actor, resultBy string, comments []envelope.Ta
 	carries(task.Filer)
 	var thread strings.Builder
 	for _, c := range comments {
-		fmt.Fprintf(&thread, "[%s]\n%s\n", taskWho(c.Actor), c.Body)
+		fmt.Fprintf(&thread, "[%s]\n%s\n", envelope.TaskWho(c.Actor), c.Body)
 		carries(c.Actor)
 	}
 	if task.Result != "" {
@@ -215,9 +209,9 @@ func taskBody(task envelope.Task, actor, resultBy string, comments []envelope.Ta
 	for strings.Contains(task.Title, nonce) || strings.Contains(detail, nonce) || strings.Contains(result, nonce) || strings.Contains(said, nonce) {
 		nonce = followOnNonce()
 	}
-	head := fmt.Sprintf(taskFraming, nonce, task.ID, taskWho(actor), taskWho(task.Filer)) + "\n\n<<<TASK " + nonce + ">>>\nTitle: " + task.Title + "\n"
+	head := fmt.Sprintf(taskFraming, nonce, task.ID, envelope.TaskWho(actor), envelope.TaskWho(task.Filer)) + "\n\n<<<TASK " + nonce + ">>>\nTitle: " + task.Title + "\n"
 	detailHead := "\nWhat is wanted:\n"
-	resultHead := "\nLatest result so far, from " + taskWho(resultBy) + ":\n"
+	resultHead := "\nLatest result so far, from " + envelope.TaskWho(resultBy) + ":\n"
 	saidHead := "\nComments since that result:\n"
 	if result == "" {
 		saidHead = "\nComments:\n"
@@ -308,17 +302,8 @@ type taskAdd struct {
 	EverySeconds int64  `json:"every_seconds"`
 }
 
-// taskReply is what a task route answers with: the task after the call.
-// Event is the comment a comment route stored. Existing marks an add that
-// stored nothing because the filer already has a live task with the key.
-// AssignError is why an add that named a teammate stored the task and sent
-// no ask; the task is open and unassigned.
-type taskReply struct {
-	Task        envelope.Task       `json:"task"`
-	Event       *envelope.TaskEvent `json:"event,omitempty"`
-	Existing    bool                `json:"existing,omitempty"`
-	AssignError string              `json:"assign_error,omitempty"`
-}
+// taskReply is what a task route answers with, the shape the client reads.
+type taskReply = client.TaskResult
 
 // check refuses an add the relay would not store, and an assignee that
 // takes no task.

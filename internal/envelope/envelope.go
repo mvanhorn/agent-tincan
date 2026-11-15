@@ -741,6 +741,15 @@ type Schedule struct {
 // digit, and "owner" alone is a name an agent may have.
 const TaskOwner = "@owner"
 
+// TaskWho is how a task's text and a listing name who: the owner, or the
+// agent.
+func TaskWho(who string) string {
+	if who == TaskOwner {
+		return "the owner"
+	}
+	return who
+}
+
 // TaskStatus is where a task stands.
 type TaskStatus string
 

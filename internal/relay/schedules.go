@@ -347,7 +347,6 @@ func (s *Server) fireTaskRepeat(ctx context.Context, sch envelope.Schedule) {
 	}
 	req, err := s.assignTask(ctx, taskAssign{TaskID: sch.TaskID, From: sch.From, To: sch.To, Repeat: true})
 	if errors.Is(err, store.ErrTaskBusy) {
-		// An assign landed since the task was read.
 		skipped("")
 		return
 	}

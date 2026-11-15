@@ -207,14 +207,6 @@ var taskGroups = []struct {
 	{envelope.TaskDropped, "Dropped"},
 }
 
-// taskWho is how a listing names a task's filer or assignee.
-func taskWho(name string) string {
-	if name == envelope.TaskOwner {
-		return "the owner"
-	}
-	return name
-}
-
 // FormatTasks renders a task list for tincan tasks, grouped by status.
 // Done and dropped tasks are counted, and listed only with closed.
 func FormatTasks(list []envelope.Task, closed bool) string {
@@ -244,14 +236,14 @@ func FormatTasks(list []envelope.Task, closed bool) string {
 // taskLine is one task on one line of a listing.
 func taskLine(t envelope.Task) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "#%d %s (filed by %s", t.ID, ScheduleText(t.Title), taskWho(t.Filer))
+	fmt.Fprintf(&b, "#%d %s (filed by %s", t.ID, ScheduleText(t.Title), envelope.TaskWho(t.Filer))
 	switch {
 	case t.Assignee == envelope.TaskOwner:
 		b.WriteString(", the owner's own")
 	case t.Assignee != "":
 		fmt.Fprintf(&b, ", with %s", t.Assignee)
 	case t.SuggestedAssignee != "":
-		fmt.Fprintf(&b, ", suggested for %s", taskWho(t.SuggestedAssignee))
+		fmt.Fprintf(&b, ", suggested for %s", envelope.TaskWho(t.SuggestedAssignee))
 	}
 	if t.AskStatus != "" {
 		fmt.Fprintf(&b, ", ask %s", t.AskStatus)
@@ -260,16 +252,29 @@ func taskLine(t envelope.Task) string {
 		fmt.Fprintf(&b, ", source %s", t.Source)
 	}
 	if t.RepeatEverySeconds != 0 {
-		fmt.Fprintf(&b, ", repeats %s", taskEvery(t))
+		fmt.Fprintf(&b, ", repeats %s", everyText(t.RepeatEverySeconds))
 	}
 	b.WriteString(")")
 	return b.String()
 }
 
-// taskEvery is how often a repeating task repeats, as a schedule listing
-// says it.
-func taskEvery(t envelope.Task) string {
-	return fmt.Sprintf("every %v", time.Duration(t.RepeatEverySeconds)*time.Second)
+// everyText is how a listing says a repeat of seconds.
+func everyText(seconds int64) string {
+	return fmt.Sprintf("every %v", time.Duration(seconds)*time.Second)
+}
+
+// TaskEverySeconds reads every, the repeat an add of a task names, as the
+// add's EverySeconds. A repeating task goes to a teammate: with no to it
+// returns noTo, the caller's own wording.
+func TaskEverySeconds(every, to string, now time.Time, noTo error) (int64, error) {
+	if to == "" {
+		return 0, noTo
+	}
+	_, interval, err := ParseWhen("", every, now)
+	if err != nil {
+		return 0, err
+	}
+	return int64(interval / time.Second), nil
 }
 
 // FormatTaskRepeat is the sentence tincan tasks add and the add_task tool
@@ -278,7 +283,7 @@ func FormatTaskRepeat(t envelope.Task) string {
 	if t.RepeatEverySeconds == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" It repeats %s for %s until it is done or dropped; stop only the repeat with tincan unschedule %d or cancel_schedule.", taskEvery(t), t.RepeatTo, t.RepeatSchedule)
+	return fmt.Sprintf(" It repeats %s for %s until it is done or dropped; stop only the repeat with tincan unschedule %d or cancel_schedule.", everyText(t.RepeatEverySeconds), t.RepeatTo, t.RepeatSchedule)
 }
 
 // FormatTask renders one task whole with its history for tincan tasks show.
@@ -286,12 +291,12 @@ func FormatTaskRepeat(t envelope.Task) string {
 // own lines.
 func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Task #%d: %s\nStatus: %s\nFiled by: %s at %s\n", t.ID, ScheduleText(t.Title), t.Status, taskWho(t.Filer), clockTime(t.CreatedAt, now))
+	fmt.Fprintf(&b, "Task #%d: %s\nStatus: %s\nFiled by: %s at %s\n", t.ID, ScheduleText(t.Title), t.Status, envelope.TaskWho(t.Filer), clockTime(t.CreatedAt, now))
 	if t.Assignee != "" {
-		fmt.Fprintf(&b, "Assignee: %s\n", taskWho(t.Assignee))
+		fmt.Fprintf(&b, "Assignee: %s\n", envelope.TaskWho(t.Assignee))
 	}
 	if t.SuggestedAssignee != "" {
-		fmt.Fprintf(&b, "Suggested assignee: %s\n", taskWho(t.SuggestedAssignee))
+		fmt.Fprintf(&b, "Suggested assignee: %s\n", envelope.TaskWho(t.SuggestedAssignee))
 	}
 	if t.CurrentRequest != "" {
 		fmt.Fprintf(&b, "Open ask: %s %s\n", t.CurrentRequest, t.AskStatus)
@@ -306,7 +311,7 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 		fmt.Fprintf(&b, "Agent assigns: %d\n", t.AgentAssigns)
 	}
 	if t.RepeatEverySeconds != 0 {
-		fmt.Fprintf(&b, "Repeats: %s for %s (schedule #%d)\n", taskEvery(t), t.RepeatTo, t.RepeatSchedule)
+		fmt.Fprintf(&b, "Repeats: %s for %s (schedule #%d)\n", everyText(t.RepeatEverySeconds), t.RepeatTo, t.RepeatSchedule)
 	}
 	if t.Detail != "" {
 		fmt.Fprintf(&b, "\nWhat is wanted:\n%s\n", t.Detail)
@@ -318,7 +323,7 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 		b.WriteString("\nHistory:\n")
 	}
 	for _, ev := range events {
-		fmt.Fprintf(&b, "%s %s %s", clockTime(ev.At, now), taskWho(ev.Actor), ev.Kind)
+		fmt.Fprintf(&b, "%s %s %s", clockTime(ev.At, now), envelope.TaskWho(ev.Actor), ev.Kind)
 		if ev.Status != "" {
 			fmt.Fprintf(&b, " (%s)", ev.Status)
 		}

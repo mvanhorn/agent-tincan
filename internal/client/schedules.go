@@ -184,5 +184,5 @@ func scheduleWhen(s envelope.Schedule, now time.Time) string {
 	if s.EverySeconds == 0 {
 		return "once at " + clockTime(s.NextAt, now)
 	}
-	return fmt.Sprintf("next at %s, every %v", clockTime(s.NextAt, now), time.Duration(s.EverySeconds)*time.Second)
+	return fmt.Sprintf("next at %s, %s", clockTime(s.NextAt, now), everyText(s.EverySeconds))
 }

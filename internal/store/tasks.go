@@ -46,21 +46,25 @@ var (
 // result. task_events is the task's history, read in id order, which is
 // also time order. task_claimants holds every agent that claimed, answered
 // or assigned an ask under the task, which is what lets it keep reading
-// the task afterwards.
+// the task afterwards. source is the outside source the filer declared for
+// the task's text, and suggested_assignee whom the filer asked to have a
+// proposed task go to; NULL for none.
 func (s *Store) migrateTasks() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
-  id              INTEGER PRIMARY KEY,
-  title           TEXT NOT NULL,
-  detail          TEXT NOT NULL DEFAULT '',
-  status          TEXT NOT NULL,
-  filer           TEXT NOT NULL,
-  assignee        TEXT NOT NULL DEFAULT '',
-  dedupe_key      TEXT NOT NULL DEFAULT '',
-  result          TEXT NOT NULL DEFAULT '',
-  result_request  TEXT NOT NULL DEFAULT '',
-  current_request TEXT NOT NULL DEFAULT '',
-  agent_assigns   INTEGER NOT NULL DEFAULT 0,
-  created_at      INTEGER NOT NULL
+  id                 INTEGER PRIMARY KEY,
+  title              TEXT NOT NULL,
+  detail             TEXT NOT NULL DEFAULT '',
+  status             TEXT NOT NULL,
+  filer              TEXT NOT NULL,
+  assignee           TEXT NOT NULL DEFAULT '',
+  dedupe_key         TEXT NOT NULL DEFAULT '',
+  result             TEXT NOT NULL DEFAULT '',
+  result_request     TEXT NOT NULL DEFAULT '',
+  current_request    TEXT NOT NULL DEFAULT '',
+  agent_assigns      INTEGER NOT NULL DEFAULT 0,
+  created_at         INTEGER NOT NULL,
+  source             TEXT,
+  suggested_assignee TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_filer ON tasks(filer, dedupe_key);
 CREATE TABLE IF NOT EXISTS task_events (
@@ -82,19 +86,6 @@ CREATE TABLE IF NOT EXISTS task_claimants (
 		return err
 	}
 	var has bool
-	// source is the outside source the filer declared for the task's text,
-	// and suggested_assignee whom the filer asked to have a proposed task
-	// go to; NULL for none.
-	for _, col := range []string{"source", "suggested_assignee"} {
-		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col).Scan(&has); err != nil {
-			return err
-		}
-		if !has {
-			if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN ` + col + ` TEXT`); err != nil {
-				return err
-			}
-		}
-	}
 	// task_id marks an ask that is an attempt at a task: the task it is
 	// for, NULL for every other request.
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'task_id')`).Scan(&has); err != nil {
@@ -336,6 +327,15 @@ func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, no
 // result instead, but only while the task is still returned on that
 // request, so a task assigned again since keeps what it has.
 func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
+	// One read ends it for a reply to a request that is no attempt at a
+	// task.
+	var task sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM requests WHERE id = ?`, rep.RequestID).Scan(&task); err != nil || !task.Valid {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		}
+		return err
+	}
 	// The ask's target can read the task after its reply even when it
 	// replied without claiming first.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_claimants (task_id, agent)
@@ -487,8 +487,8 @@ func (s *Store) ReleaseTask(ctx context.Context, id int64, actor, note string) (
 		_, err := getTask(ctx, tx, id, "")
 		return nil, err
 	}
-	// cancelled[0] is the ask that was open under the task.
-	if err := s.taskReleasedTx(ctx, tx, cancelled[0], actor, note); err != nil {
+	openAsk := cancelled[0]
+	if err := s.taskReleasedTx(ctx, tx, openAsk, actor, note); err != nil {
 		return nil, err
 	}
 	return cancelled, tx.Commit()
@@ -517,20 +517,17 @@ func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, comme
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, actor, kind, body, status, created_at FROM task_events WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id`,
+	rows, err := s.db.QueryContext(ctx, `SELECT `+taskEventCols+` FROM task_events WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id`,
 		id, envelope.TaskEventComment, last)
 	if err != nil {
 		return "", nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var ev envelope.TaskEvent
-		var status string
-		var at int64
-		if err := rows.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at); err != nil {
+		ev, err := scanTaskEvent(rows)
+		if err != nil {
 			return "", nil, err
 		}
-		ev.Status, ev.At = envelope.TaskStatus(status), time.UnixMilli(at).UTC()
 		comments = append(comments, ev)
 	}
 	return resultBy, comments, rows.Err()
@@ -659,20 +656,17 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 // TaskEvents returns up to limit entries of task id's history after the
 // entry with id after, oldest first.
 func (s *Store) TaskEvents(ctx context.Context, id, after int64, limit int) ([]envelope.TaskEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, actor, kind, body, status, created_at FROM task_events WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?`, id, after, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+taskEventCols+` FROM task_events WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?`, id, after, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []envelope.TaskEvent{}
 	for rows.Next() {
-		var ev envelope.TaskEvent
-		var status string
-		var at int64
-		if err := rows.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at); err != nil {
+		ev, err := scanTaskEvent(rows)
+		if err != nil {
 			return nil, err
 		}
-		ev.Status, ev.At = envelope.TaskStatus(status), time.UnixMilli(at).UTC()
 		out = append(out, ev)
 	}
 	return out, rows.Err()
@@ -700,6 +694,19 @@ func scanTask(sc scanner) (envelope.Task, error) {
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()
 	return t, nil
+}
+
+const taskEventCols = `id, task_id, actor, kind, body, status, created_at`
+
+func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
+	var ev envelope.TaskEvent
+	var status string
+	var at int64
+	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at); err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	ev.Status, ev.At = envelope.TaskStatus(status), time.UnixMilli(at).UTC()
+	return ev, nil
 }
 
 // TaskRelay is the actor a task's history names for a change the relay

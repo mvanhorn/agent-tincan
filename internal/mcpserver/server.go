@@ -228,14 +228,10 @@ func addTask(ctx context.Context, b Backend, in addTaskIn) (*mcp.CallToolResult,
 		add.Assignee = envelope.TaskOwner
 	}
 	if in.Every != "" {
-		if in.To == "" {
-			return fail(errors.New("every needs to: a repeating task goes to a teammate"))
-		}
-		_, every, err := client.ParseWhen("", in.Every, time.Now())
-		if err != nil {
+		var err error
+		if add.EverySeconds, err = client.TaskEverySeconds(in.Every, in.To, time.Now(), errors.New("every needs to: a repeating task goes to a teammate")); err != nil {
 			return fail(err)
 		}
-		add.EverySeconds = int64(every / time.Second)
 	}
 	res, err := client.AddTask(ctx, b, false, add)
 	if err != nil {

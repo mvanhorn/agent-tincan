@@ -155,14 +155,14 @@ the sending agent's scheduled asks, with their limits.`,
 				in.Assignee = envelope.TaskOwner
 			}
 			if every != "" {
-				if in.Assignee == "" || mine {
-					return errors.New("--every needs --to: a repeating task goes to a teammate")
+				to := in.Assignee
+				if mine {
+					to = ""
 				}
-				_, interval, err := client.ParseWhen("", every, time.Now())
-				if err != nil {
+				var err error
+				if in.EverySeconds, err = client.TaskEverySeconds(every, to, time.Now(), errors.New("--every needs --to: a repeating task goes to a teammate")); err != nil {
 					return err
 				}
-				in.EverySeconds = int64(interval / time.Second)
 			}
 			if detailStdin {
 				// One byte over the relay's limit, so too long a detail is
