@@ -352,6 +352,14 @@ func TestTasksVisibility(t *testing.T) {
 	if got := list("hermes"); !same(got, pool.ID, elsewhere.ID, returned.ID) {
 		t.Fatalf("hermes sees %v after claiming", got)
 	}
+	// Removing an agent forgets what it worked on, so a later agent under
+	// its name starts with the pool alone.
+	if _, err := s.DeleteAgent(ctx, "hermes"); err != nil {
+		t.Fatal(err)
+	}
+	if got := list("hermes"); !same(got, pool.ID, elsewhere.ID) {
+		t.Fatalf("hermes sees %v after its removal", got)
+	}
 	// A claim does not open a proposed task to anyone but its filer.
 	if err := s.RecordTaskClaimant(ctx, proposed.ID, "hermes"); err != nil {
 		t.Fatal(err)

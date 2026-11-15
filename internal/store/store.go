@@ -634,6 +634,10 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM work_leases WHERE holder = ?`, name); err != nil {
 		return false, err
 	}
+	// A later agent under the name does not read the tasks this one worked on.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_claimants WHERE agent = ?`, name); err != nil {
+		return false, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE agents SET fallback = NULL WHERE fallback = ?`, name); err != nil {
 		return false, err
 	}
