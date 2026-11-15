@@ -13,6 +13,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/phone"
 	"github.com/mvanhorn/agent-tincan/internal/policy"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
@@ -20,7 +21,7 @@ import (
 
 // phoneRoutes are every route the phone page loads: the page itself, its
 // static files, and the data it reads.
-var phoneRoutes = []string{"/phone/", "/phone/app.js", "/phone/style.css", "/phone/manifest.webmanifest", "/phone/sw.js", "/phone/icons/icon-192.png", "/v1/admin/held"}
+var phoneRoutes = []string{"/phone/", "/phone/app.js", "/phone/style.css", "/phone/manifest.webmanifest", "/phone/sw.js", "/phone/icons/icon-192.png", "/v1/admin/held", "/v1/admin/tasks"}
 
 // sameSite is what a browser adds to a fetch from the relay's own page.
 var sameSite = map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"}
@@ -321,5 +322,165 @@ func TestPhoneApproveRacesCLIDeny(t *testing.T) {
 		default:
 			t.Fatalf("final state %s", final)
 		}
+	}
+}
+
+// The Tasks tab end to end, as the page calls the relay: an admin device
+// loads the page with the tab under the page's unchanged CSP, lists tasks,
+// adds one, is told to join before it can assign, assigns as its own agent,
+// answers the assignee's question on the ask it sent, and marks the task
+// done with the nonce its listing issued. A joined agent that is no admin
+// is refused on every one of those admin calls.
+func TestPhoneTasksTab(t *testing.T) {
+	m := newTaskMesh(t)
+	page := hardened(t, m.Mesh, "admin")
+	code, body, hdr := browserCall(t, "GET", page, "/phone/", "127.0.0.1", "", map[string]string{"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"})
+	if code != http.StatusOK || !strings.Contains(body, `id="tab-tasks"`) || !strings.Contains(body, `aria-controls="tasks"`) {
+		t.Fatalf("the page an admin opens lacks the Tasks tab: %d", code)
+	}
+	if got := hdr.Get("Content-Security-Policy"); got != phone.CSP {
+		t.Fatalf("page CSP = %q, want %q", got, phone.CSP)
+	}
+	if code, script, _ := browserCall(t, "GET", page, "/phone/app.js", "127.0.0.1", "", sameSite); code != http.StatusOK || !strings.Contains(script, `"/v1/admin/tasks"`) {
+		t.Fatalf("the page's script does not read the admin task listing: %d", code)
+	}
+	list := func() []listedTask {
+		t.Helper()
+		var out taskListing
+		if code, body := pageCall(t, page, "GET", "/v1/admin/tasks", "", nil, &out); code != http.StatusOK {
+			t.Fatalf("admin listing from the page: %d %s", code, body)
+		}
+		return out.Tasks
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("task list before any task = %+v", got)
+	}
+
+	// With no agent on the device the owner still adds a task, unassigned;
+	// handing it to a teammate is refused with the reason the page shows.
+	var added taskReply
+	title := "<b>Renew the lease</b>"
+	if code, body := pageCall(t, page, "POST", "/v1/admin/tasks", "", map[string]string{"title": title, "detail": "By Friday."}, &added); code != http.StatusCreated {
+		t.Fatalf("add from the page: %d %s", code, body)
+	}
+	id := added.Task.ID
+	if added.Task.Status != envelope.TaskOpen || added.Task.Filer != envelope.TaskOwner || added.Task.Title != title {
+		t.Fatalf("added task = %+v", added.Task)
+	}
+	const needsAgent = "join this device as an agent, then assign again"
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/assign"), "", map[string]string{"to": "muse"}, nil); code != http.StatusForbidden || !strings.Contains(body, needsAgent) {
+		t.Fatalf("assign from a device with no agent: %d %s", code, body)
+	}
+	if code, body := pageCall(t, page, "POST", "/v1/admin/tasks", "", map[string]string{"title": "Sort the photos", "assignee": "muse"}, nil); code != http.StatusForbidden || !strings.Contains(body, needsAgent) {
+		t.Fatalf("add for a teammate from a device with no agent: %d %s", code, body)
+	}
+	if got := list(); len(got) != 1 || got[0].ID != id || got[0].Title != title || got[0].DoneNonce == "" || got[0].DropNonce == "" {
+		t.Fatalf("task list after the add = %+v", got)
+	}
+
+	// Joined, the page assigns as its own agent, and the ask is that agent's.
+	m.JoinOnMachineOf(t, "admin", "phone")
+	m.clk.advance(2 * time.Second)
+	var assigned taskReply
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/assign"), "phone", map[string]string{"to": "muse"}, &assigned); code != http.StatusOK {
+		t.Fatalf("assign from the page: %d %s", code, body)
+	}
+	ask := assigned.Task.CurrentRequest
+	if assigned.Task.Status != envelope.TaskWorking || assigned.Task.Assignee != "muse" || ask == "" {
+		t.Fatalf("task after the assign = %+v", assigned.Task)
+	}
+	row := list()[0]
+	if row.AskStatus != envelope.StatusQueued || row.DoneNonce != "" || row.DropNonce == "" {
+		t.Fatalf("listing of a working task = %+v", row)
+	}
+
+	// The assignee asks back. The page tells its own question by reading the
+	// ask as its agent; another agent cannot read that ask, so its page
+	// would show no answer box.
+	claimOne(t, m.muse, ask)
+	if _, err := m.muse.Reply(t.Context(), ask, "Which lease?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	if row := list()[0]; row.Status != envelope.TaskQuestion || row.CurrentRequest != ask {
+		t.Fatalf("listing of a question task = %+v", row)
+	}
+	var res envelope.Result
+	if code, body := pageCall(t, page, "GET", "/v1/requests/"+ask, "phone", nil, &res); code != http.StatusOK {
+		t.Fatalf("the page reading its own ask: %d %s", code, body)
+	}
+	if res.Request.From != "phone" || res.Status != envelope.StatusNeedsInput || len(res.Exchanges) != 1 || res.Exchanges[0].Question != "Which lease?" {
+		t.Fatalf("the page's own ask = %+v", res)
+	}
+	if err := m.grok.Raw(t.Context(), "GET", "/v1/requests/"+ask, nil, nil); !refusedWith(err, http.StatusNotFound, "") {
+		t.Fatalf("another agent reading the ask: %v, want 404", err)
+	}
+	var whole taskReply
+	if code, body := pageCall(t, page, "GET", adminTaskPath(id, ""), "", nil, &whole); code != http.StatusOK {
+		t.Fatalf("the page reading the task: %d %s", code, body)
+	}
+	if last := whole.Events[len(whole.Events)-1]; last.Status != envelope.TaskQuestion || last.Body != "Which lease?" || whole.Task.Detail != "By Friday." {
+		t.Fatalf("task with history = %+v", whole)
+	}
+	if code, body := pageCall(t, page, "POST", "/v1/requests/"+ask+"/answer", "phone", map[string]string{"body": "The flat."}, nil); code != http.StatusOK {
+		t.Fatalf("answer from the page: %d %s", code, body)
+	}
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/comment"), "", map[string]string{"body": "Ask for two years."}, nil); code != http.StatusCreated {
+		t.Fatalf("comment from the page: %d %s", code, body)
+	}
+	m.finish(t, m.muse, id, "Renewed for two years.", envelope.StatusAnswered)
+
+	// Returned: done needs the listing's nonce, a stale one is refused with
+	// the text the page reloads on, and the next listing offers reopen.
+	row = list()[0]
+	if row.Status != envelope.TaskReturned || row.Result == "" || row.DoneNonce == "" || row.NonceExpiresAt.IsZero() {
+		t.Fatalf("listing of a returned task = %+v", row)
+	}
+	const stale = "this task button has expired"
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/done"), "", map[string]string{"nonce": ""}, nil); code != http.StatusConflict || !strings.Contains(body, stale) {
+		t.Fatalf("done with no nonce: %d %s", code, body)
+	}
+	var done taskReply
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/done"), "", map[string]string{"nonce": row.DoneNonce}, &done); code != http.StatusOK || done.Task.Status != envelope.TaskDone {
+		t.Fatalf("done from the page: %d %s", code, body)
+	}
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/drop"), "", map[string]string{"nonce": row.DropNonce}, nil); code != http.StatusConflict || !strings.Contains(body, stale) {
+		t.Fatalf("drop with a nonce the done voided: %d %s", code, body)
+	}
+	row = list()[0]
+	if row.Status != envelope.TaskDone || row.ReopenNonce == "" || row.DoneNonce != "" || row.DropNonce != "" {
+		t.Fatalf("listing of a done task = %+v", row)
+	}
+
+	// The same admin calls from a joined agent's machine are refused, with
+	// or without what a browser sends.
+	agent := hardened(t, m.Mesh, "grokbot")
+	for _, c := range []struct {
+		method, path string
+		in           any
+	}{
+		{"GET", "/v1/admin/tasks", nil},
+		{"GET", adminTaskPath(id, ""), nil},
+		{"POST", "/v1/admin/tasks", map[string]string{"title": "x"}},
+		{"POST", adminTaskPath(id, "/assign"), map[string]string{"to": "muse"}},
+		{"POST", adminTaskPath(id, "/comment"), map[string]string{"body": "x"}},
+		{"POST", adminTaskPath(id, "/reopen"), map[string]string{"nonce": row.ReopenNonce}},
+		{"POST", adminTaskPath(id, "/done"), map[string]string{"nonce": row.ReopenNonce}},
+		{"POST", adminTaskPath(id, "/drop"), map[string]string{"nonce": row.ReopenNonce}},
+		{"POST", adminTaskPath(id, "/approve"), map[string]string{"nonce": row.ReopenNonce}},
+		{"POST", adminTaskPath(id, "/reset"), map[string]string{"nonce": row.ReopenNonce}},
+	} {
+		if code, body := pageCall(t, agent, c.method, c.path, "grokbot", c.in, nil); code != http.StatusForbidden {
+			t.Errorf("a joined agent's %s %s: %d %s, want 403", c.method, c.path, code, body)
+		}
+		if err := m.grok.Raw(t.Context(), c.method, c.path, c.in, nil); !refusedWith(err, http.StatusForbidden, "") {
+			t.Errorf("a joined agent's client %s %s: %v, want 403", c.method, c.path, err)
+		}
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskDone {
+		t.Fatalf("task after the agent's calls = %+v", got)
+	}
+	// The nonce the agent sent was not spent by its refused call.
+	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/reopen"), "", map[string]string{"nonce": row.ReopenNonce}, nil); code != http.StatusOK {
+		t.Fatalf("reopen from the page: %d %s", code, body)
 	}
 }

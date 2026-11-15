@@ -34,6 +34,7 @@
     <button id="tab-team" class="tab" type="button" role="tab" aria-selected="true" aria-controls="team">Team</button>
     <button id="tab-ask" class="tab" type="button" role="tab" aria-selected="false" aria-controls="ask">Ask</button>
     <button id="tab-rooms" class="tab" type="button" role="tab" aria-selected="false" aria-controls="rooms">Rooms</button>
+    <button id="tab-tasks" class="tab" type="button" role="tab" aria-selected="false" aria-controls="tasks">Tasks <span id="tasks-count" class="count" hidden>0</span><span id="tasks-count-note" class="sr-only" hidden> waiting on you</span></button>
   </div>
 
   <section id="team" role="tabpanel" aria-labelledby="tab-team">
@@ -93,6 +94,55 @@
         <button id="room-send" class="primary" type="button">Post</button>
         <ul id="room-notices" class="files"></ul>
       </div>
+    </div>
+  </section>
+
+  <section id="tasks" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+    <h2>Tasks</h2>
+    <div class="panel">
+      <label for="task-title">New task</label>
+      <input id="task-title" class="field" type="text" maxlength="200" autocomplete="off">
+      <label for="task-detail">What is wanted</label>
+      <textarea id="task-detail" class="field" rows="3"></textarea>
+      <label for="task-for">Who it is for</label>
+      <select id="task-for" class="field"></select>
+      <p id="task-for-note" class="meta" hidden></p>
+      <button id="task-join" type="button" hidden>Join this phone to hand tasks to teammates</button>
+      <button id="task-add" class="primary" type="button">Add task</button>
+      <p id="task-add-error" class="error" role="alert" hidden></p>
+    </div>
+    <p id="tasks-empty" class="empty" hidden>No tasks yet.</p>
+    <div id="tgw-proposed" class="group" hidden>
+      <h3 id="tg-proposed-title">Proposed <span id="tg-proposed-count" class="count">0</span></h3>
+      <ol id="tg-proposed" class="cards" aria-labelledby="tg-proposed-title"></ol>
+    </div>
+    <div id="tgw-answer" class="group" hidden>
+      <h3 id="tg-answer-title">Needs your answer <span id="tg-answer-count" class="count">0</span></h3>
+      <ol id="tg-answer" class="cards" aria-labelledby="tg-answer-title"></ol>
+    </div>
+    <div id="tgw-returned" class="group" hidden>
+      <h3 id="tg-returned-title">Returned <span id="tg-returned-count" class="count">0</span></h3>
+      <ol id="tg-returned" class="cards" aria-labelledby="tg-returned-title"></ol>
+    </div>
+    <div id="tgw-working" class="group" hidden>
+      <h3 id="tg-working-title">Working <span id="tg-working-count" class="count">0</span></h3>
+      <ol id="tg-working" class="cards" aria-labelledby="tg-working-title"></ol>
+    </div>
+    <div id="tgw-open" class="group" hidden>
+      <h3 id="tg-open-title">Open <span id="tg-open-count" class="count">0</span></h3>
+      <ol id="tg-open" class="cards" aria-labelledby="tg-open-title"></ol>
+    </div>
+    <div id="tgw-yours" class="group" hidden>
+      <h3 id="tg-yours-title">Yours <span id="tg-yours-count" class="count">0</span></h3>
+      <ol id="tg-yours" class="cards" aria-labelledby="tg-yours-title"></ol>
+    </div>
+    <div id="tgw-done" class="group" hidden>
+      <button id="tg-done-toggle" class="disclose" type="button" aria-expanded="false" aria-controls="tg-done">Done <span id="tg-done-count" class="count">0</span></button>
+      <ol id="tg-done" class="cards" aria-labelledby="tg-done-toggle" hidden></ol>
+    </div>
+    <div id="tgw-dropped" class="group" hidden>
+      <button id="tg-dropped-toggle" class="disclose" type="button" aria-expanded="false" aria-controls="tg-dropped">Dropped <span id="tg-dropped-count" class="count">0</span></button>
+      <ol id="tg-dropped" class="cards" aria-labelledby="tg-dropped-toggle" hidden></ol>
     </div>
   </section>
 
