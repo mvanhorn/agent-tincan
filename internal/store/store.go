@@ -280,6 +280,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate notice links: %w", err)
 	}
+	if err := s.migrateTasks(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate tasks: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -910,15 +914,20 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, ErrNotRoomMember
 		}
 	}
+	if req.TaskID != 0 {
+		if err := s.claimTaskTx(ctx, tx, req); err != nil {
+			return envelope.Request{}, err
+		}
+	}
 	var atts string
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0})
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1666,7 +1675,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1675,11 +1684,11 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var chain, kind, status, atts, exchanges, movedFrom string
 	var created, progressAt int64
 	var note string
-	var roomPost sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted); err != nil {
+	var roomPost, task sql.NullInt64
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task); err != nil {
 		return envelope.Request{}, "", err
 	}
-	r.RoomPostID = roomPost.Int64
+	r.RoomPostID, r.TaskID = roomPost.Int64, task.Int64
 	if err := json.Unmarshal([]byte(chain), &r.Chain); err != nil {
 		return envelope.Request{}, "", err
 	}

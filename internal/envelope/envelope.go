@@ -127,6 +127,10 @@ type Request struct {
 	// post: the id of that post. Only the relay sets it (a send cannot);
 	// older clients ignore it and see an ordinary ask.
 	RoomPostID int64 `json:"room_post_id,omitempty"`
+	// TaskID marks an ask that is one attempt at a task on the shared list:
+	// the id of that task. Only the relay sets it (a send cannot); older
+	// clients ignore it and see an ordinary ask.
+	TaskID int64 `json:"task_id,omitempty"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
 
@@ -718,6 +722,74 @@ type Schedule struct {
 	CreatedAt    time.Time `json:"created_at"`
 	LastRequest  string    `json:"last_request,omitempty"`
 	Blocked      bool      `json:"blocked,omitempty"`
+}
+
+// TaskOwner stands for the owner where a task names its filer or assignee.
+// No agent can hold it: an agent name starts with a lowercase letter or a
+// digit, and "owner" alone is a name an agent may have.
+const TaskOwner = "@owner"
+
+// TaskStatus is where a task stands.
+type TaskStatus string
+
+const (
+	// TaskProposed waits for the owner to approve it before anyone works it.
+	TaskProposed TaskStatus = "proposed"
+	// TaskOpen has no ask under it and can be assigned.
+	TaskOpen TaskStatus = "open"
+	// TaskWorking has an ask under it that its assignee has not answered.
+	TaskWorking TaskStatus = "working"
+	// TaskQuestion has an ask under it whose assignee needs input.
+	TaskQuestion TaskStatus = "question"
+	// TaskReturned carries a result nobody has acted on yet.
+	TaskReturned TaskStatus = "returned"
+	// TaskDone was closed by the owner.
+	TaskDone TaskStatus = "done"
+	// TaskDropped was given up.
+	TaskDropped TaskStatus = "dropped"
+)
+
+// Task is one item on the team's shared list. Filer and Assignee are agent
+// names or TaskOwner; an unassigned task has no Assignee. Each attempt at a
+// task is one ask: CurrentRequest is the ask open under it now, and
+// AskStatus that ask's status as the task was read. Result is the latest
+// answer and ResultRequest the ask that produced it. AgentAssigns counts
+// the times an agent assigned the task since the owner last reset it.
+type Task struct {
+	ID             int64      `json:"id"`
+	Title          string     `json:"title"`
+	Detail         string     `json:"detail,omitempty"`
+	Status         TaskStatus `json:"status"`
+	Filer          string     `json:"filer"`
+	Assignee       string     `json:"assignee,omitempty"`
+	Key            string     `json:"key,omitempty"`
+	Result         string     `json:"result,omitempty"`
+	ResultRequest  string     `json:"result_request,omitempty"`
+	CurrentRequest string     `json:"current_request,omitempty"`
+	AskStatus      Status     `json:"ask_status,omitempty"`
+	AgentAssigns   int        `json:"agent_assigns,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// What a task history entry records.
+const (
+	TaskEventAdded    = "added"
+	TaskEventAssigned = "assigned"
+	TaskEventStatus   = "status"
+	TaskEventComment  = "comment"
+)
+
+// TaskEvent is one entry in a task's history: who did what, and when. A
+// comment is an entry whose Body is the comment. Status is the task's
+// status after an entry that changed it. Entries are never edited.
+type TaskEvent struct {
+	ID     int64      `json:"id"`
+	TaskID int64      `json:"task_id"`
+	Actor  string     `json:"actor"`
+	Kind   string     `json:"kind"`
+	Body   string     `json:"body,omitempty"`
+	Status TaskStatus `json:"status,omitempty"`
+	At     time.Time  `json:"at"`
 }
 
 // MaxRoomPost caps a room post's body in bytes.
