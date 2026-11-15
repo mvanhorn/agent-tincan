@@ -554,45 +554,62 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTasks lists the tasks the calling agent may read, oldest first,
-// MaxTaskPage to a page; after is the last id of the page before.
+// MaxTaskPage to a page; after is the last id of the page before. Done and
+// dropped tasks are listed only with closed=1; without it the answer says
+// how many of each the caller may read.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	viewer := s.agent(w, r)
 	if viewer == "" {
 		return
 	}
-	tasks, next, ok := s.taskPage(w, r, viewer)
-	if !ok {
-		return
+	if out, _, ok := s.taskPage(w, r, viewer); ok {
+		writeJSON(w, http.StatusOK, out)
 	}
-	out := map[string]any{"tasks": tasks}
-	if next != 0 {
-		out["next_after"] = next
-	}
-	writeJSON(w, http.StatusOK, out)
+}
+
+// closedTaskCounts is how many done and dropped tasks a listing that left
+// them out could have listed.
+type closedTaskCounts struct {
+	Done    int `json:"done"`
+	Dropped int `json:"dropped"`
 }
 
 // taskPage reads one page of the tasks viewer may read, with each detail
 // and result cut to its start: the whole text is on the task's own route.
-// next is the after of the following page, 0 on the last.
-func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, viewer string) (tasks []envelope.Task, next int64, ok bool) {
+// It returns the answer's fields but for the tasks, which the caller adds:
+// next_after, the after of the following page, when there is one, and
+// closed, the counts, when the closed parameter did not ask for the done
+// and dropped tasks themselves.
+func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, viewer string) (out map[string]any, tasks []envelope.Task, ok bool) {
 	after, err := nonNegIntParam(r, "after")
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
-		return nil, 0, false
+		return nil, nil, false
 	}
-	tasks, err = s.store.Tasks(r.Context(), viewer, after, MaxTaskPage+1)
+	closed := r.URL.Query().Get("closed") == "1"
+	tasks, err = s.store.Tasks(r.Context(), viewer, after, MaxTaskPage+1, closed)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
-		return nil, 0, false
+		return nil, nil, false
 	}
+	out = map[string]any{}
 	if len(tasks) > MaxTaskPage {
 		tasks = tasks[:MaxTaskPage]
-		next = tasks[len(tasks)-1].ID
+		out["next_after"] = tasks[len(tasks)-1].ID
+	}
+	if !closed {
+		var counts closedTaskCounts
+		if counts.Done, counts.Dropped, err = s.store.ClosedTasks(r.Context(), viewer); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return nil, nil, false
+		}
+		out["closed"] = counts
 	}
 	for i := range tasks {
 		tasks[i].Detail, tasks[i].Result = approvalPreview(tasks[i].Detail), approvalPreview(tasks[i].Result)
 	}
-	return tasks, next, true
+	out["tasks"] = tasks
+	return out, tasks, true
 }
 
 // handleTask returns one task the calling agent may read, whole, with its
@@ -820,17 +837,18 @@ func (s *Server) ownerAgent(w http.ResponseWriter, r *http.Request) string {
 }
 
 // handleAdminTasks lists every task for an admin device, a page at a time
-// as handleTasks does. A tailnet caller also gets, with each task, one
-// nonce for each decision the task's status allows, bound to its device; a
-// browser (the owner page) must send the nonce back to decide. This
-// listing is the only place they are issued. As with the held listing,
+// and with or without the done and dropped ones as handleTasks does. A
+// tailnet caller also gets, with each task on the page, one nonce for each
+// decision the task's status allows, bound to its device; a browser (the
+// owner page) must send the nonce back to decide. This listing is the only
+// place they are issued, so the nonce to reopen a task comes with closed=1. As with the held listing,
 // every tailnet caller gets them and the local admin socket, which has no
 // device, gets none.
 func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
 	}
-	tasks, next, ok := s.taskPage(w, r, "")
+	out, tasks, ok := s.taskPage(w, r, "")
 	if !ok {
 		return
 	}
@@ -874,10 +892,7 @@ func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 			row.ResetNonce = issue(decisionReset)
 		}
 	}
-	out := map[string]any{"tasks": list}
-	if next != 0 {
-		out["next_after"] = next
-	}
+	out["tasks"] = list
 	writeJSON(w, http.StatusOK, out)
 }
 

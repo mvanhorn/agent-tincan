@@ -613,8 +613,130 @@ func TestTaskDecisionsSendNonce(t *testing.T) {
 	if !strings.Contains(funcBody(t, app, "schedule"), "state.tasksFresh = false") {
 		t.Error("schedule must mark the task list stale when the page hides or returns")
 	}
-	if !strings.Contains(funcBody(t, app, "refreshTasksOnce"), `api("GET", "/v1/admin/tasks"`) {
+	if !strings.Contains(funcBody(t, app, "listTasks"), `api("GET", "/v1/admin/tasks"`) {
 		t.Error("the nonces must come from the admin task listing")
+	}
+}
+
+// The poll reads the live tasks alone and shows the relay's counts on the
+// Done and Dropped buttons. The closed tasks are read only while the Tasks
+// tab shows one of those groups open, or a closed task's row is in use, and
+// a list of them the page cap cut short says so.
+func TestTaskPollLeavesClosedTasksOut(t *testing.T) {
+	app := read(t, "app.js")
+	list := funcBody(t, app, "listTasks")
+	for _, want := range []string{
+		`(closed ? ["closed=1"] : []).concat(after ? ["after=" + after] : []).join("&")`,
+		"page < MAX_TASK_PAGES",
+		"if (res.data.closed) out.counts = res.data.closed;",
+		"out.cut = true;",
+	} {
+		if !strings.Contains(list, want) {
+			t.Errorf("listTasks lacks %s", want)
+		}
+	}
+	once := funcBody(t, app, "refreshTasksOnce")
+	for _, want := range []string{
+		"const closed = closedOnce || closedWanted() || closedInUse();",
+		"const all = closed ? await listTasks(true) : null;",
+		"const live = !all || all.cut ? await listTasks(false) : null;",
+		"if (failed.status === 403) clearTasks();",
+		"cut = old.length;",
+		"Object.assign(counts, live.counts);",
+		"state.taskClosed = counts;",
+		"state.taskClosedCut = cut;",
+	} {
+		if !strings.Contains(once, want) {
+			t.Errorf("refreshTasksOnce lacks %s", want)
+		}
+	}
+	if n := strings.Count(app, "listTasks(true)"); n != 1 {
+		t.Errorf("%d reads of the closed tasks, want the one in refreshTasksOnce", n)
+	}
+	wanted := funcBody(t, app, "closedWanted")
+	if !strings.Contains(wanted, `state.tab === "tasks" &&`) || !strings.Contains(wanted, `getAttribute("aria-expanded") === "true"`) {
+		t.Error("the closed tasks must be read only while the Tasks tab shows Done or Dropped open")
+	}
+	if !strings.Contains(funcBody(t, app, "closedInUse"), "taskIsClosed(entry.task) && taskPinned(entry)") {
+		t.Error("a closed task's row in use must keep being read")
+	}
+	_, toggles, ok := strings.Cut(app, "for (const name of TASK_CLOSED) {\n  const toggle")
+	if !ok {
+		t.Fatal("app.js does not wire the Done and Dropped buttons")
+	}
+	toggles, _, _ = strings.Cut(toggles, "\n}\n")
+	if !strings.Contains(toggles, "refreshTasks();") {
+		t.Error("opening Done or Dropped must read the closed tasks")
+	}
+	render := funcBody(t, app, "renderTasks")
+	for _, want := range []string{
+		"TASK_CLOSED.includes(name) ? Math.max(state.taskClosed[name], by[name].length) : by[name].length",
+		`$("tasks-closed-note").hidden = !cut || !closedWanted();`,
+		`"Only the first " + cut + " closed tasks are shown here.`,
+	} {
+		if !strings.Contains(render, want) {
+			t.Errorf("renderTasks lacks %s", want)
+		}
+	}
+	took := funcBody(t, app, "tookTask")
+	if !strings.Contains(took, "counts[entry.task.status] - 1") || !strings.Contains(took, "counts[task.status]++") {
+		t.Error("the page's own decision must move the counts of closed tasks")
+	}
+	if !strings.Contains(read(t, "index.html"), `<p id="tasks-closed-note" class="meta" hidden></p>`) {
+		t.Error("index.html lacks the note for a list of closed tasks cut short")
+	}
+}
+
+// A device that stops being an admin's loses its tasks with its held asks,
+// in the poll that learns it, and a listing on its way cannot put them back.
+func TestTasksClearedWhenNotAdmin(t *testing.T) {
+	app := read(t, "app.js")
+	_, branch, ok := strings.Cut(funcBody(t, app, "refresh"), "if (held.status === 403) {")
+	if !ok {
+		t.Fatal("refresh has no branch for a device that is not an admin's")
+	}
+	branch, _, _ = strings.Cut(branch, "\n    }\n")
+	for _, want := range []string{"state.notAdmin = true;", "state.held.clear();", "clearTasks();", "return;"} {
+		if !strings.Contains(branch, want) {
+			t.Errorf("the not-admin branch of refresh lacks %s", want)
+		}
+	}
+	if strings.Index(branch, "clearTasks();") > strings.Index(branch, "return;") {
+		t.Error("refresh must clear the tasks before it returns")
+	}
+	clear := funcBody(t, app, "clearTasks")
+	for _, want := range []string{"taskEpoch++;", "mergeTasks([]);", "state.taskAsks.clear();", "state.taskClosed = { done: 0, dropped: 0 };", "state.taskClosedCut = 0;", "state.tasksLoaded = false;", "state.tasksFresh = false;"} {
+		if !strings.Contains(clear, want) {
+			t.Errorf("clearTasks lacks %s", want)
+		}
+	}
+}
+
+// A row that changes group, or whose focused control the new status hides,
+// gets focus back: on that control when it can still take it, else on the
+// row's head button, else on the button of the closed group it went behind.
+func TestTaskRowKeepsFocusThroughAMove(t *testing.T) {
+	app := read(t, "app.js")
+	render := funcBody(t, app, "renderTasks")
+	captured := strings.Index(render, "const had = document.activeElement;")
+	if captured < 0 || captured > strings.Index(render, "updateTaskCard(entry);") {
+		t.Error("renderTasks must note the focused control before it changes any row")
+	}
+	restored := strings.Index(render, "if (focused && taskFocusLost(had)) focusTask(focused, had);")
+	if restored < strings.LastIndex(render, ".remove()") {
+		t.Error("renderTasks must give focus back after every list is in place")
+	}
+	if !strings.Contains(funcBody(t, app, "focusTask"), "[had, entry.c.head, toggle].find((node) => node && taskFocusable(node))") {
+		t.Error("focusTask must fall back from the control to the row's head button")
+	}
+	focusable := funcBody(t, app, "taskFocusable")
+	for _, want := range []string{"!node.isConnected", "node.disabled", "n.hidden"} {
+		if !strings.Contains(focusable, want) {
+			t.Errorf("taskFocusable lacks %s", want)
+		}
+	}
+	if !strings.Contains(funcBody(t, app, "decideTask"), "if (had && taskFocusLost(had)) focusTask(entry, had);") {
+		t.Error("decideTask must give focus back to the row whose button was pressed")
 	}
 }
 

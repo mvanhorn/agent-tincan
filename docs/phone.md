@@ -58,7 +58,7 @@ Tasks are grouped, each group with a count:
 - Working: tasks with an ask open, and where that ask stands: held for your approval, waiting to be picked up, or picked up.
 - Open: tasks with no ask under them and no assignee.
 - Yours: open tasks marked as your own to do.
-- Done and Dropped: closed tasks, folded away behind their counts. Reopen puts one back to open.
+- Done and Dropped: closed tasks, folded away behind their counts. The page reads only the counts until you open one of the two, so a long history costs the page nothing; it then reads the closed tasks, and keeps them current while either is open. Reopen puts a task back to open, or to proposed when it was never approved. Past 10,000 tasks in all, the page shows the oldest closed ones and says how many; `tincan tasks --owner --closed` lists every one.
 
 Tap a task to open it. It shows what is wanted, the latest result, the history (the latest 5 entries, with the older ones behind a control) and a comment box. A comment wakes nobody; the next attempt at the task carries it. The buttons depend on the task's status:
 

@@ -841,6 +841,10 @@ type listedTask struct {
 type taskListing struct {
 	Tasks     []listedTask `json:"tasks"`
 	NextAfter int64        `json:"next_after"`
+	Closed    *struct {
+		Done    int `json:"done"`
+		Dropped int `json:"dropped"`
+	} `json:"closed"`
 }
 
 // taskCall makes one task route call as c.
@@ -1365,7 +1369,16 @@ func TestTaskDecisionsNeedNonceFromBrowser(t *testing.T) {
 		t.Fatalf("task after done = %+v", got)
 	}
 
-	if code := decide("reopen", row().ReopenNonce); code != http.StatusOK {
+	// A done task is off the listing, and so is its reopen nonce, until the
+	// page asks for the closed tasks.
+	var live, all taskListing
+	if code, body := pageCall(t, page, "GET", "/v1/admin/tasks", "", nil, &live); code != http.StatusOK || len(live.Tasks) != 0 || live.Closed == nil || live.Closed.Done != 1 {
+		t.Fatalf("listing after done: %d %s", code, body)
+	}
+	if code, body := pageCall(t, page, "GET", "/v1/admin/tasks?closed=1", "", nil, &all); code != http.StatusOK || len(all.Tasks) != 1 || all.Tasks[0].ReopenNonce == "" || all.Tasks[0].DropNonce != "" {
+		t.Fatalf("listing with closed after done: %d %s", code, body)
+	}
+	if code := decide("reopen", all.Tasks[0].ReopenNonce); code != http.StatusOK {
 		t.Fatalf("reopen from the page: %d", code)
 	}
 	if code := decide("done", first.DoneNonce); code != http.StatusConflict {
@@ -1391,6 +1404,109 @@ func TestTaskDecisionsNeedNonceFromBrowser(t *testing.T) {
 	events := m.events(t, id)
 	if last := events[len(events)-1]; last.Actor != envelope.TaskOwner || last.Status != envelope.TaskOpen {
 		t.Fatalf("history after the owner's decisions = %+v", last)
+	}
+}
+
+// A listing leaves done and dropped tasks out and says how many of each the
+// caller may read; closed=1 lists them instead. Both page by id, so closed
+// tasks cost a listing without them nothing, and the admin listing issues
+// nonces for the rows of its page.
+func TestTaskListingLeavesOutClosedUnlessAsked(t *testing.T) {
+	m := newTaskMesh(t)
+	page := hardened(t, m.Mesh, "admin")
+	ctx := t.Context()
+	const old = relay.MaxTaskPage + 5
+	dropped := 0
+	for i := range old {
+		to := envelope.TaskDone
+		if i%4 == 0 {
+			to = envelope.TaskDropped
+			dropped++
+		}
+		task := m.add(t, envelope.Task{Filer: envelope.TaskOwner, Title: fmt.Sprintf("old %d", i)})
+		if _, err := m.Store.SetTaskStatus(ctx, task.ID, to, envelope.TaskOwner, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wanted := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Still wanted"}).Task.ID
+	gone := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "No longer wanted"}).Task.ID
+	taskDo(t, m.grok, "POST", taskPath(gone, "/drop"), nil)
+
+	// An agent: its own closed task is counted, the owner's are not its to
+	// read.
+	var mine taskListing
+	if err := m.grok.Raw(ctx, "GET", "/v1/tasks", nil, &mine); err != nil {
+		t.Fatal(err)
+	}
+	if len(mine.Tasks) != 1 || mine.Tasks[0].ID != wanted || mine.NextAfter != 0 || mine.Closed == nil || mine.Closed.Done != 0 || mine.Closed.Dropped != 1 {
+		t.Fatalf("agent listing = %+v, closed %+v", mine.Tasks, mine.Closed)
+	}
+	var raw map[string]any
+	if err := m.grok.Raw(ctx, "GET", "/v1/tasks?closed=1", nil, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _ := raw["tasks"].([]any); len(rows) != 2 || raw["closed"] != nil {
+		t.Fatalf("agent listing with closed = %v", raw)
+	}
+	if err := m.muse.Raw(ctx, "GET", "/v1/tasks", nil, &mine); err != nil {
+		t.Fatal(err)
+	}
+	if len(mine.Tasks) != 1 || mine.Closed == nil || mine.Closed.Done != 0 || mine.Closed.Dropped != 0 {
+		t.Fatalf("another agent's listing = %+v, closed %+v", mine.Tasks, mine.Closed)
+	}
+
+	// The owner page: one page of live tasks however many are closed.
+	get := func(query string) taskListing {
+		t.Helper()
+		var out taskListing
+		if code, body := pageCall(t, page, "GET", "/v1/admin/tasks"+query, "", nil, &out); code != http.StatusOK {
+			t.Fatalf("admin listing %q from the page: %d %s", query, code, body)
+		}
+		return out
+	}
+	live := get("")
+	if len(live.Tasks) != 1 || live.NextAfter != 0 || live.Closed == nil || live.Closed.Done != old-dropped || live.Closed.Dropped != dropped+1 {
+		t.Fatalf("admin listing = %d tasks, next_after %d, closed %+v", len(live.Tasks), live.NextAfter, live.Closed)
+	}
+	if row := live.Tasks[0]; row.ID != wanted || row.DoneNonce == "" || row.DropNonce == "" || row.ReopenNonce != "" {
+		t.Fatalf("admin listing row = %+v", row)
+	}
+	first := get("?closed=1")
+	if len(first.Tasks) != relay.MaxTaskPage || first.NextAfter != first.Tasks[len(first.Tasks)-1].ID || first.Closed != nil {
+		t.Fatalf("admin listing with closed = %d tasks, next_after %d, closed %+v", len(first.Tasks), first.NextAfter, first.Closed)
+	}
+	for _, row := range first.Tasks {
+		if row.ReopenNonce == "" || row.DoneNonce != "" || row.DropNonce != "" {
+			t.Fatalf("closed row = %+v", row)
+		}
+	}
+	rest := get(fmt.Sprintf("?closed=1&after=%d", first.NextAfter))
+	if len(rest.Tasks) != 7 || rest.NextAfter != 0 || rest.Closed != nil {
+		t.Fatalf("second page with closed = %d tasks, next_after %d, closed %+v", len(rest.Tasks), rest.NextAfter, rest.Closed)
+	}
+	if a, b := rest.Tasks[5], rest.Tasks[6]; a.ID != wanted || a.DoneNonce == "" || b.ID != gone || b.ReopenNonce == "" {
+		t.Fatalf("last rows with closed = %+v, %+v", a, b)
+	}
+	// A nonce from the listing with closed reopens the task.
+	if code, body := pageCall(t, page, "POST", adminTaskPath(gone, "/reopen"), "", map[string]string{"nonce": rest.Tasks[6].ReopenNonce}, nil); code != http.StatusOK {
+		t.Fatalf("reopen with the listing's nonce: %d %s", code, body)
+	}
+
+	// More live tasks than a page: the cursor walks them, and each page
+	// carries the counts.
+	for i := range relay.MaxTaskPage {
+		m.add(t, envelope.Task{Filer: envelope.TaskOwner, Title: fmt.Sprintf("new %d", i)})
+	}
+	live = get("")
+	if len(live.Tasks) != relay.MaxTaskPage || live.Tasks[0].ID != wanted || live.NextAfter == 0 || live.Closed == nil || live.Closed.Dropped != dropped {
+		t.Fatalf("first page of live tasks = %d tasks, next_after %d, closed %+v", len(live.Tasks), live.NextAfter, live.Closed)
+	}
+	live = get(fmt.Sprintf("?after=%d", live.NextAfter))
+	if len(live.Tasks) != 2 || live.NextAfter != 0 || live.Closed == nil || live.Closed.Done != old-dropped {
+		t.Fatalf("second page of live tasks = %d tasks, next_after %d, closed %+v", len(live.Tasks), live.NextAfter, live.Closed)
+	}
+	if code, body := pageCall(t, page, "GET", "/v1/admin/tasks?after=x", "", nil, nil); code != http.StatusBadRequest {
+		t.Fatalf("listing with a bad cursor: %d %s", code, body)
 	}
 }
 

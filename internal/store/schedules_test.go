@@ -226,7 +226,7 @@ func TestAddRepeatingTaskIsOneWrite(t *testing.T) {
 	if _, _, err := s.AddRepeatingTask(ctx, envelope.Task{Filer: "grokbot", Title: "one too many"}, repeat); !errors.Is(err, ErrScheduleLimit) {
 		t.Fatalf("repeat over the schedule limit: %v", err)
 	}
-	if tasks, err := s.Tasks(ctx, "", 0, 10); err != nil || len(tasks) != 1 {
+	if tasks, err := s.Tasks(ctx, "", 0, 10, true); err != nil || len(tasks) != 1 {
 		t.Fatalf("tasks after the refused adds = %+v, %v", tasks, err)
 	}
 }

@@ -18,7 +18,7 @@ import (
 func onlyTask(t *testing.T, m *testrelay.Mesh, agent string) envelope.Task {
 	t.Helper()
 	var mine []envelope.Task
-	list, err := client.Tasks(t.Context(), m.Client(t, agent), false)
+	list, _, err := client.Tasks(t.Context(), m.Client(t, agent), false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestListTasksShowsOnlyVisibleTasks(t *testing.T) {
 	}
 
 	var hidden, open int64
-	list, err := client.Tasks(t.Context(), m.Client(t, "grokbot"), false)
+	list, _, err := client.Tasks(t.Context(), m.Client(t, "grokbot"), false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,8 +165,12 @@ func TestListTasksShowsOnlyVisibleTasks(t *testing.T) {
 	if out := call(t, grok, "list_tasks", nil); !strings.Contains(out, "Dropped (1)") || strings.Contains(out, "open for anyone") {
 		t.Fatalf("list_tasks after a drop = %q", out)
 	}
-	if out := call(t, grok, "list_tasks", map[string]any{"closed": true}); !strings.Contains(out, "open for anyone") {
+	if out := call(t, grok, "list_tasks", map[string]any{"closed": true}); !strings.Contains(out, "Dropped (1)\n  #") || !strings.Contains(out, "open for anyone") {
 		t.Fatalf("list_tasks with closed = %q", out)
+	}
+	// The count is of the closed tasks the caller may read.
+	if out := call(t, muse, "list_tasks", nil); strings.Contains(out, "Dropped") {
+		t.Fatalf("list_tasks counts a dropped task its caller may not read: %q", out)
 	}
 	if out := call(t, session(t, m, "instinct"), "list_tasks", map[string]any{"closed": true}); strings.Contains(out, "open for anyone") || !strings.Contains(out, "for instinct alone") {
 		t.Fatalf("assignee's list_tasks = %q", out)

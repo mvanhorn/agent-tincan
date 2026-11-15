@@ -91,32 +91,61 @@ func AddTask(ctx context.Context, c Rawer, owner bool, a TaskAdd) (TaskResult, e
 	return out, err
 }
 
+// TaskCounts is how many done and dropped tasks a listing covers.
+type TaskCounts struct {
+	Done    int `json:"done"`
+	Dropped int `json:"dropped"`
+}
+
 // Tasks lists the tasks this agent may read, or with owner every task
-// (admin devices only), oldest first. Each detail and result is cut to its
-// start; Task reads one whole.
-func Tasks(ctx context.Context, c Rawer, owner bool) ([]envelope.Task, error) {
+// (admin devices only), oldest first. Done and dropped tasks are listed
+// only with closed; either way the counts say how many of each there are.
+// Each detail and result is cut to its start; Task reads one whole.
+func Tasks(ctx context.Context, c Rawer, owner, closed bool) ([]envelope.Task, TaskCounts, error) {
 	if err := requireTasks(ctx, c); err != nil {
-		return nil, err
+		return nil, TaskCounts{}, err
 	}
 	var list []envelope.Task
+	var counts TaskCounts
 	var after int64
+	path := tasksPath(owner) + "?"
+	if closed {
+		path += "closed=1&"
+	}
 	for {
 		var out struct {
 			Tasks     []envelope.Task `json:"tasks"`
 			NextAfter int64           `json:"next_after"`
+			Closed    *TaskCounts     `json:"closed"`
 		}
-		if err := c.Raw(ctx, "GET", tasksPath(owner)+"?after="+strconv.FormatInt(after, 10), nil, &out); err != nil {
-			return nil, err
+		if err := c.Raw(ctx, "GET", path+"after="+strconv.FormatInt(after, 10), nil, &out); err != nil {
+			return nil, TaskCounts{}, err
 		}
 		list = append(list, out.Tasks...)
+		if out.Closed != nil {
+			counts = *out.Closed
+		}
 		if out.NextAfter == 0 {
-			return list, nil
+			break
 		}
 		if out.NextAfter <= after {
-			return nil, errors.New("relay repeated a task page")
+			return nil, TaskCounts{}, errors.New("relay repeated a task page")
 		}
 		after = out.NextAfter
 	}
+	if closed {
+		// The relay counts only what it leaves out.
+		counts = TaskCounts{}
+		for _, t := range list {
+			switch t.Status {
+			case envelope.TaskDone:
+				counts.Done++
+			case envelope.TaskDropped:
+				counts.Dropped++
+			}
+		}
+	}
+	return list, counts, nil
 }
 
 // Task reads task id whole with its history, oldest first: one this agent
@@ -176,8 +205,9 @@ func DropTask(ctx context.Context, c Rawer, owner bool, id int64, note string) (
 
 // DecideTask runs one of the owner's decisions on task id (admin devices
 // only): TaskApprove opens a proposed task, TaskDone closes an open or
-// returned one, TaskReopen puts a done or dropped one back to open, and
-// TaskReset sets its count of agent assigns back to zero.
+// returned one, TaskReopen puts a done or dropped one back to open (or to
+// proposed when it was never approved), and TaskReset sets its count of
+// agent assigns back to zero.
 func DecideTask(ctx context.Context, c Rawer, decision string, id int64, note string) (envelope.Task, error) {
 	return taskCall(ctx, c, taskPath(true, id, "/"+decision), map[string]string{"note": note})
 }
@@ -208,9 +238,10 @@ var taskGroups = []struct {
 }
 
 // FormatTasks renders a task list for tincan tasks, grouped by status.
-// Done and dropped tasks are counted, and listed only with closed.
-func FormatTasks(list []envelope.Task, closed bool) string {
-	if len(list) == 0 {
+// Done and dropped tasks are counted, from counts, and listed only when
+// list holds them.
+func FormatTasks(list []envelope.Task, counts TaskCounts) string {
+	if len(list) == 0 && counts == (TaskCounts{}) {
 		return "No tasks.\n"
 	}
 	var b strings.Builder
@@ -221,13 +252,17 @@ func FormatTasks(list []envelope.Task, closed bool) string {
 				lines = append(lines, "  "+taskLine(t)+"\n")
 			}
 		}
-		if len(lines) == 0 {
+		n := len(lines)
+		switch g.status {
+		case envelope.TaskDone:
+			n = counts.Done
+		case envelope.TaskDropped:
+			n = counts.Dropped
+		}
+		if n == 0 {
 			continue
 		}
-		fmt.Fprintf(&b, "%s (%d)\n", g.title, len(lines))
-		if !closed && (g.status == envelope.TaskDone || g.status == envelope.TaskDropped) {
-			continue
-		}
+		fmt.Fprintf(&b, "%s (%d)\n", g.title, n)
 		b.WriteString(strings.Join(lines, ""))
 	}
 	return b.String()

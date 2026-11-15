@@ -46,7 +46,7 @@ func TestTaskCallsRefuseOldRelay(t *testing.T) {
 	ctx := t.Context()
 	calls := map[string]func() error{
 		"add":     func() error { _, err := AddTask(ctx, old, false, TaskAdd{Title: "x"}); return err },
-		"list":    func() error { _, err := Tasks(ctx, old, true); return err },
+		"list":    func() error { _, _, err := Tasks(ctx, old, true, false); return err },
 		"show":    func() error { _, _, err := Task(ctx, old, false, 1); return err },
 		"assign":  func() error { _, err := AssignTask(ctx, old, true, 1, "muse"); return err },
 		"comment": func() error { _, err := CommentTask(ctx, old, false, 1, "x"); return err },
@@ -75,8 +75,10 @@ func TestTaskCallsUseTheirRoutes(t *testing.T) {
 			return err
 		}, `POST /v1/tasks {"title":"book","assignee":"muse","source":"mail"}`},
 		{func() error { _, err := AddTask(ctx, f, true, TaskAdd{Title: "book", Key: "k"}); return err }, `POST /v1/admin/tasks {"title":"book","key":"k"}`},
-		{func() error { _, err := Tasks(ctx, f, false); return err }, `GET /v1/tasks?after=0`},
-		{func() error { _, err := Tasks(ctx, f, true); return err }, `GET /v1/admin/tasks?after=0`},
+		{func() error { _, _, err := Tasks(ctx, f, false, false); return err }, `GET /v1/tasks?after=0`},
+		{func() error { _, _, err := Tasks(ctx, f, true, false); return err }, `GET /v1/admin/tasks?after=0`},
+		{func() error { _, _, err := Tasks(ctx, f, false, true); return err }, `GET /v1/tasks?closed=1&after=0`},
+		{func() error { _, _, err := Tasks(ctx, f, true, true); return err }, `GET /v1/admin/tasks?closed=1&after=0`},
 		{func() error { _, _, err := Task(ctx, f, false, 7); return err }, `GET /v1/tasks/7?after=0`},
 		{func() error { _, _, err := Task(ctx, f, true, 7); return err }, `GET /v1/admin/tasks/7?after=0`},
 		{func() error { _, err := AssignTask(ctx, f, false, 7, "muse"); return err }, `POST /v1/tasks/7/assign {"to":"muse"}`},
@@ -116,18 +118,26 @@ func TestAddTaskResult(t *testing.T) {
 }
 
 // A listing and a task's history are read to the end, a page at a time, and
-// a relay that hands back the same page is not followed forever.
+// a relay that hands back the same page is not followed forever. A listing
+// without the closed tasks returns the relay's counts of them, and one with
+// them counts the ones it read.
 func TestTasksReadEveryPage(t *testing.T) {
 	ctx := t.Context()
 	f := &taskRelay{answers: map[string]string{
-		"GET /v1/tasks?after=0":   `{"tasks":[{"id":1},{"id":2}],"next_after":2}`,
-		"GET /v1/tasks?after=2":   `{"tasks":[{"id":3}]}`,
-		"GET /v1/tasks/9?after=0": `{"task":{"id":9,"status":"working"},"events":[{"id":4},{"id":5}],"next_after":5}`,
-		"GET /v1/tasks/9?after=5": `{"task":{"id":9,"status":"returned"},"events":[{"id":6}]}`,
+		"GET /v1/tasks?after=0":          `{"tasks":[{"id":1},{"id":2}],"next_after":2,"closed":{"done":4,"dropped":1}}`,
+		"GET /v1/tasks?after=2":          `{"tasks":[{"id":3}],"closed":{"done":5,"dropped":1}}`,
+		"GET /v1/tasks?closed=1&after=0": `{"tasks":[{"id":1},{"id":2,"status":"done"}],"next_after":2}`,
+		"GET /v1/tasks?closed=1&after=2": `{"tasks":[{"id":3,"status":"dropped"},{"id":4,"status":"done"}]}`,
+		"GET /v1/tasks/9?after=0":        `{"task":{"id":9,"status":"working"},"events":[{"id":4},{"id":5}],"next_after":5}`,
+		"GET /v1/tasks/9?after=5":        `{"task":{"id":9,"status":"returned"},"events":[{"id":6}]}`,
 	}}
-	list, err := Tasks(ctx, f, false)
-	if err != nil || len(list) != 3 || list[2].ID != 3 {
-		t.Fatalf("list = %+v, %v", list, err)
+	list, counts, err := Tasks(ctx, f, false, false)
+	if err != nil || len(list) != 3 || list[2].ID != 3 || counts != (TaskCounts{Done: 5, Dropped: 1}) {
+		t.Fatalf("list = %+v, %+v, %v", list, counts, err)
+	}
+	list, counts, err = Tasks(ctx, f, false, true)
+	if err != nil || len(list) != 4 || list[3].ID != 4 || counts != (TaskCounts{Done: 2, Dropped: 1}) {
+		t.Fatalf("list with closed = %+v, %+v, %v", list, counts, err)
 	}
 	task, events, err := Task(ctx, f, false, 9)
 	if err != nil || task.Status != envelope.TaskReturned || len(events) != 3 || events[2].ID != 6 {
@@ -140,7 +150,7 @@ func TestTasksReadEveryPage(t *testing.T) {
 		"GET /v1/tasks/9?after=0": `{"task":{"id":9},"events":[{"id":4}],"next_after":4}`,
 		"GET /v1/tasks/9?after=4": `{"task":{"id":9},"events":[{"id":4}],"next_after":4}`,
 	}}
-	if _, err := Tasks(ctx, stuck, false); err == nil {
+	if _, _, err := Tasks(ctx, stuck, false, false); err == nil {
 		t.Fatal("a repeated task page was followed")
 	}
 	if _, _, err := Task(ctx, stuck, false, 9); err == nil {
@@ -153,11 +163,14 @@ func TestFormatTasks(t *testing.T) {
 		{ID: 1, Title: "book the venue", Status: envelope.TaskOpen, Filer: envelope.TaskOwner},
 		{ID: 2, Title: "draft\nthe \x1b[2Kinvite", Status: envelope.TaskWorking, Filer: "grokbot", Assignee: "muse", AskStatus: envelope.StatusDelivered},
 		{ID: 3, Title: "from mail", Status: envelope.TaskProposed, Filer: "grokbot", SuggestedAssignee: "muse", Source: "mail"},
-		{ID: 4, Title: "old one", Status: envelope.TaskDone, Filer: "grokbot"},
 		{ID: 5, Title: "call the bank", Status: envelope.TaskOpen, Filer: "grokbot", Assignee: envelope.TaskOwner},
 		{ID: 6, Title: "check the backups", Status: envelope.TaskReturned, Filer: "grokbot", Assignee: "muse", RepeatSchedule: 3, RepeatEverySeconds: 86400, RepeatTo: "muse"},
 	}
-	out := FormatTasks(list, false)
+	closed := []envelope.Task{
+		{ID: 4, Title: "old one", Status: envelope.TaskDone, Filer: "grokbot"},
+		{ID: 7, Title: "gave up", Status: envelope.TaskDropped, Filer: "grokbot"},
+	}
+	out := FormatTasks(list, TaskCounts{Done: 1})
 	for _, want := range []string{
 		"Open (2)\n  #1 book the venue (filed by the owner)\n  #5 call the bank (filed by grokbot, the owner's own)\n",
 		"Working (1)\n  #2 draft the [2Kinvite (filed by grokbot, with muse, ask delivered)\n",
@@ -175,10 +188,19 @@ func TestFormatTasks(t *testing.T) {
 	if strings.Index(out, "Proposed") > strings.Index(out, "Working") || strings.Index(out, "Working") > strings.Index(out, "Open") {
 		t.Errorf("groups out of order: %q", out)
 	}
-	if out := FormatTasks(list, true); !strings.Contains(out, "#4 old one") {
-		t.Errorf("closed listing lacks the done task: %q", out)
+	if strings.Contains(out, "Dropped") {
+		t.Errorf("listing names a group with no task: %q", out)
 	}
-	if got := FormatTasks(nil, false); got != "No tasks.\n" {
+	if !strings.HasSuffix(out, "Open (2)\n  #1 book the venue (filed by the owner)\n  #5 call the bank (filed by grokbot, the owner's own)\nDone (1)\n") {
+		t.Errorf("the count of done tasks is not the last line: %q", out)
+	}
+	if out := FormatTasks(append(list, closed...), TaskCounts{Done: 1, Dropped: 1}); !strings.HasSuffix(out, "Done (1)\n  #4 old one (filed by grokbot)\nDropped (1)\n  #7 gave up (filed by grokbot)\n") {
+		t.Errorf("closed listing lacks the closed tasks: %q", out)
+	}
+	if got := FormatTasks(nil, TaskCounts{Dropped: 2}); got != "Dropped (2)\n" {
+		t.Errorf("only closed tasks = %q", got)
+	}
+	if got := FormatTasks(nil, TaskCounts{}); got != "No tasks.\n" {
 		t.Fatalf("empty = %q", got)
 	}
 }

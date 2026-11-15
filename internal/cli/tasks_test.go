@@ -102,6 +102,11 @@ func TestTasksCommands(t *testing.T) {
 		t.Fatalf("a done task is listed without --closed: %q", out)
 	}
 	tasksRun(t, []string{"--owner", "--closed"}, "Done (1)\n  #1 Book the venue")
+	// Without --closed the done task is not read from the relay at all.
+	if out := tasksRun(t, []string{"--owner", "--json"}); strings.Contains(out, "Book the venue") {
+		t.Fatalf("tasks --json lists a closed task without --closed: %q", out)
+	}
+	tasksRun(t, []string{"--owner", "--closed", "--json"}, `"title": "Book the venue"`)
 	tasksRun(t, []string{"reopen", "1"}, "Task #1 is now open.")
 	tasksRun(t, []string{"drop", "1", "--owner", "--note", "no party"}, "Task #1 is now dropped.")
 
@@ -153,7 +158,7 @@ func TestTasksOnRelayHostWithoutFlags(t *testing.T) {
 	if out, err := run(t, tasksCmd(), "add", "Feed the cat", "--to", "muse"); !errors.Is(err, errTaskNoAgent) {
 		t.Fatalf("add --to on the relay host = %q, %v", out, err)
 	}
-	if list, err := client.Tasks(t.Context(), m.Client(t, "admin"), true); err != nil || len(list) != 1 {
+	if list, _, err := client.Tasks(t.Context(), m.Client(t, "admin"), true, true); err != nil || len(list) != 1 {
 		t.Fatalf("tasks = %+v, %v", list, err)
 	}
 }
@@ -241,7 +246,7 @@ func TestTasksAssignNeedsAnAgent(t *testing.T) {
 	if got := taskNow(t, m, 1); got.Status != envelope.TaskOpen || got.Assignee != "" || got.CurrentRequest != "" {
 		t.Fatalf("task after a refused assign = %+v", got)
 	}
-	if list, err := client.Tasks(t.Context(), m.Client(t, "admin"), true); err != nil || len(list) != 1 {
+	if list, _, err := client.Tasks(t.Context(), m.Client(t, "admin"), true, true); err != nil || len(list) != 1 {
 		t.Fatalf("tasks = %+v, %v", list, err)
 	}
 	if inbox, err := m.Client(t, "muse").Poll(t.Context(), 0); err != nil || len(inbox.Requests) != 0 {
@@ -268,7 +273,7 @@ func TestTasksOwnerCommandsNeedAnAdminDevice(t *testing.T) {
 	if got := taskNow(t, m, 1); got.Status != envelope.TaskOpen || got.Assignee != "" {
 		t.Fatalf("task after refused decisions = %+v", got)
 	}
-	if list, err := client.Tasks(t.Context(), m.Client(t, "admin"), true); err != nil || len(list) != 1 {
+	if list, _, err := client.Tasks(t.Context(), m.Client(t, "admin"), true, true); err != nil || len(list) != 1 {
 		t.Fatalf("tasks = %+v, %v", list, err)
 	}
 }
@@ -287,7 +292,7 @@ func TestTasksAddRepeating(t *testing.T) {
 			t.Fatalf("tasks %v = %q, want a refusal", args, out)
 		}
 	}
-	if list, err := client.Tasks(t.Context(), m.Client(t, "admin"), true); err != nil || len(list) != 0 {
+	if list, _, err := client.Tasks(t.Context(), m.Client(t, "admin"), true, true); err != nil || len(list) != 0 {
 		t.Fatalf("refused adds stored %+v, %v", list, err)
 	}
 	tasksRun(t, []string{"add", "Check the backups", "--to", "muse", "--every", "24h"},

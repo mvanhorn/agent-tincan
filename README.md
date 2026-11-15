@@ -495,7 +495,7 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `list_schedules` | `tincan schedules` | Your scheduled asks: who each goes to, when it next fires, how often. An admin device adds `--all` for everyone's. |
 | `cancel_schedule` | `tincan unschedule <id>` | Stop a scheduled ask. An admin device with `--relay` or `--socket`, or the relay host, can stop anyone's. |
 | `add_task` | `tincan tasks add <title>` | File a task on the team's shared task list: unassigned, handed to a teammate (`to`, `--to`), or the owner's own (`for_owner`, `--mine`). `source` (`--source mail`) marks text from outside the team, and the task then waits as proposed until the owner approves it. `key` (`--key`) makes a second add return the first task. `every` (`--every 24h`) with a teammate makes it repeat. See [Tasks](#tasks). |
-| `list_tasks` | `tincan tasks` | The tasks you can see, grouped by status. Done and dropped tasks are counted, and listed with `closed: true` (`--closed`). An admin device adds `--owner` for every task. |
+| `list_tasks` | `tincan tasks` | The tasks you can see, grouped by status. Done and dropped tasks are counted, and read from the relay and listed only with `closed: true` (`--closed`). An admin device adds `--owner` for every task. |
 | `get_task` | `tincan tasks show <id>` | One task whole: what is wanted, who has it, the latest result and the history with its comments. |
 | `update_task` | `tincan tasks comment <id> <comment>`, `tincan tasks drop <id>` | Act on a task you can see. `assign` gives an open or returned task to a teammate as an ask from you (tool only; an agent on the CLI hands a task over when it adds it, with `--to`). `comment` adds a note the next attempt carries. `drop` gives up a task you filed while no ask is open under it. |
 | `room_post` | `tincan room post <room> <message>` | Post to a room you are in. An `@name` of a member asks it, and its reply is posted to the room. See [Rooms](#rooms). |
@@ -641,13 +641,13 @@ A task is proposed, open, working, question, returned, done or dropped. Nothing 
 
 | Command | What it does |
 |---|---|
-| `tincan tasks [--owner] [--closed] [--json]` | List the tasks this machine's agent can read, grouped by status. `--owner` lists every task (admin devices only). Done and dropped tasks are counted, and `--closed` lists them. |
+| `tincan tasks [--owner] [--closed] [--json]` | List the tasks this machine's agent can read, grouped by status. `--owner` lists every task (admin devices only). Done and dropped tasks are counted, and `--closed` lists them; without it they are not read from the relay, so `--json` leaves them out too. |
 | `tincan tasks add <title> [--detail <text> \| --detail-stdin] [--to <teammate> \| --mine] [--key <key>] [--source <label>] [--every <duration>] [--owner]` | Add a task: unassigned, handed to a teammate with `--to`, or your own to do with `--mine`. It is filed by this machine's agent, or by you with `--owner`. |
 | `tincan tasks show <id> [--owner]` | One task whole, with its result and history. |
 | `tincan tasks assign <id> [teammate]` | Your assign, from an admin device. With no teammate it prints the team with each one's status and good-at line and changes nothing. A task someone already has is taken from them and their ask cancelled. |
 | `tincan tasks comment <id> <comment> [--owner]` | Add a comment. It wakes nobody; the next attempt at the task carries it. |
 | `tincan tasks drop <id> [--note <why>] [--owner]` | Give a task up. An agent drops only a task it filed, and only while no ask is open under it. With `--owner` any task is dropped and an ask open under it is cancelled. |
-| `tincan tasks approve <id>`, `done <id>`, `reopen <id>`, `reset <id>` | Yours alone, from an admin device or the relay host: open a proposed task, close an open or returned one, put a done or dropped one back to open, and set a task's count of agent assigns back to zero. |
+| `tincan tasks approve <id>`, `done <id>`, `reopen <id>`, `reset <id>` | Yours alone, from an admin device or the relay host: open a proposed task, close an open or returned one, put a done or dropped one back to open (or to proposed, when it was never approved), and set a task's count of agent assigns back to zero. |
 
 Agents use the `add_task`, `list_tasks`, `get_task` and `update_task` tools, or the same `tincan tasks` commands. What stays with you:
 

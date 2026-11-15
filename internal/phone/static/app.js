@@ -37,6 +37,8 @@ const state = {
   tasks: new Map(), // task id -> its row: {task, li, open, events, ...}
   tasksLoaded: false, // the task list has been read at least once
   tasksFresh: false, // the task list was read since the page last came to the foreground
+  taskClosed: { done: 0, dropped: 0 }, // how many done and dropped tasks the relay holds
+  taskClosedCut: 0, // how many closed tasks are listed when the page cap cut their list short, else 0
   taskAsks: new Map(), // request id -> who sent the ask under a question task, and the question
 };
 
@@ -921,6 +923,9 @@ const TASK_OWNER = "@owner";
 const NO_TASK_KINDS = new Set(["phone", "history", "notes", "pass", "council"]);
 // The groups, in the order a task is sorted into the first that fits.
 const TASK_GROUPS = ["proposed", "answer", "returned", "working", "open", "yours", "done", "dropped"];
+// The groups of closed tasks. Each sits behind a button with its count, and
+// their rows are read from the relay only while one is open (closedWanted).
+const TASK_CLOSED = ["done", "dropped"];
 // The groups that wait on the owner; the tab's count is their total.
 const TASK_WAITING = new Set(["proposed", "answer", "returned"]);
 // The owner's decisions, with what the page says once one lands and when
@@ -936,12 +941,16 @@ const TASK_DECISIONS = {
 // How the relay's refusal of a used or expired nonce starts.
 const STALE_TASK_BUTTON = "this task button has expired";
 const HISTORY_SHOWN = 5;
+// The most pages one read of a listing or a history follows. The live
+// tasks stay far under it; a listing with the closed tasks can reach it,
+// and the page then says how many it shows (taskClosedCut).
 const MAX_TASK_PAGES = 50;
 // Off the Tasks tab the list is read on every sixth poll, for the tab's count.
 const TASKS_IDLE_EVERY = 6;
 const taskPath = (id) => "/v1/admin/tasks/" + encodeURIComponent(id);
 const taskWho = (name) => (name === TASK_OWNER ? "owner" : name);
 const taskOff = () => state.offline || state.notAdmin;
+const taskIsClosed = (task) => TASK_CLOSED.includes(task.status);
 const relayError = (res) => (res && res.data && res.data.error) || (res ? "error " + res.status : "offline");
 
 // setText sets node's text only when it changed, so a refresh leaves a
@@ -1342,6 +1351,32 @@ function renderTaskForm() {
   $("task-add").disabled = addingTask || taskOff();
 }
 
+// taskFocusable reports whether node can take focus: it is on the page, not
+// off, and not inside anything hidden.
+function taskFocusable(node) {
+  if (!node.isConnected || node.disabled) return false;
+  for (let n = node; n; n = n.parentNode) {
+    if (n.hidden) return false;
+  }
+  return true;
+}
+
+// taskFocusLost reports whether the focus had held is gone: nothing has it
+// now, or had still does and can no longer take it.
+function taskFocusLost(had) {
+  const now = document.activeElement;
+  return !now || now === document.body || (now === had && !taskFocusable(had));
+}
+
+// focusTask gives focus back to a row: to had, the control that held it,
+// when that can still take it, else to the row's head button, else, for a
+// row now behind a closed Done or Dropped, to that group's button.
+function focusTask(entry, had) {
+  const toggle = TASK_CLOSED.includes(entry.group) ? $("tg-" + entry.group + "-toggle") : null;
+  const to = [had, entry.c.head, toggle].find((node) => node && taskFocusable(node));
+  if (to) to.focus();
+}
+
 // renderTasks updates every row in place and puts each in its group, oldest
 // first. A row is inserted only where it is out of place, and a row in use
 // (taskPinned) is not moved at all.
@@ -1351,6 +1386,11 @@ function renderTasks() {
   for (const name of TASK_GROUPS) by[name] = [];
   let waiting = 0;
   const entries = [...state.tasks.values()].sort((a, b) => a.task.id - b.task.id);
+  // A row that changes group is taken out of one list and put in another,
+  // and a control the new status hides cannot keep focus. Either way the
+  // row gets its focus back once every row is in place.
+  const had = document.activeElement;
+  const focused = had && had !== document.body ? entries.find((entry) => entry.li && entry.li.contains(had)) : undefined;
   for (const entry of entries) {
     if (!entry.li) taskCard(entry);
     updateTaskCard(entry);
@@ -1359,6 +1399,7 @@ function renderTasks() {
     if (!entry.group || !entry.li.parentNode || !taskPinned(entry)) entry.group = group;
     by[entry.group].push(entry);
   }
+  let closed = 0;
   for (const name of TASK_GROUPS) {
     const list = $("tg-" + name);
     const shown = new Set();
@@ -1366,21 +1407,26 @@ function renderTasks() {
       shown.add(entry.li);
       const at = list.children[i];
       if (at === entry.li) return;
-      // A moved row loses focus; give it back to the control that had it.
-      const had = entry.li.contains(document.activeElement) ? document.activeElement : null;
       list.insertBefore(entry.li, at || null);
-      if (had && !had.disabled && !had.hidden) had.focus();
     });
     for (const li of [...list.children]) {
       if (!shown.has(li)) li.remove();
     }
-    $("tg-" + name + "-count").textContent = String(by[name].length);
-    $("tgw-" + name).hidden = by[name].length === 0;
+    // A closed group's count is the relay's: its rows are on the page only
+    // while Done or Dropped is open.
+    const n = TASK_CLOSED.includes(name) ? Math.max(state.taskClosed[name], by[name].length) : by[name].length;
+    if (TASK_CLOSED.includes(name)) closed += n;
+    $("tg-" + name + "-count").textContent = String(n);
+    $("tgw-" + name).hidden = n === 0;
   }
+  if (focused && taskFocusLost(had)) focusTask(focused, had);
+  const cut = state.taskClosedCut;
+  $("tasks-closed-note").hidden = !cut || !closedWanted();
+  setText($("tasks-closed-note"), cut ? "Only the first " + cut + " closed tasks are shown here. tincan tasks --owner --closed lists them all." : "");
   $("tasks-count").textContent = String(waiting);
   $("tasks-count").hidden = waiting === 0;
   $("tasks-count-note").hidden = waiting === 0;
-  $("tasks-empty").hidden = entries.length > 0 || !state.tasksLoaded || state.notAdmin;
+  $("tasks-empty").hidden = entries.length > 0 || closed > 0 || !state.tasksLoaded || state.notAdmin;
 }
 
 // mergeTasks takes a whole listing: rows are kept by task id and given the
@@ -1405,6 +1451,19 @@ function mergeTasks(items) {
     state.tasks.delete(id);
   }
   if (news.length) announce(news.slice(0, 3).join(" ") + (news.length > 3 ? " And " + (news.length - 3) + " more task changes." : ""));
+}
+
+// clearTasks takes every task and all that was read with them off the
+// page, for a device that is not an admin's. A listing on its way is
+// dropped when it lands (taskEpoch).
+function clearTasks() {
+  taskEpoch++;
+  mergeTasks([]);
+  state.taskAsks.clear();
+  state.taskClosed = { done: 0, dropped: 0 };
+  state.taskClosedCut = 0;
+  state.tasksLoaded = false;
+  state.tasksFresh = false;
 }
 
 // readTask reads task id whole with its history after entry after, or null
@@ -1474,8 +1533,8 @@ async function loadTaskAsks(items) {
   }
 }
 
-// refreshTasks reads the whole task list (an admin listing, which carries
-// the nonces for the owner's decisions), then what each open row shows. A
+// refreshTasks reads the task list (an admin listing, which carries the
+// nonces for the owner's decisions), then what each open row shows. A
 // call made while one runs is not dropped: the running one goes again.
 let tasksPolling = false;
 let tasksAgain = false;
@@ -1484,6 +1543,9 @@ let tasksTick = 0;
 // one is dropped and read again, so it cannot put back an older status or a
 // nonce the change voided.
 let taskEpoch = 0;
+// closedOnce makes the next read take the closed tasks whatever is open,
+// to find a row in use that left the live tasks.
+let closedOnce = false;
 async function refreshTasks() {
   if (tasksPolling) {
     tasksAgain = true;
@@ -1501,29 +1563,90 @@ async function refreshTasks() {
   }
 }
 
+// closedWanted reports whether the page shows closed tasks: the Tasks tab
+// is up with Done or Dropped open. Only then does the poll read them.
+function closedWanted() {
+  return state.tab === "tasks" && TASK_CLOSED.some((name) => $("tg-" + name + "-toggle").getAttribute("aria-expanded") === "true");
+}
+
+// closedInUse reports whether a row in use (taskPinned) is a closed task's,
+// such as one marked done with a comment half typed. It is read with the
+// closed tasks until that ends, so the row and its text stay.
+function closedInUse() {
+  return [...state.tasks.values()].some((entry) => entry.li && taskIsClosed(entry.task) && taskPinned(entry));
+}
+
+// listTasks reads one listing to its end: the live tasks with the relay's
+// counts of the closed ones, or with closed every task. cut says the page
+// cap ended it early. Any answer but a listing ends it with that status.
+async function listTasks(closed) {
+  const out = { status: 200, items: [], counts: null, cut: false };
+  let after = 0;
+  for (let page = 0; page < MAX_TASK_PAGES; page++) {
+    const query = (closed ? ["closed=1"] : []).concat(after ? ["after=" + after] : []).join("&");
+    const res = await api("GET", "/v1/admin/tasks" + (query ? "?" + query : ""));
+    if (res.status !== 200 || !res.data) return { status: res.status === 200 ? 0 : res.status };
+    out.items.push(...(res.data.tasks || []));
+    if (res.data.closed) out.counts = res.data.closed;
+    after = res.data.next_after || 0;
+    if (!after) return out;
+  }
+  out.cut = true;
+  return out;
+}
+
 async function refreshTasksOnce() {
   const gen = heldGen, epoch = taskEpoch;
   try {
-    const items = [];
-    let after = 0;
-    for (let page = 0; page < MAX_TASK_PAGES; page++) {
-      const res = await api("GET", "/v1/admin/tasks" + (after ? "?after=" + after : ""));
-      if (res.status === 403) {
-        // Not an admin device: no task may stay on the page.
-        mergeTasks([]);
-        return;
+    const closed = closedOnce || closedWanted() || closedInUse();
+    closedOnce = false;
+    // With the closed tasks, one listing holds every task. When the page
+    // cap cuts it short the live tasks are read on their own, after it, so
+    // none of them is ever missing and theirs is the newer answer.
+    const all = closed ? await listTasks(true) : null;
+    const live = !all || all.cut ? await listTasks(false) : null;
+    const failed = [all, live].find((got) => got && got.status !== 200);
+    if (failed) {
+      // Not an admin device: no task may stay on the page.
+      if (failed.status === 403) clearTasks();
+      return;
+    }
+    let items = all ? all.items : live.items;
+    let cut = 0;
+    if (all && live) {
+      const ids = new Set(live.items.map((task) => task.id));
+      const old = all.items.filter((task) => taskIsClosed(task) && !ids.has(task.id));
+      cut = old.length;
+      items = old.concat(live.items);
+    }
+    // The relay counts the closed tasks it leaves out; a listing that
+    // holds them all is counted here.
+    const counts = { done: 0, dropped: 0 };
+    if (live) {
+      Object.assign(counts, live.counts);
+    } else {
+      for (const task of items) {
+        if (taskIsClosed(task)) counts[task.status]++;
       }
-      if (res.status !== 200 || !res.data) return;
-      items.push(...(res.data.tasks || []));
-      after = res.data.next_after || 0;
-      if (!after) break;
     }
     await loadTaskAsks(items);
     if (epoch !== taskEpoch) {
       tasksAgain = true;
       return;
     }
+    if (!all) {
+      // A row in use that left the live tasks was closed elsewhere: read
+      // it with the closed tasks instead of taking it away.
+      const ids = new Set(items.map((task) => task.id));
+      if ([...state.tasks.values()].some((entry) => entry.li && !ids.has(entry.task.id) && taskPinned(entry))) {
+        closedOnce = true;
+        tasksAgain = true;
+        return;
+      }
+    }
     mergeTasks(items);
+    state.taskClosed = counts;
+    state.taskClosedCut = cut;
     // A listing that started before the page last hid does not count.
     state.tasksFresh = gen === heldGen;
     state.tasksLoaded = true;
@@ -1558,8 +1681,11 @@ function openJoin() {
 
 // tookTask records the relay's answer to this page's own change to a task:
 // the row shows the task as it now stands, with no nonce until the next
-// listing issues fresh ones.
+// listing issues fresh ones, and the counts of closed tasks follow it.
 function tookTask(entry, task) {
+  const counts = state.taskClosed;
+  if (taskIsClosed(entry.task)) counts[entry.task.status] = Math.max(0, counts[entry.task.status] - 1);
+  if (taskIsClosed(task)) counts[task.status]++;
   entry.task = task;
   entry.full = task;
   entry.error = "";
@@ -1581,6 +1707,8 @@ async function decideTask(entry, verb) {
     }
   }
   const nonce = task[verb + "_nonce"];
+  // The pressed button goes off now and may be gone once the answer lands.
+  const had = entry.li.contains(document.activeElement) ? document.activeElement : null;
   entry.busy = true;
   entry.error = "";
   updateTaskCard(entry);
@@ -1609,6 +1737,7 @@ async function decideTask(entry, verb) {
     entry.error = TASK_DECISIONS[verb][1] + ": " + relayError(res);
   }
   renderTasks();
+  if (had && taskFocusLost(had)) focusTask(entry, had);
   refreshTasks();
 }
 
@@ -1723,6 +1852,8 @@ async function refresh() {
       state.notAdmin = true;
       state.held.clear();
       $("held-list").replaceChildren();
+      // The tasks were read as an admin too: none may stay on the page.
+      clearTasks();
       state.loaded = true;
       return;
     }
@@ -2011,12 +2142,16 @@ $("tab-tasks").addEventListener("click", () => { state.tab = "tasks"; render(); 
 $("task-add").addEventListener("click", addTask);
 $("task-join").addEventListener("click", openJoin);
 $("task-for").addEventListener("change", renderTaskForm);
-for (const name of ["done", "dropped"]) {
+for (const name of TASK_CLOSED) {
   const toggle = $("tg-" + name + "-toggle");
   toggle.addEventListener("click", () => {
     const open = toggle.getAttribute("aria-expanded") !== "true";
     toggle.setAttribute("aria-expanded", open ? "true" : "false");
     $("tg-" + name).hidden = !open;
+    // Opening reads the closed tasks; with both shut the next read takes
+    // their rows off the page again.
+    renderTasks();
+    refreshTasks();
   });
 }
 $("room-pick").addEventListener("change", () => {

@@ -50,7 +50,9 @@ var (
 // the task afterwards; the target of an ask that ended while held for the
 // owner is taken out again. source is the outside source the filer declared for
 // the task's text, and suggested_assignee whom the filer asked to have a
-// proposed task go to; NULL for none.
+// proposed task go to; NULL for none. tasks_live is what a listing without
+// the closed tasks walks, so it costs what the live tasks do however many
+// are done or dropped, and tasks_status is what counts those.
 func (s *Store) migrateTasks() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
   id                 INTEGER PRIMARY KEY,
@@ -83,7 +85,9 @@ CREATE TABLE IF NOT EXISTS task_claimants (
   task_id INTEGER NOT NULL REFERENCES tasks(id),
   agent   TEXT NOT NULL,
   PRIMARY KEY (task_id, agent)
-);`)
+);
+CREATE INDEX IF NOT EXISTS tasks_live ON tasks(id) WHERE status NOT IN ('done', 'dropped');
+CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	if err != nil {
 		return err
 	}
@@ -251,9 +255,14 @@ func (s *Store) Task(ctx context.Context, id int64, viewer string) (envelope.Tas
 }
 
 // Tasks lists up to limit of the tasks viewer may read with an id above
-// after, oldest first; viewer "" is an admin's, every task.
-func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int) ([]envelope.Task, error) {
-	rows, err := s.db.QueryContext(ctx, taskSelect+` WHERE `+taskVisible+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, viewer, after, limit)
+// after, oldest first; viewer "" is an admin's, every task. Done and dropped
+// tasks are listed only with closed.
+func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int, closed bool) ([]envelope.Task, error) {
+	live := ""
+	if !closed {
+		live = ` AND t.` + taskOpenStatuses
+	}
+	rows, err := s.db.QueryContext(ctx, taskSelect+` WHERE `+taskVisible+live+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, viewer, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +276,35 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// ClosedTasks counts the done and the dropped tasks viewer may read; viewer
+// "" is an admin's, every one.
+func (s *Store) ClosedTasks(ctx context.Context, viewer string) (done, dropped int, err error) {
+	query, args := `SELECT t.status, COUNT(*) FROM tasks t LEFT JOIN requests q ON q.id = t.current_request
+		WHERE `+taskVisible+` AND t.status IN ('done', 'dropped') GROUP BY t.status`, []any{viewer}
+	if viewer == "" {
+		// Every task: the count is read from the status index alone.
+		query, args = `SELECT status, COUNT(*) FROM tasks WHERE status IN ('done', 'dropped') GROUP BY status`, nil
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return 0, 0, err
+		}
+		if envelope.TaskStatus(status) == envelope.TaskDone {
+			done = n
+		} else {
+			dropped = n
+		}
+	}
+	return done, dropped, rows.Err()
 }
 
 // claimTaskTx gives the task to req, an ask being written in tx as an

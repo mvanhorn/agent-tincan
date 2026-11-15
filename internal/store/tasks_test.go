@@ -125,7 +125,7 @@ func TestAddTaskLimit(t *testing.T) {
 	if _, _, err := s.AddTask(ctx, envelope.Task{Filer: "codex", Title: "one too many"}); !errors.Is(err, ErrTaskLimit) {
 		t.Fatalf("over the limit: %v", err)
 	}
-	if all, err := s.Tasks(ctx, "", 0, 1000); err != nil || len(all) != MaxOpenTasks {
+	if all, err := s.Tasks(ctx, "", 0, 1000, true); err != nil || len(all) != MaxOpenTasks {
 		t.Fatalf("after refusal: %d tasks, %v", len(all), err)
 	}
 	// Another filer has its own count.
@@ -168,7 +168,7 @@ func TestAddTaskDedupesOnKey(t *testing.T) {
 	if fresh.ID == first.ID {
 		t.Fatal("a done task's key matched")
 	}
-	if all, err := s.Tasks(ctx, "", 0, 100); err != nil || len(all) != 5 {
+	if all, err := s.Tasks(ctx, "", 0, 100, true); err != nil || len(all) != 5 {
 		t.Fatalf("tasks = %v, %v", taskIDs(all), err)
 	}
 }
@@ -310,7 +310,7 @@ func TestTasksVisibility(t *testing.T) {
 
 	list := func(viewer string) []int64 {
 		t.Helper()
-		tasks, err := s.Tasks(ctx, viewer, 0, 100)
+		tasks, err := s.Tasks(ctx, viewer, 0, 100, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -368,8 +368,80 @@ func TestTasksVisibility(t *testing.T) {
 		t.Fatalf("hermes get of a proposed task: %v", err)
 	}
 	// Paging: after a cursor, up to a limit.
-	if tasks, err := s.Tasks(ctx, "", filed.ID, 2); err != nil || !same(taskIDs(tasks), assigned.ID, pool.ID) {
+	if tasks, err := s.Tasks(ctx, "", filed.ID, 2, true); err != nil || !same(taskIDs(tasks), assigned.ID, pool.ID) {
 		t.Fatalf("page = %v, %v", taskIDs(tasks), err)
+	}
+}
+
+// A listing leaves done and dropped tasks out unless it asks for them, the
+// count of them follows what the viewer may read, and the listing without
+// them is read from the index of live tasks.
+func TestTasksLeaveOutClosedUnlessAsked(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	var ids []int64
+	for i, filer := range []string{"muse", "muse", "codex", "codex", "codex", "muse"} {
+		ids = append(ids, addTask(t, s, envelope.Task{Filer: filer, Title: fmt.Sprintf("task %d", i)}).ID)
+	}
+	for i, status := range map[int]envelope.TaskStatus{0: envelope.TaskDone, 2: envelope.TaskDropped, 3: envelope.TaskDone, 4: envelope.TaskDone} {
+		if _, err := s.SetTaskStatus(ctx, ids[i], status, envelope.TaskOwner, "", envelope.TaskOpen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// hermes worked on one of codex's done tasks, so it still reads it.
+	if err := s.RecordTaskClaimant(ctx, ids[3], "hermes"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		viewer        string
+		live, all     []int64
+		done, dropped int
+	}{
+		{"", []int64{ids[1], ids[5]}, ids, 3, 1},
+		{"muse", []int64{ids[1], ids[5]}, []int64{ids[0], ids[1], ids[5]}, 1, 0},
+		{"codex", []int64{ids[1], ids[5]}, []int64{ids[1], ids[2], ids[3], ids[4], ids[5]}, 2, 1},
+		{"hermes", []int64{ids[1], ids[5]}, []int64{ids[1], ids[3], ids[5]}, 1, 0},
+	} {
+		live, err := s.Tasks(ctx, c.viewer, 0, 100, false)
+		if err != nil || !slices.Equal(taskIDs(live), c.live) {
+			t.Errorf("%q lists %v, %v; want %v", c.viewer, taskIDs(live), err, c.live)
+		}
+		all, err := s.Tasks(ctx, c.viewer, 0, 100, true)
+		if err != nil || !slices.Equal(taskIDs(all), c.all) {
+			t.Errorf("%q lists %v with closed, %v; want %v", c.viewer, taskIDs(all), err, c.all)
+		}
+		done, dropped, err := s.ClosedTasks(ctx, c.viewer)
+		if err != nil || done != c.done || dropped != c.dropped {
+			t.Errorf("%q counts %d done and %d dropped, %v; want %d and %d", c.viewer, done, dropped, err, c.done, c.dropped)
+		}
+	}
+	// The cursor pages the live tasks alone.
+	if page, err := s.Tasks(ctx, "", ids[1], 100, false); err != nil || !slices.Equal(taskIDs(page), []int64{ids[5]}) {
+		t.Fatalf("page after the first live task = %v, %v", taskIDs(page), err)
+	}
+	plan := func(query string, args ...any) string {
+		t.Helper()
+		rows, err := s.DB().Query(`EXPLAIN QUERY PLAN `+query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, detail)
+		}
+		return strings.Join(out, "; ")
+	}
+	if got := plan(taskSelect+` WHERE `+taskVisible+` AND t.`+taskOpenStatuses+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, "", 0, 100); !strings.Contains(got, "tasks_live") {
+		t.Errorf("the listing of live tasks does not use their index: %s", got)
+	}
+	if got := plan(`SELECT status, COUNT(*) FROM tasks WHERE status IN ('done', 'dropped') GROUP BY status`); !strings.Contains(got, "COVERING INDEX tasks_status") {
+		t.Errorf("the admin's count of closed tasks does not use the status index: %s", got)
 	}
 }
 

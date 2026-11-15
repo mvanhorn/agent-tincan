@@ -446,7 +446,16 @@ func TestPhoneTasksTab(t *testing.T) {
 	if code, body := pageCall(t, page, "POST", adminTaskPath(id, "/drop"), "", map[string]string{"nonce": row.DropNonce}, nil); code != http.StatusConflict || !strings.Contains(body, stale) {
 		t.Fatalf("drop with a nonce the done voided: %d %s", code, body)
 	}
-	row = list()[0]
+	// The page's poll no longer carries the done task, only its count; the
+	// listing the page reads when Done is opened offers reopen.
+	var polled, closed taskListing
+	if code, body := pageCall(t, page, "GET", "/v1/admin/tasks", "", nil, &polled); code != http.StatusOK || len(polled.Tasks) != 0 || polled.Closed == nil || polled.Closed.Done != 1 || polled.Closed.Dropped != 0 {
+		t.Fatalf("listing after done: %d %s", code, body)
+	}
+	if code, body := pageCall(t, page, "GET", "/v1/admin/tasks?closed=1", "", nil, &closed); code != http.StatusOK || len(closed.Tasks) != 1 {
+		t.Fatalf("listing with closed after done: %d %s", code, body)
+	}
+	row = closed.Tasks[0]
 	if row.Status != envelope.TaskDone || row.ReopenNonce == "" || row.DoneNonce != "" || row.DropNonce != "" {
 		t.Fatalf("listing of a done task = %+v", row)
 	}

@@ -732,6 +732,8 @@ add_task (or run `tincan tasks add "<title>" --detail "<what is wanted>"`). to
 and for_owner (or `--mine`) marks it as the owner's own to do. list_tasks (or
 `tincan tasks`) shows the tasks you can see, grouped by status, and get_task
 (or `tincan tasks show <id>`) reads one whole, with its result and history.
+Done and dropped tasks are only counted; closed: true (or `--closed`) lists
+them too.
 update_task assigns an open or returned task to the teammate whose good_at
 line fits (action assign), comments on one (action comment, or `tincan tasks
 comment <id> "<comment>"`) or drops one you filed while no ask is open under it

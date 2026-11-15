@@ -102,14 +102,14 @@ an admin device (or the relay host).`,
 				return err
 			}
 			defer printHeld(cmd, r)
-			list, err := client.Tasks(cmd.Context(), r, owner)
+			list, counts, err := client.Tasks(cmd.Context(), r, owner, closed)
 			if err != nil {
 				return err
 			}
 			if asJSON {
 				return writeJSON(cmd.OutOrStdout(), list)
 			}
-			cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatTasks(list, closed)))
+			cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatTasks(list, counts)))
 			return nil
 		},
 	}
