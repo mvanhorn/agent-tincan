@@ -1406,6 +1406,29 @@ func TestTaskDoneRefusedWhileAskOpen(t *testing.T) {
 	}
 }
 
+// An agent that assigns a task it did not file keeps it in view, and so
+// does the teammate that answered it, claimed or not.
+func TestTaskAssignerAndReplierKeepReading(t *testing.T) {
+	m := newTaskMesh(t)
+	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Book the venue"}).Task.ID
+	ask := taskDo(t, m.instinct, "POST", taskPath(id, "/assign"), map[string]string{"to": "muse"}).Task.CurrentRequest
+	if _, err := m.muse.Reply(t.Context(), ask, "booked", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.task(t, id); got.Status != envelope.TaskReturned {
+		t.Fatalf("task after the answer = %+v", got)
+	}
+	if !seesTask(t, m.instinct, id) {
+		t.Fatal("the agent that assigned the task cannot read what came back")
+	}
+	if !seesTask(t, m.muse, id) {
+		t.Fatal("the teammate that answered the task cannot read it")
+	}
+	if seesTask(t, m.scout, id) {
+		t.Fatal("an agent that took no part reads a returned task")
+	}
+}
+
 // Agents may assign one task five times; the sixth is refused until the
 // owner resets the count. An assign that sent nothing is not counted.
 func TestTaskAgentAssignLimit(t *testing.T) {

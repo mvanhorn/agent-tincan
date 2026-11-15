@@ -387,7 +387,9 @@ func (s *Server) agentAssign(ctx context.Context, a taskAssign) error {
 		}
 		return err
 	}
-	return nil
+	// The assigner could read the task to assign it, and the reply comes
+	// to it: it keeps the task in view once the task leaves the shared pool.
+	return s.store.RecordTaskClaimant(context.WithoutCancel(ctx), a.TaskID, a.From)
 }
 
 // recordTask audits a task action with the task's id and what fields adds,
@@ -633,8 +635,7 @@ func (s *Server) handleAssignTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeTaskNow answers a call that changed task id with the task as it now
-// stands. The caller acted on it, so it is read whole whoever may read it
-// from here on: an agent that assigns a task it did not file hands it on.
+// stands. The caller acted on it, so it is read whole.
 func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, id int64, code int, ev *envelope.TaskEvent) {
 	task, err := s.store.Task(r.Context(), id, "")
 	if err != nil {

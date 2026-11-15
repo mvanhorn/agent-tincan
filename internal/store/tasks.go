@@ -44,8 +44,9 @@ var (
 // so its id only ever names one task. current_request is the one ask open
 // under the task, empty for none; result_request is the ask that produced
 // result. task_events is the task's history, read in id order, which is
-// also time order. task_claimants holds every agent that claimed an ask
-// under the task, which is what lets it keep reading the task afterwards.
+// also time order. task_claimants holds every agent that claimed, answered
+// or assigned an ask under the task, which is what lets it keep reading
+// the task afterwards.
 func (s *Store) migrateTasks() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
   id              INTEGER PRIMARY KEY,
@@ -311,6 +312,13 @@ func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, no
 // result instead, but only while the task is still returned on that
 // request, so a task assigned again since keeps what it has.
 func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
+	// The ask's target can read the task after its reply even when it
+	// replied without claiming first.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_claimants (task_id, agent)
+		SELECT task_id, to_agent FROM requests WHERE id = ? AND task_id IS NOT NULL AND to_agent = ?
+		ON CONFLICT DO NOTHING`, rep.RequestID, rep.From); err != nil {
+		return err
+	}
 	if rep.Replaced {
 		res, err := tx.ExecContext(ctx, `UPDATE tasks SET result = ? WHERE result_request = ? AND status = ? AND current_request = ''
 			AND id = (SELECT task_id FROM requests WHERE id = ?)`, taskResult(rep), rep.RequestID, string(envelope.TaskReturned), rep.RequestID)
@@ -630,8 +638,8 @@ func (s *Store) TaskEvents(ctx context.Context, id, after int64, limit int) ([]e
 	return out, rows.Err()
 }
 
-// RecordTaskClaimant notes that agent claimed an ask under task id, so the
-// agent can read the task from then on. Recording it again changes nothing.
+// RecordTaskClaimant notes that agent took part in task id, by claiming or
+// assigning an ask under it, so the agent can read the task from then on. Recording it again changes nothing.
 func (s *Store) RecordTaskClaimant(ctx context.Context, id int64, agent string) error {
 	return recordTaskClaimant(ctx, s.db, id, agent)
 }
