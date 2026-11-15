@@ -1332,7 +1332,8 @@ func TestRoomToolsOverMCP(t *testing.T) {
 		if strings.Contains(n, "room") {
 			rooms = append(rooms, n)
 		}
-		if membershipTool.MatchString(n) {
+		// add_task files a task; it adds nobody to a room.
+		if n != "add_task" && membershipTool.MatchString(n) {
 			t.Errorf("tool %q looks like it changes room membership", n)
 		}
 	}

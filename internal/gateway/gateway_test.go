@@ -539,4 +539,11 @@ func TestGatewayRoomTools(t *testing.T) {
 	if out, isErr := callText("list_leases", nil); isErr || !strings.Contains(out, "chatgpt") {
 		t.Fatalf("list_leases = %q", out)
 	}
+	// A task filed over the gateway is filed by the token's agent.
+	if out, isErr := callText("add_task", map[string]any{"title": "check the launch copy"}); isErr || !strings.Contains(out, "Added task #1, now open.") {
+		t.Fatalf("add_task = %q", out)
+	}
+	if out, isErr := callText("list_tasks", nil); isErr || !strings.Contains(out, "check the launch copy (filed by chatgpt)") {
+		t.Fatalf("list_tasks = %q", out)
+	}
 }
