@@ -1010,11 +1010,20 @@ function taskStatusText(task) {
   }
 }
 
+// repeatEvery is a repeat's interval in words, in its largest whole unit.
+function repeatEvery(seconds) {
+  for (const [size, unit] of [[86400, "d"], [3600, "h"], [60, "m"]]) {
+    if (seconds % size === 0) return seconds / size + unit;
+  }
+  return seconds + "s";
+}
+
 function taskFacts(task) {
   const facts = [];
   if (task.assignee === TASK_OWNER) facts.push("yours");
   else if (task.assignee) facts.push("assigned to " + task.assignee);
   else facts.push("unassigned");
+  if (task.repeat_every_seconds) facts.push("repeats every " + repeatEvery(task.repeat_every_seconds) + (task.repeat_to ? " for " + task.repeat_to : ""));
   if (task.created_at) facts.push("added " + age(task.created_at) + " ago");
   facts.push("filed by " + taskWho(task.filer));
   facts.push("task " + task.id);

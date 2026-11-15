@@ -34,12 +34,15 @@ func requireTasks(ctx context.Context, c Rawer) error {
 // the same filer return the first task. Source names where the text came
 // from when that is outside the team ("mail", "meeting"); only an agent
 // declares one, and the task then waits for the owner as proposed.
+// EverySeconds makes the task repeat: the relay assigns it to Assignee, a
+// teammate, again that often, within the bounds of a scheduled ask's repeat.
 type TaskAdd struct {
-	Title    string `json:"title"`
-	Detail   string `json:"detail,omitempty"`
-	Assignee string `json:"assignee,omitempty"`
-	Key      string `json:"key,omitempty"`
-	Source   string `json:"source,omitempty"`
+	Title        string `json:"title"`
+	Detail       string `json:"detail,omitempty"`
+	Assignee     string `json:"assignee,omitempty"`
+	Key          string `json:"key,omitempty"`
+	Source       string `json:"source,omitempty"`
+	EverySeconds int64  `json:"every_seconds,omitempty"`
 }
 
 // TaskResult is what the relay answers a task call with: the task after the
@@ -256,8 +259,26 @@ func taskLine(t envelope.Task) string {
 	if t.Source != "" {
 		fmt.Fprintf(&b, ", source %s", t.Source)
 	}
+	if t.RepeatEverySeconds != 0 {
+		fmt.Fprintf(&b, ", repeats %s", taskEvery(t))
+	}
 	b.WriteString(")")
 	return b.String()
+}
+
+// taskEvery is how often a repeating task repeats, as a schedule listing
+// says it.
+func taskEvery(t envelope.Task) string {
+	return fmt.Sprintf("every %v", time.Duration(t.RepeatEverySeconds)*time.Second)
+}
+
+// FormatTaskRepeat is the sentence tincan tasks add and the add_task tool
+// end with for a task that repeats, and "" for one that does not.
+func FormatTaskRepeat(t envelope.Task) string {
+	if t.RepeatEverySeconds == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" It repeats %s for %s until it is done or dropped; stop only the repeat with tincan unschedule %d or cancel_schedule.", taskEvery(t), t.RepeatTo, t.RepeatSchedule)
 }
 
 // FormatTask renders one task whole with its history for tincan tasks show.
@@ -283,6 +304,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 	}
 	if t.AgentAssigns > 0 {
 		fmt.Fprintf(&b, "Agent assigns: %d\n", t.AgentAssigns)
+	}
+	if t.RepeatEverySeconds != 0 {
+		fmt.Fprintf(&b, "Repeats: %s for %s (schedule #%d)\n", taskEvery(t), t.RepeatTo, t.RepeatSchedule)
 	}
 	if t.Detail != "" {
 		fmt.Fprintf(&b, "\nWhat is wanted:\n%s\n", t.Detail)

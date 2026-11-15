@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -270,4 +271,31 @@ func TestTasksOwnerCommandsNeedAnAdminDevice(t *testing.T) {
 	if list, err := client.Tasks(t.Context(), m.Client(t, "admin"), true); err != nil || len(list) != 1 {
 		t.Fatalf("tasks = %+v, %v", list, err)
 	}
+}
+
+// tasks add --every files a task that repeats for the --to teammate, and
+// says how to stop the repeat. It needs a teammate and a duration.
+func TestTasksAddRepeating(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ownerDesk(t, m)
+	for _, args := range [][]string{
+		{"add", "Check the backups", "--every", "24h"},
+		{"add", "Check the backups", "--mine", "--every", "24h"},
+		{"add", "Check the backups", "--to", "muse", "--every", "daily"},
+	} {
+		if out, err := run(t, tasksCmd(), args...); err == nil {
+			t.Fatalf("tasks %v = %q, want a refusal", args, out)
+		}
+	}
+	if list, err := client.Tasks(t.Context(), m.Client(t, "admin"), true); err != nil || len(list) != 0 {
+		t.Fatalf("refused adds stored %+v, %v", list, err)
+	}
+	tasksRun(t, []string{"add", "Check the backups", "--to", "muse", "--every", "24h"},
+		"Added task #1, now working, assigned to muse.\nIt repeats every 24h0m0s for muse until it is done or dropped; stop only the repeat with tincan unschedule ")
+	got := taskNow(t, m, 1)
+	if got.RepeatEverySeconds != 86400 || got.RepeatTo != "muse" || got.Filer != "desk" {
+		t.Fatalf("task = %+v", got)
+	}
+	tasksRun(t, nil, "#1 Check the backups (filed by desk, with muse, ask queued, repeats every 24h0m0s)")
+	tasksRun(t, []string{"show", "1"}, fmt.Sprintf("Repeats: every 24h0m0s for muse (schedule #%d)", got.RepeatSchedule))
 }

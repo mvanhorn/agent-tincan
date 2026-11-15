@@ -122,10 +122,11 @@ CREATE TABLE IF NOT EXISTS task_claimants (
 	return nil
 }
 
-// taskSelect reads tasks with the status of the ask open under each, which
-// is not copied onto the task.
-const taskSelect = `SELECT t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(q.status, '')
-	FROM tasks t LEFT JOIN requests q ON q.id = t.current_request`
+// taskSelect reads tasks with the status of the ask open under each and
+// the schedule each repeats on, neither of which is copied onto the task.
+const taskSelect = `SELECT t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(q.status, ''),
+		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, '')
+	FROM tasks t LEFT JOIN requests q ON q.id = t.current_request LEFT JOIN schedules r ON r.task_id = t.id`
 
 // taskVisible is true for the tasks viewer ?1 may read; an empty
 // viewer is an admin's, every task. An agent reads a task it filed. It reads any other task only
@@ -167,6 +168,18 @@ func getTask(ctx context.Context, q queryer, id int64, viewer string) (envelope.
 // transaction, after its first write, so no other AddTask lands between
 // them.
 func (s *Store) AddTask(ctx context.Context, t envelope.Task) (envelope.Task, bool, error) {
+	return s.addTask(ctx, t, nil)
+}
+
+// AddRepeatingTask is AddTask for a task that repeats on repeat, a schedule
+// stored in the same transaction as AddSchedule stores one, so a task whose
+// schedule is refused (ErrNoAgent, ErrScheduleLimit) is not stored either.
+// A task returned for its key gets no schedule.
+func (s *Store) AddRepeatingTask(ctx context.Context, t envelope.Task, repeat envelope.Schedule) (envelope.Task, bool, error) {
+	return s.addTask(ctx, t, &repeat)
+}
+
+func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.Schedule) (envelope.Task, bool, error) {
 	if t.Status == "" {
 		t.Status = envelope.TaskOpen
 	}
@@ -209,6 +222,12 @@ func (s *Store) AddTask(ctx context.Context, t envelope.Task) (envelope.Task, bo
 	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: t.Filer, Kind: envelope.TaskEventAdded, Status: t.Status}, now); err != nil {
 		return envelope.Task{}, false, err
 	}
+	if repeat != nil {
+		repeat.TaskID = id
+		if _, err := s.addScheduleTx(ctx, tx, *repeat); err != nil {
+			return envelope.Task{}, false, err
+		}
+	}
 	out, err := getTask(ctx, tx, id, "")
 	if err != nil {
 		return envelope.Task{}, false, err
@@ -247,7 +266,9 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 // target, and it is working. The update is conditional on the task having
 // no open ask and being open or returned, so of any number of asks racing
 // for a task one is stored; the others, and an ask under a task that is
-// missing or in any other status, get ErrTaskBusy.
+// missing or in any other status, get ErrTaskBusy. A task that repeats
+// repeats for req's target from now on: its schedule's target follows the
+// assignment here, and nowhere else, so a move to a fallback leaves it.
 func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Request) error {
 	res, err := tx.ExecContext(ctx, `UPDATE tasks SET current_request = ?, assignee = ?, status = ?
 		WHERE id = ? AND current_request = '' AND status IN (?, ?)`,
@@ -259,6 +280,9 @@ func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Reques
 		if err == nil {
 			err = ErrTaskBusy
 		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schedules SET to_agent = ? WHERE task_id = ? AND to_agent != ?`, req.To, req.TaskID, req.To); err != nil {
 		return err
 	}
 	actor := req.From
@@ -393,8 +417,15 @@ func (s *Store) cancelTaskAskTx(ctx context.Context, tx *sql.Tx, id int64) ([]st
 	return append([]string{ask}, closed...), err
 }
 
+// endTaskRepeatTx deletes the schedule task id repeats on, if it has one,
+// inside tx, the transaction that closes the task.
+func endTaskRepeatTx(ctx context.Context, tx *sql.Tx, id int64) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM schedules WHERE task_id = ?`, id)
+	return err
+}
+
 // DropTask gives task id up as actor's change, with note in its history,
-// from any status but done or dropped. An ask open under it is cancelled
+// from any status but done or dropped, and ends its repeat. An ask open under it is cancelled
 // in the same transaction, claimed or not, so its target's later reply is
 // refused as a reply to any cancelled request is; the task then has no
 // assignee. It returns the dropped task and the ids of the requests it
@@ -424,6 +455,9 @@ func (s *Store) DropTask(ctx context.Context, id int64, actor, note string) (env
 		return envelope.Task{}, nil, err
 	}
 	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskDropped}, s.now().UnixMilli()); err != nil {
+		return envelope.Task{}, nil, err
+	}
+	if err := endTaskRepeatTx(ctx, tx, id); err != nil {
 		return envelope.Task{}, nil, err
 	}
 	out, err := getTask(ctx, tx, id, "")
@@ -507,7 +541,8 @@ func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, comme
 // the task is in one of those statuses, and returns ErrTaskState otherwise:
 // the check and the change are one statement, so an ask sent under the task
 // meanwhile either lands first and refuses the change, or finds the new
-// status.
+// status. A task moved to done or dropped stops repeating: its schedule is
+// deleted in the same transaction.
 func (s *Store) SetTaskStatus(ctx context.Context, id int64, to envelope.TaskStatus, actor, note string, from ...envelope.TaskStatus) (envelope.Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -537,6 +572,11 @@ func (s *Store) SetTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 	}
 	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: to}, s.now().UnixMilli()); err != nil {
 		return envelope.Task{}, err
+	}
+	if to == envelope.TaskDone || to == envelope.TaskDropped {
+		if err := endTaskRepeatTx(ctx, tx, id); err != nil {
+			return envelope.Task{}, err
+		}
 	}
 	out, err := getTask(ctx, tx, id, "")
 	if err != nil {
@@ -655,7 +695,7 @@ func scanTask(sc scanner) (envelope.Task, error) {
 	var t envelope.Task
 	var status, ask string
 	var created int64
-	if err := sc.Scan(&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &ask); err != nil {
+	if err := sc.Scan(&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo); err != nil {
 		return envelope.Task{}, err
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()

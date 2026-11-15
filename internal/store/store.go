@@ -600,7 +600,8 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 
 // DeleteAgent removes name and, in the same transaction, the last wake the
 // relay sent it, every idle watch it set or that watches it, every scheduled
-// ask from or to it, its room memberships, and every other agent's fallback
+// ask from or to it (a task that repeated on one stays and no longer
+// repeats), its room memberships, and every other agent's fallback
 // to it, so an agent joined again under
 // the name starts with none and in no rooms. Its room posts stay, shown under
 // its name.

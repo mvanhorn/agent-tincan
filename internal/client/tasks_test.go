@@ -155,6 +155,7 @@ func TestFormatTasks(t *testing.T) {
 		{ID: 3, Title: "from mail", Status: envelope.TaskProposed, Filer: "grokbot", SuggestedAssignee: "muse", Source: "mail"},
 		{ID: 4, Title: "old one", Status: envelope.TaskDone, Filer: "grokbot"},
 		{ID: 5, Title: "call the bank", Status: envelope.TaskOpen, Filer: "grokbot", Assignee: envelope.TaskOwner},
+		{ID: 6, Title: "check the backups", Status: envelope.TaskReturned, Filer: "grokbot", Assignee: "muse", RepeatSchedule: 3, RepeatEverySeconds: 86400, RepeatTo: "muse"},
 	}
 	out := FormatTasks(list, false)
 	for _, want := range []string{
@@ -162,6 +163,7 @@ func TestFormatTasks(t *testing.T) {
 		"Working (1)\n  #2 draft the [2Kinvite (filed by grokbot, with muse, ask delivered)\n",
 		"approval (1)\n  #3 from mail (filed by grokbot, suggested for muse, source mail)\n",
 		"Done (1)\n",
+		"Returned (1)\n  #6 check the backups (filed by grokbot, with muse, repeats every 24h0m0s)\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("%q lacks %q", out, want)
@@ -197,5 +199,22 @@ func TestFormatTask(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("%q lacks %q", out, want)
 		}
+	}
+}
+
+// A repeating task says how often it repeats, for whom, and on which
+// schedule; a task that does not repeat says nothing of it.
+func TestFormatTaskRepeat(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	task := envelope.Task{ID: 6, Title: "check the backups", Status: envelope.TaskOpen, Filer: "grokbot", CreatedAt: now, RepeatSchedule: 3, RepeatEverySeconds: 5400, RepeatTo: "muse"}
+	if out := FormatTask(task, nil, now); !strings.Contains(out, "Repeats: every 1h30m0s for muse (schedule #3)\n") {
+		t.Errorf("%q lacks the repeat", out)
+	}
+	if got, want := FormatTaskRepeat(task), " It repeats every 1h30m0s for muse until it is done or dropped; stop only the repeat with tincan unschedule 3 or cancel_schedule."; got != want {
+		t.Errorf("FormatTaskRepeat = %q, want %q", got, want)
+	}
+	task.RepeatSchedule, task.RepeatEverySeconds, task.RepeatTo = 0, 0, ""
+	if out := FormatTask(task, nil, now); strings.Contains(out, "Repeats") || FormatTaskRepeat(task) != "" {
+		t.Errorf("a task with no repeat shows one: %q", out)
 	}
 }

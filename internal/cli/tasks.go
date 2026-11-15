@@ -128,6 +128,7 @@ func taskAddCmd() *cobra.Command {
 	var side taskSide
 	var in client.TaskAdd
 	var mine, detailStdin, asJSON bool
+	var every string
 	cmd := &cobra.Command{
 		Use:   "add <title...>",
 		Short: "Add a task: unassigned, handed to a teammate with --to, or the owner's own with --mine",
@@ -140,12 +141,28 @@ still sends the ask as this machine's agent, so the machine needs one.
 
 A task whose text came from outside the team names where with --source
 (mail, meeting). It waits as proposed, with nothing sent, until the owner
-approves it.`,
+approves it.
+
+With --every the task repeats: the relay assigns it to the --to teammate
+again that often, as a new attempt on the same task, skipping a time while
+an attempt is still open. Marking the task done or dropping it ends the
+repeat, and tincan unschedule ends the repeat alone. The repeat is one of
+the sending agent's scheduled asks, with their limits.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			in.Title = strings.Join(args, " ")
 			if mine {
 				in.Assignee = envelope.TaskOwner
+			}
+			if every != "" {
+				if in.Assignee == "" || mine {
+					return errors.New("--every needs --to: a repeating task goes to a teammate")
+				}
+				_, interval, err := client.ParseWhen("", every, time.Now())
+				if err != nil {
+					return err
+				}
+				in.EverySeconds = int64(interval / time.Second)
 			}
 			if detailStdin {
 				// One byte over the relay's limit, so too long a detail is
@@ -188,6 +205,9 @@ approves it.`,
 			default:
 				cmd.Printf("Added task #%d, now %s.\n", t.ID, t.Status)
 			}
+			if repeat := client.FormatTaskRepeat(t); repeat != "" && !res.Existing {
+				cmd.Println(strings.TrimSpace(repeat))
+			}
 			return nil
 		},
 	}
@@ -197,6 +217,7 @@ approves it.`,
 	cmd.Flags().BoolVar(&mine, "mine", false, "mark the task as the owner's own to do")
 	cmd.Flags().StringVar(&in.Key, "key", "", "a key of your own; adding again with the same key returns the first task")
 	cmd.Flags().StringVar(&in.Source, "source", "", "where the text came from when that is outside the team, such as mail or meeting")
+	cmd.Flags().StringVar(&every, "every", "", "repeat: assign the task to the --to teammate again this often, such as 24h")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	side.flags(cmd, "file the task as the owner")
 	cmd.MarkFlagsMutuallyExclusive("to", "mine")

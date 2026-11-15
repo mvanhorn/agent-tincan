@@ -21,9 +21,10 @@ var ErrScheduleLimit = errors.New("too many scheduled asks; cancel one first")
 // agent's schedules instead. AUTOINCREMENT keeps a cancelled schedule's id
 // from coming back, so an id only ever names one schedule. blocked marks a
 // recurring schedule whose last fire was rejected, so a run of rejections
-// tells the asker once.
+// tells the asker once. task_id marks a task's repeat: the task each fire
+// starts a new attempt at, NULL for a scheduled ask. A task has at most one.
 func (s *Store) migrateSchedules() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schedules (
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schedules (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   from_agent   TEXT NOT NULL,
   to_agent     TEXT NOT NULL,
@@ -36,11 +37,23 @@ func (s *Store) migrateSchedules() error {
   blocked      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS schedules_next ON schedules(next_at);
-CREATE INDEX IF NOT EXISTS schedules_owner ON schedules(from_agent);`)
+CREATE INDEX IF NOT EXISTS schedules_owner ON schedules(from_agent);`); err != nil {
+		return err
+	}
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('schedules') WHERE name = 'task_id')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE schedules ADD COLUMN task_id INTEGER`); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS schedules_task ON schedules(task_id) WHERE task_id IS NOT NULL`)
 	return err
 }
 
-const scheduleCols = `id, from_agent, to_agent, body, urgent, every_s, next_at, created_at, last_request, blocked`
+const scheduleCols = `id, from_agent, to_agent, body, urgent, every_s, next_at, created_at, last_request, blocked, COALESCE(task_id, 0)`
 
 // AddSchedule stores a new schedule. Both agents must still be in the
 // directory and the owner under MaxSchedules: the checks run in the insert's
@@ -53,9 +66,18 @@ func (s *Store) AddSchedule(ctx context.Context, sch envelope.Schedule) (envelop
 		return envelope.Schedule{}, err
 	}
 	defer tx.Rollback()
-	out, err := scanSchedule(tx.QueryRowContext(ctx, `INSERT INTO schedules (from_agent, to_agent, body, urgent, every_s, next_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING `+scheduleCols,
-		sch.From, sch.To, sch.Body, sch.Urgent, sch.EverySeconds, sch.NextAt.UnixMilli(), s.now().UnixMilli()))
+	out, err := s.addScheduleTx(ctx, tx, sch)
+	if err != nil {
+		return envelope.Schedule{}, err
+	}
+	return out, tx.Commit()
+}
+
+// addScheduleTx is AddSchedule inside tx. The caller commits.
+func (s *Store) addScheduleTx(ctx context.Context, tx *sql.Tx, sch envelope.Schedule) (envelope.Schedule, error) {
+	out, err := scanSchedule(tx.QueryRowContext(ctx, `INSERT INTO schedules (from_agent, to_agent, body, urgent, every_s, next_at, created_at, task_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, 0)) RETURNING `+scheduleCols,
+		sch.From, sch.To, sch.Body, sch.Urgent, sch.EverySeconds, sch.NextAt.UnixMilli(), s.now().UnixMilli(), sch.TaskID))
 	if err != nil {
 		return envelope.Schedule{}, err
 	}
@@ -72,7 +94,7 @@ func (s *Store) AddSchedule(ctx context.Context, sch envelope.Schedule) (envelop
 	if live > MaxSchedules {
 		return envelope.Schedule{}, ErrScheduleLimit
 	}
-	return out, tx.Commit()
+	return out, nil
 }
 
 // Schedules lists owner's schedules, or every schedule with owner "", oldest
@@ -162,7 +184,8 @@ func (s *Store) BlockSchedule(ctx context.Context, id int64, notice envelope.Req
 // CancelSchedule deletes schedule id and returns it. With an owner it
 // touches only that owner's schedule; "" is an admin's, any schedule. It
 // returns ErrNotFound when there is no such schedule, so a caller learns
-// nothing about another agent's.
+// nothing about another agent's. A task's repeat goes the same way: the
+// task stays and no longer repeats.
 func (s *Store) CancelSchedule(ctx context.Context, id int64, owner string) (envelope.Schedule, error) {
 	sch, err := scanSchedule(s.db.QueryRowContext(ctx, `DELETE FROM schedules WHERE id = ? AND ? IN ('', from_agent) RETURNING `+scheduleCols, id, owner))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -174,7 +197,7 @@ func (s *Store) CancelSchedule(ctx context.Context, id int64, owner string) (env
 func scanSchedule(sc scanner) (envelope.Schedule, error) {
 	var sch envelope.Schedule
 	var next, created int64
-	if err := sc.Scan(&sch.ID, &sch.From, &sch.To, &sch.Body, &sch.Urgent, &sch.EverySeconds, &next, &created, &sch.LastRequest, &sch.Blocked); err != nil {
+	if err := sc.Scan(&sch.ID, &sch.From, &sch.To, &sch.Body, &sch.Urgent, &sch.EverySeconds, &next, &created, &sch.LastRequest, &sch.Blocked, &sch.TaskID); err != nil {
 		return envelope.Schedule{}, err
 	}
 	sch.NextAt, sch.CreatedAt = time.UnixMilli(next).UTC(), time.UnixMilli(created).UTC()

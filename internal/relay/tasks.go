@@ -296,13 +296,16 @@ func taskNonceID(id int64) string { return "task:" + strconv.FormatInt(id, 10) }
 
 // taskAdd is the body of an add. Assignee is a teammate, envelope.TaskOwner
 // for the owner's own, or empty. Source names where the text came from when
-// that is outside the team; only an agent declares one.
+// that is outside the team; only an agent declares one. EverySeconds makes
+// the task repeat: the relay assigns it to Assignee again that often, on a
+// schedule with the bounds of a scheduled ask's every_seconds.
 type taskAdd struct {
-	Title    string `json:"title"`
-	Detail   string `json:"detail"`
-	Assignee string `json:"assignee"`
-	Key      string `json:"key"`
-	Source   string `json:"source"`
+	Title        string `json:"title"`
+	Detail       string `json:"detail"`
+	Assignee     string `json:"assignee"`
+	Key          string `json:"key"`
+	Source       string `json:"source"`
+	EverySeconds int64  `json:"every_seconds"`
 }
 
 // taskReply is what a task route answers with: the task after the call.
@@ -335,6 +338,10 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 		err = errors.New("task: text is not UTF-8")
 	case in.Source != "" && !taskSourceRE.MatchString(in.Source):
 		err = errors.New("task: source is a short label such as mail or meeting: lowercase letters, digits and dashes, at most 32")
+	case in.EverySeconds != 0 && (in.Assignee == "" || in.Assignee == envelope.TaskOwner):
+		err = errors.New("task: a repeating task needs a teammate to go to; name one as its assignee")
+	default:
+		err = checkScheduleEvery(in.EverySeconds)
 	}
 	if err != nil {
 		return &StatusError{Code: http.StatusBadRequest, Err: err}
@@ -349,7 +356,13 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 // it with assign. A proposed task is assigned to no one: the assignee is
 // kept as the filer's suggestion. An assign the relay refuses leaves the
 // task stored, open and unassigned, and the refusal in the reply.
-func (s *Server) addTask(ctx context.Context, in taskAdd, filer string, proposed bool, assign func(id int64) error) (taskReply, error) {
+//
+// A task with a repeat is stored with its schedule or not at all. The
+// schedule is from's, the agent the task's asks are sent as, and counts
+// toward its store.MaxSchedules; its first fire is one interval from now,
+// the add itself being the first attempt. The caller has run
+// checkScheduleCaller for from.
+func (s *Server) addTask(ctx context.Context, in taskAdd, filer, from string, proposed bool, assign func(id int64) error) (taskReply, error) {
 	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source}
 	switch {
 	case proposed:
@@ -357,9 +370,20 @@ func (s *Server) addTask(ctx context.Context, in taskAdd, filer string, proposed
 	case in.Assignee == envelope.TaskOwner:
 		task.Assignee = envelope.TaskOwner
 	}
-	task, created, err := s.store.AddTask(ctx, task)
+	var created bool
+	var err error
+	if in.EverySeconds != 0 {
+		every := time.Duration(in.EverySeconds) * time.Second
+		task, created, err = s.store.AddRepeatingTask(ctx, task, envelope.Schedule{From: from, To: in.Assignee, EverySeconds: in.EverySeconds, NextAt: s.cfg.Now().Add(every)})
+		err = scheduleAddError(err, in.Assignee)
+	} else {
+		task, created, err = s.store.AddTask(ctx, task)
+	}
 	if err != nil {
 		return taskReply{}, taskStatusError(err)
+	}
+	if created && task.RepeatSchedule != 0 {
+		s.scheduleCreated(ctx, envelope.Schedule{ID: task.RepeatSchedule, From: from, To: task.RepeatTo, EverySeconds: task.RepeatEverySeconds, NextAt: s.cfg.Now().Add(time.Duration(task.RepeatEverySeconds) * time.Second), TaskID: task.ID})
 	}
 	out := taskReply{Task: task, Existing: !created}
 	if !created || proposed || in.Assignee == "" || in.Assignee == envelope.TaskOwner {
@@ -465,7 +489,8 @@ func writeTaskErr(w http.ResponseWriter, err error) {
 // team waits for the owner as proposed, with nothing sent: one that
 // declares a source, and any filed while a guest's ask is open with the
 // caller, claimed or not, as a schedule made then is refused. An add takes
-// a slot of the caller's send rate, as an ask does.
+// a slot of the caller's send rate, as an ask does. A repeating task makes
+// a schedule, so it is refused when a schedule from the caller would be.
 func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 	from := s.agent(w, r)
 	if from == "" {
@@ -490,13 +515,19 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proposed := in.Source != "" || guestAsks > 0
+	if in.EverySeconds != 0 {
+		if err := s.checkScheduleCaller(r.Context(), from, sess); err != nil {
+			writeTaskErr(w, err)
+			return
+		}
+	}
 	if rp, ok := s.preparer().(RoomPolicy); ok {
 		if err := rp.Charge(from); err != nil {
 			writeErr(w, statusFor(err), err)
 			return
 		}
 	}
-	out, err := s.addTask(r.Context(), in, from, proposed, func(id int64) error {
+	out, err := s.addTask(r.Context(), in, from, from, proposed, func(id int64) error {
 		return s.agentAssign(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Session: sess})
 	})
 	if err != nil {
@@ -838,7 +869,8 @@ func (s *Server) handleAdminTask(w http.ResponseWriter, r *http.Request) {
 // own, or handed to a teammate. Handing it on sends an ask, so that needs
 // an agent on the device, as handleAdminAssignTask does, and is refused
 // before anything is stored without one. The owner's task is never
-// proposed and declares no source.
+// proposed and declares no source. A repeat's schedule belongs to that
+// agent, under the rules of a schedule it makes itself.
 func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
@@ -866,7 +898,13 @@ func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	out, err := s.addTask(r.Context(), in, envelope.TaskOwner, false, func(id int64) error {
+	if in.EverySeconds != 0 {
+		if err := s.checkScheduleCaller(r.Context(), from, sess); err != nil {
+			writeTaskErr(w, err)
+			return
+		}
+	}
+	out, err := s.addTask(r.Context(), in, envelope.TaskOwner, from, false, func(id int64) error {
 		_, err := s.assignTask(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner, Session: sess})
 		return err
 	})

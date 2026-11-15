@@ -354,3 +354,37 @@ func TestInstructionsTeachTasks(t *testing.T) {
 		}
 	}
 }
+
+// add_task with to and every files a task that repeats: the answer says how
+// often and how to stop it, and the relay holds the schedule. every with no
+// teammate, or one that is no duration, is refused before anything is filed.
+func TestAddRepeatingTaskOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	for _, in := range []map[string]any{
+		{"title": "x", "every": "24h"},
+		{"title": "x", "for_owner": true, "every": "24h"},
+		{"title": "x", "to": "muse", "every": "daily"},
+		{"title": "x", "to": "muse", "every": "1m"},
+	} {
+		if out := call(t, cs, "add_task", in); !strings.HasPrefix(out, "ERROR:") {
+			t.Fatalf("add_task %v = %q", in, out)
+		}
+	}
+	out := call(t, cs, "add_task", map[string]any{"title": "check the backups", "to": "muse", "every": "24h"})
+	task := onlyTask(t, m, "grokbot")
+	if task.RepeatEverySeconds != 86400 || task.RepeatTo != "muse" || task.Status != envelope.TaskWorking {
+		t.Fatalf("task = %+v", task)
+	}
+	for _, want := range []string{fmt.Sprintf("Added task #%d, now working, assigned to muse", task.ID), "It repeats every 24h0m0s for muse", fmt.Sprintf("tincan unschedule %d or cancel_schedule", task.RepeatSchedule)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("add_task = %q, lacks %q", out, want)
+		}
+	}
+	if list := call(t, cs, "list_schedules", nil); !strings.Contains(list, fmt.Sprintf("Repeats task #%d.", task.ID)) {
+		t.Errorf("list_schedules = %q", list)
+	}
+	if list := call(t, cs, "list_tasks", nil); !strings.Contains(list, "repeats every 24h0m0s") {
+		t.Errorf("list_tasks = %q", list)
+	}
+}

@@ -720,7 +720,8 @@ const (
 // Schedule is an ask the relay sends later, once or on a repeat. A one-shot
 // has no EverySeconds and goes when it fires. LastRequest is the request
 // its latest fire made, and Blocked is set while its latest fire was
-// rejected.
+// rejected. TaskID marks a task's repeat: each fire starts a new attempt at
+// that task for To instead of sending Body.
 type Schedule struct {
 	ID           int64     `json:"id"`
 	From         string    `json:"from"`
@@ -732,6 +733,7 @@ type Schedule struct {
 	CreatedAt    time.Time `json:"created_at"`
 	LastRequest  string    `json:"last_request,omitempty"`
 	Blocked      bool      `json:"blocked,omitempty"`
+	TaskID       int64     `json:"task_id,omitempty"`
 }
 
 // TaskOwner stands for the owner where a task names its filer or assignee.
@@ -767,7 +769,9 @@ const (
 // the times an agent assigned the task since the owner last reset it.
 // Source is the outside source its filer declared for its text ("mail",
 // "meeting"), and SuggestedAssignee whom the filer asked to have a proposed
-// task go to: the owner decides, and nothing was sent.
+// task go to: the owner decides, and nothing was sent. A task that repeats
+// names its schedule in RepeatSchedule, how often it fires in
+// RepeatEverySeconds, and the teammate each fire assigns it to in RepeatTo.
 type Task struct {
 	ID                int64      `json:"id"`
 	Title             string     `json:"title"`
@@ -784,6 +788,11 @@ type Task struct {
 	Source            string     `json:"source,omitempty"`
 	SuggestedAssignee string     `json:"suggested_assignee,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
+	// The three below are read from the task's schedule, never stored on
+	// the task.
+	RepeatSchedule     int64  `json:"repeat_schedule,omitempty"`
+	RepeatEverySeconds int64  `json:"repeat_every_seconds,omitempty"`
+	RepeatTo           string `json:"repeat_to,omitempty"`
 }
 
 // What a task history entry records.
