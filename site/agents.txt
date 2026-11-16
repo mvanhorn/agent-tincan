@@ -123,6 +123,12 @@ A3. Keep it running as a service, so it restarts after crashes and reboots.
     running `~/.local/bin/tincan relay` with RunAtLoad and KeepAlive true, then
     `launchctl load ~/Library/LaunchAgents/com.agenttincan.relay.plist`.
 
+    So the relay can upgrade itself later (tincan relay-upgrade --latest from an
+    admin device), add --dist <state-dir>/dist and --release-url
+    https://github.com/mvanhorn/agent-tincan/releases/download to the relay's
+    command, or write the service with tincan relay install --self-upgrade.
+    Nothing upgrades the relay unless an admin runs tincan relay-upgrade.
+
     Tell your owner to back up the relay state dir (`tincan relay --help` shows
     it): it holds the database, relay.key and the node identity. With it, the
     relay survives a rebuild without anyone noticing.

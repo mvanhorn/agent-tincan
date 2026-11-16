@@ -24,6 +24,11 @@ var latestReleaseURL = "https://api.github.com/repos/mvanhorn/agent-tincan/relea
 // then carries the same explicit flags an operator could write by hand.
 func applySelfUpgrade(fs *pflag.FlagSet, stateDir string) error {
 	if !fs.Changed("dist") {
+		// The state folder holds every message, so a missing one is made
+		// 0700, as the relay itself makes it, before the dist folder in it.
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			return err
+		}
 		if err := fs.Set("dist", filepath.Join(stateDir, "dist")); err != nil {
 			return err
 		}
@@ -60,10 +65,22 @@ func selfUpgradeWarning(exe, dist string) string {
 			problems = append(problems, fmt.Sprintf("the dist folder %s is not writable by the relay user (%v)", dist, err))
 		}
 	}
-	if len(problems) == 0 {
-		return ""
+	var msgs []string
+	if len(problems) > 0 {
+		msgs = append(msgs, "warning: tincan relay-upgrade will fail on this relay until this is fixed: "+strings.Join(problems, "; "))
 	}
-	return "warning: tincan relay-upgrade will fail on this relay until this is fixed: " + strings.Join(problems, "; ")
+	// Whoever can write the dist folder or the binary's folder can run code
+	// as the relay at the next upgrade (docs/trust-model.md).
+	var open []string
+	for _, p := range []string{dist, filepath.Dir(exe)} {
+		if fi, err := os.Stat(p); p != "" && err == nil && fi.Mode().Perm()&0o022 != 0 {
+			open = append(open, p)
+		}
+	}
+	if len(open) > 0 {
+		msgs = append(msgs, "warning: "+strings.Join(open, " and ")+" can be written by other users, and anyone who can write there can run code as the relay at the next tincan relay-upgrade; keep it writable only by the relay user (chmod go-w)")
+	}
+	return strings.Join(msgs, "\n")
 }
 
 // latestReleaseTag asks GitHub for the newest stable release's tag, on the

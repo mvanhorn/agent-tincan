@@ -67,6 +67,22 @@ func TestApplySelfUpgrade(t *testing.T) {
 	}
 }
 
+// A relay installed before its first start gets a private state folder,
+// as the relay itself would make it, before the dist folder inside it.
+func TestApplySelfUpgradeKeepsStatePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix modes")
+	}
+	state := filepath.Join(t.TempDir(), "tincan-relay")
+	cmd := relayInstallCmd()
+	if err := applySelfUpgrade(cmd.Flags(), state); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(state); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("state folder mode = %v, %v; want 0700", fi.Mode().Perm(), err)
+	}
+}
+
 func TestSelfUpgradeOffer(t *testing.T) {
 	if got := selfUpgradeOffer(""); !strings.Contains(got, "--self-upgrade") || !strings.Contains(got, "relay-upgrade") {
 		t.Fatalf("offer = %q", got)
@@ -101,6 +117,14 @@ func TestSelfUpgradeWarning(t *testing.T) {
 		t.Fatalf("read-only binary folder: warning %q", got)
 	}
 	os.Chmod(bin, 0o755)
+
+	if err := os.Chmod(dist, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if got := selfUpgradeWarning(exe, dist); !strings.Contains(got, dist) || !strings.Contains(got, "other users") {
+		t.Fatalf("dist writable by others: warning %q", got)
+	}
+	os.Chmod(dist, 0o755)
 
 	if err := os.Chmod(dist, 0o555); err != nil {
 		t.Fatal(err)
