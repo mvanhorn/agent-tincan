@@ -356,6 +356,21 @@ func TestTaskHostSuspendedWhenItStopsBeingEligible(t *testing.T) {
 	if e := m.entry(t, m.admin, "muse"); !e.TaskHost || e.TaskHostSuspended != "notes is a service agent" {
 		t.Fatalf("muse as a notes agent = %+v", e)
 	}
+
+	// The owner can always clear a suspended host: only naming one checks
+	// eligibility.
+	if _, err := m.admin.SetTaskHost(t.Context(), "muse", false); err != nil {
+		t.Fatalf("clear a suspended host: %v", err)
+	}
+	if m.stored(t, "muse") {
+		t.Fatal("the clear left the stored mark")
+	}
+	if e := m.entry(t, m.admin, "muse"); e.TaskHost || e.TaskHostSuspended != "" {
+		t.Fatalf("muse after the clear = %+v", e)
+	}
+	if got := m.hostAudit(t, "muse"); len(got) != 2 || got[1] != `{"task_host":false}` {
+		t.Fatalf("audit after the clear = %v", got)
+	}
 }
 
 // Removing a host writes an audit row for the cleared mark, and an agent
