@@ -66,3 +66,15 @@ func (s *Server) ReassignTask(ctx context.Context, a TaskAssign) (envelope.Reque
 func (s *Server) DropTask(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
 	return s.dropTask(ctx, id, actor, note)
 }
+
+// WriteTaskNowAs answers w as a task route answers agent after it changed
+// task id, so a test can see what such an answer hands a task host for a
+// task no route lets it change.
+func (s *Server) WriteTaskNowAs(w http.ResponseWriter, r *http.Request, agent string, id int64) error {
+	view, err := s.hostTaskView(r.Context(), agent)
+	if err != nil {
+		return err
+	}
+	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
+	return nil
+}

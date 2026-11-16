@@ -19,14 +19,21 @@ var ErrTasksUnsupported = errors.New("this relay has no task list; upgrade the r
 // the task list. It runs before every task call, so an older relay answers
 // with one clear error instead of its plain 404.
 func requireTasks(ctx context.Context, c Rawer) error {
+	_, err := taskCapabilities(ctx, c)
+	return err
+}
+
+// taskCapabilities is requireTasks for a call that also needs to know what
+// else the relay advertises.
+func taskCapabilities(ctx context.Context, c Rawer) (Capabilities, error) {
 	caps, err := capabilities(ctx, c)
 	if err != nil {
-		return fmt.Errorf("check relay capabilities: %w", err)
+		return Capabilities{}, fmt.Errorf("check relay capabilities: %w", err)
 	}
 	if !caps.Tasks {
-		return ErrTasksUnsupported
+		return Capabilities{}, ErrTasksUnsupported
 	}
-	return nil
+	return caps, nil
 }
 
 // TaskAdd is a task to file. Assignee is a teammate, envelope.TaskOwner for
@@ -105,31 +112,75 @@ func Tasks(ctx context.Context, c Rawer, owner, closed bool) ([]envelope.Task, T
 	if err := requireTasks(ctx, c); err != nil {
 		return nil, TaskCounts{}, err
 	}
+	list, counts, _, err := readTasks(ctx, c, tasksPath(owner)+"?", closed)
+	return list, counts, err
+}
+
+// TaskHostView is what the relay said of a read that asked for the task
+// host view.
+type TaskHostView struct {
+	// Served is set when the relay answered with the host view: every task,
+	// with the text of the ones the owner never approved withheld.
+	Served bool
+	// Refused is why this agent, a task host the owner named, got its
+	// ordinary view instead; "" for an agent that is no host.
+	Refused string
+}
+
+// hostParam asks a task read for the host view.
+const hostParam = "host=1&"
+
+// HostTasks is Tasks for an agent, asking for the task host view. The relay
+// serves it only to a task host the owner named, and the returned view says
+// whether it did; any other agent gets what Tasks returns. A relay that
+// does not advertise task hosts is not asked.
+func HostTasks(ctx context.Context, c Rawer, closed bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
+		return nil, TaskCounts{}, TaskHostView{}, err
+	}
+	path := tasksPath(false) + "?"
+	if caps.TaskHosts {
+		path += hostParam
+	}
+	return readTasks(ctx, c, path, closed)
+}
+
+// readTasks reads every page of the listing at path, which ends with the
+// parameters before after. The host view is reported served only when every
+// page was.
+func readTasks(ctx context.Context, c Rawer, path string, closed bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
 	var list []envelope.Task
 	var counts TaskCounts
 	var after int64
-	path := tasksPath(owner) + "?"
+	view := TaskHostView{Served: true}
 	if closed {
-		path += "closed=1&"
+		path = strings.Replace(path, "?", "?closed=1&", 1)
 	}
 	for {
 		var out struct {
-			Tasks     []envelope.Task `json:"tasks"`
-			NextAfter int64           `json:"next_after"`
-			Closed    *TaskCounts     `json:"closed"`
+			Tasks       []envelope.Task `json:"tasks"`
+			NextAfter   int64           `json:"next_after"`
+			Closed      *TaskCounts     `json:"closed"`
+			Host        bool            `json:"host,omitempty"`
+			HostRefused string          `json:"host_refused,omitempty"`
 		}
 		if err := c.Raw(ctx, "GET", path+"after="+strconv.FormatInt(after, 10), nil, &out); err != nil {
-			return nil, TaskCounts{}, err
+			return nil, TaskCounts{}, TaskHostView{}, err
 		}
 		list = append(list, out.Tasks...)
 		if out.Closed != nil {
 			counts = *out.Closed
 		}
+		view.Served = view.Served && out.Host
+		if out.HostRefused != "" {
+			view.Refused = out.HostRefused
+		}
 		if out.NextAfter == 0 {
 			break
 		}
 		if out.NextAfter <= after {
-			return nil, TaskCounts{}, errors.New("relay repeated a task page")
+			return nil, TaskCounts{}, TaskHostView{}, errors.New("relay repeated a task page")
 		}
 		after = out.NextAfter
 	}
@@ -145,7 +196,7 @@ func Tasks(ctx context.Context, c Rawer, owner, closed bool) ([]envelope.Task, T
 			}
 		}
 	}
-	return list, counts, nil
+	return list, counts, view, nil
 }
 
 // Task reads task id whole with its history, oldest first: one this agent
@@ -154,6 +205,27 @@ func Task(ctx context.Context, c Rawer, owner bool, id int64) (envelope.Task, []
 	if err := requireTasks(ctx, c); err != nil {
 		return envelope.Task{}, nil, err
 	}
+	return readTask(ctx, c, taskPath(owner, id, "")+"?")
+}
+
+// HostTask is Task for an agent, asking for the task host view as HostTasks
+// does. A task host is shown a task the owner never approved as a withheld
+// row, with no history.
+func HostTask(ctx context.Context, c Rawer, id int64) (envelope.Task, []envelope.TaskEvent, error) {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
+		return envelope.Task{}, nil, err
+	}
+	path := taskPath(false, id, "") + "?"
+	if caps.TaskHosts {
+		path += hostParam
+	}
+	return readTask(ctx, c, path)
+}
+
+// readTask reads the task at path, which ends with the parameters before
+// after, and every page of its history.
+func readTask(ctx context.Context, c Rawer, path string) (envelope.Task, []envelope.TaskEvent, error) {
 	var task envelope.Task
 	var events []envelope.TaskEvent
 	var after int64
@@ -163,7 +235,7 @@ func Task(ctx context.Context, c Rawer, owner bool, id int64) (envelope.Task, []
 			Events    []envelope.TaskEvent `json:"events"`
 			NextAfter int64                `json:"next_after"`
 		}
-		if err := c.Raw(ctx, "GET", taskPath(owner, id, "")+"?after="+strconv.FormatInt(after, 10), nil, &out); err != nil {
+		if err := c.Raw(ctx, "GET", path+"after="+strconv.FormatInt(after, 10), nil, &out); err != nil {
 			return envelope.Task{}, nil, err
 		}
 		task, events = out.Task, append(events, out.Events...)
@@ -268,10 +340,37 @@ func FormatTasks(list []envelope.Task, counts TaskCounts) string {
 	return b.String()
 }
 
+// FormatHostTasks renders the answer to HostTasks. A list served with the
+// host view opens by saying the reader is the owner's task host; its groups
+// are FormatTasks's, which lead with what waits on the owner. A task host
+// that got its ordinary view is told why. Any other list is FormatTasks's.
+func FormatHostTasks(list []envelope.Task, counts TaskCounts, view TaskHostView) string {
+	head := ""
+	switch {
+	case view.Served:
+		head = "You are the owner's task host: this is every task on the list, with what waits on the owner first.\n"
+	case view.Refused != "":
+		head = "This is your ordinary view, not the task host view: " + ScheduleText(view.Refused) + ".\n"
+	}
+	return head + FormatTasks(list, counts)
+}
+
+// taskWithheld stands where the title of a withheld task would be.
+const taskWithheld = "text withheld until the owner approves it"
+
+// taskTitle is a task's title on one line, or for a withheld row the words
+// that say why it has none.
+func taskTitle(t envelope.Task) string {
+	if t.Withheld {
+		return taskWithheld
+	}
+	return ScheduleText(t.Title)
+}
+
 // taskLine is one task on one line of a listing.
 func taskLine(t envelope.Task) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "#%d %s (filed by %s", t.ID, ScheduleText(t.Title), envelope.TaskWho(t.Filer))
+	fmt.Fprintf(&b, "#%d %s (filed by %s", t.ID, taskTitle(t), envelope.TaskWho(t.Filer))
 	switch {
 	case t.Assignee == envelope.TaskOwner:
 		b.WriteString(", the owner's own")
@@ -336,7 +435,7 @@ func FormatTaskRepeat(t envelope.Task) string {
 // own lines.
 func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Task #%d: %s\nStatus: %s\nFiled by: %s at %s\n", t.ID, ScheduleText(t.Title), t.Status, envelope.TaskWho(t.Filer), clockTime(t.CreatedAt, now))
+	fmt.Fprintf(&b, "Task #%d: %s\nStatus: %s\nFiled by: %s at %s\n", t.ID, taskTitle(t), t.Status, envelope.TaskWho(t.Filer), clockTime(t.CreatedAt, now))
 	if t.Assignee != "" {
 		fmt.Fprintf(&b, "Assignee: %s\n", envelope.TaskWho(t.Assignee))
 	}

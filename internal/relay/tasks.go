@@ -582,13 +582,20 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 // handleTasks lists the tasks the calling agent may read, oldest first,
 // MaxTaskPage to a page; after is the last id of the page before. Done and
 // dropped tasks are listed only with closed=1; without it the answer says
-// how many of each the caller may read.
+// how many of each the caller may read. With host=1 the caller asks for the
+// task host view, and the answer's host field says whether it was served
+// (askedTaskView); host_refused says why a named host did not get it.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	viewer := s.agent(w, r)
 	if viewer == "" {
 		return
 	}
-	if out, _, ok := s.taskPage(w, r, viewer); ok {
+	view, ok := s.askedTaskView(w, r, viewer)
+	if !ok {
+		return
+	}
+	if out, _, ok := s.taskPage(w, r, view); ok {
+		view.mark(out)
 		writeJSON(w, http.StatusOK, out)
 	}
 }
@@ -600,20 +607,20 @@ type closedTaskCounts struct {
 	Dropped int `json:"dropped"`
 }
 
-// taskPage reads one page of the tasks viewer may read, with each detail
+// taskPage reads one page of the tasks view shows, with each detail
 // and result cut to its start: the whole text is on the task's own route.
 // It returns the answer's fields but for the tasks, which the caller adds:
 // next_after, the after of the following page, when there is one, and
 // closed, the counts, when the closed parameter did not ask for the done
 // and dropped tasks themselves.
-func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, viewer string) (out map[string]any, tasks []envelope.Task, ok bool) {
+func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, view taskView) (out map[string]any, tasks []envelope.Task, ok bool) {
 	after, err := nonNegIntParam(r, "after")
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return nil, nil, false
 	}
 	closed := r.URL.Query().Get("closed") == "1"
-	tasks, err = s.store.Tasks(r.Context(), viewer, after, MaxTaskPage+1, closed)
+	tasks, err = view.tasks(r.Context(), s.store, after, MaxTaskPage+1, closed)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return nil, nil, false
@@ -625,7 +632,7 @@ func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, viewer string)
 	}
 	if !closed {
 		var counts closedTaskCounts
-		if counts.Done, counts.Dropped, err = s.store.ClosedTasks(r.Context(), viewer); err != nil {
+		if counts.Done, counts.Dropped, err = view.closed(r.Context(), s.store); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return nil, nil, false
 		}
@@ -640,18 +647,24 @@ func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, viewer string)
 
 // handleTask returns one task the calling agent may read, whole, with its
 // history. A task the caller may not read answers as one that does not
-// exist.
+// exist. host=1 asks for the task host view, as on handleTasks.
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
-	if viewer := s.agent(w, r); viewer != "" {
-		s.writeTask(w, r, viewer)
+	viewer := s.agent(w, r)
+	if viewer == "" {
+		return
+	}
+	if view, ok := s.askedTaskView(w, r, viewer); ok {
+		s.writeTask(w, r, view)
 	}
 }
 
-// writeTask answers with the task in r's path as viewer may read it and
+// writeTask answers with the task in r's path as view shows it and
 // its history, oldest first, from the entry after the after parameter: at
 // most maxTaskEvents entries and taskEventsBudget bytes of their text, with
-// next_after when there are more.
-func (s *Server) writeTask(w http.ResponseWriter, r *http.Request, viewer string) {
+// next_after when there are more. A task whose text is withheld from a task
+// host comes as its row alone: its history is the filer's text too, and is
+// not read.
+func (s *Server) writeTask(w http.ResponseWriter, r *http.Request, view taskView) {
 	id, ok := taskID(w, r)
 	if !ok {
 		return
@@ -661,9 +674,16 @@ func (s *Server) writeTask(w http.ResponseWriter, r *http.Request, viewer string
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	task, err := s.store.Task(r.Context(), id, viewer)
+	task, err := view.task(r.Context(), s.store, id)
 	if err != nil {
 		writeTaskErr(w, err)
+		return
+	}
+	out := map[string]any{"task": task}
+	view.mark(out)
+	if task.Withheld {
+		out["events"] = []envelope.TaskEvent{}
+		writeJSON(w, http.StatusOK, out)
 		return
 	}
 	events, err := s.store.TaskEvents(r.Context(), id, after, maxTaskEvents+1)
@@ -671,7 +691,6 @@ func (s *Server) writeTask(w http.ResponseWriter, r *http.Request, viewer string
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := map[string]any{"task": task}
 	size := 0
 	for i, ev := range events {
 		if size += len(ev.Body); i == maxTaskEvents || i > 0 && size > taskEventsBudget {
@@ -686,7 +705,9 @@ func (s *Server) writeTask(w http.ResponseWriter, r *http.Request, viewer string
 
 // handleAssignTask assigns a task the calling agent may read to a
 // teammate, as the caller's own ask. Agents may assign one task
-// store.MaxAgentAssigns times until the owner resets the count.
+// store.MaxAgentAssigns times until the owner resets the count. A task host
+// may assign any task it reads whole (actingTaskView), and its assigns are
+// counted as any agent's are.
 func (s *Server) handleAssignTask(w http.ResponseWriter, r *http.Request) {
 	from := s.agent(w, r)
 	if from == "" {
@@ -707,7 +728,12 @@ func (s *Server) handleAssignTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if _, err := s.store.Task(r.Context(), id, from); err != nil {
+	view, err := s.actingTaskView(r.Context(), from)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := view.whole(r.Context(), s.store, id); err != nil {
 		writeTaskErr(w, err)
 		return
 	}
@@ -716,13 +742,18 @@ func (s *Server) handleAssignTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordTask(r, "task_assigned", from, id, map[string]any{"to": in.To})
-	s.writeTaskNow(w, r, id, http.StatusOK, nil)
+	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
 }
 
 // writeTaskNow answers a call that changed task id with the task as it now
-// stands. The caller acted on it, so it is read whole.
-func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, id int64, code int, ev *envelope.TaskEvent) {
-	task, err := s.store.Task(r.Context(), id, "")
+// stands. The caller acted on it, so it is read whole, except by a task
+// host: what a host is sent of a task is always what its view shows
+// (taskView.task), so no call a host makes hands it text the view withholds.
+func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, view taskView, id int64, code int, ev *envelope.TaskEvent) {
+	if !view.host {
+		view = taskView{}
+	}
+	task, err := view.task(r.Context(), s.store, id)
 	if err != nil {
 		writeTaskErr(w, err)
 		return
@@ -746,7 +777,8 @@ func (s *Server) handleCommentTask(w http.ResponseWriter, r *http.Request) {
 
 // commentTask stores the comment in r's body on the task in its path as
 // actor's, when viewer may read the task; viewer "" is the owner's, any
-// task.
+// task. A task host may comment on any task it reads whole
+// (actingTaskView).
 func (s *Server) commentTask(w http.ResponseWriter, r *http.Request, viewer, actor string) {
 	id, ok := taskID(w, r)
 	if !ok {
@@ -762,7 +794,12 @@ func (s *Server) commentTask(w http.ResponseWriter, r *http.Request, viewer, act
 		writeTaskErr(w, err)
 		return
 	}
-	if _, err := s.store.Task(r.Context(), id, viewer); err != nil {
+	view, err := s.actingTaskView(r.Context(), viewer)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := view.whole(r.Context(), s.store, id); err != nil {
 		writeTaskErr(w, err)
 		return
 	}
@@ -793,7 +830,7 @@ func (s *Server) commentTask(w http.ResponseWriter, r *http.Request, viewer, act
 		return
 	}
 	s.recordTask(r, "task_commented", audited, id, map[string]any{"bytes": len(in.Body)})
-	s.writeTaskNow(w, r, id, http.StatusCreated, &ev)
+	s.writeTaskNow(w, r, view, id, http.StatusCreated, &ev)
 }
 
 // handleDropTask gives up a task the calling agent filed, while no ask is
@@ -875,7 +912,7 @@ func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 	if !s.adminOnly(w, r) {
 		return
 	}
-	out, tasks, ok := s.taskPage(w, r, "")
+	out, tasks, ok := s.taskPage(w, r, taskView{})
 	if !ok {
 		return
 	}
@@ -926,7 +963,7 @@ func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 // handleAdminTask returns any task, whole, with its history.
 func (s *Server) handleAdminTask(w http.ResponseWriter, r *http.Request) {
 	if s.adminOnly(w, r) {
-		s.writeTask(w, r, "")
+		s.writeTask(w, r, taskView{})
 	}
 }
 
@@ -1028,7 +1065,7 @@ func (s *Server) handleAdminAssignTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordTask(r, "task_assigned", "", id, map[string]any{"to": in.To, "as": from})
-	s.writeTaskNow(w, r, id, http.StatusOK, nil)
+	s.writeTaskNow(w, r, taskView{}, id, http.StatusOK, nil)
 }
 
 // handleAdminCommentTask adds the owner's comment to any task.

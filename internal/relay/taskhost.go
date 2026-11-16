@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/store"
@@ -143,4 +144,136 @@ func (s *Server) handleSetTaskHost(w http.ResponseWriter, r *http.Request) {
 // to the gateway. reason names which.
 func (s *Server) recordTaskHostCleared(ctx context.Context, name, reason string) {
 	s.record(ctx, taskHostEvent, "", "", name, store.DetailJSON(map[string]any{"task_host": false, "reason": reason}))
+}
+
+// taskHostGuestAsk is why a task host has its ordinary view while a
+// guest's ask is open with it: what it read as a host could reach the guest
+// in its reply.
+const taskHostGuestAsk = "a guest's ask is open with you, so you have your ordinary view until it ends"
+
+// taskView is how one caller reads tasks: as an admin, as an agent with its
+// ordinary view, or as a task host with the host view. Every task an answer
+// to an agent carries is read through one, so a task host is sent what the
+// host view shows and nothing past it.
+//
+// The host view shows every task but one whose open ask is held for the
+// owner with the host as its target. A task filed as proposed that the
+// owner never approved is shown to a host that did not file it as a
+// withheld row: id, status, filer, source and creation time (the store's
+// HostTask).
+type taskView struct {
+	// viewer is the agent, "" for an admin, who reads every task.
+	viewer string
+	// host is set when the caller reads with the host view.
+	host bool
+	// refused is why a named task host does not have the host view now, ""
+	// for a host that has it and for a caller that is no host.
+	refused string
+	// asked is set when the caller asked for the host view, so the answer
+	// says whether it got it.
+	asked bool
+}
+
+// hostTaskView is the view agent name reads tasks with now: the host view
+// when the owner named it a task host, taskHostRefusal has no objection and
+// no guest's ask is open with it, and its ordinary view otherwise. This is
+// the one place that decides it; whether the caller asked for the host
+// view is its caller's to weigh.
+func (s *Server) hostTaskView(ctx context.Context, name string) (taskView, error) {
+	view := taskView{viewer: name}
+	a, ok, err := s.dir.Agent(ctx, name)
+	if err != nil || !ok || !a.TaskHost {
+		return view, err
+	}
+	if why := s.taskHostRefusal(a); why != "" {
+		view.refused = "you are suspended as a task host: " + why
+		return view, nil
+	}
+	open, err := s.store.OpenGuestAsks(ctx, name)
+	if err != nil {
+		return view, err
+	}
+	if open > 0 {
+		view.refused = taskHostGuestAsk
+		return view, nil
+	}
+	view.host = true
+	return view, nil
+}
+
+// askedTaskView is the view for a read by agent name: the host view only
+// when r asks for it with host=1 and hostTaskView grants it. A read that
+// does not ask is the ordinary view for every caller, so a client that
+// knows nothing of task hosts is answered as before. It writes the error
+// and returns false when the view cannot be decided.
+func (s *Server) askedTaskView(w http.ResponseWriter, r *http.Request, name string) (taskView, bool) {
+	if r.URL.Query().Get("host") != "1" {
+		return taskView{viewer: name}, true
+	}
+	view, err := s.hostTaskView(r.Context(), name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return taskView{}, false
+	}
+	view.asked = true
+	return view, true
+}
+
+// actingTaskView is the view a call that changes a task resolves the task
+// through: hostTaskView for an agent, so a task host acts on what the host
+// view shows it whole, and the admin's for viewer "".
+func (s *Server) actingTaskView(ctx context.Context, viewer string) (taskView, error) {
+	if viewer == "" {
+		return taskView{}, nil
+	}
+	return s.hostTaskView(ctx, viewer)
+}
+
+// mark says in out, the answer to a read, whether the host view was served
+// and, when a named host did not get it, why. It adds nothing to the answer
+// to a read that did not ask.
+func (v taskView) mark(out map[string]any) {
+	if !v.asked {
+		return
+	}
+	out["host"] = v.host
+	if v.refused != "" {
+		out["host_refused"] = v.refused
+	}
+}
+
+// task reads task id as the view shows it. For a task host that may be a
+// withheld row.
+func (v taskView) task(ctx context.Context, st *store.Store, id int64) (envelope.Task, error) {
+	if v.host {
+		return st.HostTask(ctx, id, v.viewer)
+	}
+	return st.Task(ctx, id, v.viewer)
+}
+
+// whole is task for a caller about to act on the task: a row whose text is
+// withheld answers as a task that does not exist, as any task the caller
+// may not read does.
+func (v taskView) whole(ctx context.Context, st *store.Store, id int64) (envelope.Task, error) {
+	t, err := v.task(ctx, st, id)
+	if err == nil && t.Withheld {
+		return envelope.Task{}, store.ErrNoTask
+	}
+	return t, err
+}
+
+// tasks lists one page of the tasks the view shows, as store.Tasks does.
+func (v taskView) tasks(ctx context.Context, st *store.Store, after int64, limit int, closed bool) ([]envelope.Task, error) {
+	if v.host {
+		return st.HostTasks(ctx, v.viewer, after, limit, closed)
+	}
+	return st.Tasks(ctx, v.viewer, after, limit, closed)
+}
+
+// closed counts the done and dropped tasks the view shows.
+func (v taskView) closed(ctx context.Context, st *store.Store) (done, dropped int, err error) {
+	if v.host {
+		return st.ClosedHostTasks(ctx, v.viewer)
+	}
+	return st.ClosedTasks(ctx, v.viewer)
 }

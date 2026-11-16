@@ -16,11 +16,13 @@ import (
 type taskRelay struct {
 	calls   []string
 	answers map[string]string
+	// hosts makes it advertise task hosts as well.
+	hosts bool
 }
 
 func (f *taskRelay) Raw(_ context.Context, method, path string, in, out any) error {
 	if path == "/v1/capabilities" {
-		*(out.(*Capabilities)) = Capabilities{Tasks: true}
+		*(out.(*Capabilities)) = Capabilities{Tasks: true, TaskHosts: f.hosts}
 		return nil
 	}
 	call := method + " " + path
@@ -249,5 +251,130 @@ func TestFormatTaskHeld(t *testing.T) {
 	held.AskStatus = envelope.StatusQueued
 	if got := FormatTaskHeld(held); got != "" {
 		t.Errorf("queued = %q, want nothing", got)
+	}
+}
+
+// HostTasks and HostTask ask for the host view only of a relay that
+// advertises task hosts, on every page, and report what the relay says it
+// served. Against a relay that does not, they make the calls Tasks and Task
+// make and report no host view.
+func TestHostReadsAskOnlyARelayWithTaskHosts(t *testing.T) {
+	ctx := t.Context()
+	f := &taskRelay{hosts: true, answers: map[string]string{
+		"GET /v1/tasks?host=1&after=0":          `{"host":true,"tasks":[{"id":1},{"id":2,"withheld":true}],"next_after":2,"closed":{"done":1,"dropped":0}}`,
+		"GET /v1/tasks?host=1&after=2":          `{"host":true,"tasks":[{"id":3}],"closed":{"done":1,"dropped":0}}`,
+		"GET /v1/tasks?closed=1&host=1&after=0": `{"host":false,"host_refused":"a guest's ask is open with you","tasks":[{"id":1}]}`,
+		"GET /v1/tasks/9?host=1&after=0":        `{"host":true,"task":{"id":9,"status":"dropped","withheld":true},"events":[]}`,
+	}}
+	list, counts, view, err := HostTasks(ctx, f, false)
+	if err != nil || len(list) != 3 || !list[1].Withheld || counts != (TaskCounts{Done: 1}) || view != (TaskHostView{Served: true}) {
+		t.Fatalf("host list = %+v, %+v, %+v, %v", list, counts, view, err)
+	}
+	list, _, view, err = HostTasks(ctx, f, true)
+	if err != nil || len(list) != 1 || view != (TaskHostView{Refused: "a guest's ask is open with you"}) {
+		t.Fatalf("host list while refused = %+v, %+v, %v", list, view, err)
+	}
+	task, events, err := HostTask(ctx, f, 9)
+	if err != nil || !task.Withheld || len(events) != 0 {
+		t.Fatalf("host read = %+v, %+v, %v", task, events, err)
+	}
+	if want := []string{"GET /v1/tasks?host=1&after=0", "GET /v1/tasks?host=1&after=2", "GET /v1/tasks?closed=1&host=1&after=0", "GET /v1/tasks/9?host=1&after=0"}; strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls = %q, want %q", f.calls, want)
+	}
+	// Tasks and Task never ask, whatever the relay advertises.
+	f.calls = nil
+	f.answers["GET /v1/tasks?after=0"] = `{"tasks":[]}`
+	if _, _, err := Tasks(ctx, f, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Task(ctx, f, false, 7); err != nil {
+		t.Fatal(err)
+	}
+	if want := "GET /v1/tasks?after=0\nGET /v1/tasks/7?after=0"; strings.Join(f.calls, "\n") != want {
+		t.Fatalf("calls of the plain reads = %q", f.calls)
+	}
+
+	old := &taskRelay{answers: map[string]string{
+		"GET /v1/tasks?after=0":   `{"tasks":[{"id":1}],"closed":{"done":2,"dropped":0}}`,
+		"GET /v1/tasks/9?after=0": `{"task":{"id":9,"status":"open"},"events":[{"id":4}]}`,
+	}}
+	list, counts, view, err = HostTasks(ctx, old, false)
+	if err != nil || len(list) != 1 || counts != (TaskCounts{Done: 2}) || view != (TaskHostView{}) {
+		t.Fatalf("list from a relay without task hosts = %+v, %+v, %+v, %v", list, counts, view, err)
+	}
+	if task, events, err := HostTask(ctx, old, 9); err != nil || task.ID != 9 || len(events) != 1 {
+		t.Fatalf("read from a relay without task hosts = %+v, %+v, %v", task, events, err)
+	}
+	if want := "GET /v1/tasks?after=0\nGET /v1/tasks/9?after=0"; strings.Join(old.calls, "\n") != want {
+		t.Fatalf("calls to a relay without task hosts = %q", old.calls)
+	}
+	if _, _, _, err := HostTasks(ctx, &oldRelay{}, false); !errors.Is(err, ErrTasksUnsupported) {
+		t.Fatalf("host list from a relay with no task list: %v", err)
+	}
+	if _, _, err := HostTask(ctx, &oldRelay{}, 1); !errors.Is(err, ErrTasksUnsupported) {
+		t.Fatalf("host read from a relay with no task list: %v", err)
+	}
+}
+
+// A list served with the host view opens by saying so, leads with what
+// waits on the owner (proposed, then question, then returned) and prints a
+// withheld row with its id, filer and source in place of text. A named
+// host that did not get the host view is told why; any other list reads as
+// FormatTasks prints it.
+func TestFormatHostTasks(t *testing.T) {
+	list := []envelope.Task{
+		{ID: 1, Title: "book the venue", Status: envelope.TaskOpen, Filer: envelope.TaskOwner},
+		{ID: 2, Title: "draft the invite", Status: envelope.TaskWorking, Filer: "grokbot", Assignee: "muse"},
+		{ID: 3, Title: "check the backups", Status: envelope.TaskReturned, Filer: "grokbot", Assignee: "muse"},
+		{ID: 4, Title: "which venue?", Status: envelope.TaskQuestion, Filer: "grokbot", Assignee: "instinct"},
+		{ID: 5, Status: envelope.TaskProposed, Filer: "grokbot", Source: "mail", Withheld: true},
+		{ID: 6, Title: "the host's own", Status: envelope.TaskProposed, Filer: "muse", Source: "meeting"},
+		{ID: 7, Status: envelope.TaskDropped, Filer: "instinct", Source: "mail", Withheld: true},
+	}
+	out := FormatHostTasks(list, TaskCounts{Dropped: 1}, TaskHostView{Served: true})
+	if !strings.HasPrefix(out, "You are the owner's task host") {
+		t.Errorf("host list does not open by saying so: %q", out)
+	}
+	order := []string{"You are the owner's task host", "Proposed, waiting for the owner's approval (2)", "Question, waiting for an answer (1)", "Returned (1)", "Working (1)", "Open (1)", "Dropped (1)"}
+	at := -1
+	for _, part := range order {
+		i := strings.Index(out, part)
+		if i <= at {
+			t.Fatalf("%q is missing or out of order in %q", part, out)
+		}
+		at = i
+	}
+	for _, want := range []string{
+		"  #5 text withheld until the owner approves it (filed by grokbot, source mail)\n",
+		"  #6 the host's own (filed by muse, source meeting)\n",
+		"Dropped (1)\n  #7 text withheld until the owner approves it (filed by instinct, source mail)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q lacks %q", out, want)
+		}
+	}
+
+	plain := FormatTasks(list[:4], TaskCounts{})
+	if got := FormatHostTasks(list[:4], TaskCounts{}, TaskHostView{}); got != plain {
+		t.Errorf("a list not served with the host view = %q, want %q", got, plain)
+	}
+	refused := FormatHostTasks(list[:4], TaskCounts{}, TaskHostView{Refused: "a guest's ask is open with you"})
+	if !strings.HasSuffix(refused, plain) || !strings.Contains(strings.TrimSuffix(refused, plain), "a guest's ask is open with you") || strings.Contains(refused, "You are the owner's task host") {
+		t.Errorf("a refused host's list = %q", refused)
+	}
+	if got := FormatHostTasks(nil, TaskCounts{}, TaskHostView{Served: true}); !strings.HasPrefix(got, "You are the owner's task host") || !strings.HasSuffix(got, "No tasks.\n") {
+		t.Errorf("an empty host list = %q", got)
+	}
+}
+
+// A withheld task read alone says its text is withheld, with its filer and
+// source.
+func TestFormatTaskWithheld(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	out := FormatTask(envelope.Task{ID: 5, Status: envelope.TaskDropped, Filer: "grokbot", Source: "mail", Withheld: true, CreatedAt: now}, nil, now)
+	for _, want := range []string{"Task #5: text withheld until the owner approves it\n", "Status: dropped\n", "Filed by: grokbot at ", "Source: mail\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q lacks %q", out, want)
+		}
 	}
 }
