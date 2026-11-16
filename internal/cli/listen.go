@@ -108,6 +108,7 @@ unless the process left changes or commits in it.`,
 	cmd.Flags().StringVar(&worktree, "worktree", "", "with --per-request, run each process in a new git worktree of this repository")
 	cmd.Flags().IntVar(&maxWorkers, "max-workers", 2, "with --per-request, how many processes run at once")
 	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Minute, "with --per-request, how long a process may run before it and its children are killed")
+	cmd.AddCommand(listenInstallCmd())
 	return cmd
 }
 

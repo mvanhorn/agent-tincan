@@ -493,3 +493,31 @@ func TestUpgradeRunsServicesRefresh(t *testing.T) {
 		}
 	}
 }
+
+// After the swap, upgrade has the new binary refresh the installed wake
+// scripts, and a failure there does not fail the upgrade.
+func TestUpgradeRunsWakeRefresh(t *testing.T) {
+	m := meshWithDist(t, map[string]string{platformFile: "new binary", "VERSION": "0.4.0"})
+	exe, _ := fakeExe(t)
+	origS := postUpgradeRefresh
+	origW := postUpgradeWakeRefresh
+	t.Cleanup(func() { postUpgradeRefresh, postUpgradeWakeRefresh = origS, origW })
+	postUpgradeRefresh = func(string) (string, error) { return "", nil }
+	var ran string
+	postUpgradeWakeRefresh = func(newExe string) (string, error) {
+		ran = newExe
+		return "left /x/codex.listen/codex-wake.sh: you edited it\n", errors.New("exit status 1")
+	}
+	var out bytes.Buffer
+	if err := upgrade(t.Context(), m.Client(t, "muse"), exe, false, false, &out); err != nil {
+		t.Fatalf("upgrade failed because the wake refresh failed: %v", err)
+	}
+	if ran != exe {
+		t.Fatalf("wake refresh ran %q, want the new binary %q", ran, exe)
+	}
+	for _, want := range []string{"left /x/codex.listen/codex-wake.sh", "tincan listen install --wake"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}

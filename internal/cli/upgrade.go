@@ -158,6 +158,11 @@ func upgrade(ctx context.Context, r *client.Relay, exe string, check, force bool
 	if err != nil {
 		fmt.Fprintf(out, "tincan services refresh did not finish (%v); run it again to update the macOS services.\n", err)
 	}
+	wmsg, werr := postUpgradeWakeRefresh(exe)
+	fmt.Fprint(out, wmsg)
+	if werr != nil {
+		fmt.Fprintf(out, "updating the installed wake scripts did not finish (%v); run tincan listen install --wake <wake> again for each listener.\n", werr)
+	}
 	fmt.Fprint(out, reloadAdvice(mcpserver.ReadLaunches(mcpserver.LaunchDir(client.ConfigPath())), available, mcpserver.LaunchRunning))
 	return nil
 }
@@ -245,6 +250,20 @@ var postUpgradeRefresh = func(exe string) (string, error) {
 		return "", nil
 	}
 	out, err := exec.Command(exe, "services", "refresh", "--restart").CombinedOutput()
+	return string(out), err
+}
+
+// postUpgradeWakeRefresh runs the new binary's wake-script refresh, since
+// only the new binary carries the new release's scripts. It updates the
+// scripts installed by tincan listen install that nobody edited and names
+// the ones it left. Machines with no installed listener skip it. Tests
+// replace it.
+var postUpgradeWakeRefresh = func(exe string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || len(installedListenerConfigs(home, runtime.GOOS)) == 0 {
+		return "", nil
+	}
+	out, err := exec.Command(exe, "listen", "install", "--refresh").CombinedOutput()
 	return string(out), err
 }
 

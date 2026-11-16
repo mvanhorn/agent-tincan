@@ -196,6 +196,15 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	// 6. tincan mcp servers left on another build by an upgrade.
 	add(buildCheck(launches, mcpserver.LaunchRunning))
 
+	// A listener installed by tincan listen install for this agent.
+	if home, err := os.UserHomeDir(); err == nil {
+		if cfg, err := filepath.Abs(client.ConfigPath()); err == nil {
+			if c := listenerCheck(runtime.GOOS, home, cfg, codexConfigPath(home), defaultConfigPath(), launchctl{uid: os.Getuid()}.Loaded); c.Name != "" {
+				add(c)
+			}
+		}
+	}
+
 	// 7. The Tincan extension's native hosts, one per Chrome profile.
 	add(nativeHostsCheck(history.ReadNativeHosts(history.NativeHostsDir())))
 	if runtime.GOOS == "darwin" && exe != "" {
