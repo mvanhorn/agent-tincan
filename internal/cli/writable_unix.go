@@ -22,3 +22,9 @@ func writable(exe string) error {
 	}
 	return nil
 }
+
+// dirWritable reports whether the relay user can write in dir.
+func dirWritable(dir string) error {
+	const wOK = 0x2
+	return syscall.Access(dir, wOK)
+}
