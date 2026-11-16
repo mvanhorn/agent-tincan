@@ -73,7 +73,11 @@ type Capabilities struct {
 	// never sends one without this.
 	GatewayGuests bool `json:"gateway_guests,omitempty"`
 	// Tasks is set by a relay that keeps the shared task list (/v1/tasks).
-	Tasks              bool  `json:"tasks,omitempty"`
+	Tasks bool `json:"tasks,omitempty"`
+	// TaskHosts is set by a relay that stores task hosts and shows them on
+	// the roster. Naming one needs no check of this: an older relay has no
+	// such route and answers its plain 404.
+	TaskHosts          bool  `json:"task_hosts,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`

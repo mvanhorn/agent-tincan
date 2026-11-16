@@ -14,6 +14,9 @@ type Rebind struct {
 	OldNodeName string `json:"old_node_name"`
 	NewNode     string `json:"new_node"`
 	NewNodeName string `json:"new_node_name"`
+	// TaskHostCleared is set when the agent was a task host on its old
+	// node. The owner named the agent on that node, so the move cleared it.
+	TaskHostCleared bool `json:"task_host_cleared,omitempty"`
 }
 
 // Resolved is the agent behind a request, and the rebind that re-admitted
@@ -191,8 +194,10 @@ func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Re
 	if carriesGuest(others) {
 		return Resolved{}, false, nil
 	}
-	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name}
+	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name, TaskHostCleared: a.TaskHost}
 	a.NodeID, a.NodeName, a.NodeUser = n.ID, n.Name, n.User
+	// PutAgent drops the mark for the new node; the row says so too.
+	a.TaskHost = false
 	if err := d.store.PutAgent(ctx, a); err != nil {
 		return Resolved{}, false, err
 	}

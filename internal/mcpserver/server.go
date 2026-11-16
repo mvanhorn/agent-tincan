@@ -714,6 +714,9 @@ func NewWithOptions(b Backend, version string, opts *mcp.ServerOptions, more ...
 				if fallback := a.FallbackField(); fallback != "" {
 					fmt.Fprintf(&out, ", %s", fallback)
 				}
+				if host := a.TaskHostField(); host != "" {
+					fmt.Fprintf(&out, ", %s", host)
+				}
 				if goodAt := a.GoodAtField(); goodAt != "" {
 					fmt.Fprintf(&out, ", %s", goodAt)
 				}

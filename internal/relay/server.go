@@ -479,6 +479,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("PUT /v1/agents/{name}/kind", s.handleSetKind)
 	mux.HandleFunc("PUT /v1/agents/{name}/good-at", s.handleSetGoodAt)
 	mux.HandleFunc("PUT /v1/agents/{name}/fallback", s.handleSetFallback)
+	mux.HandleFunc("PUT /v1/agents/{name}/task-host", s.handleSetTaskHost)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
@@ -703,6 +704,9 @@ func (s *Server) agentOf(r *http.Request) (string, error) {
 		s.record(r.Context(), "rebind", "", "", rb.Agent, store.DetailJSON(map[string]any{
 			"agent": rb.Agent, "old_node": rb.OldNode, "old_node_name": rb.OldNodeName, "new_node": rb.NewNode, "new_node_name": rb.NewNodeName,
 		}))
+		if rb.TaskHostCleared {
+			s.recordTaskHostCleared(r.Context(), rb.Agent, "rebind")
+		}
 	}
 	s.seen(r.Context(), res.Name, r.Header.Get(client.VersionHeader))
 	sess, sessErr := session(r)
@@ -1991,6 +1995,14 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 	if err != nil {
 		log.Printf("agents web status: %v", err)
 	}
+	// Why each named task host may not act as one now, read before taking
+	// s.mu, which the policy lookup takes itself.
+	suspended := map[string]string{}
+	for _, a := range agents {
+		if a.TaskHost {
+			suspended[a.Name] = s.taskHostRefusal(a)
+		}
+	}
 	quietUntil := s.started.Add(s.cfg.ClaimLease)
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
@@ -2004,7 +2016,7 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		if p := persisted[a.Name]; p.After(active) {
 			active = p
 		}
-		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Fallback: a.Fallback, Version: s.versions[a.Name], GuestUntil: a.Guest.Until}
+		info := client.AgentInfo{Name: a.Name, LastPoll: last, LastActive: active, Online: s.polledRecently(last, now), Wake: "none", Kind: a.Kind, GoodAt: a.GoodAt, Fallback: a.Fallback, TaskHost: a.TaskHost, TaskHostSuspended: suspended[a.Name], Version: s.versions[a.Name], GuestUntil: a.Guest.Until}
 		if info.GoodAt == "" {
 			info.GoodAt = onboard.StockGoodAt(a.Name, a.Kind)
 		}
@@ -2050,11 +2062,12 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	name, err := s.dir.Join(r.Context(), r.RemoteAddr, in.Code)
+	j, err := s.dir.JoinAgent(r.Context(), r.RemoteAddr, in.Code)
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
+	name := j.Name
 	if wr, ok := s.wake.(WakeReporter); ok {
 		wr.Joined(name)
 	}
@@ -2063,6 +2076,9 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		joined = store.DetailJSON(map[string]any{"guest_until": a.Guest.Until.UTC()})
 	}
 	s.record(r.Context(), "joined", "", "", name, joined)
+	if j.TaskHostCleared {
+		s.recordTaskHostCleared(r.Context(), name, "joined")
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"name": name})
 }
 
@@ -2182,7 +2198,8 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
 		return
 	}
-	if ok, err := s.dir.Has(r.Context(), in.Name); err != nil {
+	before, ok, err := s.dir.Agent(r.Context(), in.Name)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	} else if !ok {
@@ -2244,6 +2261,10 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.hostStatus, in.Name)
 	s.mu.Unlock()
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
+	if before.TaskHost {
+		// The mark went with the agent's row.
+		s.recordTaskHostCleared(r.Context(), in.Name, "removed")
+	}
 	for _, l := range leases {
 		s.record(r.Context(), "lease_released", "", "", in.Name, store.DetailJSON(map[string]any{"resource": l.Resource, "holder": l.Holder, "reason": "removed"}))
 	}
@@ -2584,10 +2605,25 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		s.connectGuest(w, r, in.Name, in.Replace, *in.Guest)
 		return
 	}
+	// A bind writes a new row for the name, which clears a task host mark.
+	// The connector reports only the code, so the mark is read on each side
+	// of it to say in the audit log that it went.
+	before, _, err := s.dir.Agent(r.Context(), in.Name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 	code, url, err := s.conn.Connect(r.Context(), in.Name, in.Replace)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	if before.TaskHost {
+		if after, ok, err := s.dir.Agent(r.Context(), in.Name); err != nil {
+			log.Printf("connect %s: read task host: %v", in.Name, err)
+		} else if !ok || !after.TaskHost {
+			s.recordTaskHostCleared(r.Context(), in.Name, "connected")
+		}
 	}
 	// The roster shows only stored kinds, and a gateway agent has no shell to
 	// run tincan kind from, so connecting a product name (sesame, chatgpt)

@@ -22,8 +22,11 @@ func (m *MemoryStore) PutAgent(_ context.Context, a Agent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Only SetAgentGoodAt and SetAgentFallback write those; a rewrite keeps
-	// them.
-	a.GoodAt, a.Fallback = m.agents[a.Name].GoodAt, m.agents[a.Name].Fallback
+	// them. The task host mark stays only on a row that carries it and
+	// leaves the agent on the node it had, and is never set here.
+	old := m.agents[a.Name]
+	a.GoodAt, a.Fallback = old.GoodAt, old.Fallback
+	a.TaskHost = a.TaskHost && old.TaskHost && old.NodeID == a.NodeID
 	m.agents[a.Name] = a
 	return nil
 }
@@ -121,6 +124,17 @@ func (m *MemoryStore) SetAgentFallback(_ context.Context, name, to string) (bool
 	a, ok := m.agents[name]
 	if ok {
 		a.Fallback = to
+		m.agents[name] = a
+	}
+	return ok, nil
+}
+
+func (m *MemoryStore) SetAgentTaskHost(_ context.Context, name string, on bool) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[name]
+	if ok {
+		a.TaskHost = on
 		m.agents[name] = a
 	}
 	return ok, nil
