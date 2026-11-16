@@ -1029,9 +1029,12 @@ function repeatEvery(seconds) {
 
 function taskFacts(task) {
   const facts = [];
-  // The owner's own task says so in its status line and its group.
-  if (task.assignee && task.assignee !== TASK_OWNER) facts.push("assigned to " + task.assignee);
-  else if (!task.assignee) facts.push("unassigned");
+  // The owner's own open task says so in its status line; a closed one's
+  // status line does not, so it says so here.
+  if (task.assignee === TASK_OWNER) {
+    if (task.status !== "open") facts.push("yours");
+  } else if (task.assignee) facts.push("assigned to " + task.assignee);
+  else facts.push("unassigned");
   if (task.repeat_every_seconds) facts.push("repeats every " + repeatEvery(task.repeat_every_seconds) + (task.repeat_to ? " for " + task.repeat_to : ""));
   if (task.created_at) facts.push("added " + age(task.created_at) + " ago");
   facts.push("filed by " + taskWho(task.filer));

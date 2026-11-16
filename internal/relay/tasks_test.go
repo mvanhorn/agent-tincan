@@ -143,19 +143,23 @@ func TestTaskAssignSendsOneAskAndReplyReturnsIt(t *testing.T) {
 		t.Fatalf("task block = %q", inside)
 	}
 	head, _, _ := strings.Cut(req.Body, "\n\n<<<TASK")
-	for _, want := range []string{"task #" + strconv.FormatInt(task.ID, 10) + " from grokbot, filed by instinct", "changes how you reply"} {
+	for _, want := range []string{"task #" + strconv.FormatInt(task.ID, 10) + ".", "changes how you reply"} {
 		if !strings.Contains(head, want) {
 			t.Errorf("preamble lacks %q: %s", want, head)
 		}
 	}
 	_, after, _ := strings.Cut(req.Body, "\n<<<END TASK")
-	for _, want := range []string{"a task assigned to you", "hand it back with your reply", "names who wrote it"} {
+	for _, want := range []string{"a task that grokbot assigned to you, filed by instinct", "hand it back with your reply", "names who wrote it"} {
 		if !strings.Contains(after, want) {
 			t.Errorf("text after the block lacks %q: %s", want, after)
 		}
 	}
 	// A held listing and an inbox line show an ask cut short, with its
-	// whitespace folded: the cut has to reach the title.
+	// whitespace folded: the cut has to reach the title, and no agent's
+	// name comes before it to push it out.
+	if strings.Contains(head, "grokbot") || strings.Contains(head, "instinct") {
+		t.Errorf("the preamble names an agent, whose length would move the title: %s", head)
+	}
 	if cut := strings.Join(strings.Fields(req.Body), " "); !strings.Contains(cut[:min(len(cut), 200)], "Title: Ship the release") {
 		t.Errorf("the first 200 bytes of the ask do not reach the title: %s", cut)
 	}
@@ -543,7 +547,7 @@ func TestReassignTaskCancelsOpenAsk(t *testing.T) {
 		events[n-1].Kind != envelope.TaskEventAssigned || events[n-1].Actor != envelope.TaskOwner || events[n-1].Body != "instinct" {
 		t.Fatalf("history = %+v", events)
 	}
-	if !strings.Contains(second.Body, "from the owner, filed by the owner.") {
+	if !strings.Contains(second.Body, "the owner assigned to you, filed by the owner:") {
 		t.Fatalf("body = %s", second.Body)
 	}
 }
@@ -779,7 +783,7 @@ func TestTaskBodyCarriesResultAndLaterComments(t *testing.T) {
 			t.Errorf("body carries earlier history %q", old)
 		}
 	}
-	if !strings.Contains(second.Body, ", filed by instinct.") {
+	if !strings.Contains(second.Body, ", filed by instinct:") {
 		t.Errorf("body does not name the filer: %s", second.Body)
 	}
 	// grokbot is behind the result: it sent the attempt muse answered, and
@@ -1231,7 +1235,7 @@ func TestTaskAdminAssign(t *testing.T) {
 		t.Fatalf("task after the owner's assign = %+v", out)
 	}
 	req, _, err := m.Store.Request(ctx, out.CurrentRequest)
-	if err != nil || req.From != "phone" || req.To != "instinct" || !strings.Contains(req.Body, " from the owner, filed by ") {
+	if err != nil || req.From != "phone" || req.To != "instinct" || !strings.Contains(req.Body, "the owner assigned to you, filed by ") {
 		t.Fatalf("the owner's ask = %+v, %v", req, err)
 	}
 	events := m.events(t, id)
