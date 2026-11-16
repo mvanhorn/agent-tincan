@@ -257,7 +257,7 @@ func addTask(ctx context.Context, b Backend, in addTaskIn) (*mcp.CallToolResult,
 // assignedText ends an answer about a task just assigned: who has it, the
 // ask under it, and where its result goes.
 func assignedText(t envelope.Task) string {
-	return fmt.Sprintf("assigned to %s (request %s). The reply comes to you like any other, and the owner decides when the task is done.", t.Assignee, t.CurrentRequest)
+	return fmt.Sprintf("assigned to %s (request %s). The reply comes to you like any other, and the owner decides when the task is done.", t.Assignee, t.CurrentRequest) + client.FormatTaskHeld(t)
 }
 
 // updateTask is the update_task tool. Its actions are all an agent may do

@@ -201,7 +201,7 @@ the sending agent's scheduled asks, with their limits.`,
 			case t.Status == envelope.TaskProposed:
 				cmd.Printf("Added task #%d, now %s. It waits for the owner's approval; nothing was sent.\n", t.ID, t.Status)
 			case t.Assignee != "" && !mine:
-				cmd.Printf("Added task #%d, now %s, assigned to %s.\n", t.ID, t.Status, t.Assignee)
+				cmd.Printf("Added task #%d, now %s, assigned to %s.%s\n", t.ID, t.Status, t.Assignee, client.FormatTaskHeld(t))
 			default:
 				cmd.Printf("Added task #%d, now %s.\n", t.ID, t.Status)
 			}
@@ -305,7 +305,7 @@ cancelled.`,
 			if err != nil {
 				return err
 			}
-			cmd.Printf("Task #%d is now %s, assigned to %s.\n", task.ID, task.Status, task.Assignee)
+			cmd.Printf("Task #%d is now %s, assigned to %s.%s\n", task.ID, task.Status, task.Assignee, client.FormatTaskHeld(task))
 			return nil
 		},
 	}

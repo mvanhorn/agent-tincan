@@ -240,3 +240,14 @@ func TestFormatTaskRepeat(t *testing.T) {
 		t.Errorf("a task with no repeat shows one: %q", out)
 	}
 }
+
+func TestFormatTaskHeld(t *testing.T) {
+	held := envelope.Task{ID: 3, Assignee: "muse", AskStatus: envelope.StatusHeld}
+	if got := FormatTaskHeld(held); !strings.Contains(got, "held for the owner's approval") || !strings.Contains(got, "muse gets the task only once") {
+		t.Errorf("held = %q", got)
+	}
+	held.AskStatus = envelope.StatusQueued
+	if got := FormatTaskHeld(held); got != "" {
+		t.Errorf("queued = %q, want nothing", got)
+	}
+}
