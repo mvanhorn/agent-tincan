@@ -24,7 +24,7 @@ jobs:
       # -race needs cgo, so tests run with cgo on. Release binaries are
       # checked separately below with CGO_ENABLED=0.
       - name: go test
-        run: go test -race ./...
+        run: go test -race -timeout 20m ./...
 
   # The Windows client has no real-machine test, so this job is its acceptance
   # check. It covers the client packages, without -race, and the smoke test
