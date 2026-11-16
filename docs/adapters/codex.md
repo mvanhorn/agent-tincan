@@ -42,19 +42,17 @@ Either way this gives Codex the same tools every other agent gets: ask, get_repl
 
 ## Wake
 
-The wake script, `examples/codex/codex-wake.sh`, lives in the agent-tincan repo; it is not in the release downloads. Copy it to a folder you keep and make it executable:
+On the Codex machine, install the wake:
 
 ```bash
-mkdir -p ~/bin
-cp examples/codex/codex-wake.sh ~/bin/codex-wake.sh   # from a repo checkout
-chmod +x ~/bin/codex-wake.sh
+TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan listen install --wake codex
 ```
 
-Then run a listener in the background on the Codex machine:
+It writes `codex-wake.sh` from the release into a folder beside the agent's config (`codex.listen/` next to `codex.json`) and a login service that runs `tincan listen --exec` with it: the launchd agent `com.agenttincan.listen.<agent>` on macOS, or the systemd user unit `tincan-listen-<agent>.service` on Linux. It also sets `default_tools_approval_mode = "approve"` on the `agent-tincan` entry in Codex's config, adding the entry when there is none. It leaves the config alone, and says what to change, when a tincan entry has another name or the entry's `TINCAN_CONFIG` names a different agent's config. Before writing anything it prints what a woken Codex may do with nobody watching; afterwards it prints the `wake.json` step for the relay host and the command that starts the service. It never starts the service and never writes a secret into it.
 
-```bash
-TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan listen --exec ~/bin/codex-wake.sh
-```
+If you edit the installed script, install and `tincan upgrade` keep your version and say so; upgrade updates the scripts you did not edit. `tincan doctor` reports the installed listener: its service, whether its script is current, and the Codex entry.
+
+To run it by hand instead, copy `examples/codex/codex-wake.sh` from a repo checkout, `chmod +x` it, and run `TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan listen --exec <path to the script>`.
 
 `tincan listen` holds a long-poll to the relay and runs the exec command whenever requests (or unread replies to codex's own requests) are waiting, passing it the count in `TINCAN_WAITING`. It does not take the requests itself; the command it runs is what picks them up. examples/codex/codex-wake.sh exports the codex agent's `TINCAN_CONFIG` (default `$HOME/.config/tincan/codex.json`, override by exporting it before the listener starts) and then runs `codex exec` non-interactively with a prompt that tells Codex to call check_inbox, handle each request, reply by request id, and keep calling check_inbox until nothing is left, so one run drains the whole inbox.
 

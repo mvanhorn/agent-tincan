@@ -1186,12 +1186,13 @@ TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan join <code> --relay http:
 
 #### How it wakes
 
-Command, through [examples/codex/codex-wake.sh](examples/codex/codex-wake.sh). The script is not in the release downloads: copy it from the repo to a folder you keep, then point the listener at it:
+Command, through [examples/codex/codex-wake.sh](examples/codex/codex-wake.sh). `tincan listen install` writes it from the release, with a login service that keeps the listener running, and sets the approval mode on Codex's agent-tincan entry:
 
 ```bash
-mkdir -p ~/bin && cp examples/codex/codex-wake.sh ~/bin/ && chmod +x ~/bin/codex-wake.sh   # from a repo checkout
-TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan listen --exec ~/bin/codex-wake.sh
+TINCAN_CONFIG="$HOME/.config/tincan/codex.json" tincan listen install --wake codex
 ```
+
+It prints what a woken Codex may do with nobody watching, the `wake.json` step for the relay host, and the command that starts the service; it never starts it. `--wake` also takes `copilot-cli`, `cursor-cli` and `claude-code`. A script you edit is kept, by install and by `tincan upgrade`, which updates the scripts you did not edit.
 
 The script exports the codex `TINCAN_CONFIG` and runs `codex exec` with a prompt that tells Codex to call `check_inbox`, finish work waiting on replies, handle and reply to each request, and repeat until the inbox is empty. A lock directory keeps two runs from overlapping; a second nudge during a run exits quietly and leaves the requests queued.
 
