@@ -495,7 +495,7 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `list_schedules` | `tincan schedules` | Your scheduled asks: who each goes to, when it next fires, how often. An admin device adds `--all` for everyone's. |
 | `cancel_schedule` | `tincan unschedule <id>` | Stop a scheduled ask. An admin device with `--relay` or `--socket`, or the relay host, can stop anyone's. |
 | `add_task` | `tincan tasks add <title>` | File a task on the team's shared task list: unassigned, handed to a teammate (`to`, `--to`), or the owner's own (`for_owner`, `--mine`). `source` (`--source mail`) marks text from outside the team, and the task then waits as proposed until the owner approves it. `key` (`--key`) makes a second add return the first task. `every` (`--every 24h`) with a teammate makes it repeat. See [Tasks](#tasks). |
-| `list_tasks` | `tincan tasks` | The tasks you can see, grouped by status. Done and dropped tasks are counted, and read from the relay and listed only with `closed: true` (`--closed`). An admin device adds `--owner` for every task. |
+| `list_tasks` | `tincan tasks` | The tasks you can see, grouped by status. For a [task host](#run-the-list-from-an-agent) the tool lists every task. Done and dropped tasks are counted, and read from the relay and listed only with `closed: true` (`--closed`). An admin device adds `--owner` for every task. |
 | `get_task` | `tincan tasks show <id>` | One task whole: what is wanted, who has it, the latest result and the history with its comments. |
 | `update_task` | `tincan tasks comment <id> <comment>`, `tincan tasks drop <id>` | Act on a task you can see. `assign` gives an open or returned task to a teammate as an ask from you (tool only; an agent on the CLI hands a task over when it adds it, with `--to`). `comment` adds a note the next attempt carries. `drop` gives up a task you filed while no ask is open under it. |
 | `room_post` | `tincan room post <room> <message>` | Post to a room you are in. An `@name` of a member asks it, and its reply is posted to the room. See [Rooms](#rooms). |
@@ -648,6 +648,8 @@ A task is proposed, open, working, question, returned, done or dropped. Nothing 
 | `tincan tasks comment <id> <comment> [--owner]` | Add a comment. It wakes nobody; the next attempt at the task carries it. |
 | `tincan tasks drop <id> [--note <why>] [--owner]` | Give a task up. An agent drops only a task it filed, and only while no ask is open under it. With `--owner` any task is dropped and an ask open under it is cancelled. |
 | `tincan tasks approve <id>`, `done <id>`, `reopen <id>`, `reset <id>` | Yours alone, from an admin device or the relay host: open a proposed task, close an open or returned one, put a done or dropped one back to open (or to proposed, when it was never approved), and set a task's count of agent assigns back to zero. |
+| `tincan tasks host set <agent>` | Name a teammate a task host, from an admin device or the relay host. It prints a warning when the agent reaches the relay through the MCP gateway, when its wake method cannot start a turn, and for each guest that may ask it. |
+| `tincan tasks host clear <agent>` | Stop a teammate being a task host. Tasks it assigned earlier stay under its name. |
 
 Agents use the `add_task`, `list_tasks`, `get_task` and `update_task` tools, or the same `tincan tasks` commands. What stays with you:
 
@@ -658,7 +660,26 @@ Agents use the `add_task`, `list_tasks`, `get_task` and `update_task` tools, or 
 - An agent can have 50 tasks it filed that are not done or dropped, and an add takes a slot of its send rate, as an ask does.
 - History, notes, pass and council agents take no tasks, and neither do phones or guests.
 
-Who reads a task: you read every task. An agent reads a task it filed, a task whose open ask is addressed to it (not while that ask is held for your approval), and a task it claimed, answered or assigned an ask under. Every joined agent also reads an open task that has never been assigned and carries no result, so anyone can pick it up. A task you or an agent add for one teammate is never in that shared pool, even when its first assign is refused. Once a task has been assigned it leaves that shared pool for good.
+Who reads a task: you read every task, and so does a task host you named (see below). Any other agent reads a task it filed, a task whose open ask is addressed to it (not while that ask is held for your approval), and a task it claimed, answered or assigned an ask under. Every joined agent also reads an open task that has never been assigned and carries no result, so anyone can pick it up. A task you or an agent add for one teammate is never in that shared pool, even when its first assign is refused. Once a task has been assigned it leaves that shared pool for good.
+
+#### Run the list from an agent
+
+You can keep the list from a conversation with a teammate you already talk to, such as one you reach from your phone. Name it a task host on an admin device:
+
+```bash
+tincan tasks host set grokbot
+tincan agents                   # grokbot's line now ends with task_host=yes
+tincan tasks host clear grokbot
+```
+
+Then ask it in its own chat: "what's on my list", "what came back today", "give 12 to codex". A host's `list_tasks` and `get_task` cover every task, with what waits on you first: proposed tasks, questions, then returned ones. It assigns and comments as itself, and its assigns count toward the 5. Several teammates can be hosts at once.
+
+- A host reads and hands out. It closes nothing: approving, marking done, reopening and resetting stay with you on an admin device or the [phone page](docs/phone.md), as above.
+- A proposed task you have not approved reaches a host as a row with its number, filer, source and age, and no text. The host tells you it is waiting; you read and approve it on an admin device. A task filed from outside text without `--source`, and a teammate's result that quotes a web page or a mail, reach a host in full.
+- The relay sends each host a short notice when a task comes back, asks a question, falls back to open with no result, or is filed as proposed. The notice has the task's number, its new status and agent names, and none of its text. A host that caused the change gets none, and neither do changes you make from an admin device. A host whose wake cannot start a turn tells you only when you next speak to it.
+- A guest, a phone, a history, notes, pass or council agent, an agent driven through a web chat page, and an agent `approval.json` gates cannot be a host. A host that becomes one of those keeps the mark and shows as `task_host="suspended: <reason>"` in `tincan agents`, with its ordinary view until the reason is gone. A host also has its ordinary view while a guest's ask is open with it.
+- A host connected through the MCP gateway sends the text of every task it reads to its vendor. `host set` says so when you name one.
+- Removing an agent, or inviting a new one under its name, clears the mark.
 
 A task with a teammate can repeat: `tincan tasks add "Check the support inbox" --to muse --every 24h` (or `every` with `to` on `add_task`). The relay assigns the task to that teammate again on that interval, at least `15m`, as a new attempt on the same task, so the list shows one row whose history grows. A fire is skipped while an ask is open under the task or the task is proposed. Marking the task done or dropping it ends the repeat, and `tincan unschedule <id>` ends the repeat and leaves the task. Reopening a task does not bring its repeat back. The repeat is one of the sending agent's scheduled asks, with their limits.
 

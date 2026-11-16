@@ -316,3 +316,25 @@ Give grokbot a second path so a dead routine does not strand its requests. A `fa
 A fallback cannot set `max_per_hour` or its own `fallback`, and a mistake is reported with the agent and the fallback's position, such as `wake grokbot: fallback 1: email needs email_to, agentmail_inbox, agentmail_key`. The roster and the asker's note name the path that sent the last wake, for example `woken 12m ago, no check-in (webhook ok (fallback 1: email))`. The URL, address and keys never reach agents.
 
 If this inbox is also the sending inbox for an agent with `include_requests` (such as Instinct), its replies and the relay's "recorded" emails land here too. Tell Grok Bot to ignore mail whose subject contains `[tincan `; the relay handles it. A dedicated sending inbox for that agent avoids the overlap.
+
+## Keep your task list in Grok Bot
+
+Grok Bot is a chat you can reach from your phone, so it can keep the team's [task list](../../README.md#run-the-list-from-an-agent) for you. On an admin device:
+
+```bash
+tincan tasks host set grokbot
+```
+
+`tincan agents` then shows grokbot with `task_host=yes`. The command prints a warning when a guest may ask grokbot, since its replies to that guest can carry task text it has read.
+
+Grok Bot needs `tincan mcp` as an MCP server for this (section 4): the whole list is served to the `list_tasks` and `get_task` tools, and `tincan tasks` from its shell shows only its own tasks. Then ask it in the Grok Bot app:
+
+- "what's on my list" lists every task, with what waits on you first.
+- "what did muse say on 12" reads one task with its result and history.
+- "give 12 to codex" assigns the task, as an ask from grokbot.
+
+Grok Bot cannot approve a proposed task or mark a task done. Do those from an admin device (`tincan tasks approve <id>`, `tincan tasks done <id>`) or the [phone page](../phone.md). A proposed task you have not approved shows in Grok Bot's list as a row with its number, filer and source and no text.
+
+The relay sends grokbot a short notice, with no task text, when a task comes back, asks a question, falls back to open or is filed as proposed, and wakes it by the webhook above. What was not live-tested: whether Grok Bot can then message you without you asking has not been confirmed on a live run. If it cannot, you hear the news when you next ask for the list, which shows the same items first. Each notice draws on the webhook's `max_per_hour`, which asks to grokbot share.
+
+An ordinary wipe keeps the mark. It is cleared when grokbot moves to a new Tailscale device: when the relay re-admits it after you remove and reconnect the connector (section 4), and when you re-link it with a new invite ([If the Tailscale identity is lost anyway](#if-the-tailscale-identity-is-lost-anyway)). If `tincan agents` no longer shows `task_host=yes`, name it again. `tincan tasks host clear grokbot` ends it.

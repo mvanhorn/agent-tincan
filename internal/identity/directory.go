@@ -118,6 +118,12 @@ type Agent struct {
 	// SetAgentFallback writes it; PutAgent keeps it, and removing the
 	// fallback agent clears it.
 	Fallback string `json:"fallback,omitempty"`
+	// TaskHost is set on an agent the owner named a task host. Only
+	// SetAgentTaskHost sets it. PutAgent never does: it keeps the mark when
+	// the row it writes carries it and leaves the agent on the node it had,
+	// and clears it otherwise, so a new join under the name or a move to
+	// another node starts without it.
+	TaskHost bool `json:"task_host,omitempty"`
 	// Guest is set on a guest, a narrower tier than a teammate; see
 	// GuestTerms. Every rewrite of the row must carry it.
 	Guest GuestTerms `json:"guest,omitzero"`
@@ -180,6 +186,10 @@ type Store interface {
 	// clears it) and reports whether name exists. PutAgent keeps it, and
 	// DeleteAgent clears it on every agent that names the removed one.
 	SetAgentFallback(ctx context.Context, name, to string) (bool, error)
+	// SetAgentTaskHost sets or clears an agent's task host mark and reports
+	// whether the agent exists. PutAgent keeps the mark only for a row that
+	// carries it and stays on the stored node, and never sets it.
+	SetAgentTaskHost(ctx context.Context, name string, on bool) (bool, error)
 	// PutInvite stores inv and retires any earlier unredeemed code for the
 	// same name, so re-inviting a name leaves only the newest code valid.
 	// Callers pass inv.Code already digested (see hashInviteCode); the raw
@@ -548,50 +558,68 @@ func newOnlyRefusal(a Agent, found bool, mintNode string) error {
 // bound to a machine other than the minting one; the check runs under the
 // same lock as the join, so no other join can slip in between.
 func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, error) {
+	j, err := d.JoinAgent(ctx, remoteAddr, code)
+	return j.Name, err
+}
+
+// Joined is what a redeemed invite did.
+type Joined struct {
+	Name string
+	// TaskHostCleared is set when the name belonged to a task host until
+	// this join. The agent that joined is a new holder of the name, on any
+	// machine, and the owner named the earlier one, so the mark is gone.
+	TaskHostCleared bool
+}
+
+// JoinAgent is Join that also reports what the join changed besides the
+// binding, so the relay can put it in the audit log.
+func (d *Directory) JoinAgent(ctx context.Context, remoteAddr, code string) (Joined, error) {
 	n, err := d.who.WhoIs(ctx, remoteAddr)
 	if err != nil {
-		return "", err
+		return Joined{}, err
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// Look up by digest: the store never sees the raw code.
 	inv, ok, err := d.store.TakeInvite(ctx, hashInviteCode(d.invitePepper, code))
 	if err != nil {
-		return "", err
+		return Joined{}, err
 	}
 	if !ok || d.cfg.Now().After(inv.Expires) {
-		return "", ErrBadInvite
+		return Joined{}, ErrBadInvite
 	}
 	prev, found, err := d.Agent(ctx, inv.Name)
 	if err != nil {
-		return "", err
+		return Joined{}, err
 	}
 	if inv.NewOnly {
 		if err := newOnlyRefusal(prev, found, inv.MintNode); err != nil {
-			return "", err
+			return Joined{}, err
 		}
 	}
 	if prev.Guest.Set() && !inv.Guest.Set() {
-		return "", fmt.Errorf("%s: %w", inv.Name, ErrGuestTier)
+		return Joined{}, fmt.Errorf("%s: %w", inv.Name, ErrGuestTier)
 	}
 	others, err := d.store.AgentsByNode(ctx, n.ID)
 	if err != nil {
-		return "", err
+		return Joined{}, err
 	}
 	for _, o := range others {
 		if o.Name != inv.Name && (o.Guest.Set() || inv.Guest.Set()) {
-			return "", fmt.Errorf("%s runs %s: %w", n.Name, o.Name, ErrGuestNode)
+			return Joined{}, fmt.Errorf("%s runs %s: %w", n.Name, o.Name, ErrGuestNode)
 		}
 	}
 	kind := prev.Kind
 	if inv.Kind != "" {
 		kind = inv.Kind
 	}
+	// The row is built new and carries no task host mark, so PutAgent
+	// clears the one prev had.
 	a := Agent{Name: inv.Name, NodeID: n.ID, NodeName: n.Name, NodeUser: n.User, JoinedAt: d.cfg.Now(), Kind: kind, Guest: inv.Guest}
 	if err := d.store.PutAgent(ctx, a); err != nil {
-		return "", err
+		return Joined{}, err
 	}
-	return a.Name, nil
+	return Joined{Name: a.Name, TaskHostCleared: prev.TaskHost}, nil
 }
 
 // Remove unbinds an agent. The relay cancels its queued requests.
@@ -693,6 +721,38 @@ func (d *Directory) SetFallback(ctx context.Context, remoteAddr, name, to string
 		}
 	}
 	ok, err = d.store.SetAgentFallback(ctx, name, to)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+	}
+	return nil
+}
+
+// SetTaskHost names agent name a task host, or with on false clears the
+// mark. Only admin devices may do either, and a guest is never named. The
+// relay checks the rest of what makes an agent eligible, since that turns
+// on its policy, and checks it again whenever the mark is used.
+func (d *Directory) SetTaskHost(ctx context.Context, remoteAddr, name string, on bool) error {
+	if err := d.requireAdmin(ctx, remoteAddr); err != nil {
+		return err
+	}
+	// Serialize with Join, as SetKind does: a join that lands first has
+	// cleared the mark for the new holder of the name, and this set then
+	// names that holder.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	a, ok, err := d.store.AgentByName(ctx, name)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return fmt.Errorf("%s: %w", name, ErrUnknownAgent)
+	case on && a.Guest.Set():
+		return fmt.Errorf("%s is a guest and cannot be a task host", name)
+	}
+	ok, err = d.store.SetAgentTaskHost(ctx, name, on)
 	if err != nil {
 		return err
 	}

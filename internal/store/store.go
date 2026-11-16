@@ -155,6 +155,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent fallback: %w", err)
 	}
+	if err := s.migrateAgentTaskHost(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate agent task host: %w", err)
+	}
 	if err := s.migrateAgentFeatures(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate agent features: %w", err)
@@ -283,6 +287,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateTasks(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate tasks: %w", err)
+	}
+	if err := s.migrateTaskNotices(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate task notices: %w", err)
 	}
 	for {
 		more, err := s.backfillSearchBatch()
@@ -457,6 +465,21 @@ func (s *Store) migrateAgentFallback() error {
 	return err
 }
 
+// migrateAgentTaskHost adds the task_host column (1 on an agent the owner
+// named a task host, NULL on every other) to an agents table created before
+// task hosts were stored. It is a no-op on a current table.
+func (s *Store) migrateAgentTaskHost() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'task_host')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE agents ADD COLUMN task_host INTEGER`)
+	return err
+}
+
 // migrateProject adds to_project (the project of the session a request is
 // for, "" for any session), queued_at (when its fallback clock started) and
 // fallback_woken (whether FallenBack reported it since that clock started).
@@ -578,21 +601,32 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// name's last activity and poll, the build it last reported and the
 	// owner's good-at line and fallback carry over; only SetAgentGoodAt and
 	// SetAgentFallback write those.
+	//
+	// The task host mark does not carry over that way. It stays only when the
+	// row passed in carries it and the stored row is on the same node, which is a rewrite
+	// of an agent in place (the login backfill). A row built for a new join
+	// carries no mark, and a rebind or a gateway bind changes the node, so
+	// each of those writes NULL. A row that claims a mark the stored row
+	// lacks gets none: only SetAgentTaskHost grants it.
 	var lastSeen, lastPoll sql.NullInt64
-	var version, features, pollFeatures, goodAt, fallback sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, last_poll_at, version, features, poll_features, good_at, fallback FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &lastPoll, &version, &features, &pollFeatures, &goodAt, &fallback)
+	var version, features, pollFeatures, goodAt, fallback, node sql.NullString
+	var taskHost sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT last_seen_at, last_poll_at, version, features, poll_features, good_at, fallback, node_id, task_host FROM agents WHERE name = ?`, a.Name).Scan(&lastSeen, &lastPoll, &version, &features, &pollFeatures, &goodAt, &fallback, &node, &taskHost)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM agents WHERE name = ?`, a.Name); err != nil {
 		return err
 	}
+	if !a.TaskHost || node.String != a.NodeID {
+		taskHost = sql.NullInt64{}
+	}
 	until, asks, err := encodeGuest(a.Guest)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at, fallback, guest_until, guest_asks, guest_no_hold, guest_ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt, fallback, until, asks, a.Guest.NoHold, a.Guest.Ended); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents(name, node_id, node_name, joined_at, kind, node_user, last_seen_at, last_poll_at, version, features, poll_features, good_at, fallback, task_host, guest_until, guest_asks, guest_no_hold, guest_ended) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.Name, a.NodeID, a.NodeName, a.JoinedAt.UnixMilli(), nullable(a.Kind), nullable(a.NodeUser), lastSeen, lastPoll, version, features, pollFeatures, goodAt, fallback, taskHost, until, asks, a.Guest.NoHold, a.Guest.Ended); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -669,6 +703,22 @@ func (s *Store) SetAgentGoodAt(ctx context.Context, name, line string) (bool, er
 // stores NULL. It reports whether name exists.
 func (s *Store) SetAgentFallback(ctx context.Context, name, to string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE agents SET fallback = ? WHERE name = ?`, nullable(to), name)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// SetAgentTaskHost marks name a task host, or with on false clears the mark,
+// which stores NULL. It reports whether name exists. It is the only write
+// that sets the mark: PutAgent keeps or clears it and never grants it.
+func (s *Store) SetAgentTaskHost(ctx context.Context, name string, on bool) (bool, error) {
+	var mark any
+	if on {
+		mark = 1
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET task_host = ? WHERE name = ?`, mark, name)
 	if err != nil {
 		return false, err
 	}
@@ -773,7 +823,7 @@ func (s *Store) AgentByName(ctx context.Context, name string) (identity.Agent, b
 }
 
 func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]identity.Agent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, ''), COALESCE(fallback, ''), guest_until, guest_asks, guest_no_hold, guest_ended FROM agents WHERE `+where+` ORDER BY name`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT name, node_id, node_name, joined_at, COALESCE(kind, ''), COALESCE(node_user, ''), COALESCE(good_at, ''), COALESCE(fallback, ''), COALESCE(task_host, 0), guest_until, guest_asks, guest_no_hold, guest_ended FROM agents WHERE `+where+` ORDER BY name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -783,7 +833,7 @@ func (s *Store) agentsWhere(ctx context.Context, where string, args ...any) ([]i
 		var a identity.Agent
 		var joined, until int64
 		var asks string
-		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt, &a.Fallback, &until, &asks, &a.Guest.NoHold, &a.Guest.Ended); err != nil {
+		if err := rows.Scan(&a.Name, &a.NodeID, &a.NodeName, &joined, &a.Kind, &a.NodeUser, &a.GoodAt, &a.Fallback, &a.TaskHost, &until, &asks, &a.Guest.NoHold, &a.Guest.Ended); err != nil {
 			return nil, err
 		}
 		a.JoinedAt = time.UnixMilli(joined)

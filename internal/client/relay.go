@@ -112,6 +112,13 @@ type AgentInfo struct {
 	// untaken past the relay's notice grace, set by the owner with tincan
 	// fallback set. Empty when unset, and from relays that predate it.
 	Fallback string `json:"fallback,omitempty"`
+	// TaskHost is set on an agent the owner named a task host with tincan
+	// tasks host set. TaskHostSuspended is why a named host may not act as
+	// one now, such as approval.json holding asks to it; the mark is still
+	// stored, and the agent is a host again once the reason is gone. Both
+	// are empty for other agents and from relays that predate task hosts.
+	TaskHost          bool   `json:"task_host,omitempty"`
+	TaskHostSuspended string `json:"task_host_suspended,omitempty"`
 	// WorkingOn is the title of the agent's most recently refreshed session
 	// that shares its title (tincan mcp --share-title), and WorkingOnOthers
 	// how many other sessions of the agent share one. The text is the
@@ -898,6 +905,18 @@ func (r *Relay) SetKind(ctx context.Context, name, kind string) error {
 // it. Only admin devices may set it.
 func (r *Relay) SetFallback(ctx context.Context, name, to string) error {
 	return r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/fallback", map[string]string{"fallback": to}, nil)
+}
+
+// SetTaskHost names agent name a task host, or with on false clears the
+// mark. Only admin devices may do either. It returns the relay's warnings
+// about what the grant costs, such as task text reaching an outside vendor;
+// a clear has none. An older relay answers its plain 404.
+func (r *Relay) SetTaskHost(ctx context.Context, name string, on bool) ([]string, error) {
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	err := r.call(ctx, r.api, "PUT", "/v1/agents/"+url.PathEscape(name)+"/task-host", map[string]bool{"task_host": on}, &out)
+	return out.Warnings, err
 }
 
 // SetGoodAt records the owner's line saying what an agent is good at; ""

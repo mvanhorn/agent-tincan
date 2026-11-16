@@ -809,6 +809,11 @@ type Task struct {
 	RepeatSchedule     int64  `json:"repeat_schedule,omitempty"`
 	RepeatEverySeconds int64  `json:"repeat_every_seconds,omitempty"`
 	RepeatTo           string `json:"repeat_to,omitempty"`
+	// Withheld marks the row a task host is shown of a task it may not read:
+	// one filed as proposed that the owner never approved. Such a row
+	// carries the id, status, filer, source and creation time and nothing
+	// else.
+	Withheld bool `json:"withheld,omitempty"`
 	// Chain is set on a task being added only: the chain of the request its
 	// filer held a claim on at that moment, with that request's
 	// contributors, kept on the task's first history entry. It is never

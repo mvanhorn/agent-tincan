@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1136,5 +1138,120 @@ func TestTaskClaimNeedsTheResultItWasBuiltFrom(t *testing.T) {
 	ask.TaskResultEvent = fresh.ResultEvent
 	if _, err := s.Enqueue(ctx, ask, time.Hour); err != nil {
 		t.Fatalf("ask built from the stored result: %v", err)
+	}
+}
+
+// A task host is shown every task but one whose open ask is held with the
+// host as its target. Of a task filed as proposed that the owner never
+// approved, a host that did not file it gets a row with the id, status,
+// filer, source and creation time and every other field empty, in the list,
+// read alone, open and dropped; the host that filed it reads it whole, and
+// so does any host once the owner has approved it.
+func TestHostTasksWithholdNeverApprovedText(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	working := addTask(t, s, envelope.Task{Filer: "codex", Title: "hermes works"})
+	if _, err := attempt(s, working.ID, "codex", "hermes", false); err != nil {
+		t.Fatal(err)
+	}
+	heldTask := addTask(t, s, envelope.Task{Filer: "codex", Title: "held for the owner"})
+	heldReq, err := attempt(s, heldTask.ID, "codex", "muse", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposed := addTask(t, s, envelope.Task{Filer: "codex", Title: "from mail", Detail: "the body", Key: "mail-7", Source: "mail", SuggestedAssignee: "hermes", Status: envelope.TaskProposed})
+	// Fields no proposed task holds today are filled in too: the row is
+	// built from what it may carry, not from what happens to be empty.
+	if _, err := s.DB().Exec(`UPDATE tasks SET result = 'a result', result_request = 'r1', agent_assigns = 2, assignee = 'hermes' WHERE id = ?`, proposed.ID); err != nil {
+		t.Fatal(err)
+	}
+	mine := addTask(t, s, envelope.Task{Filer: "muse", Title: "muse's from mail", Source: "mail", Status: envelope.TaskProposed})
+	done := addTask(t, s, envelope.Task{Filer: envelope.TaskOwner, Title: "owner's, done"})
+	if _, err := s.MarkTaskDone(ctx, done.ID, envelope.TaskOwner, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	list := func(closed bool) map[int64]envelope.Task {
+		t.Helper()
+		tasks, err := s.HostTasks(ctx, "muse", 0, 100, closed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[int64]envelope.Task{}
+		for _, task := range tasks {
+			one, err := s.HostTask(ctx, task.ID, "muse")
+			if err != nil || !reflect.DeepEqual(one, task) {
+				t.Fatalf("task %d read alone = %+v, %v; listed as %+v", task.ID, one, err, task)
+			}
+			out[task.ID] = task
+		}
+		return out
+	}
+	withheld := func(got envelope.Task, status envelope.TaskStatus) {
+		t.Helper()
+		want := envelope.Task{ID: proposed.ID, Status: status, Filer: "codex", Source: "mail", CreatedAt: proposed.CreatedAt, Withheld: true}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("withheld row = %+v, want only %+v", got, want)
+		}
+	}
+
+	shown := list(false)
+	if got := slices.Sorted(maps.Keys(shown)); !slices.Equal(got, []int64{working.ID, proposed.ID, mine.ID}) {
+		t.Fatalf("host is shown %v", got)
+	}
+	if got := shown[working.ID]; got.Title != "hermes works" || got.Withheld {
+		t.Fatalf("a teammate's task = %+v", got)
+	}
+	if got := shown[mine.ID]; got.Title != "muse's from mail" || got.Withheld {
+		t.Fatalf("the host's own proposed task = %+v", got)
+	}
+	withheld(shown[proposed.ID], envelope.TaskProposed)
+	if _, err := s.HostTask(ctx, heldTask.ID, "muse"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("task whose ask is held for the host: %v", err)
+	}
+	// The agent that filed the held task is shown it as a host.
+	if got, err := s.HostTask(ctx, heldTask.ID, "codex"); err != nil || got.Title != "held for the owner" {
+		t.Fatalf("the filer's read of its held task = %+v, %v", got, err)
+	}
+	if got, err := s.HostTask(ctx, proposed.ID, "codex"); err != nil || got.Withheld || got.Detail != "the body" || got.Key != "mail-7" {
+		t.Fatalf("the filing host's read = %+v, %v", got, err)
+	}
+
+	// Dropped unapproved, it is withheld still, and counted.
+	if _, err := s.SetTaskStatus(ctx, proposed.ID, envelope.TaskDropped, "codex", "the reason", envelope.TaskProposed); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := list(false)[proposed.ID]; has {
+		t.Fatal("a dropped task is listed without closed")
+	}
+	withheld(list(true)[proposed.ID], envelope.TaskDropped)
+	if doneN, dropped, err := s.ClosedHostTasks(ctx, "muse"); err != nil || doneN != 1 || dropped != 1 {
+		t.Fatalf("closed counts for a host = %d done, %d dropped, %v", doneN, dropped, err)
+	}
+
+	// The owner's reopen is not an approval. The approval is.
+	if _, err := s.ReopenTask(ctx, proposed.ID, envelope.TaskOwner, ""); err != nil {
+		t.Fatal(err)
+	}
+	withheld(list(false)[proposed.ID], envelope.TaskProposed)
+	if _, err := s.SetTaskStatus(ctx, proposed.ID, envelope.TaskOpen, envelope.TaskOwner, "", envelope.TaskProposed); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(false)[proposed.ID]; got.Withheld || got.Title != "from mail" || got.Detail != "the body" {
+		t.Fatalf("approved task as a host reads it = %+v", got)
+	}
+	if _, err := s.SetTaskStatus(ctx, proposed.ID, envelope.TaskDropped, envelope.TaskOwner, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(true)[proposed.ID]; got.Withheld || got.Title != "from mail" {
+		t.Fatalf("approved, then dropped task as a host reads it = %+v", got)
+	}
+
+	// Once the owner approves the held ask, the host is shown its task.
+	if _, err := s.Release(ctx, heldReq.ID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.HostTask(ctx, heldTask.ID, "muse"); err != nil || got.Title != "held for the owner" {
+		t.Fatalf("task after its held ask was approved = %+v, %v", got, err)
 	}
 }

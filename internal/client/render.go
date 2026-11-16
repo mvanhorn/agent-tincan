@@ -342,6 +342,20 @@ func (a AgentInfo) FallbackField() string {
 	return "fallback=" + a.Fallback
 }
 
+// TaskHostField is the agent's task host mark as a roster field:
+// task_host=yes for a host, and task_host="suspended: <reason>" for a named
+// host that may not act as one now, quoted as the good-at line is. It is
+// empty for an agent that is not a host.
+func (a AgentInfo) TaskHostField() string {
+	switch {
+	case !a.TaskHost:
+		return ""
+	case a.TaskHostSuspended != "":
+		return "task_host=" + strconv.Quote("suspended: "+a.TaskHostSuspended)
+	}
+	return "task_host=yes"
+}
+
 // SelfField is the mark on the caller's own roster entry, you, shown as the
 // last field. It is empty on every other entry.
 func (a AgentInfo) SelfField() string {

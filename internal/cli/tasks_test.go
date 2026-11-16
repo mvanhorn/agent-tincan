@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
+	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
@@ -303,4 +307,141 @@ func TestTasksAddRepeating(t *testing.T) {
 	}
 	tasksRun(t, nil, "#1 Check the backups (filed by desk, with muse, ask queued, repeats every 24h0m0s)")
 	tasksRun(t, []string{"show", "1"}, fmt.Sprintf("Repeats: every 24h0m0s for muse (schedule #%d)", got.RepeatSchedule))
+}
+
+// tincan tasks host set names a task host and prints the relay's warnings,
+// tincan agents and list_agents both show the mark, and clear removes it and
+// says what stays. The relay's refusal for an agent that can never host
+// reaches the owner, and a machine that is not an admin device is refused.
+func TestTasksHostCommands(t *testing.T) {
+	m := testrelay.NewWithAdminLogin(t, relay.Config{})
+	ctx := t.Context()
+	m.JoinGuest(t, "friend", client.GuestInvite{Ask: []string{"grokbot"}, ForSeconds: 3600})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	out := tasksRun(t, []string{"host", "set", "grokbot"},
+		"\"grokbot\" is now a task host.\n",
+		"Warning: grokbot wakes by none, which cannot start a turn",
+		"Warning: guest friend may ask grokbot")
+	if n := strings.Count(out, "Warning: "); n != 2 {
+		t.Fatalf("host set printed %d warnings, want 2:\n%s", n, out)
+	}
+	if out, _ := run(t, agentsCmd()); !strings.Contains(out, " task_host=yes") {
+		t.Fatalf("roster after set:\n%s", out)
+	}
+
+	srvT, cliT := mcp.NewInMemoryTransports()
+	ss, err := mcpserver.New(m.Client(t, "muse"), "test").Connect(ctx, srvT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, cliT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	listAgents := func() string {
+		t.Helper()
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "list_agents"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Content[0].(*mcp.TextContent).Text
+	}
+	if text := listAgents(); !strings.Contains(text, ", task_host=yes") || strings.Count(text, "task_host=") != 1 {
+		t.Fatalf("list_agents after set:\n%s", text)
+	}
+
+	if err := m.Client(t, "admin").SetKind(ctx, "muse", "notes"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(t, tasksCmd(), "host", "set", "muse"); err == nil || !strings.Contains(err.Error(), "muse cannot be a task host: notes is a service agent") {
+		t.Fatalf("host set of a notes agent = %q, %v", out, err)
+	}
+
+	out = tasksRun(t, []string{"host", "clear", "grokbot"})
+	if out != "\"grokbot\" is no longer a task host. Tasks it assigned earlier stay attributed to grokbot.\n" {
+		t.Fatalf("host clear printed %q", out)
+	}
+	if out, _ := run(t, agentsCmd()); strings.Contains(out, "task_host=") {
+		t.Fatalf("roster after clear:\n%s", out)
+	}
+	if text := listAgents(); strings.Contains(text, "task_host=") {
+		t.Fatalf("list_agents after clear:\n%s", text)
+	}
+
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	for _, args := range [][]string{{"host", "set", "grokbot"}, {"host", "clear", "grokbot"}} {
+		out, err := run(t, tasksCmd(), args...)
+		if !client.IsStatus(err, http.StatusForbidden) || !strings.Contains(err.Error(), identity.ErrNotAdmin.Error()) {
+			t.Errorf("tasks %v from a teammate = %q, %v", args, out, err)
+		}
+	}
+}
+
+// The roster marks a host that stopped being eligible as suspended, with
+// the reason, in tincan agents.
+func TestAgentsShowsSuspendedTaskHost(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	tasksRun(t, []string{"host", "set", "muse"}, "\"muse\" is now a task host.")
+	if err := m.Client(t, "admin").SetKind(t.Context(), "muse", "notes"); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := run(t, agentsCmd()); !strings.Contains(out, ` task_host="suspended: notes is a service agent"`) {
+		t.Fatalf("roster with a suspended host:\n%s", out)
+	}
+}
+
+// On the relay host the local admin socket names a host with no flags, and
+// --socket does the same from a named path.
+func TestTasksHostThroughTheAdminSocket(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{})
+	serveAdminSocket(t, m)
+	tasksRun(t, []string{"host", "set", "grokbot"}, "\"grokbot\" is now a task host.")
+	if a, _, err := m.Dir.Agent(t.Context(), "grokbot"); err != nil || !a.TaskHost {
+		t.Fatalf("grokbot after set on the relay host = %+v, %v", a, err)
+	}
+	tasksRun(t, []string{"host", "clear", "grokbot", "--socket", adminSocket(t, m)}, "\"grokbot\" is no longer a task host.")
+	if a, _, err := m.Dir.Agent(t.Context(), "grokbot"); err != nil || a.TaskHost {
+		t.Fatalf("grokbot after clear through --socket = %+v, %v", a, err)
+	}
+}
+
+// A relay older than the task host route answers Go's plain "404 page not
+// found", which tincan tasks host turns into an upgrade hint, for set and
+// for clear, without asking the relay what it supports first. A JSON 404
+// for an unknown agent passes through unchanged.
+func TestTasksHostAgainstOlderRelay(t *testing.T) {
+	var mu sync.Mutex
+	var called []string
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every command asks who it is first; that call is not the test's.
+		if r.URL.Path != "/v1/whoami" {
+			mu.Lock()
+			called = append(called, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(old.Close)
+	useConfig(t, client.Config{Relay: old.URL})
+	for _, verb := range []string{"set", "clear"} {
+		out, err := run(t, tasksCmd(), "host", verb, "grokbot")
+		if !client.IsStatus(err, http.StatusNotFound) || !strings.Contains(err.Error(), "older than this tincan and cannot store task hosts yet") || !strings.Contains(err.Error(), "upgrade the relay") {
+			t.Errorf("tasks host %s against an older relay = %q, %v", verb, out, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"PUT /v1/agents/grokbot/task-host", "PUT /v1/agents/grokbot/task-host"}; !slices.Equal(called, want) {
+		t.Fatalf("calls to the older relay = %v, want %v", called, want)
+	}
+
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	if out, err := run(t, tasksCmd(), "host", "set", "nobody"); !client.IsStatus(err, http.StatusNotFound) || strings.Contains(err.Error(), "upgrade") || !strings.Contains(err.Error(), identity.ErrUnknownAgent.Error()) {
+		t.Fatalf("tasks host set of an unknown agent = %q, %v", out, err)
+	}
 }

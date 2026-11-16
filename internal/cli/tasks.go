@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -94,7 +95,12 @@ status, or with --owner every task. Done and dropped tasks are counted;
 
 add, show, comment and drop act as this machine's agent, or with --owner as
 the owner. assign, approve, done, reopen and reset are the owner's and need
-an admin device (or the relay host).`,
+an admin device (or the relay host).
+
+host set and host clear, also the owner's, name a teammate a task host: it
+reads every task through its list_tasks and get_task tools and keeps the
+list for you from a conversation with it. A task host cannot approve a task
+or mark one done.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, owner, err := side.relay()
@@ -120,8 +126,77 @@ an admin device (or the relay host).`,
 		taskDecideCmd(client.TaskDone, "Mark an open or returned task done"),
 		taskDecideCmd(client.TaskApprove, "Approve a proposed task, so it can be assigned"),
 		taskDecideCmd(client.TaskReopen, "Put a done or dropped task back to open, or to proposed if it was never approved"),
-		taskDecideCmd(client.TaskReset, "Set a task's count of agent assigns back to zero"))
+		taskDecideCmd(client.TaskReset, "Set a task's count of agent assigns back to zero"),
+		taskHostCmd())
 	return cmd
+}
+
+// taskHostCmd is tincan tasks host: the owner's choice of which teammates
+// keep the task list for them.
+func taskHostCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "host",
+		Short: "Name the teammates that keep the task list for you (admin devices only)",
+		Long: `Name a teammate a task host, or clear the mark.
+
+A task host is a teammate you trust to keep the team's task list for you
+from a conversation with it. Several teammates may be hosts at once. Only an
+admin device, or the relay host, names or clears one: no agent can.
+
+A guest, a phone, a history, notes, pass or council agent, an agent driven
+through a web chat page, and an agent approval.json gates cannot be a host.
+A host that becomes one of those keeps the mark and is shown as suspended
+until it is eligible again.
+
+  tincan tasks host set grokbot
+  tincan tasks host clear grokbot
+
+"tincan agents" shows each task host.`,
+	}
+	cmd.AddCommand(taskHostSetCmd("set <agent>", "Name <agent> a task host", true),
+		taskHostSetCmd("clear <agent>", "Stop <agent> being a task host", false))
+	return cmd
+}
+
+func taskHostSetCmd(use, short string, on bool) *cobra.Command {
+	var relayURL, socket string
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: short + " (admin devices only)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			warnings, err := r.SetTaskHost(cmd.Context(), args[0], on)
+			if err != nil {
+				return olderRelayTaskHost(err)
+			}
+			if !on {
+				cmd.Printf("%q is no longer a task host. Tasks it assigned earlier stay attributed to %s.\n", args[0], args[0])
+				return nil
+			}
+			cmd.Printf("%q is now a task host.\n", args[0])
+			for _, w := range warnings {
+				cmd.Printf("Warning: %s\n", w)
+			}
+			return nil
+		},
+	}
+	adminFlags(cmd, &relayURL, &socket)
+	return cmd
+}
+
+// olderRelayTaskHost turns an older relay's plain "404 page not found" for
+// the task host route into an upgrade hint. The route's own 404, for an
+// agent the relay does not know, comes as a JSON error and passes through.
+func olderRelayTaskHost(err error) error {
+	apiErr, ok := errors.AsType[*client.APIError](err)
+	if !ok || apiErr.Code != http.StatusNotFound || !strings.Contains(apiErr.Message, "page not found") {
+		return err
+	}
+	return fmt.Errorf("%w. The relay is older than this tincan and cannot store task hosts yet: upgrade the relay to this release and restart it", err)
 }
 
 func taskAddCmd() *cobra.Command {
