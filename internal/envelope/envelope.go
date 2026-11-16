@@ -135,6 +135,12 @@ type Request struct {
 	// is not From: the owner, whose assign goes out as one of the owner's
 	// agents. Relay-only, and not stored on the request.
 	TaskActor string `json:"-"`
+	// TaskResultEvent is, on a task's ask being sent, the id of the task
+	// history entry that stored the result its body carries, 0 for a task
+	// with none. The store takes the task for the ask only while that is
+	// still the task's latest result. Relay-only, and not stored on the
+	// request.
+	TaskResultEvent int64 `json:"-"`
 	// Contributors names the agents, beside the sender and the chain, whose
 	// text the body carries: on a task's ask, the agent that filed the task
 	// and the authors of the result and comments sent along, and on any

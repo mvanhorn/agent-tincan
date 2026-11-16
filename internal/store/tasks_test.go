@@ -29,6 +29,10 @@ func attempt(s *Store, id int64, from, to string, held bool) (envelope.Request, 
 	if held {
 		req.Status, req.HoldTTL = envelope.StatusHeld, time.Hour
 	}
+	// A missing task keeps the zero marker, and is refused for being missing.
+	if c, err := s.TaskCarry(context.Background(), id); err == nil {
+		req.TaskResultEvent = c.ResultEvent
+	}
 	return s.Enqueue(context.Background(), req, time.Hour)
 }
 
@@ -57,9 +61,9 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 	for i := range 2 {
 		s, _ = open(t, path)
 		if i == 1 {
-			// A tasks table from before named_for gets the column on the
-			// next open.
-			if _, err := s.DB().Exec(`ALTER TABLE tasks DROP COLUMN named_for`); err != nil {
+			// A tasks table from before named_for and result_authors gets
+			// the columns on the next open.
+			if _, err := s.DB().Exec(`ALTER TABLE tasks DROP COLUMN named_for; ALTER TABLE tasks DROP COLUMN result_authors;`); err != nil {
 				t.Fatal(err)
 			}
 			s.Close()
@@ -816,9 +820,9 @@ func TestTaskCarry(t *testing.T) {
 		}
 	}
 	comment("codex", "before the result")
-	by, _, comments, err := s.TaskCarry(ctx, task.ID)
-	if err != nil || by != "" || len(comments) != 1 || comments[0].Body != "before the result" {
-		t.Fatalf("carry with no result = %q, %+v, %v", by, comments, err)
+	c, err := s.TaskCarry(ctx, task.ID)
+	if by, comments := c.ResultBy, c.Comments; err != nil || by != "" || len(comments) != 1 || comments[0].Body != "before the result" || c.ResultEvent != 0 || c.ResultAuthors != nil {
+		t.Fatalf("carry with no result = %+v, %v", c, err)
 	}
 	claimAsk(t, s, req.ID, "muse")
 	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "first pass"}); err != nil {
@@ -826,9 +830,15 @@ func TestTaskCarry(t *testing.T) {
 	}
 	comment("hermes", "needs a test")
 	comment(envelope.TaskOwner, "and a changelog line")
-	by, _, comments, err = s.TaskCarry(ctx, task.ID)
-	if err != nil || by != "muse" || len(comments) != 2 || comments[0].Actor != "hermes" || comments[0].Body != "needs a test" || comments[1].Actor != envelope.TaskOwner {
-		t.Fatalf("carry = %q, %+v, %v", by, comments, err)
+	c, err = s.TaskCarry(ctx, task.ID)
+	if by, comments := c.ResultBy, c.Comments; err != nil || by != "muse" || len(comments) != 2 || comments[0].Actor != "hermes" || comments[0].Body != "needs a test" || comments[1].Actor != envelope.TaskOwner {
+		t.Fatalf("carry = %+v, %v", c, err)
+	}
+	if c.Task.Result != "first pass" || c.Task.ResultRequest != req.ID || c.ResultEvent == 0 {
+		t.Fatalf("carried task = %+v, result entry %d", c.Task, c.ResultEvent)
+	}
+	if _, err := s.TaskCarry(ctx, task.ID+9); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("carry of a missing task: %v", err)
 	}
 }
 
@@ -976,4 +986,155 @@ func taskHistory(t *testing.T, s *Store, id int64) []envelope.TaskEvent {
 		t.Fatal(err)
 	}
 	return events
+}
+
+// A result is stored with the agents behind the ask it answers: who
+// replied, and the ask's chain, sender and contributors, never the owner. A
+// reply that replaces a held acknowledgement stores them again.
+func TestTaskResultKeepsItsAuthors(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	task := addTask(t, s, envelope.Task{Filer: "codex", Title: "ship it"})
+	req, err := s.Enqueue(ctx, envelope.Request{From: "codex", To: "muse", Kind: envelope.KindAsk, Body: "do it", Hop: 2, Chain: []string{"hermes", "codex"},
+		Contributors: []string{"scout", envelope.TaskOwner, "hermes"}, TaskID: task.ID}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authors := func() []string {
+		t.Helper()
+		carried, err := s.TaskCarry(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return carried.ResultAuthors
+	}
+	if got := authors(); got != nil {
+		t.Fatalf("authors of no result = %v", got)
+	}
+	want := []string{"muse", "hermes", "codex", "scout"}
+	claimAsk(t, s, req.ID, "muse")
+	if err := s.HoldAck(ctx, req.ID, "muse", "on it", 30*time.Minute, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(31 * time.Minute)
+	if reps, err := s.CloseHeldAcks(ctx, func(string, string) bool { return true }); err != nil || len(reps) != 1 {
+		t.Fatalf("close held acks = %+v, %v", reps, err)
+	}
+	if got := authors(); !slices.Equal(got, want) {
+		t.Fatalf("authors of the acknowledgement = %v, want %v", got, want)
+	}
+	// A row from before the column has none, and the replacement writes
+	// them with the result it stores.
+	if _, err := s.DB().Exec(`UPDATE tasks SET result_authors = NULL WHERE id = ?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := authors(); got != nil {
+		t.Fatalf("authors of a result stored without them = %v", got)
+	}
+	if rep, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "the real answer"}); err != nil || !rep.Replaced {
+		t.Fatalf("late reply = %+v, %v", rep, err)
+	}
+	if got := authors(); !slices.Equal(got, want) {
+		t.Fatalf("authors of the replacement = %v, want %v", got, want)
+	}
+}
+
+// A comment made on a task returned with a held acknowledgement was in no
+// ask, so it is still carried after the real answer replaces the
+// acknowledgement. The replacement is a new version of the result, and the
+// comments from before the acknowledgement stay out.
+func TestReplacedReplyKeepsCommentsSinceTheAcknowledgement(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	comment := func(actor, body string) {
+		t.Helper()
+		if _, err := s.AppendTaskEvent(ctx, envelope.TaskEvent{TaskID: task.ID, Actor: actor, Kind: envelope.TaskEventComment, Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	carried := func() TaskCarried {
+		t.Helper()
+		out, err := s.TaskCarry(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	bodies := func(out TaskCarried) string {
+		list := []string{}
+		for _, ev := range out.Comments {
+			list = append(list, ev.Body)
+		}
+		return strings.Join(list, "|")
+	}
+	comment("codex", "before the attempt ended")
+	claimAsk(t, s, req.ID, "muse")
+	if err := s.HoldAck(ctx, req.ID, "muse", "on it", 30*time.Minute, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(31 * time.Minute)
+	if reps, err := s.CloseHeldAcks(ctx, func(string, string) bool { return true }); err != nil || len(reps) != 1 {
+		t.Fatalf("close held acks = %+v, %v", reps, err)
+	}
+	comment("hermes", "on the acknowledgement")
+	acked := carried()
+	if acked.Task.Status != envelope.TaskReturned || acked.Task.Result != "on it" || bodies(acked) != "on the acknowledgement" {
+		t.Fatalf("carry after the acknowledgement = %+v", acked)
+	}
+	if rep, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "the real answer"}); err != nil || !rep.Replaced {
+		t.Fatalf("late reply = %+v, %v", rep, err)
+	}
+	comment("codex", "on the real answer")
+	got := carried()
+	if got.Task.Result != "the real answer" || got.ResultBy != "muse" || bodies(got) != "on the acknowledgement|on the real answer" {
+		t.Fatalf("carry after the replacement = %+v, want the comment made on the acknowledgement kept", got)
+	}
+	if got.ResultEvent <= acked.ResultEvent {
+		t.Fatalf("result entry %d after the replacement, %d before: want a later one", got.ResultEvent, acked.ResultEvent)
+	}
+	// The next attempt was handed both, so its result starts a new count.
+	next, err := attempt(s, task.ID, "codex", "hermes", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimAsk(t, s, next.ID, "hermes")
+	if _, err := s.Reply(ctx, next.ID, "hermes", envelope.Reply{Status: envelope.StatusAnswered, Body: "second pass"}); err != nil {
+		t.Fatal(err)
+	}
+	comment("codex", "on the second pass")
+	if got := carried(); got.ResultBy != "hermes" || bodies(got) != "on the second pass" {
+		t.Fatalf("carry after the next attempt = %+v", got)
+	}
+}
+
+// An ask is stored under a task only while the task's result is the one the
+// ask was built from.
+func TestTaskClaimNeedsTheResultItWasBuiltFrom(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	stale, err := s.TaskCarry(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimAsk(t, s, req.ID, "muse")
+	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "first pass"}); err != nil {
+		t.Fatal(err)
+	}
+	ask := envelope.Request{From: "codex", To: "hermes", Kind: envelope.KindAsk, Body: "do it", Hop: 1, Chain: []string{}, TaskID: task.ID, TaskResultEvent: stale.ResultEvent}
+	if _, err := s.Enqueue(ctx, ask, time.Hour); !errors.Is(err, ErrTaskBusy) {
+		t.Fatalf("ask built before the result landed: %v, want ErrTaskBusy", err)
+	}
+	if got := readTask(t, s, task.ID); got.Status != envelope.TaskReturned || got.CurrentRequest != "" || got.Assignee != "muse" {
+		t.Fatalf("task after the refused ask = %+v", got)
+	}
+	fresh, err := s.TaskCarry(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ask.TaskResultEvent = fresh.ResultEvent
+	if _, err := s.Enqueue(ctx, ask, time.Hour); err != nil {
+		t.Fatalf("ask built from the stored result: %v", err)
+	}
 }

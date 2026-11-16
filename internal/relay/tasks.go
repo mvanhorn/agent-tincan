@@ -70,21 +70,21 @@ func (a taskAssign) actor() string {
 // through submit, so it is an ordinary ask to the loop, hop, rate and
 // approval rules, and the store takes the task for it as it is written:
 // a task that already has an ask open, or is not open or returned, gets
-// store.ErrTaskBusy (409) and no request. Any refusal before the ask is
+// store.ErrTaskBusy (409) and no request. The body is built from one
+// snapshot of the task (store.TaskCarry), and the store takes the task only
+// while its result is still the one in that snapshot, so a reply that lands
+// while the ask is being checked refuses it the same way and the caller
+// assigns again from the new result. Any refusal before the ask is
 // queued leaves the task exactly as it was. The returned request is held
 // when the owner's rules hold it; the task is working either way.
 //
 // It does not decide who may assign: the caller has checked that.
 func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request, error) {
-	task, err := s.store.Task(ctx, a.TaskID, "")
+	carried, err := s.store.TaskCarry(ctx, a.TaskID)
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
 	if err := s.checkTaskTarget(ctx, a.To); err != nil {
-		return envelope.Request{}, err
-	}
-	resultBy, filedUnder, comments, err := s.store.TaskCarry(ctx, a.TaskID)
-	if err != nil {
 		return envelope.Request{}, err
 	}
 	limit, err := s.followOnLimit(ctx, a.To)
@@ -92,9 +92,9 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 		return envelope.Request{}, err
 	}
 	actor := a.actor()
-	body, contributors := taskBody(task, actor, resultBy, filedUnder, comments, limit)
+	body, contributors := taskBody(carried, actor, limit)
 	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
-		TaskID: a.TaskID, TaskActor: actor, Contributors: contributors, NoParent: a.Repeat})
+		TaskID: a.TaskID, TaskActor: actor, TaskResultEvent: carried.ResultEvent, Contributors: contributors, NoParent: a.Repeat})
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
@@ -181,13 +181,13 @@ const taskFraming = "Agent Tincan task #%[2]d. Between the line <<<TASK %[1]s>>>
 
 const taskReturnLine = "To hand the task back, reply to this request with the result; if you cannot go on without a detail, reply needs_input with your question."
 
-// taskBody is the ask an assignment of task becomes, at most limit bytes,
-// and the agents whose text it carries. A fixed preamble says what the
-// block is, who assigned it (actor) and who filed it. Between delimiters
-// whose nonce appears nowhere in the task's text, so nothing in it can
-// close them, sit the title, the detail, the latest earlier result with
-// its author (resultBy) and the comments made since that result, each
-// with its author; never the rest of the history. One fixed line after
+// taskBody is the ask an assignment of the task in c becomes, at most
+// limit bytes, and the agents whose text it carries. A fixed preamble says
+// what the block is, who assigned it (actor) and who filed it. Between
+// delimiters whose nonce appears nowhere in the task's text, so nothing in
+// it can close them, sit the title, the detail, the latest earlier result
+// with its author (c.ResultBy) and the comments made since that result,
+// each with its author; never the rest of the history. One fixed line after
 // the block says how to hand back or ask. The detail, the result and the
 // comments share the room when they do not fit whole. The framing tells
 // an agent that has never seen a task what to do; like a follow-on's, it
@@ -197,10 +197,15 @@ const taskReturnLine = "To hand the task back, reply to this request with the re
 // authors of carried comments, without the owner, whose text needs no
 // approval of the owner's. With them go the agents in the chain the filer
 // held a claim under as it filed the task and that request's contributors
-// (filedUnder), and the same for each carried comment's author as it wrote:
-// text written while working a request may hold what that request's chain
-// and contributors sent.
-func taskBody(task envelope.Task, actor, resultBy string, filedUnder []string, comments []envelope.TaskEvent, limit int) (string, []string) {
+// (c.FiledUnder), and the same for each carried comment's author as it
+// wrote: text written while working a request may hold what that request's
+// chain and contributors sent. A carried result is such text too. Its
+// author wrote it while working an attempt whose body held the comments
+// and the result before it, which this body no longer carries, so for as
+// long as the result is carried the agents behind that attempt
+// (c.ResultAuthors) are contributors with it.
+func taskBody(c store.TaskCarried, actor string, limit int) (string, []string) {
+	task, resultBy := c.Task, c.ResultBy
 	var contributors []string
 	carries := func(agent string) {
 		if agent != "" && agent != envelope.TaskOwner && !slices.Contains(contributors, agent) {
@@ -208,19 +213,22 @@ func taskBody(task envelope.Task, actor, resultBy string, filedUnder []string, c
 		}
 	}
 	carries(task.Filer)
-	for _, name := range filedUnder {
+	for _, name := range c.FiledUnder {
 		carries(name)
 	}
 	var thread strings.Builder
-	for _, c := range comments {
-		fmt.Fprintf(&thread, "[%s]\n%s\n", envelope.TaskWho(c.Actor), c.Body)
-		carries(c.Actor)
-		for _, name := range c.Chain {
+	for _, said := range c.Comments {
+		fmt.Fprintf(&thread, "[%s]\n%s\n", envelope.TaskWho(said.Actor), said.Body)
+		carries(said.Actor)
+		for _, name := range said.Chain {
 			carries(name)
 		}
 	}
 	if task.Result != "" {
 		carries(resultBy)
+		for _, name := range c.ResultAuthors {
+			carries(name)
+		}
 	}
 	detail, result, said := task.Detail, task.Result, strings.TrimSuffix(thread.String(), "\n")
 

@@ -44,7 +44,9 @@ var (
 // agents, since a rebind re-inserts the agent row. A task is never deleted,
 // so its id only ever names one task. current_request is the one ask open
 // under the task, empty for none; result_request is the ask that produced
-// result. task_events is the task's history, read in id order, which is
+// result, and result_authors the JSON list of the agents behind that ask:
+// who replied, its sender, its chain and its contributors, NULL for a task
+// with no result or one stored before the column. task_events is the task's history, read in id order, which is
 // also time order. task_claimants holds every agent that claimed, answered
 // or assigned an ask under the task, which is what lets it keep reading
 // the task afterwards; the target of an ask that ended while held for the
@@ -72,7 +74,8 @@ func (s *Store) migrateTasks() error {
   created_at         INTEGER NOT NULL,
   source             TEXT,
   suggested_assignee TEXT,
-  named_for          TEXT
+  named_for          TEXT,
+  result_authors     TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_filer ON tasks(filer, dedupe_key);
 CREATE TABLE IF NOT EXISTS task_events (
@@ -102,6 +105,15 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	}
 	if !has {
 		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN named_for TEXT`); err != nil {
+			return err
+		}
+	}
+	// A tasks table made before result_authors gets the column here.
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'result_authors')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN result_authors TEXT`); err != nil {
 			return err
 		}
 	}
@@ -173,6 +185,11 @@ const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed'
 			AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'assigned')))`
 
 const taskOpenStatuses = `status NOT IN ('done', 'dropped')`
+
+// taskResultEvent is the id of the history entry that last stored a result
+// on a row of tasks, 0 for a task with none. Every write of a result adds
+// one in its own transaction, so the id names one version of the result.
+const taskResultEvent = `COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = tasks.id AND e.kind = 'status' AND e.status = 'returned'), 0)`
 
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -331,15 +348,19 @@ func (s *Store) ClosedTasks(ctx context.Context, viewer string) (done, dropped i
 // target, and it is working. The update is conditional on the task having
 // no open ask and being open or returned, so of any number of asks racing
 // for a task one is stored; the others, and an ask under a task that is
-// missing or in any other status, get ErrTaskBusy. A task that repeats
+// missing or in any other status, get ErrTaskBusy. It is also conditional
+// on the task's result still being the one req's body was built from
+// (req.TaskResultEvent, as TaskCarry gave it): an ask written from a result
+// that has been replaced since gets ErrTaskBusy too, and its sender builds
+// it again. A task that repeats
 // repeats for req's target from now on, unless req is stored as held for
 // the owner: then the repeat follows only when the owner approves the ask
 // (Release), so one that is denied, expires or is cancelled leaves the
 // repeat where it was. A move to a fallback leaves it too.
 func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Request) error {
 	res, err := tx.ExecContext(ctx, `UPDATE tasks SET current_request = ?, assignee = ?, status = ?
-		WHERE id = ? AND current_request = '' AND status IN (?, ?)`,
-		req.ID, req.To, string(envelope.TaskWorking), req.TaskID, string(envelope.TaskOpen), string(envelope.TaskReturned))
+		WHERE id = ? AND current_request = '' AND status IN (?, ?) AND `+taskResultEvent+` = ?`,
+		req.ID, req.To, string(envelope.TaskWorking), req.TaskID, string(envelope.TaskOpen), string(envelope.TaskReturned), req.TaskResultEvent)
 	if err != nil {
 		return err
 	}
@@ -445,7 +466,8 @@ func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, no
 // history. A reply that replaces a held acknowledgement finds its request
 // closed and the task returned with the acknowledgement: it becomes the
 // result instead, but only while the task is still returned on that
-// request, so a task assigned again since keeps what it has.
+// request, so a task assigned again since keeps what it has. Either write
+// of a result stores the agents behind it beside it (taskResultAuthorsTx).
 func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
 	// One read ends it for a reply to a request that is no attempt at a
 	// task.
@@ -456,16 +478,23 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 		}
 		return err
 	}
+	var authors string
+	var err error
 	// The ask's target can read the task after its reply even when it
 	// replied without claiming first.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO task_claimants (task_id, agent)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO task_claimants (task_id, agent)
 		SELECT task_id, to_agent FROM requests WHERE id = ? AND task_id IS NOT NULL AND to_agent = ?
 		ON CONFLICT DO NOTHING`, rep.RequestID, rep.From); err != nil {
 		return err
 	}
+	if rep.Replaced || rep.Status == envelope.StatusAnswered {
+		if authors, err = taskResultAuthorsTx(ctx, tx, rep); err != nil {
+			return err
+		}
+	}
 	if rep.Replaced {
-		res, err := tx.ExecContext(ctx, `UPDATE tasks SET result = ? WHERE result_request = ? AND status = ? AND current_request = ''
-			AND id = (SELECT task_id FROM requests WHERE id = ?)`, taskResult(rep), rep.RequestID, string(envelope.TaskReturned), rep.RequestID)
+		res, err := tx.ExecContext(ctx, `UPDATE tasks SET result = ?, result_authors = ? WHERE result_request = ? AND status = ? AND current_request = ''
+			AND id = (SELECT task_id FROM requests WHERE id = ?)`, taskResult(rep), authors, rep.RequestID, string(envelope.TaskReturned), rep.RequestID)
 		if err != nil {
 			return err
 		}
@@ -480,9 +509,41 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 	if rep.Status != envelope.StatusAnswered {
 		return s.taskReleasedTx(ctx, tx, rep.RequestID, rep.From, taskNote(string(rep.Status), rep.Body))
 	}
-	return s.followTaskTx(ctx, tx, rep.RequestID, `status = ?, result = ?, result_request = ?, current_request = ''`,
-		[]any{string(envelope.TaskReturned), taskResult(rep), rep.RequestID},
+	return s.followTaskTx(ctx, tx, rep.RequestID, `status = ?, result = ?, result_request = ?, result_authors = ?, current_request = ''`,
+		[]any{string(envelope.TaskReturned), taskResult(rep), rep.RequestID, authors},
 		envelope.TaskEvent{Actor: rep.From, Kind: envelope.TaskEventStatus, Body: "answered on request " + rep.RequestID, Status: envelope.TaskReturned})
+}
+
+// taskResultAuthorsTx is the JSON list a task keeps with the result rep
+// stores: the agents whose text the answer may hold. rep.From wrote it, and
+// wrote it while working the request it answers, so the request's sender,
+// chain and contributors are behind it as well. Never the owner, whose text
+// needs no approval of the owner's.
+func taskResultAuthorsTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) (string, error) {
+	var from, chain, contributors string
+	if err := tx.QueryRowContext(ctx, `SELECT from_agent, chain, contributors FROM requests WHERE id = ?`, rep.RequestID).Scan(&from, &chain, &contributors); err != nil {
+		return "", err
+	}
+	names := []string{rep.From}
+	for _, list := range []string{chain, contributors} {
+		if list == "" {
+			continue
+		}
+		var more []string
+		if err := json.Unmarshal([]byte(list), &more); err != nil {
+			return "", err
+		}
+		names = append(names, more...)
+	}
+	names = append(names, from)
+	authors := []string{}
+	for _, name := range names {
+		if name != "" && name != envelope.TaskOwner && !slices.Contains(authors, name) {
+			authors = append(authors, name)
+		}
+	}
+	b, err := json.Marshal(authors)
+	return string(b), err
 }
 
 // taskNote is a history note: what happened, and the reason given, if any.
@@ -631,43 +692,92 @@ func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) 
 	return out, err
 }
 
-// TaskCarry returns what the next ask under task id carries beside the
-// task's own text: who wrote its stored result ("" when it has none), the
-// chain its filer held a claim under as it filed the task, with that
-// request's contributors (filedUnder, nil for none), and the comments made
-// since that result, oldest first, each with what its author held the same
-// way.
-func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, filedUnder []string, comments []envelope.TaskEvent, err error) {
-	var last int64
-	err = s.db.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? ORDER BY id DESC LIMIT 1`,
-		id, envelope.TaskEventStatus, string(envelope.TaskReturned)).Scan(&last, &resultBy)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", nil, nil, err
+// TaskCarried is what the next ask under a task is built from, read as one
+// snapshot.
+type TaskCarried struct {
+	// Task is the task, whole.
+	Task envelope.Task
+	// ResultBy is who wrote Task.Result, "" for a task with none.
+	ResultBy string
+	// ResultAuthors are the agents behind Task.Result: ResultBy, and the
+	// sender, chain and contributors of the ask it answered. Nil for a task
+	// with no result.
+	ResultAuthors []string
+	// ResultEvent is the id of the history entry that last stored
+	// Task.Result, 0 for none: what envelope.Request.TaskResultEvent takes.
+	ResultEvent int64
+	// FiledUnder is the chain the filer held a claim under as it filed the
+	// task, with that request's contributors; nil for none.
+	FiledUnder []string
+	// Comments are the comments no attempt has been handed with a result
+	// yet, oldest first, each with what its author held the same way.
+	Comments []envelope.TaskEvent
+}
+
+// TaskCarry returns what the next ask under task id carries, all of it read
+// in one transaction, so the result, who is behind it and the comments
+// beside it belong to the same moment. It returns ErrNoTask when there is
+// no such task.
+//
+// The comments are those made since the attempt that produced the result
+// handed the task back. A reply that replaces a held acknowledgement is the
+// same attempt's: it writes a second returned entry, and the comments made
+// between the two were in no ask, so the first entry stays the cutoff. That
+// is the first returned entry after the last assign before the latest one.
+func (s *Store) TaskCarry(ctx context.Context, id int64) (TaskCarried, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TaskCarried{}, err
 	}
-	var chain string
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(chain, '') FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id LIMIT 1`, id, envelope.TaskEventAdded).Scan(&chain)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", nil, nil, err
+	defer tx.Rollback()
+	var c TaskCarried
+	if c.Task, err = getTask(ctx, tx, id, ""); err != nil {
+		return TaskCarried{}, err
 	}
-	if chain != "" {
-		if err := json.Unmarshal([]byte(chain), &filedUnder); err != nil {
-			return "", nil, nil, err
+	err = tx.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? ORDER BY id DESC LIMIT 1`,
+		id, envelope.TaskEventStatus, string(envelope.TaskReturned)).Scan(&c.ResultEvent, &c.ResultBy)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return TaskCarried{}, err
+	}
+	since := c.ResultEvent
+	if since != 0 {
+		err = tx.QueryRowContext(ctx, `SELECT MIN(id) FROM task_events WHERE task_id = ?1 AND kind = ?2 AND status = ?3
+			AND id > COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?1 AND kind = ?4 AND id < ?5), 0)`,
+			id, envelope.TaskEventStatus, string(envelope.TaskReturned), envelope.TaskEventAssigned, c.ResultEvent).Scan(&since)
+		if err != nil {
+			return TaskCarried{}, err
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+taskEventCols+` FROM task_events WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id`,
-		id, envelope.TaskEventComment, last)
+	var authors, chain string
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(t.result_authors, ''), COALESCE((SELECT e.chain FROM task_events e WHERE e.task_id = t.id AND e.kind = ? ORDER BY e.id LIMIT 1), '')
+		FROM tasks t WHERE t.id = ?`, envelope.TaskEventAdded, id).Scan(&authors, &chain)
 	if err != nil {
-		return "", nil, nil, err
+		return TaskCarried{}, err
+	}
+	if authors != "" && c.Task.Result != "" {
+		if err := json.Unmarshal([]byte(authors), &c.ResultAuthors); err != nil {
+			return TaskCarried{}, err
+		}
+	}
+	if chain != "" {
+		if err := json.Unmarshal([]byte(chain), &c.FiledUnder); err != nil {
+			return TaskCarried{}, err
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT `+taskEventCols+` FROM task_events WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id`,
+		id, envelope.TaskEventComment, since)
+	if err != nil {
+		return TaskCarried{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		ev, err := scanTaskEvent(rows)
 		if err != nil {
-			return "", nil, nil, err
+			return TaskCarried{}, err
 		}
-		comments = append(comments, ev)
+		c.Comments = append(c.Comments, ev)
 	}
-	return resultBy, filedUnder, comments, rows.Err()
+	return c, rows.Err()
 }
 
 // ReopenTask puts a done or dropped task back as actor's change, with note

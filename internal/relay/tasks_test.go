@@ -770,8 +770,10 @@ func TestTaskBodyCarriesResultAndLaterComments(t *testing.T) {
 	if !strings.Contains(second.Body, "It was filed by instinct") {
 		t.Errorf("body does not name the filer: %s", second.Body)
 	}
+	// grokbot is behind the result: it sent the attempt muse answered, and
+	// wrote the early remark that attempt carried.
 	stored, _, err := m.Store.Request(ctx, second.ID)
-	if err != nil || strings.Join(stored.Contributors, ",") != "instinct,scout,muse" {
+	if err != nil || strings.Join(stored.Contributors, ",") != "instinct,scout,muse,grokbot" {
 		t.Fatalf("contributors = %v, %v", stored.Contributors, err)
 	}
 	// Text that imitates the delimiters cannot close the block: the nonce
@@ -2078,4 +2080,130 @@ func TestTaskContributorsFollowAsksSentWhileHandling(t *testing.T) {
 	if req := sent(hermes, "muse"); req.Status == envelope.StatusHeld {
 		t.Fatalf("an ask two hops from that task's ask = %+v", req)
 	}
+}
+
+// A result is written from the attempt that produced it, so it may hold
+// what that attempt's body carried. The next attempt carries the result
+// without the comments from before it, and still names their authors: a
+// rule that holds one of them from a target holds the ask that carries the
+// result. A result no gated agent was behind is not held.
+func TestTaskResultCarriesTheAgentsBehindIt(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	m.gate(t, `{"gate":{"muse":{"from":["scout"]}},"hold_ttl":"1h"}`)
+	// returned has grokbot file a task, scout comment on it when asked to,
+	// and instinct answer the first attempt at it.
+	returned := func(title string, scoutComments bool) int64 {
+		t.Helper()
+		task := m.add(t, envelope.Task{Filer: "grokbot", Title: title})
+		for actor, body := range map[string]string{"scout": "The vendor wants net 30.", envelope.TaskOwner: "Keep it short."} {
+			if actor == "scout" && !scoutComments {
+				continue
+			}
+			if _, err := m.Store.AppendTaskEvent(ctx, envelope.TaskEvent{TaskID: task.ID, Actor: actor, Kind: envelope.TaskEventComment, Body: body}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		first := m.assign(t, task.ID, "grokbot", "instinct")
+		if first.Status == envelope.StatusHeld || slices.Contains(first.Contributors, "scout") != scoutComments {
+			t.Fatalf("first attempt = %+v", first)
+		}
+		claimOne(t, m.instinct, first.ID)
+		if _, err := m.instinct.Reply(ctx, first.ID, "Summary: the vendor wants net 30.", envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+		return task.ID
+	}
+
+	second := m.assign(t, returned("Summarise the vendor call", true), "grokbot", "muse")
+	if inside := block(t, second.Body); !strings.Contains(inside, "Latest result so far, from instinct:\nSummary: the vendor wants net 30.") || strings.Contains(inside, "[scout]") {
+		t.Fatalf("second attempt's block = %q, want the result without the earlier comment", inside)
+	}
+	stored, _, err := m.Store.Request(ctx, second.ID)
+	if err != nil || second.Status != envelope.StatusHeld || !slices.Contains(stored.Contributors, "scout") || !slices.Contains(stored.Contributors, "instinct") {
+		t.Fatalf("ask carrying a result written from scout's comment = %+v with contributors %v, %v; want it held for scout", second, stored.Contributors, err)
+	}
+	if slices.Contains(stored.Contributors, envelope.TaskOwner) || slices.Contains(stored.Chain, "scout") {
+		t.Fatalf("contributors = %v, chain = %v; want no owner and scout in no chain", stored.Contributors, stored.Chain)
+	}
+
+	clean := m.assign(t, returned("Summarise the bank call", false), "grokbot", "muse")
+	if stored, _, err := m.Store.Request(ctx, clean.ID); err != nil || clean.Status == envelope.StatusHeld || slices.Contains(stored.Contributors, "scout") {
+		t.Fatalf("ask carrying a result scout was not behind = %+v with contributors %v, %v", clean, stored.Contributors, err)
+	}
+}
+
+// landing runs do once as the next task ask is prepared, in front of the
+// real policy: after the ask's body is built and before the ask is stored.
+type landing struct {
+	relay.Preparer
+	do func()
+}
+
+func (l *landing) Prepare(ctx context.Context, req *envelope.Request) error {
+	if do := l.do; do != nil && req.TaskID != 0 {
+		l.do = nil
+		do()
+	}
+	return l.Preparer.Prepare(ctx, req)
+}
+
+// An ask is built from one reading of the task. A result that lands after
+// that reading and before the ask is stored refuses the ask as busy, with
+// nothing stored: it would carry the earlier result, or none, and name the
+// wrong authors. The assign made again carries the new result.
+func TestTaskAssignRefusedWhenTheResultChangedMeanwhile(t *testing.T) {
+	// racing assigns task id to to while land runs between the reading and
+	// the write, and wants the assign refused and no request stored for it.
+	racing := func(t *testing.T, m *taskMesh, id int64, to string, land func()) {
+		t.Helper()
+		before := m.asks(t, id)
+		m.Server.SetPreparer(&landing{Preparer: policy.New(m.Store, policy.Config{Now: m.clk.now}), do: land})
+		if _, err := m.Server.AssignTask(t.Context(), relay.TaskAssign{TaskID: id, From: "grokbot", To: to}); !relayStatus(err, 409, store.ErrTaskBusy.Error()) {
+			t.Fatalf("assign built from a result that changed meanwhile: %v, want it refused as busy", err)
+		}
+		if got := m.task(t, id); got.Status != envelope.TaskReturned || got.CurrentRequest != "" || m.asks(t, id) != before {
+			t.Fatalf("task after the refused assign = %+v with %d requests, want it returned with %d", got, m.asks(t, id), before)
+		}
+	}
+	t.Run("an attempt's answer", func(t *testing.T) {
+		m := newTaskMesh(t)
+		ctx := t.Context()
+		task := m.add(t, envelope.Task{Filer: "grokbot", Title: "write the report"})
+		first := m.assign(t, task.ID, "grokbot", "instinct")
+		claimOne(t, m.instinct, first.ID)
+		racing(t, m, task.ID, "muse", func() {
+			if _, err := m.instinct.Reply(ctx, first.ID, "The report: all green.", envelope.StatusAnswered); err != nil {
+				t.Error(err)
+			}
+		})
+		again := m.assign(t, task.ID, "grokbot", "muse")
+		stored, _, err := m.Store.Request(ctx, again.ID)
+		if err != nil || !strings.Contains(block(t, again.Body), "Latest result so far, from instinct:\nThe report: all green.") || !slices.Contains(stored.Contributors, "instinct") {
+			t.Fatalf("the assign made again = %+v with contributors %v, %v", again, stored.Contributors, err)
+		}
+	})
+	t.Run("a reply that replaces an acknowledgement", func(t *testing.T) {
+		m := newTaskMesh(t)
+		ctx := t.Context()
+		task := m.add(t, envelope.Task{Filer: "grokbot", Title: "write the report"})
+		first := m.assign(t, task.ID, "grokbot", "muse")
+		if _, err := m.muse.Claim(ctx, first.ID); err != nil {
+			t.Fatal(err)
+		}
+		if rep, err := m.muse.Reply(ctx, first.ID, "Working on it, full report will follow.", envelope.StatusAnswered); err != nil || !rep.KeptOpen {
+			t.Fatalf("acknowledgement = %+v, %v", rep, err)
+		}
+		m.clk.advance(relay.DefaultClaimLease + time.Minute)
+		m.Server.Sweep(ctx)
+		racing(t, m, task.ID, "instinct", func() {
+			if _, err := m.muse.Reply(ctx, first.ID, "The report: all green.", envelope.StatusAnswered); err != nil {
+				t.Error(err)
+			}
+		})
+		again := m.assign(t, task.ID, "grokbot", "instinct")
+		if inside := block(t, again.Body); !strings.Contains(inside, "Latest result so far, from muse:\nThe report: all green.") || strings.Contains(inside, "Working on it") {
+			t.Fatalf("the assign made again carries %q", inside)
+		}
+	})
 }

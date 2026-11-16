@@ -1138,6 +1138,11 @@ function taskCard(entry) {
   return li;
 }
 
+// taskAnswering holds the asks an answer is on its way for. A render from a
+// poll in the meantime keeps that ask's box and button off, so one answer
+// is sent once however slow the relay is to say it took it.
+const taskAnswering = new Set();
+
 // taskAnswerBox shows the answer box for ask, a question this phone's agent
 // was asked on the ask it sent, and takes the box away for null. The box is
 // rebuilt only for another question, so typed text stays through a refresh.
@@ -1161,10 +1166,13 @@ function taskAnswerBox(entry, ask) {
   input.rows = 2;
   const send = button("primary", "Send answer", async () => {
     const body = input.value.trim();
-    if (!body || taskOff()) return;
-    send.disabled = true;
+    if (!body || taskOff() || taskAnswering.has(req)) return;
+    taskAnswering.add(req);
+    send.disabled = input.disabled = true;
     const res = await api("POST", "/v1/requests/" + encodeURIComponent(req) + "/answer", { body }).catch(() => null);
-    send.disabled = false;
+    taskAnswering.delete(req);
+    input.disabled = false;
+    send.disabled = taskOff();
     if (res && res.status === 200) {
       // The same ask goes on; the next listing confirms it.
       taskEpoch++;
@@ -1269,7 +1277,11 @@ function updateTaskCard(entry) {
   // The answer box is only for a question on an ask this phone's agent sent.
   const ask = taskAsk(task);
   taskAnswerBox(entry, task.status === "question" && ask && ask.mine ? ask : null);
-  if (entry.answerSend) entry.answerSend.disabled = off;
+  if (entry.answerSend) {
+    const sending = taskAnswering.has(task.current_request);
+    entry.answerSend.disabled = off || sending;
+    entry.answerInput.disabled = sending;
+  }
   setText(c.error, entry.error);
   c.error.hidden = !entry.error;
   c.more.hidden = !entry.open;
