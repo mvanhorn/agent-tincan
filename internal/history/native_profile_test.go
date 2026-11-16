@@ -185,7 +185,9 @@ func TestSecondHostForALiveSocketWaits(t *testing.T) {
 			waitFor(t, func() bool { return serving(sock) })
 			second := startProfileHost(t, dir, unpackedOrigin, "second", os.Getppid())
 			nameProfile(t, second.toHost, name)
-			waitFor(t, func() bool { return presenceOf(t, dir, os.Getppid()).State == "waiting" })
+			// A host is written as waiting before it knows why, so wait for
+			// the reason too: reading it straight after the state is a race.
+			waitFor(t, func() bool { pr := presenceOf(t, dir, os.Getppid()); return pr.State == "waiting" && pr.Reason != "" })
 			pr := presenceOf(t, dir, os.Getppid())
 			if !strings.Contains(pr.Reason, "another native host serves "+filepath.Base(sock)) || !strings.Contains(pr.Reason, "options page") {
 				t.Fatalf("waiting reason %q", pr.Reason)
@@ -238,7 +240,9 @@ func TestUnpackedHostWaitsForAStoreHostOnAnySocket(t *testing.T) {
 	waitFor(t, func() bool { return serving(filepath.Join(dir, "host-work.sock")) })
 	unpacked := startProfileHost(t, dir, unpackedOrigin, "unpacked", os.Getppid())
 	nameProfile(t, unpacked.toHost, nil)
-	waitFor(t, func() bool { return presenceOf(t, dir, os.Getppid()).State == "waiting" })
+	// A host is written as waiting before it knows why, so wait for
+	// the reason too: reading it straight after the state is a race.
+	waitFor(t, func() bool { pr := presenceOf(t, dir, os.Getppid()); return pr.State == "waiting" && pr.Reason != "" })
 	if pr := presenceOf(t, dir, os.Getppid()); !strings.Contains(pr.Reason, "store build") {
 		t.Fatalf("reason %q", pr.Reason)
 	}
