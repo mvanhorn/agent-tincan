@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,5 +149,173 @@ func TestBlockScheduleNoticeOnce(t *testing.T) {
 	}
 	if _, first, err := s.BlockSchedule(ctx, sch.ID, notice, time.Hour); err != nil || !first {
 		t.Fatalf("new run = %v, %v", first, err)
+	}
+}
+
+// repeatingTask files a task from grokbot that repeats hourly for muse.
+func repeatingTask(t *testing.T, s *Store, c *clock) envelope.Task {
+	t.Helper()
+	task, created, err := s.AddRepeatingTask(context.Background(), envelope.Task{Filer: "grokbot", Title: "check the backups"},
+		envelope.Schedule{From: "grokbot", To: "muse", EverySeconds: 3600, NextAt: c.t.Add(time.Hour)})
+	if err != nil || !created || task.RepeatSchedule == 0 || task.RepeatEverySeconds != 3600 || task.RepeatTo != "muse" {
+		t.Fatalf("repeating task = %+v, %v, %v", task, created, err)
+	}
+	return task
+}
+
+// A database from before repeating tasks gains the schedule's task link,
+// and opening it again changes nothing.
+func TestSchedulesMigrateOnExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, c := open(t, path)
+	ctx := context.Background()
+	joinAll(t, s, c, "grokbot", "muse")
+	old, err := s.AddSchedule(ctx, envelope.Schedule{From: "grokbot", To: "muse", Body: "weekly report", EverySeconds: 3600, NextAt: c.t.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`DROP INDEX schedules_task; ALTER TABLE schedules DROP COLUMN task_id;`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	for i := range 2 {
+		s, c = open(t, path)
+		list, err := s.Schedules(ctx, "grokbot", 0, MaxSchedules)
+		if err != nil || len(list) == 0 || list[0].ID != old.ID || list[0].Body != "weekly report" || list[0].TaskID != 0 {
+			t.Fatalf("schedules after open %d = %+v, %v", i, list, err)
+		}
+		if i == 0 {
+			repeatingTask(t, s, c)
+		} else if len(list) != 2 || list[1].TaskID == 0 {
+			t.Fatalf("schedules after the second open = %+v", list)
+		}
+		s.Close()
+	}
+}
+
+// A repeating task is stored with its schedule or not at all, and a task
+// returned for its key gets no second schedule.
+func TestAddRepeatingTaskIsOneWrite(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	joinAll(t, s, c, "grokbot", "muse")
+	repeat := envelope.Schedule{From: "grokbot", To: "muse", EverySeconds: 3600, NextAt: c.t.Add(time.Hour)}
+	first, _, err := s.AddRepeatingTask(ctx, envelope.Task{Filer: "grokbot", Title: "check the backups", Key: "backups"}, repeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, created, err := s.AddRepeatingTask(ctx, envelope.Task{Filer: "grokbot", Title: "check them again", Key: "backups"}, repeat)
+	if err != nil || created || again.ID != first.ID || again.RepeatSchedule != first.RepeatSchedule {
+		t.Fatalf("second add with the key = %+v, %v, %v", again, created, err)
+	}
+	list, err := s.Schedules(ctx, "grokbot", 0, MaxSchedules)
+	if err != nil || len(list) != 1 || list[0].TaskID != first.ID || list[0].Body != "" {
+		t.Fatalf("schedules = %+v, %v", list, err)
+	}
+
+	gone := repeat
+	gone.To = "nobody"
+	if _, _, err := s.AddRepeatingTask(ctx, envelope.Task{Filer: "grokbot", Title: "for nobody"}, gone); !errors.Is(err, ErrNoAgent) {
+		t.Fatalf("repeat for an unknown agent: %v", err)
+	}
+	for range MaxSchedules - 1 {
+		if _, err := s.AddSchedule(ctx, envelope.Schedule{From: "grokbot", To: "muse", Body: "x", NextAt: c.t.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := s.AddRepeatingTask(ctx, envelope.Task{Filer: "grokbot", Title: "one too many"}, repeat); !errors.Is(err, ErrScheduleLimit) {
+		t.Fatalf("repeat over the schedule limit: %v", err)
+	}
+	if tasks, err := s.Tasks(ctx, "", 0, 10, true); err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks after the refused adds = %+v, %v", tasks, err)
+	}
+}
+
+// Closing a task deletes its schedule in the same write, and a task opened
+// again does not repeat. Cancelling the schedule, or removing an agent it
+// names, leaves the task with no repeat.
+func TestTaskRepeatEnds(t *testing.T) {
+	ctx := context.Background()
+	ends := map[string]func(s *Store, id, schedule int64) error{
+		"done": func(s *Store, id, _ int64) error {
+			_, err := s.MarkTaskDone(ctx, id, envelope.TaskOwner, "")
+			return err
+		},
+		"dropped by its filer": func(s *Store, id, _ int64) error {
+			_, err := s.SetTaskStatus(ctx, id, envelope.TaskDropped, "grokbot", "", envelope.TaskOpen)
+			return err
+		},
+		"dropped by the owner": func(s *Store, id, _ int64) error {
+			_, _, err := s.DropTask(ctx, id, envelope.TaskOwner, "")
+			return err
+		},
+		"schedule cancelled": func(s *Store, _, schedule int64) error {
+			_, err := s.CancelSchedule(ctx, schedule, "grokbot")
+			return err
+		},
+		"sender removed": func(s *Store, _, _ int64) error {
+			_, err := s.DeleteAgent(ctx, "grokbot")
+			return err
+		},
+		"target removed": func(s *Store, _, _ int64) error {
+			_, err := s.DeleteAgent(ctx, "muse")
+			return err
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			s, c := open(t, ":memory:")
+			joinAll(t, s, c, "grokbot", "muse")
+			task := repeatingTask(t, s, c)
+			if err := end(s, task.ID, task.RepeatSchedule); err != nil {
+				t.Fatal(err)
+			}
+			if list, err := s.Schedules(ctx, "", 0, MaxSchedules); err != nil || len(list) != 0 {
+				t.Fatalf("schedules = %+v, %v", list, err)
+			}
+			got, err := s.Task(ctx, task.ID, "")
+			if err != nil || got.RepeatSchedule != 0 || got.RepeatEverySeconds != 0 || got.RepeatTo != "" {
+				t.Fatalf("task = %+v, %v", got, err)
+			}
+			if closed := got.Status == envelope.TaskDone || got.Status == envelope.TaskDropped; closed != (name == "done" || strings.HasPrefix(name, "dropped")) {
+				t.Fatalf("task is %s", got.Status)
+			}
+			if got.Status != envelope.TaskOpen {
+				if got, err = s.SetTaskStatus(ctx, task.ID, envelope.TaskOpen, envelope.TaskOwner, "", envelope.TaskDone, envelope.TaskDropped); err != nil || got.RepeatSchedule != 0 {
+					t.Fatalf("task opened again = %+v, %v", got, err)
+				}
+			}
+		})
+	}
+}
+
+// Assigning a repeating task to another teammate moves its schedule's
+// target in the write that stores the ask. A move of that ask to a fallback
+// does not.
+func TestTaskRepeatFollowsAssignNotMove(t *testing.T) {
+	s, c := open(t, ":memory:")
+	ctx := context.Background()
+	joinAll(t, s, c, "grokbot", "muse", "instinct", "scout")
+	task := repeatingTask(t, s, c)
+	plain, err := s.AddSchedule(ctx, envelope.Schedule{From: "grokbot", To: "muse", Body: "x", NextAt: c.t.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := attempt(s, task.ID, "grokbot", "instinct", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Task(ctx, task.ID, ""); err != nil || got.RepeatTo != "instinct" || got.Assignee != "instinct" || got.RepeatSchedule != task.RepeatSchedule {
+		t.Fatalf("task after the assign = %+v, %v", got, err)
+	}
+	if _, err := s.RerouteUntaken(ctx, req.ID, "instinct", "scout"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Task(ctx, task.ID, ""); err != nil || got.RepeatTo != "instinct" || got.Assignee != "scout" {
+		t.Fatalf("task after the move = %+v, %v", got, err)
+	}
+	list, err := s.Schedules(ctx, "grokbot", 0, MaxSchedules)
+	if err != nil || len(list) != 2 || list[1].ID != plain.ID || list[1].To != "muse" || list[1].TaskID != 0 {
+		t.Fatalf("schedules = %+v, %v", list, err)
 	}
 }

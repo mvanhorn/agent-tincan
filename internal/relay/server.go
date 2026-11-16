@@ -447,6 +447,12 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /v1/rooms", s.handleRooms)
 	mux.HandleFunc("GET /v1/rooms/{room}/posts", s.handleRoomRead)
 	mux.HandleFunc("POST /v1/rooms/{room}/posts", s.handleRoomPost)
+	mux.HandleFunc("POST /v1/tasks", s.handleAddTask)
+	mux.HandleFunc("GET /v1/tasks", s.handleTasks)
+	mux.HandleFunc("GET /v1/tasks/{id}", s.handleTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/assign", s.handleAssignTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/comment", s.handleCommentTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/drop", s.handleDropTask)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
@@ -495,6 +501,16 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("POST /v1/admin/rooms", s.handleCreateRoom)
 	mux.HandleFunc("POST /v1/admin/rooms/{room}/members", s.handleRoomMember)
 	mux.HandleFunc("DELETE /v1/admin/rooms/{room}/members", s.handleRoomMember)
+	mux.HandleFunc("GET /v1/admin/tasks", s.handleAdminTasks)
+	mux.HandleFunc("POST /v1/admin/tasks", s.handleAdminAddTask)
+	mux.HandleFunc("GET /v1/admin/tasks/{id}", s.handleAdminTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/assign", s.handleAdminAssignTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/comment", s.handleAdminCommentTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/approve", s.handleApproveTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/done", s.handleDoneTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/reopen", s.handleReopenTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/drop", s.handleAdminDropTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/reset", s.handleResetTask)
 }
 
 // AdminHandler serves only admin routes and treats every caller as the local
@@ -659,14 +675,28 @@ func (s *Server) remote(r *http.Request) string {
 // agents and is refused for a name bound elsewhere. A rebuilt machine that the
 // directory re-admits on the way is audited as a "rebind".
 func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
+	name, err := s.agentOf(r)
+	if err != nil {
+		writeErr(w, agentErrStatus(err), err)
+		return ""
+	}
+	return name
+}
+
+// agentErrStatus is the HTTP status of a caller agentOf could not attribute.
+func agentErrStatus(err error) int {
+	if errors.Is(err, identity.ErrRebindCheckFailed) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusForbidden
+}
+
+// agentOf is agent for a handler that answers a caller with no agent
+// itself: it attributes the request and writes nothing.
+func (s *Server) agentOf(r *http.Request) (string, error) {
 	res, err := s.resolve(r)
 	if err != nil {
-		code := http.StatusForbidden
-		if errors.Is(err, identity.ErrRebindCheckFailed) {
-			code = http.StatusServiceUnavailable
-		}
-		writeErr(w, code, err)
-		return ""
+		return "", err
 	}
 	if rb := res.Rebind; rb != nil {
 		log.Printf("rebind: %s moved from %s (%s) to %s (%s)", rb.Agent, rb.OldNodeName, rb.OldNode, rb.NewNodeName, rb.NewNode)
@@ -720,7 +750,7 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request) string {
 			}
 		}
 	}
-	return res.Name
+	return res.Name, nil
 }
 
 // seen records that agent called the relay, running the tincan build named

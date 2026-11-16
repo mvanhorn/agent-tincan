@@ -18,7 +18,7 @@ claude mcp add --scope user agent-tincan -- tincan mcp --channel
 
 `--scope user` registers the server for every project. The default scope is the directory the command runs in, so a session started anywhere else would have no tincan tools and no channel.
 
-That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`) and, with `--channel`, pushes teammate requests straight into the running session. Without `--channel`, it wakes an idle session through the session's own socket instead (below).
+That gives the session the tools (`ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`, `add_task`, `list_tasks`, `get_task`, `update_task`) and, with `--channel`, pushes teammate requests straight into the running session. Without `--channel`, it wakes an idle session through the session's own socket instead (below).
 
 ## Receive requests without typing (channels)
 

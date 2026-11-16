@@ -209,3 +209,49 @@ func TestApprovalFailureRefundsUrgent(t *testing.T) {
 		t.Fatalf("urgent slot not refunded: %v", err)
 	}
 }
+
+// A rule reads the agents whose text a request carries as it reads the
+// chain: a gated contributor holds the request, an "unless" rule holds one
+// it does not name, and a request with no contributors is decided as before.
+func TestApprovalHoldsOnContributors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approval.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"gate":{"muse":{"from":["untrusted"]}}}`)
+	a, err := LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := func(contributors ...string) bool {
+		t.Helper()
+		req := envelope.Request{From: "safe", To: "muse", Chain: []string{"safe"}, Contributors: contributors}
+		h, err := a.Held(&req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	if held() {
+		t.Fatal("a plain ask from an ungated sender was held")
+	}
+	if !held("untrusted") {
+		t.Fatal("an ask carrying a gated agent's text was not held")
+	}
+	if held("other") {
+		t.Fatal("an ask carrying an ungated agent's text was held")
+	}
+	if req := (envelope.Request{From: "safe", To: "instinct", Chain: []string{"safe"}, Contributors: []string{"untrusted"}}); func() bool { h, _ := a.Held(&req); return h }() {
+		t.Fatal("a contributor held an ask to a target the file does not gate")
+	}
+	write(`{"gate":{"muse":{"unless":["safe"]}}}`)
+	if held() || held("safe") {
+		t.Fatal("an unless rule held text from the agent it names")
+	}
+	if !held("safe", "other") {
+		t.Fatal("an unless rule passed text from an agent it does not name")
+	}
+}

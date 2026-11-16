@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -39,17 +40,89 @@ var errScheduleDuringClaim = errors.New("you hold a claimed request and a schedu
 // claimed or not, would go out as the caller's own work for good.
 var errScheduleDuringGuestAsk = errors.New("you have an open request that a guest's ask led to, and a scheduled ask would not carry its mark; finish that request first, or send an ordinary ask")
 
+// checkScheduleEvery refuses a repeat no schedule may have; 0 is no repeat.
+func checkScheduleEvery(every int64) error {
+	switch {
+	case every != 0 && every < int64(MinScheduleInterval/time.Second):
+		return fmt.Errorf("schedule: the shortest repeat is %v", MinScheduleInterval)
+	case every > int64(maxScheduleInterval/time.Second):
+		return fmt.Errorf("schedule: the longest repeat is %v", maxScheduleInterval)
+	}
+	return nil
+}
+
+// checkScheduleCaller refuses a schedule from agent in session while a
+// guest's ask is open with it or it holds a claim.
+func (s *Server) checkScheduleCaller(ctx context.Context, agent, session string) error {
+	if open, err := s.store.OpenGuestAsks(ctx, agent); err != nil {
+		return err
+	} else if open > 0 {
+		return &StatusError{Code: http.StatusConflict, Err: errScheduleDuringGuestAsk}
+	}
+	if held, err := s.holdsClaim(ctx, agent, session); err != nil {
+		return err
+	} else if held {
+		return &StatusError{Code: http.StatusConflict, Err: errScheduleDuringClaim}
+	}
+	return nil
+}
+
+// scheduleAddError gives the store's refusals of a new schedule to to their
+// HTTP status.
+func scheduleAddError(err error, to string) error {
+	switch {
+	case errors.Is(err, store.ErrNoAgent):
+		return &StatusError{Code: http.StatusNotFound, Err: errors.New("no such agent: " + to)}
+	case errors.Is(err, store.ErrScheduleLimit):
+		return &StatusError{Code: http.StatusConflict, Err: err}
+	}
+	return err
+}
+
+// scheduleCreated audits a new schedule, with the task it repeats if any.
+func (s *Server) scheduleCreated(ctx context.Context, sch envelope.Schedule) {
+	detail := map[string]any{"schedule": sch.ID, "to": sch.To, "next_at": sch.NextAt, "every_seconds": sch.EverySeconds}
+	if sch.TaskID != 0 {
+		detail["task"] = sch.TaskID
+	}
+	s.record(ctx, "schedule_created", "", "", sch.From, store.DetailJSON(detail))
+}
+
 // holdsClaim reports whether a send from agent in session would continue a
 // claim, the way policy.Prepare decides it: the session's own claim, or else
 // the agent-wide one, which a session cannot step out of.
 func (s *Server) holdsClaim(ctx context.Context, agent, session string) (bool, error) {
+	_, ok, err := s.heldClaim(ctx, agent, session)
+	return ok, err
+}
+
+// heldClaim is holdsClaim with the claimed request.
+func (s *Server) heldClaim(ctx context.Context, agent, session string) (envelope.Request, bool, error) {
 	if session != "" {
-		if _, ok, err := s.store.OpenClaimFor(ctx, agent, session); ok || err != nil {
-			return ok, err
+		if req, ok, err := s.store.OpenClaimFor(ctx, agent, session); ok || err != nil {
+			return req, ok, err
 		}
 	}
-	_, ok, err := s.store.OpenClaim(ctx, agent)
-	return ok, err
+	return s.store.OpenClaim(ctx, agent)
+}
+
+// claimChain returns the chain of the request agent holds a claim on in
+// session, followed by that request's contributors, nil when it holds none.
+// Text the agent stores now, to be sent on later, is kept with it: a send
+// made now would carry that chain and those contributors, and the stored
+// text must not shed either.
+func (s *Server) claimChain(ctx context.Context, agent, session string) ([]string, error) {
+	req, ok, err := s.heldClaim(ctx, agent, session)
+	if err != nil || !ok {
+		return nil, err
+	}
+	out := slices.Clone(req.Chain)
+	for _, name := range req.Contributors {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
 }
 
 // handleCreateSchedule records an ask from the calling agent to fire later
@@ -98,10 +171,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		err = errors.New("schedule: at or every_seconds is required")
 	case !in.At.IsZero() && !in.At.After(now):
 		err = errors.New("schedule: at is in the past")
-	case in.EverySeconds != 0 && in.EverySeconds < int64(MinScheduleInterval/time.Second):
-		err = fmt.Errorf("schedule: the shortest repeat is %v", MinScheduleInterval)
-	case in.EverySeconds > int64(maxScheduleInterval/time.Second):
-		err = fmt.Errorf("schedule: the longest repeat is %v", maxScheduleInterval)
+	default:
+		err = checkScheduleEvery(in.EverySeconds)
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -116,18 +187,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if open, err := s.store.OpenGuestAsks(r.Context(), from); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	} else if open > 0 {
-		writeErr(w, http.StatusConflict, errScheduleDuringGuestAsk)
-		return
-	}
-	if held, err := s.holdsClaim(r.Context(), from, sess); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	} else if held {
-		writeErr(w, http.StatusConflict, errScheduleDuringClaim)
+	if err := s.checkScheduleCaller(r.Context(), from, sess); err != nil {
+		writeTaskErr(w, err)
 		return
 	}
 	next := in.At
@@ -135,25 +196,19 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		next = now.Add(time.Duration(in.EverySeconds) * time.Second)
 	}
 	sch, err := s.store.AddSchedule(r.Context(), envelope.Schedule{From: from, To: req.To, Body: req.Body, Urgent: req.Urgent, NextAt: next, EverySeconds: in.EverySeconds})
-	switch {
-	case errors.Is(err, store.ErrNoAgent):
-		writeErr(w, http.StatusNotFound, errors.New("no such agent: "+req.To))
-		return
-	case errors.Is(err, store.ErrScheduleLimit):
-		writeErr(w, http.StatusConflict, err)
-		return
-	case err != nil:
-		writeErr(w, http.StatusInternalServerError, err)
+	if err != nil {
+		writeTaskErr(w, scheduleAddError(err, req.To))
 		return
 	}
-	s.record(r.Context(), "schedule_created", "", "", from, store.DetailJSON(map[string]any{"schedule": sch.ID, "to": sch.To, "next_at": sch.NextAt, "every_seconds": sch.EverySeconds}))
+	s.scheduleCreated(r.Context(), sch)
 	writeJSON(w, http.StatusCreated, sch)
 }
 
 // handleSchedules lists the calling agent's schedules, or with all=1 every
 // agent's, for an admin device. Each body is a preview: full bodies from 16
 // schedules are past what Relay.callOnce reads of a response, and an owner
-// who cannot list schedules cannot stop them.
+// who cannot list schedules cannot stop them. A task's repeat has no body
+// of its own and names its task.
 func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	owner := ""
 	if r.URL.Query().Get("all") == "1" {
@@ -191,6 +246,9 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range list {
 		list[i].Body = approvalPreview(client.ScheduleText(list[i].Body))
+		if list[i].TaskID != 0 {
+			list[i].Body = fmt.Sprintf("Repeats task #%d.", list[i].TaskID)
+		}
 	}
 	out["schedules"] = list
 	writeJSON(w, http.StatusOK, out)
@@ -198,7 +256,8 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 
 // handleCancelSchedule deletes a schedule of the calling agent, or any
 // schedule for an admin device. A schedule that is not the caller's answers
-// 404, like one that does not exist.
+// 404, like one that does not exist. Cancelling a task's repeat leaves the
+// task, which no longer repeats.
 func (s *Server) handleCancelSchedule(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -217,7 +276,11 @@ func (s *Server) handleCancelSchedule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	s.record(r.Context(), "schedule_cancelled", "", "", actor, store.DetailJSON(map[string]any{"schedule": sch.ID, "from": sch.From, "to": sch.To}))
+	detail := map[string]any{"schedule": sch.ID, "from": sch.From, "to": sch.To}
+	if sch.TaskID != 0 {
+		detail["task"] = sch.TaskID
+	}
+	s.record(r.Context(), "schedule_cancelled", "", "", actor, store.DetailJSON(detail))
 	writeJSON(w, http.StatusOK, sch)
 }
 
@@ -244,7 +307,8 @@ func (s *Server) fireSchedules(ctx context.Context) {
 // relay that dies between the two loses the occurrence rather than sending
 // it twice. A recurring schedule skips an occurrence while its last request
 // is open. Everything else goes through submit, so a fire takes the send
-// path a teammate's ask takes, as a new chain with no parent.
+// path a teammate's ask takes, as a new chain with no parent. A task's
+// repeat starts an attempt at the task instead (fireTaskRepeat).
 func (s *Server) fireSchedule(ctx context.Context, sch envelope.Schedule) {
 	won, err := s.store.AdvanceSchedule(ctx, sch)
 	if err != nil {
@@ -256,6 +320,10 @@ func (s *Server) fireSchedule(ctx context.Context, sch envelope.Schedule) {
 	}
 	if ok, err := s.dir.Has(ctx, sch.From); err == nil && !ok {
 		return // removed since the sweep read it
+	}
+	if sch.TaskID != 0 {
+		s.fireTaskRepeat(ctx, sch)
+		return
 	}
 	if sch.EverySeconds != 0 && sch.LastRequest != "" {
 		open, err := s.requestOpen(ctx, sch.LastRequest)
@@ -282,6 +350,41 @@ func (s *Server) fireSchedule(ctx context.Context, sch envelope.Schedule) {
 	s.record(ctx, "schedule_fired", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"schedule": sch.ID, "from": sch.From, "to": sch.To}))
 }
 
+// fireTaskRepeat takes one occurrence of sch, a task's repeat that
+// fireSchedule has already moved on: it assigns the task to the schedule's
+// own target as the schedule's sender, whoever the task names as assignee
+// now, so a task a failed attempt left with no assignee goes back to the
+// same teammate. The occurrence is skipped while an ask is open under the
+// task or the task is proposed. A fire is the relay's and takes none of the
+// task's agent assigns.
+func (s *Server) fireTaskRepeat(ctx context.Context, sch envelope.Schedule) {
+	skipped := func(ask string) {
+		s.record(ctx, "schedule_skipped", ask, "", "relay", store.DetailJSON(map[string]any{"schedule": sch.ID, "to": sch.To, "task": sch.TaskID}))
+	}
+	task, err := s.store.Task(ctx, sch.TaskID, "")
+	if err != nil {
+		log.Printf("schedule %d: task %d: %v", sch.ID, sch.TaskID, err)
+		return
+	}
+	if task.Status == envelope.TaskProposed || task.CurrentRequest != "" {
+		skipped(task.CurrentRequest)
+		return
+	}
+	req, err := s.assignTask(ctx, taskAssign{TaskID: sch.TaskID, From: sch.From, To: sch.To, Repeat: true})
+	if errors.Is(err, store.ErrTaskBusy) {
+		skipped("")
+		return
+	}
+	if err != nil {
+		s.scheduleBlocked(ctx, sch, err)
+		return
+	}
+	if err := s.store.ScheduleFired(ctx, sch.ID, req.ID); err != nil {
+		log.Printf("schedule %d: %v", sch.ID, err)
+	}
+	s.record(ctx, "schedule_fired", req.ID, req.TraceID, "relay", store.DetailJSON(map[string]any{"schedule": sch.ID, "from": sch.From, "to": sch.To, "task": sch.TaskID}))
+}
+
 // requestOpen reports whether request id can still get an answer. A request
 // the store no longer has is not open.
 func (s *Server) requestOpen(ctx context.Context, id string) (bool, error) {
@@ -301,6 +404,9 @@ func (s *Server) requestOpen(ctx context.Context, id string) (bool, error) {
 func (s *Server) scheduleBlocked(ctx context.Context, sch envelope.Schedule, cause error) {
 	s.record(ctx, "schedule_blocked", "", "", "relay", store.DetailJSON(map[string]any{"schedule": sch.ID, "from": sch.From, "to": sch.To, "reason": cause.Error()}))
 	body := fmt.Sprintf("Scheduled ask #%d to %s was not sent: %v. ", sch.ID, sch.To, cause)
+	if sch.TaskID != 0 {
+		body = fmt.Sprintf("Repeat #%d of task #%d for %s was not sent: %v. ", sch.ID, sch.TaskID, sch.To, cause)
+	}
 	if sch.EverySeconds == 0 {
 		body += "It will not run again."
 	} else {

@@ -1,7 +1,8 @@
 // Tincan phone page. It reads and acts only through the relay's own routes,
 // as the CLI on an admin device does. Everything the relay returns (agent
-// names, good-at lines, request text, attachment names) is untrusted text and
-// reaches the page only through textContent, never as markup.
+// names, good-at lines, request text, attachment names, task titles, details,
+// results, comments and history) is untrusted text and reaches the page only
+// through textContent, never as markup.
 "use strict";
 
 const POLL_MS = 5000;
@@ -33,6 +34,12 @@ const state = {
   roomGen: 0, // bumped by resetRoom, so a read for an earlier room is dropped
   roomRecheckAt: 0, // where the next recheckMentions starts among open mentions
   roomDrafts: new Map(), // room name -> unsent text, for rooms not open now
+  tasks: new Map(), // task id -> its row: {task, li, open, events, ...}
+  tasksLoaded: false, // the task list has been read at least once
+  tasksFresh: false, // the task list was read since the page last came to the foreground
+  taskClosed: { done: 0, dropped: 0 }, // how many done and dropped tasks the relay holds
+  taskClosedCut: 0, // how many closed tasks are listed when the page cap cut their list short, else 0
+  taskAsks: new Map(), // request id -> who sent the ask under a question task, and the question
 };
 
 // sending is true while an ask is on its way, so a render from a poll in
@@ -333,7 +340,7 @@ function renderTeam() {
 // ---- Ask: join this phone, ask a teammate, follow the answers ----
 
 function renderTabs() {
-  for (const name of ["team", "ask", "rooms"]) {
+  for (const name of ["team", "ask", "rooms", "tasks"]) {
     const on = state.tab === name;
     $("tab-" + name).setAttribute("aria-selected", on ? "true" : "false");
     $(name).hidden = !on;
@@ -908,6 +915,932 @@ async function postToRoom() {
   }
 }
 
+// ---- Tasks: the team's shared list and the owner's decisions on it ----
+
+// TASK_OWNER is how the relay names the owner as a task's filer or assignee.
+const TASK_OWNER = "@owner";
+// Agents of these kinds take no tasks; the relay refuses them as well.
+const NO_TASK_KINDS = new Set(["phone", "history", "notes", "pass", "council"]);
+// The groups, in the order a task is sorted into the first that fits.
+const TASK_GROUPS = ["proposed", "answer", "returned", "working", "open", "yours", "done", "dropped"];
+// The groups of closed tasks. Each sits behind a button with its count, and
+// their rows are read from the relay only while one is open (closedWanted).
+const TASK_CLOSED = ["done", "dropped"];
+// The groups that wait on the owner; the tab's count is their total.
+const TASK_WAITING = new Set(["proposed", "answer", "returned"]);
+// The owner's decisions, with what the page says once one lands and when
+// the relay refuses it. Each is sent with the nonce the task listing issued
+// for it (decideTask).
+const TASK_DECISIONS = {
+  approve: ["Approved", "Not approved"],
+  done: ["Marked done", "Not marked done"],
+  reopen: ["Reopened", "Not reopened"],
+  drop: ["Dropped", "Not dropped"],
+  reset: ["Reset the assign count of", "Assign count not reset"],
+};
+// How the relay's refusal of a used or expired nonce starts.
+const STALE_TASK_BUTTON = "this task button has expired";
+const HISTORY_SHOWN = 5;
+// The most pages one read of a listing or a history follows. The live
+// tasks stay far under it; a listing with the closed tasks can reach it,
+// and the page then says how many it shows (taskClosedCut).
+const MAX_TASK_PAGES = 50;
+// Off the Tasks tab the list is read on every sixth poll, for the tab's count.
+const TASKS_IDLE_EVERY = 6;
+const taskPath = (id) => "/v1/admin/tasks/" + encodeURIComponent(id);
+const taskWho = (name) => (name === TASK_OWNER ? "owner" : name);
+const taskOff = () => state.offline || state.notAdmin;
+const taskIsClosed = (task) => TASK_CLOSED.includes(task.status);
+const relayError = (res) => (res && res.data && res.data.error) || (res ? "error " + res.status : "offline");
+
+// setText sets node's text only when it changed, so a refresh leaves a
+// card's nodes alone.
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function button(cls, text, onClick) {
+  const b = el("button", cls, text);
+  b.type = "button";
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function dayTime(at) {
+  const d = new Date(at);
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + hhmm(d);
+}
+
+// taskAsk is what the page knows of the ask open under a question task:
+// whether this phone's agent sent it, the question, and else who sent it.
+function taskAsk(task) {
+  return task.current_request ? state.taskAsks.get(task.current_request) : undefined;
+}
+
+// taskGroup sorts a task into exactly one group. A question is the owner's
+// to answer here only when this phone's agent sent the ask; any other
+// question stays with the working tasks.
+function taskGroup(task) {
+  switch (task.status) {
+    case "proposed": return "proposed";
+    case "question": {
+      const ask = taskAsk(task);
+      return ask && ask.mine ? "answer" : "working";
+    }
+    case "returned": return "returned";
+    case "working": return "working";
+    case "done": return "done";
+    case "dropped": return "dropped";
+    default: return task.assignee === TASK_OWNER ? "yours" : "open";
+  }
+}
+
+// taskStatusText is a task's status in words. A working task also says
+// where its ask stands, which the relay reads from the ask itself.
+function taskStatusText(task) {
+  const who = task.assignee && task.assignee !== TASK_OWNER ? task.assignee : "the assignee";
+  switch (task.status) {
+    case "working":
+      switch (task.ask_status) {
+        case "held": return "working: the ask to " + who + " is held for your approval";
+        case "queued":
+        case "delivered": return "working: waiting for " + who + " to pick it up";
+        case "claimed": return "working: " + who + " has picked it up";
+        default: return "working";
+      }
+    case "question": {
+      const ask = taskAsk(task);
+      if (ask && ask.mine) return "question from " + who + " for you";
+      return "question from " + who + ", waiting on " + ((ask && ask.sender) || "the agent that assigned it") + " to answer";
+    }
+    case "returned": return task.assignee ? "returned by " + who : "returned";
+    case "open": return task.assignee === TASK_OWNER ? "open, yours" : "open";
+    default: return task.status;
+  }
+}
+
+// repeatEvery is a repeat's interval in words, in its largest whole unit.
+function repeatEvery(seconds) {
+  for (const [size, unit] of [[86400, "d"], [3600, "h"], [60, "m"]]) {
+    if (seconds % size === 0) return seconds / size + unit;
+  }
+  return seconds + "s";
+}
+
+function taskFacts(task) {
+  const facts = [];
+  if (task.assignee === TASK_OWNER) facts.push("yours");
+  else if (task.assignee) facts.push("assigned to " + task.assignee);
+  else facts.push("unassigned");
+  if (task.repeat_every_seconds) facts.push("repeats every " + repeatEvery(task.repeat_every_seconds) + (task.repeat_to ? " for " + task.repeat_to : ""));
+  if (task.created_at) facts.push("added " + age(task.created_at) + " ago");
+  facts.push("filed by " + taskWho(task.filer));
+  facts.push("task " + task.id);
+  return facts.join(", ");
+}
+
+// taskOrigin says why a proposed task waits for the owner, and whom its
+// filer wanted it to go to. Nothing was sent to that teammate.
+function taskOrigin(task) {
+  if (task.status !== "proposed") return "";
+  let line = task.source
+    ? "Its text came from outside the team (source: " + task.source + ")."
+    : "It was filed while " + taskWho(task.filer) + " was handling a guest's ask.";
+  if (task.suggested_assignee) {
+    line += " " + taskWho(task.filer) + " suggests " + task.suggested_assignee + " for it; that is a suggestion, and nothing was sent.";
+  }
+  return line;
+}
+
+// taskCandidates are the teammates a task can go to: no guests, no phone
+// agents, and none of the kinds that take no tasks.
+function taskCandidates() {
+  return state.roster.filter((a) => !a.guest_until && !NO_TASK_KINDS.has(a.kind)).sort((a, b) => (a.name < b.name ? -1 : 1));
+}
+
+function taskReady(entry, verb) {
+  return state.tasksFresh && !taskOff() && !entry.busy && !!entry.task[verb + "_nonce"] && nonceLive(entry.task);
+}
+
+function taskEntry(task) {
+  return { task, li: null, c: null, group: "", open: false, full: null, events: [], drawn: "", allHistory: false, picker: false, pick: "", pickRows: new Map(), busy: false, error: "", answerInput: null, answerSend: null };
+}
+
+// taskCard builds a task's row once. Every later change goes through
+// updateTaskCard, which sets text and shows or hides the parts in place, so
+// a refresh never replaces a box being typed in or a button that has focus.
+function taskCard(entry) {
+  const id = entry.task.id, title = entry.task.title;
+  const li = el("li", "card");
+  const c = {};
+  c.head = button("task-head", title, () => toggleTask(entry));
+  c.head.setAttribute("aria-expanded", "false");
+  c.head.setAttribute("aria-controls", "task-more-" + id);
+  c.status = el("p", "meta");
+  c.facts = el("p", "meta");
+  c.origin = el("p", "meta");
+  c.answer = el("div", "answer");
+  c.error = el("p", "error");
+  c.error.setAttribute("role", "alert");
+  c.error.hidden = true;
+  c.more = el("div", "task-more");
+  c.more.id = "task-more-" + id;
+  c.more.hidden = true;
+  c.detail = el("p", "body");
+  c.resultLabel = el("p", "meta", "Latest result");
+  c.result = el("p", "body");
+  c.older = button("", "", () => {
+    entry.allHistory = !entry.allHistory;
+    updateTaskCard(entry);
+  });
+  c.history = el("ol", "history");
+  const label = el("label", "", "Comment");
+  label.htmlFor = "task-comment-" + id;
+  c.comment = el("textarea", "field");
+  c.comment.id = "task-comment-" + id;
+  c.comment.rows = 2;
+  c.commentNote = el("p", "meta", "An ask is open under this task, so this comment reaches the assignee on the next attempt.");
+  c.commentSend = button("primary", "Add comment", () => commentTask(entry));
+  c.commentSend.setAttribute("aria-label", "Add comment to " + title);
+  c.actions = el("div", "task-actions");
+  c.drop = button("deny", "Drop", () => decideTask(entry, "drop"));
+  c.drop.setAttribute("aria-label", "Drop " + title);
+  c.reopen = button("", "Reopen", () => decideTask(entry, "reopen"));
+  c.reopen.setAttribute("aria-label", "Reopen " + title);
+  c.reset = button("", "Reset assign count", () => decideTask(entry, "reset"));
+  c.reset.setAttribute("aria-label", "Reset the assign count of " + title);
+  c.assign = button("", "Assign", () => openPicker(entry, ""));
+  c.done = button("approve", "Done", () => decideTask(entry, "done"));
+  c.done.setAttribute("aria-label", "Mark done: " + title);
+  c.approve = button("approve", "Approve", () => decideTask(entry, "approve"));
+  c.approve.setAttribute("aria-label", "Approve " + title);
+  c.actions.append(c.drop, c.reopen, c.reset, c.assign, c.done, c.approve);
+  c.openNote = el("p", "meta", "Done is refused while an ask is open under the task. Drop it, which cancels the ask, or wait for the ask to end.");
+  c.resetNote = el("p", "meta");
+  c.joinNote = el("p", "meta", "Assigning sends an ask as this phone's agent, and this phone has not joined the team.");
+  c.join = button("", "Join this phone", openJoin);
+  c.pickBox = el("div", "");
+  c.pickEmpty = el("p", "empty", "No teammate can take a task yet.");
+  c.pickList = el("ul", "picker");
+  c.pickSend = button("primary", "Assign", () => assignTask(entry));
+  c.pickCancel = button("", "Cancel", () => {
+    entry.picker = false;
+    updateTaskCard(entry);
+    c.assign.focus();
+  });
+  c.pickCancel.setAttribute("aria-label", "Cancel assigning " + title);
+  c.pickBox.append(el("p", "meta", "Pick a teammate for this task."), c.pickEmpty, c.pickList, c.pickSend, c.pickCancel);
+  c.more.append(el("p", "meta", "What is wanted"), c.detail, c.resultLabel, c.result, el("p", "meta", "History"), c.older, c.history,
+    label, c.comment, c.commentNote, c.commentSend, c.actions, c.openNote, c.resetNote, c.joinNote, c.join, c.pickBox);
+  li.append(c.head, c.status, c.facts, c.origin, c.answer, c.error, c.more);
+  entry.li = li;
+  entry.c = c;
+  return li;
+}
+
+// taskAnswering holds the asks an answer is on its way for. A render from a
+// poll in the meantime keeps that ask's box and button off, so one answer
+// is sent once however slow the relay is to say it took it.
+const taskAnswering = new Set();
+
+// taskAnswerBox shows the answer box for ask, a question this phone's agent
+// was asked on the ask it sent, and takes the box away for null. The box is
+// rebuilt only for another question, so typed text stays through a refresh.
+function taskAnswerBox(entry, ask) {
+  const box = entry.c.answer;
+  const req = entry.task.current_request;
+  const key = ask ? req + "\n" + ask.question : "";
+  if ((box.dataset.question || "") === key) return;
+  box.replaceChildren();
+  entry.answerInput = entry.answerSend = null;
+  if (!ask) {
+    delete box.dataset.question;
+    return;
+  }
+  box.dataset.question = key;
+  const id = "task-answer-" + entry.task.id;
+  const label = el("label", "", "Your answer");
+  label.htmlFor = id;
+  const input = el("textarea", "field");
+  input.id = id;
+  input.rows = 2;
+  const send = button("primary", "Send answer", async () => {
+    const body = input.value.trim();
+    if (!body || taskOff() || taskAnswering.has(req)) return;
+    taskAnswering.add(req);
+    send.disabled = input.disabled = true;
+    const res = await api("POST", "/v1/requests/" + encodeURIComponent(req) + "/answer", { body }).catch(() => null);
+    taskAnswering.delete(req);
+    input.disabled = false;
+    send.disabled = taskOff();
+    if (res && res.status === 200) {
+      // The same ask goes on; the next listing confirms it.
+      taskEpoch++;
+      state.taskAsks.delete(req);
+      if (entry.task.current_request === req) entry.task = Object.assign({}, entry.task, { status: "working", ask_status: "queued" });
+      entry.error = "";
+      announce("Answer sent for " + entry.task.title + ".");
+    } else {
+      entry.error = "Answer not sent: " + relayError(res);
+    }
+    renderTasks();
+    refreshTasks();
+  });
+  send.setAttribute("aria-label", "Send answer for " + entry.task.title);
+  box.append(el("p", "meta", "Question: " + ask.question), label, input, send);
+  entry.answerInput = input;
+  entry.answerSend = send;
+}
+
+function taskEventLine(ev) {
+  let what;
+  switch (ev.kind) {
+    case "added": what = ev.status === "proposed" ? "filed it as proposed" : "added it"; break;
+    case "assigned": what = "assigned it to " + ev.body; break;
+    case "comment": what = "commented"; break;
+    case "progress": what = "progress"; break;
+    case "assigns_reset": what = "reset the assign count"; break;
+    default: what = ev.status ? "now " + ev.status : ev.kind;
+  }
+  return taskWho(ev.actor) + ", " + dayTime(ev.at) + ": " + what;
+}
+
+// drawHistory lists a task's history, oldest first, with all but the
+// latest entries behind a control. The list is drawn again only when it
+// grew or the control was used.
+function drawHistory(entry) {
+  const c = entry.c, events = entry.events;
+  const older = Math.max(0, events.length - HISTORY_SHOWN);
+  c.older.hidden = older === 0;
+  setText(c.older, entry.allHistory ? "Hide older history" : "Show " + older + " older history " + (older === 1 ? "entry" : "entries"));
+  c.older.setAttribute("aria-expanded", entry.allHistory ? "true" : "false");
+  const from = entry.allHistory ? 0 : older;
+  const key = events.length + ":" + from;
+  if (entry.drawn === key) return;
+  entry.drawn = key;
+  c.history.replaceChildren();
+  for (const ev of events.slice(from)) {
+    const li = el("li", "", taskEventLine(ev));
+    if (ev.body && ev.kind !== "assigned") li.append(el("p", "body", ev.body));
+    c.history.append(li);
+  }
+}
+
+// drawPicker lists the teammates a task can go to, each with its status and
+// good-at line, as the Team tab shows them. Rows are kept and updated in
+// place; picking one marks it, and Assign sends.
+function drawPicker(entry) {
+  const c = entry.c, agents = taskCandidates(), rows = entry.pickRows;
+  const names = new Set(agents.map((a) => a.name));
+  for (const [name, row] of rows) {
+    if (!names.has(name)) {
+      row.li.remove();
+      rows.delete(name);
+    }
+  }
+  if (entry.pick && !names.has(entry.pick)) entry.pick = "";
+  agents.forEach((a, i) => {
+    let row = rows.get(a.name);
+    if (!row) {
+      row = { li: el("li", ""), status: el("span", ""), good: el("span", "meta") };
+      row.b = button("pick", "", () => {
+        entry.pick = a.name;
+        updateTaskCard(entry);
+      });
+      row.b.append(el("span", "agent-name", a.name), row.status, row.good);
+      row.li.append(row.b);
+      rows.set(a.name, row);
+    }
+    row.status.className = "status " + (a.status || (a.online ? "idle" : "offline"));
+    setText(row.status, statusText(a));
+    setText(row.good, a.good_at ? "good at: " + a.good_at : "");
+    row.good.hidden = !a.good_at;
+    row.b.setAttribute("aria-pressed", entry.pick === a.name ? "true" : "false");
+    const at = c.pickList.children[i];
+    if (at !== row.li) c.pickList.insertBefore(row.li, at || null);
+  });
+  c.pickEmpty.hidden = agents.length > 0;
+  setText(c.pickSend, entry.pick ? "Assign to " + entry.pick : "Assign");
+  c.pickSend.setAttribute("aria-label", "Assign " + entry.task.title + (entry.pick ? " to " + entry.pick : ""));
+  c.pickSend.disabled = !entry.pick || taskOff() || entry.busy || !state.me;
+}
+
+function updateTaskCard(entry) {
+  const c = entry.c, task = entry.task, off = taskOff();
+  const closed = task.status === "done" || task.status === "dropped";
+  c.head.setAttribute("aria-expanded", entry.open ? "true" : "false");
+  setText(c.status, taskStatusText(task));
+  setText(c.facts, taskFacts(task));
+  const origin = taskOrigin(task);
+  setText(c.origin, origin);
+  c.origin.hidden = !origin;
+  // The answer box is only for a question on an ask this phone's agent sent.
+  const ask = taskAsk(task);
+  taskAnswerBox(entry, task.status === "question" && ask && ask.mine ? ask : null);
+  if (entry.answerSend) {
+    const sending = taskAnswering.has(task.current_request);
+    entry.answerSend.disabled = off || sending;
+    entry.answerInput.disabled = sending;
+  }
+  setText(c.error, entry.error);
+  c.error.hidden = !entry.error;
+  c.more.hidden = !entry.open;
+  if (!entry.open) return;
+
+  const full = entry.full;
+  setText(c.detail, full ? full.detail || "No detail was given." : "Loading.");
+  const result = (full && full.result) || "";
+  c.resultLabel.hidden = !result;
+  c.result.hidden = !result;
+  setText(c.result, result);
+  drawHistory(entry);
+  c.commentNote.hidden = !task.current_request;
+  c.commentSend.disabled = off || entry.busy;
+
+  c.approve.hidden = task.status !== "proposed";
+  c.done.hidden = task.status !== "open" && task.status !== "returned";
+  c.reopen.hidden = !closed;
+  c.drop.hidden = closed;
+  c.reset.hidden = closed || !task.agent_assigns;
+  for (const verb of Object.keys(TASK_DECISIONS)) c[verb].disabled = !taskReady(entry, verb);
+  c.openNote.hidden = !task.current_request;
+  c.resetNote.hidden = c.reset.hidden;
+  setText(c.resetNote, "Agents have assigned this task " + (task.agent_assigns === 1 ? "once" : task.agent_assigns + " times") + " since the count was last reset.");
+
+  const canAssign = !closed && task.status !== "proposed";
+  c.assign.hidden = !canAssign || entry.picker;
+  const verb = task.current_request ? "Reassign" : task.status === "returned" ? "Assign again" : "Assign";
+  setText(c.assign, verb);
+  c.assign.setAttribute("aria-label", verb + " " + task.title);
+  c.assign.disabled = off || entry.busy || !state.me;
+  // Without an agent on this phone an assign has no sender: say so beside
+  // a way to join.
+  const unjoined = canAssign && !state.me && state.meChecked;
+  c.joinNote.hidden = !unjoined;
+  c.join.hidden = !unjoined;
+  c.pickBox.hidden = !canAssign || !entry.picker;
+  if (!c.pickBox.hidden) drawPicker(entry);
+}
+
+// taskPinned reports whether a row is in use: its picker is open, it holds
+// typed text, or a box in it has focus. Such a row stays where it is until
+// that ends, even when its task now belongs to another group.
+function taskPinned(entry) {
+  const at = document.activeElement;
+  return entry.picker || !!entry.c.comment.value || !!(entry.answerInput && entry.answerInput.value) ||
+    (!!at && at.tagName === "TEXTAREA" && entry.li.contains(at));
+}
+
+// renderTaskForm fills the add panel's choice of who a task is for: no
+// one, the owner, or a teammate. A teammate needs this phone's agent to
+// send the ask, so without one those choices are off beside a way to join.
+function renderTaskForm() {
+  const sel = $("task-for"), agents = taskCandidates(), joined = !!state.me;
+  const word = (a) => a.status || (a.online ? "online" : "offline");
+  const key = agents.map((a) => a.name + " " + word(a)).join(",") + "|" + joined;
+  if (sel.dataset.names !== key && document.activeElement !== sel) {
+    const current = sel.value;
+    sel.replaceChildren();
+    const add = (value, text, disabled) => {
+      const opt = el("option", "", text);
+      opt.value = value;
+      opt.disabled = !!disabled;
+      sel.append(opt);
+    };
+    add("", "No one yet");
+    add(TASK_OWNER, "Me, the owner");
+    for (const a of agents) add(a.name, a.name + " (" + word(a) + ")", !joined);
+    sel.dataset.names = key;
+    sel.value = current === TASK_OWNER || (joined && agents.some((a) => a.name === current)) ? current : "";
+  }
+  const picked = agents.find((a) => a.name === sel.value);
+  let note = "";
+  if (picked && picked.good_at) note = picked.name + " is good at: " + picked.good_at;
+  else if (!joined && agents.length) note = "Handing a task to a teammate sends an ask as this phone's agent, and this phone has not joined the team.";
+  $("task-for-note").textContent = note;
+  $("task-for-note").hidden = !note;
+  $("task-join").hidden = joined || !state.meChecked || state.notAdmin || agents.length === 0;
+  $("task-add").disabled = addingTask || taskOff();
+}
+
+// taskFocusable reports whether node can take focus: it is on the page, not
+// off, and not inside anything hidden.
+function taskFocusable(node) {
+  if (!node.isConnected || node.disabled) return false;
+  for (let n = node; n; n = n.parentNode) {
+    if (n.hidden) return false;
+  }
+  return true;
+}
+
+// taskFocusLost reports whether the focus had held is gone: nothing has it
+// now, or had still does and can no longer take it.
+function taskFocusLost(had) {
+  const now = document.activeElement;
+  return !now || now === document.body || (now === had && !taskFocusable(had));
+}
+
+// focusTask gives focus back to a row: to had, the control that held it,
+// when that can still take it, else to the row's head button, else, for a
+// row now behind a closed Done or Dropped, to that group's button.
+function focusTask(entry, had) {
+  const toggle = TASK_CLOSED.includes(entry.group) ? $("tg-" + entry.group + "-toggle") : null;
+  const to = [had, entry.c.head, toggle].find((node) => node && taskFocusable(node));
+  if (to) to.focus();
+}
+
+// renderTasks updates every row in place and puts each in its group, oldest
+// first. A row is inserted only where it is out of place, and a row in use
+// (taskPinned) is not moved at all.
+function renderTasks() {
+  renderTaskForm();
+  const by = {};
+  for (const name of TASK_GROUPS) by[name] = [];
+  let waiting = 0;
+  const entries = [...state.tasks.values()].sort((a, b) => a.task.id - b.task.id);
+  // A row that changes group is taken out of one list and put in another,
+  // and a control the new status hides cannot keep focus. Either way the
+  // row gets its focus back once every row is in place.
+  const had = document.activeElement;
+  const focused = had && had !== document.body ? entries.find((entry) => entry.li && entry.li.contains(had)) : undefined;
+  for (const entry of entries) {
+    if (!entry.li) taskCard(entry);
+    updateTaskCard(entry);
+    const group = taskGroup(entry.task);
+    if (TASK_WAITING.has(group)) waiting++;
+    if (!entry.group || !entry.li.parentNode || !taskPinned(entry)) entry.group = group;
+    by[entry.group].push(entry);
+  }
+  let closed = 0;
+  for (const name of TASK_GROUPS) {
+    const list = $("tg-" + name);
+    const shown = new Set();
+    by[name].forEach((entry, i) => {
+      shown.add(entry.li);
+      const at = list.children[i];
+      if (at === entry.li) return;
+      list.insertBefore(entry.li, at || null);
+    });
+    for (const li of [...list.children]) {
+      if (!shown.has(li)) li.remove();
+    }
+    // A closed group's count is the relay's: its rows are on the page only
+    // while Done or Dropped is open.
+    const n = TASK_CLOSED.includes(name) ? Math.max(state.taskClosed[name], by[name].length) : by[name].length;
+    if (TASK_CLOSED.includes(name)) closed += n;
+    $("tg-" + name + "-count").textContent = String(n);
+    $("tgw-" + name).hidden = n === 0;
+  }
+  if (focused && taskFocusLost(had)) focusTask(focused, had);
+  const cut = state.taskClosedCut;
+  $("tasks-closed-note").hidden = !cut || !closedWanted();
+  setText($("tasks-closed-note"), cut ? "Only the first " + cut + " closed tasks are shown here. tincan tasks --owner --closed lists them all." : "");
+  $("tasks-count").textContent = String(waiting);
+  $("tasks-count").hidden = waiting === 0;
+  $("tasks-count-note").hidden = waiting === 0;
+  $("tasks-empty").hidden = entries.length > 0 || closed > 0 || !state.tasksLoaded || state.notAdmin;
+}
+
+// mergeTasks takes a whole listing: rows are kept by task id and given the
+// listing's task and fresh nonces, and status changes are announced.
+function mergeTasks(items) {
+  const seen = new Set();
+  const news = [];
+  for (const task of items) {
+    seen.add(task.id);
+    const entry = state.tasks.get(task.id);
+    if (!entry) {
+      state.tasks.set(task.id, taskEntry(task));
+      if (state.tasksLoaded && task.status === "proposed") news.push("New proposed task: " + task.title + ".");
+      continue;
+    }
+    if (entry.task.status !== task.status) news.push(task.title + " is now " + task.status + ".");
+    entry.task = task;
+  }
+  for (const [id, entry] of state.tasks) {
+    if (seen.has(id)) continue;
+    if (entry.li) entry.li.remove();
+    state.tasks.delete(id);
+  }
+  if (news.length) announce(news.slice(0, 3).join(" ") + (news.length > 3 ? " And " + (news.length - 3) + " more task changes." : ""));
+}
+
+// clearTasks takes every task and all that was read with them off the
+// page, for a device that is not an admin's. A listing on its way is
+// dropped when it lands (taskEpoch).
+function clearTasks() {
+  taskEpoch++;
+  mergeTasks([]);
+  state.taskAsks.clear();
+  state.taskClosed = { done: 0, dropped: 0 };
+  state.taskClosedCut = 0;
+  state.tasksLoaded = false;
+  state.tasksFresh = false;
+}
+
+// readTask reads task id whole with its history after entry after, or null
+// when the relay does not answer with it.
+async function readTask(id, after) {
+  const events = [];
+  let task = null;
+  for (let page = 0; page < MAX_TASK_PAGES; page++) {
+    const res = await api("GET", taskPath(id) + "?after=" + after);
+    if (res.status !== 200 || !res.data) return null;
+    task = res.data.task;
+    events.push(...(res.data.events || []));
+    after = res.data.next_after || 0;
+    if (!after) break;
+  }
+  return { task, events };
+}
+
+// loadTaskDetail reads an open row's task whole and the history entries it
+// does not have yet.
+async function loadTaskDetail(entry) {
+  const last = () => (entry.events.length ? entry.events[entry.events.length - 1].id : 0);
+  const got = await readTask(entry.task.id, last()).catch(() => null);
+  if (!got) return;
+  entry.full = got.task;
+  // Two reads may overlap; each entry is kept once.
+  for (const ev of got.events) {
+    if (ev.id > last()) entry.events.push(ev);
+  }
+}
+
+// loadTaskAsks finds, for each question task in items, whether this phone's
+// agent sent the ask under it. The relay lets only an ask's sender and
+// target read it, so a read as this phone's agent that names it as the
+// sender settles that, and gives the question. For any other question the
+// task's history names who assigned it, which is who it waits on.
+async function loadTaskAsks(items) {
+  const live = new Set();
+  await Promise.all(items.filter((t) => t.status === "question" && t.current_request).map(async (t) => {
+    const id = t.current_request;
+    live.add(id);
+    let ask = state.taskAsks.get(id);
+    if (state.me && (!ask || ask.mine || ask.me !== state.me)) {
+      const res = await api("GET", "/v1/requests/" + encodeURIComponent(id));
+      if (res.status === 200 && res.data && res.data.request.from === state.me) {
+        // An ask that has moved on since the listing is no question now.
+        if (res.data.status !== "needs_input") return;
+        const open = (res.data.exchanges || []).filter((x) => !x.answer);
+        const question = open.length ? open[open.length - 1].question : (res.data.reply && res.data.reply.body) || "";
+        ask = { mine: true, me: state.me, question, sender: state.me };
+      } else if (res.status === 200 || res.status === 404) {
+        ask = { mine: false, me: state.me, question: "", sender: (ask && !ask.mine && ask.sender) || "" };
+      } else {
+        return;
+      }
+      state.taskAsks.set(id, ask);
+    }
+    if (ask && (ask.mine || ask.sender)) return;
+    const got = await readTask(t.id, 0);
+    const assigned = got ? got.events.filter((ev) => ev.kind === "assigned") : [];
+    if (!assigned.length) return;
+    const by = assigned[assigned.length - 1].actor;
+    state.taskAsks.set(id, { mine: false, me: state.me, question: "", sender: by === TASK_OWNER ? "the owner's agent on another device" : by });
+  }));
+  for (const id of [...state.taskAsks.keys()]) {
+    if (!live.has(id)) state.taskAsks.delete(id);
+  }
+}
+
+// refreshTasks reads the task list (an admin listing, which carries the
+// nonces for the owner's decisions), then what each open row shows. A
+// call made while one runs is not dropped: the running one goes again.
+let tasksPolling = false;
+let tasksAgain = false;
+let tasksTick = 0;
+// taskEpoch counts this page's own changes to tasks. A listing read across
+// one is dropped and read again, so it cannot put back an older status or a
+// nonce the change voided.
+let taskEpoch = 0;
+// closedOnce makes the next read take the closed tasks whatever is open,
+// to find a row in use that left the live tasks.
+let closedOnce = false;
+async function refreshTasks() {
+  if (tasksPolling) {
+    tasksAgain = true;
+    return;
+  }
+  tasksPolling = true;
+  try {
+    do {
+      tasksAgain = false;
+      await refreshTasksOnce();
+    } while (tasksAgain);
+  } finally {
+    tasksPolling = false;
+    renderTasks();
+  }
+}
+
+// closedWanted reports whether the page shows closed tasks: the Tasks tab
+// is up with Done or Dropped open. Only then does the poll read them.
+function closedWanted() {
+  return state.tab === "tasks" && TASK_CLOSED.some((name) => $("tg-" + name + "-toggle").getAttribute("aria-expanded") === "true");
+}
+
+// closedInUse reports whether a row in use (taskPinned) is a closed task's,
+// such as one marked done with a comment half typed. It is read with the
+// closed tasks until that ends, so the row and its text stay.
+function closedInUse() {
+  return [...state.tasks.values()].some((entry) => entry.li && taskIsClosed(entry.task) && taskPinned(entry));
+}
+
+// listTasks reads one listing to its end: the live tasks with the relay's
+// counts of the closed ones, or with closed every task. cut says the page
+// cap ended it early. Any answer but a listing ends it with that status.
+async function listTasks(closed) {
+  const out = { status: 200, items: [], counts: null, cut: false };
+  let after = 0;
+  for (let page = 0; page < MAX_TASK_PAGES; page++) {
+    const query = (closed ? ["closed=1"] : []).concat(after ? ["after=" + after] : []).join("&");
+    const res = await api("GET", "/v1/admin/tasks" + (query ? "?" + query : ""));
+    if (res.status !== 200 || !res.data) return { status: res.status === 200 ? 0 : res.status };
+    out.items.push(...(res.data.tasks || []));
+    if (res.data.closed) out.counts = res.data.closed;
+    after = res.data.next_after || 0;
+    if (!after) return out;
+  }
+  out.cut = true;
+  return out;
+}
+
+async function refreshTasksOnce() {
+  const gen = heldGen, epoch = taskEpoch;
+  try {
+    const closed = closedOnce || closedWanted() || closedInUse();
+    closedOnce = false;
+    // With the closed tasks, one listing holds every task. When the page
+    // cap cuts it short the live tasks are read on their own, after it, so
+    // none of them is ever missing and theirs is the newer answer.
+    const all = closed ? await listTasks(true) : null;
+    const live = !all || all.cut ? await listTasks(false) : null;
+    const failed = [all, live].find((got) => got && got.status !== 200);
+    if (failed) {
+      // Not an admin device: no task may stay on the page.
+      if (failed.status === 403) clearTasks();
+      return;
+    }
+    let items = all ? all.items : live.items;
+    let cut = 0;
+    if (all && live) {
+      const ids = new Set(live.items.map((task) => task.id));
+      const old = all.items.filter((task) => taskIsClosed(task) && !ids.has(task.id));
+      cut = old.length;
+      items = old.concat(live.items);
+    }
+    // The relay counts the closed tasks it leaves out; a listing that
+    // holds them all is counted here.
+    const counts = { done: 0, dropped: 0 };
+    if (live) {
+      Object.assign(counts, live.counts);
+    } else {
+      for (const task of items) {
+        if (taskIsClosed(task)) counts[task.status]++;
+      }
+    }
+    await loadTaskAsks(items);
+    if (epoch !== taskEpoch) {
+      tasksAgain = true;
+      return;
+    }
+    if (!all) {
+      // A row in use that left the live tasks was closed elsewhere: read
+      // it with the closed tasks instead of taking it away.
+      const ids = new Set(items.map((task) => task.id));
+      if ([...state.tasks.values()].some((entry) => entry.li && !ids.has(entry.task.id) && taskPinned(entry))) {
+        closedOnce = true;
+        tasksAgain = true;
+        return;
+      }
+    }
+    mergeTasks(items);
+    state.taskClosed = counts;
+    state.taskClosedCut = cut;
+    // A listing that started before the page last hid does not count.
+    state.tasksFresh = gen === heldGen;
+    state.tasksLoaded = true;
+    await Promise.all([...state.tasks.values()].filter((e) => e.open).map(loadTaskDetail));
+  } catch (_) {
+    // The main poll reports the relay as offline.
+  }
+}
+
+function toggleTask(entry) {
+  entry.open = !entry.open;
+  updateTaskCard(entry);
+  if (entry.open) loadTaskDetail(entry).then(() => updateTaskCard(entry));
+}
+
+// openPicker opens a row's assign picker with pick marked when that
+// teammate can take the task.
+function openPicker(entry, pick) {
+  entry.picker = true;
+  entry.pick = taskCandidates().some((a) => a.name === pick) ? pick : "";
+  if (!entry.open) toggleTask(entry);
+  else updateTaskCard(entry);
+}
+
+// openJoin shows the Ask tab's join panel, where this phone joins the team.
+function openJoin() {
+  state.tab = "ask";
+  render();
+  refreshSent();
+  if (!$("join").hidden) $("join-name").focus();
+}
+
+// tookTask records the relay's answer to this page's own change to a task:
+// the row shows the task as it now stands, with no nonce until the next
+// listing issues fresh ones, and the counts of closed tasks follow it.
+function tookTask(entry, task) {
+  const counts = state.taskClosed;
+  if (taskIsClosed(entry.task)) counts[entry.task.status] = Math.max(0, counts[entry.task.status] - 1);
+  if (taskIsClosed(task)) counts[task.status]++;
+  entry.task = task;
+  entry.full = task;
+  entry.error = "";
+}
+
+// decideTask sends one of the owner's decisions (approve, done, reopen,
+// drop, reset) with the nonce the task listing issued to this device for
+// that task and decision. A refusal shows on the row; after any answer the
+// list is read again, which is also what replaces an expired nonce.
+async function decideTask(entry, verb) {
+  const task = entry.task;
+  if (!taskReady(entry, verb)) return;
+  if (verb === "drop") {
+    const ask = task.current_request ? " The ask open under it is cancelled." : "";
+    if (!window.confirm("Drop " + task.title + "?" + ask)) return;
+    if (!taskReady(entry, verb)) {
+      refreshTasks();
+      return;
+    }
+  }
+  const nonce = task[verb + "_nonce"];
+  // The pressed button goes off now and may be gone once the answer lands.
+  const had = entry.li.contains(document.activeElement) ? document.activeElement : null;
+  entry.busy = true;
+  entry.error = "";
+  updateTaskCard(entry);
+  taskEpoch++;
+  let res;
+  try {
+    res = await api("POST", taskPath(task.id) + "/" + verb, { nonce });
+  } catch (_) {
+    entry.busy = false;
+    state.offline = true;
+    render();
+    announce("Offline. " + task.title + " may not have changed; the list shows it once the relay answers.");
+    return;
+  }
+  entry.busy = false;
+  taskEpoch++;
+  if (res.status === 200 && res.data && res.data.task) {
+    tookTask(entry, res.data.task);
+    announce(TASK_DECISIONS[verb][0] + " " + task.title + ".");
+    // An approved task is open: offer to assign it, with the filer's
+    // suggestion marked.
+    if (verb === "approve") openPicker(entry, task.suggested_assignee || "");
+  } else if (res.status === 409 && String(res.data && res.data.error).startsWith(STALE_TASK_BUTTON)) {
+    entry.error = "That button expired. The list is reloading; try again.";
+  } else {
+    entry.error = TASK_DECISIONS[verb][1] + ": " + relayError(res);
+  }
+  renderTasks();
+  if (had && taskFocusLost(had)) focusTask(entry, had);
+  refreshTasks();
+}
+
+// assignTask hands a task to the picked teammate. The relay sends the ask
+// as this phone's agent, and refuses with the reason when this device has
+// none; the refusal shows on the row.
+async function assignTask(entry) {
+  const task = entry.task, to = entry.pick;
+  if (!to || !state.me || entry.busy || taskOff()) return;
+  if (task.current_request &&
+      !window.confirm("Give " + task.title + " to " + to + "? The ask " + (task.assignee || "its assignee") + " has now is cancelled.")) {
+    return;
+  }
+  entry.busy = true;
+  entry.error = "";
+  updateTaskCard(entry);
+  taskEpoch++;
+  const res = await api("POST", taskPath(task.id) + "/assign", { to }).catch(() => null);
+  entry.busy = false;
+  taskEpoch++;
+  if (res && res.status === 200 && res.data && res.data.task) {
+    tookTask(entry, res.data.task);
+    entry.picker = false;
+    announce("Assigned " + task.title + " to " + to + (res.data.task.ask_status === "held" ? ", held for your approval." : "."));
+  } else {
+    entry.error = "Not assigned: " + relayError(res);
+    // A 403 may mean this phone's agent is gone; ask again who it is.
+    if (res && res.status === 403) await whoami();
+  }
+  renderTasks();
+  refreshTasks();
+}
+
+async function commentTask(entry) {
+  const box = entry.c.comment, draft = box.value, body = draft.trim();
+  if (!body || entry.busy || taskOff()) return;
+  entry.busy = true;
+  entry.error = "";
+  updateTaskCard(entry);
+  const res = await api("POST", taskPath(entry.task.id) + "/comment", { body }).catch(() => null);
+  entry.busy = false;
+  if (res && res.status === 201) {
+    if (box.value === draft) box.value = "";
+    announce("Comment added to " + entry.task.title + ".");
+    await loadTaskDetail(entry);
+  } else {
+    entry.error = "Comment not added: " + relayError(res);
+  }
+  renderTasks();
+}
+
+// addingTask is true while an add is on its way, so a render from a poll in
+// the meantime keeps Add task off.
+let addingTask = false;
+async function addTask() {
+  const title = $("task-title").value.trim(), detail = $("task-detail").value.trim(), assignee = $("task-for").value;
+  const err = $("task-add-error");
+  err.hidden = true;
+  if (addingTask || taskOff()) return;
+  if (!title) {
+    err.textContent = "Give the task a title.";
+    err.hidden = false;
+    return;
+  }
+  addingTask = true;
+  renderTaskForm();
+  try {
+    const res = await api("POST", "/v1/admin/tasks", { title, detail, assignee });
+    taskEpoch++;
+    if (res.status === 403) await whoami();
+    if ((res.status !== 201 && res.status !== 200) || !res.data || !res.data.task) throw new Error(relayError(res));
+    $("task-title").value = "";
+    $("task-detail").value = "";
+    $("task-for").value = "";
+    if (res.data.assign_error) {
+      err.textContent = "Added, but not handed to " + assignee + ": " + res.data.assign_error;
+      err.hidden = false;
+    }
+    announce("Added task " + title + ".");
+  } catch (e) {
+    err.textContent = e.timeout
+      ? "No answer from the relay in time. The task may have been added; check the list before adding again."
+      : "Not added: " + e.message;
+    err.hidden = false;
+  } finally {
+    addingTask = false;
+    renderTasks();
+    refreshTasks();
+  }
+}
+
 function render() {
   renderConn();
   renderHeld();
@@ -915,6 +1848,7 @@ function render() {
   renderTeam();
   renderAsk();
   renderRooms();
+  renderTasks();
 }
 
 // ---- Polling ----
@@ -930,6 +1864,8 @@ async function refresh() {
       state.notAdmin = true;
       state.held.clear();
       $("held-list").replaceChildren();
+      // The tasks were read as an admin too: none may stay on the page.
+      clearTasks();
       state.loaded = true;
       return;
     }
@@ -946,6 +1882,7 @@ async function refresh() {
     if (!state.meChecked) await whoami();
     if (sentNeeded()) refreshSent();
     if (state.tab === "rooms") refreshRooms();
+    if (state.tab === "tasks" || tasksTick++ % TASKS_IDLE_EVERY === 0) refreshTasks();
   } catch (_) {
     state.offline = true;
   } finally {
@@ -1195,7 +2132,9 @@ function schedule() {
   // a held listing read after this lands.
   heldGen++;
   state.heldFresh = false;
+  state.tasksFresh = false;
   renderHeld();
+  renderTasks();
   if (document.visibilityState === "visible") {
     refresh();
     timer = setInterval(refresh, POLL_MS);
@@ -1211,6 +2150,22 @@ window.addEventListener("hashchange", () => {
 $("tab-team").addEventListener("click", () => { state.tab = "team"; render(); });
 $("tab-ask").addEventListener("click", () => { state.tab = "ask"; refreshSent(); render(); });
 $("tab-rooms").addEventListener("click", () => { state.tab = "rooms"; render(); refreshRooms(); });
+$("tab-tasks").addEventListener("click", () => { state.tab = "tasks"; render(); refreshTasks(); });
+$("task-add").addEventListener("click", addTask);
+$("task-join").addEventListener("click", openJoin);
+$("task-for").addEventListener("change", renderTaskForm);
+for (const name of TASK_CLOSED) {
+  const toggle = $("tg-" + name + "-toggle");
+  toggle.addEventListener("click", () => {
+    const open = toggle.getAttribute("aria-expanded") !== "true";
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    $("tg-" + name).hidden = !open;
+    // Opening reads the closed tasks; with both shut the next read takes
+    // their rows off the page again.
+    renderTasks();
+    refreshTasks();
+  });
+}
 $("room-pick").addEventListener("change", () => {
   switchRoom($("room-pick").value);
   $("room-notices").replaceChildren();

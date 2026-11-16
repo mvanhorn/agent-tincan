@@ -127,6 +127,27 @@ type Request struct {
 	// post: the id of that post. Only the relay sets it (a send cannot);
 	// older clients ignore it and see an ordinary ask.
 	RoomPostID int64 `json:"room_post_id,omitempty"`
+	// TaskID marks an ask that is one attempt at a task on the shared list:
+	// the id of that task. Only the relay sets it (a send cannot); older
+	// clients ignore it and see an ordinary ask.
+	TaskID int64 `json:"task_id,omitempty"`
+	// TaskActor is who the task's history names for assigning it, when that
+	// is not From: the owner, whose assign goes out as one of the owner's
+	// agents. Relay-only, and not stored on the request.
+	TaskActor string `json:"-"`
+	// TaskResultEvent is, on a task's ask being sent, the id of the task
+	// history entry that stored the result its body carries, 0 for a task
+	// with none. The store takes the task for the ask only while that is
+	// still the task's latest result. Relay-only, and not stored on the
+	// request.
+	TaskResultEvent int64 `json:"-"`
+	// Contributors names the agents, beside the sender and the chain, whose
+	// text the body carries: on a task's ask, the agent that filed the task
+	// and the authors of the result and comments sent along, and on any
+	// request sent while handling one that has contributors, those too.
+	// Relay-only: a send cannot set it. The owner's approval rules read them
+	// as they read the chain; the loop and hop checks do not.
+	Contributors []string `json:"-"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
 
@@ -706,7 +727,8 @@ const (
 // Schedule is an ask the relay sends later, once or on a repeat. A one-shot
 // has no EverySeconds and goes when it fires. LastRequest is the request
 // its latest fire made, and Blocked is set while its latest fire was
-// rejected.
+// rejected. TaskID marks a task's repeat: each fire starts a new attempt at
+// that task for To instead of sending Body.
 type Schedule struct {
 	ID           int64     `json:"id"`
 	From         string    `json:"from"`
@@ -718,6 +740,115 @@ type Schedule struct {
 	CreatedAt    time.Time `json:"created_at"`
 	LastRequest  string    `json:"last_request,omitempty"`
 	Blocked      bool      `json:"blocked,omitempty"`
+	TaskID       int64     `json:"task_id,omitempty"`
+}
+
+// TaskOwner stands for the owner where a task names its filer or assignee.
+// No agent can hold it: an agent name starts with a lowercase letter or a
+// digit, and "owner" alone is a name an agent may have.
+const TaskOwner = "@owner"
+
+// TaskWho is how a task's text and a listing name who: the owner, or the
+// agent.
+func TaskWho(who string) string {
+	if who == TaskOwner {
+		return "the owner"
+	}
+	return who
+}
+
+// TaskStatus is where a task stands.
+type TaskStatus string
+
+const (
+	// TaskProposed waits for the owner to approve it before anyone works it.
+	TaskProposed TaskStatus = "proposed"
+	// TaskOpen has no ask under it and can be assigned.
+	TaskOpen TaskStatus = "open"
+	// TaskWorking has an ask under it that its assignee has not answered.
+	TaskWorking TaskStatus = "working"
+	// TaskQuestion has an ask under it whose assignee needs input.
+	TaskQuestion TaskStatus = "question"
+	// TaskReturned carries a result nobody has acted on yet.
+	TaskReturned TaskStatus = "returned"
+	// TaskDone was closed by the owner.
+	TaskDone TaskStatus = "done"
+	// TaskDropped was given up.
+	TaskDropped TaskStatus = "dropped"
+)
+
+// Task is one item on the team's shared list. Filer and Assignee are agent
+// names or TaskOwner; an unassigned task has no Assignee. Each attempt at a
+// task is one ask: CurrentRequest is the ask open under it now, and
+// AskStatus that ask's status as the task was read. Result is the latest
+// answer and ResultRequest the ask that produced it. AgentAssigns counts
+// the times an agent assigned the task since the owner last reset it.
+// Source is the outside source its filer declared for its text ("mail",
+// "meeting"), and SuggestedAssignee whom the filer asked to have a proposed
+// task go to: the owner decides, and nothing was sent. A task that repeats
+// names its schedule in RepeatSchedule, how often it fires in
+// RepeatEverySeconds, and the teammate each fire assigns it to in RepeatTo.
+type Task struct {
+	ID                int64      `json:"id"`
+	Title             string     `json:"title"`
+	Detail            string     `json:"detail,omitempty"`
+	Status            TaskStatus `json:"status"`
+	Filer             string     `json:"filer"`
+	Assignee          string     `json:"assignee,omitempty"`
+	Key               string     `json:"key,omitempty"`
+	Result            string     `json:"result,omitempty"`
+	ResultRequest     string     `json:"result_request,omitempty"`
+	CurrentRequest    string     `json:"current_request,omitempty"`
+	AskStatus         Status     `json:"ask_status,omitempty"`
+	AgentAssigns      int        `json:"agent_assigns,omitempty"`
+	Source            string     `json:"source,omitempty"`
+	SuggestedAssignee string     `json:"suggested_assignee,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	// The three below are read from the task's schedule, never stored on
+	// the task.
+	RepeatSchedule     int64  `json:"repeat_schedule,omitempty"`
+	RepeatEverySeconds int64  `json:"repeat_every_seconds,omitempty"`
+	RepeatTo           string `json:"repeat_to,omitempty"`
+	// Chain is set on a task being added only: the chain of the request its
+	// filer held a claim on at that moment, with that request's
+	// contributors, kept on the task's first history entry. It is never
+	// sent to a client.
+	Chain []string `json:"-"`
+	// NamedFor is set on a task being added only: the teammate, or
+	// TaskOwner, its filer named for it. A task stored with one is never in
+	// the shared pool. It is never sent to a client.
+	NamedFor string `json:"-"`
+}
+
+// What a task history entry records.
+const (
+	TaskEventAdded    = "added"
+	TaskEventAssigned = "assigned"
+	TaskEventStatus   = "status"
+	TaskEventComment  = "comment"
+	TaskEventProgress = "progress"
+	// TaskEventAssignsReset is the owner setting the count of agent assigns
+	// back to zero.
+	TaskEventAssignsReset = "assigns_reset"
+)
+
+// TaskEvent is one entry in a task's history: who did what, and when. A
+// comment is an entry whose Body is the comment. Status is the task's
+// status after an entry that changed it. Entries are never edited. Chain is
+// the chain of the request the actor held a claim on as it wrote an added
+// entry's task or a comment, with that request's contributors, nil for
+// none: the text may hold what those
+// agents sent, so an ask that carries it names them to the owner's approval
+// rules. It is never sent to a client.
+type TaskEvent struct {
+	ID     int64      `json:"id"`
+	TaskID int64      `json:"task_id"`
+	Actor  string     `json:"actor"`
+	Kind   string     `json:"kind"`
+	Body   string     `json:"body,omitempty"`
+	Status TaskStatus `json:"status,omitempty"`
+	At     time.Time  `json:"at"`
+	Chain  []string   `json:"-"`
 }
 
 // MaxRoomPost caps a room post's body in bytes.

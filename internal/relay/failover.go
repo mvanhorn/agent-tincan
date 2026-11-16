@@ -62,7 +62,8 @@ type MoveChecker interface {
 // it is to or from dot-web, duet-web or any agent outside the six web chat kinds
 // (the target), from a council, was ever held, is not an ask, is part of a
 // group, came from a room mention (the reply posts to the room as the
-// mentioned member), carries attachments, names a conversation, has a
+// mentioned member), is an attempt at a task (its body carries teammates'
+// text that the asker did not choose a vendor for), carries attachments, names a conversation, has a
 // clarification exchange or was resumed, follows an answered request (its
 // body carries a teammate's reply), comes from a guest (the owner listed its
 // teammates by name), was moved by the owner's fallback (one hop at most),
@@ -88,6 +89,8 @@ func failoverIneligible(req envelope.Request, claimed bool, fromKind, toKind str
 		return "it is part of a group"
 	case req.RoomPostID != 0:
 		return "it came from a room mention"
+	case req.TaskID != 0:
+		return "it is an attempt at a task"
 	case len(req.Attachments) > 0:
 		return "it carries attachments"
 	case strings.HasPrefix(strings.ToLower(strings.TrimSpace(first)), "conversation:"):

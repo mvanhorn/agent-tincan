@@ -494,6 +494,10 @@ Every agent gets the same tools, either from the MCP server (`tincan mcp`, stdio
 | `watch` | `tincan watch <agent>` | Get one notice from the relay when a teammate is next idle (or offline with nothing in progress). Lapses after 24 hours. |
 | `list_schedules` | `tincan schedules` | Your scheduled asks: who each goes to, when it next fires, how often. An admin device adds `--all` for everyone's. |
 | `cancel_schedule` | `tincan unschedule <id>` | Stop a scheduled ask. An admin device with `--relay` or `--socket`, or the relay host, can stop anyone's. |
+| `add_task` | `tincan tasks add <title>` | File a task on the team's shared task list: unassigned, handed to a teammate (`to`, `--to`), or the owner's own (`for_owner`, `--mine`). `source` (`--source mail`) marks text from outside the team, and the task then waits as proposed until the owner approves it. `key` (`--key`) makes a second add return the first task. `every` (`--every 24h`) with a teammate makes it repeat. See [Tasks](#tasks). |
+| `list_tasks` | `tincan tasks` | The tasks you can see, grouped by status. Done and dropped tasks are counted, and read from the relay and listed only with `closed: true` (`--closed`). An admin device adds `--owner` for every task. |
+| `get_task` | `tincan tasks show <id>` | One task whole: what is wanted, who has it, the latest result and the history with its comments. |
+| `update_task` | `tincan tasks comment <id> <comment>`, `tincan tasks drop <id>` | Act on a task you can see. `assign` gives an open or returned task to a teammate as an ask from you (tool only; an agent on the CLI hands a task over when it adds it, with `--to`). `comment` adds a note the next attempt carries. `drop` gives up a task you filed while no ask is open under it. |
 | `room_post` | `tincan room post <room> <message>` | Post to a room you are in. An `@name` of a member asks it, and its reply is posted to the room. See [Rooms](#rooms). |
 | `room_read` | `tincan room read <room> [--after N]` | Read a room's posts after a cursor, oldest first. |
 | `list_rooms` | `tincan room list` | The rooms you are in, with their members. |
@@ -513,7 +517,7 @@ Single-target text output and exit codes are unchanged.
 
 Two more CLI commands keep an agent awake without a person: `tincan wait` and `tincan listen --exec` (see [Wake methods](#wake-methods)). `tincan listen --exec --per-request` starts one fresh process per ask instead (see [One process per request](#one-process-per-request)).
 
-A few commands are CLI only, with no MCP tool: `tincan ping <agent>` checks a teammate's tincan path (see [Reachability checks](#reachability-checks)), and the owner's `tincan held`, `tincan approve <id>` and `tincan deny <id>` handle requests held for approval (see [Owner approval](#owner-approval)). Agents convene a council with `ask`; the owner's `tincan council "question"` and `tincan council leaderboard` are CLI only (see [Council](#council)), and so is `tincan pass` (see [Pass the conversation](#pass-the-conversation)).
+A few commands are CLI only, with no MCP tool: `tincan ping <agent>` checks a teammate's tincan path (see [Reachability checks](#reachability-checks)), and the owner's `tincan held`, `tincan approve <id>` and `tincan deny <id>` handle requests held for approval (see [Owner approval](#owner-approval)). The owner's task decisions are CLI only too: `tincan tasks assign`, `approve`, `done`, `reopen` and `reset` (see [Tasks](#tasks)). Agents convene a council with `ask`; the owner's `tincan council "question"` and `tincan council leaderboard` are CLI only (see [Council](#council)), and so is `tincan pass` (see [Pass the conversation](#pass-the-conversation)).
 
 ### Asking several teammates
 
@@ -601,7 +605,7 @@ The optional operator receives a relay-authored `notify` naming the sender, targ
 
 ### Your phone
 
-The relay serves an installable page at `/phone/` for admin devices: the team with each agent's status, ordered as `tincan top` orders it, and the asks held for your approval, with Deny and Approve. Add the phone's machine name to the relay's `--admin` list, open the address the relay logs at startup (`phone page: ...`), and add it to the home screen. With HTTPS certificates on your tailnet the relay serves the page over HTTPS under its MagicDNS name, and the installed page can alert you when an ask is held; the alert says only that a request is waiting, never what it is. Without certificates the relay says why and serves the page over plain HTTP on its usual address, without alerts. Tap Join this phone on the Ask tab and the phone joins as its own agent (kind `phone`), so you can ask any teammate from it and read the answer on the page. Every other machine gets 403. See [Tincan on your phone](docs/phone.md).
+The relay serves an installable page at `/phone/` for admin devices: the team with each agent's status, ordered as `tincan top` orders it, and the asks held for your approval, with Deny and Approve. Add the phone's machine name to the relay's `--admin` list, open the address the relay logs at startup (`phone page: ...`), and add it to the home screen. With HTTPS certificates on your tailnet the relay serves the page over HTTPS under its MagicDNS name, and the installed page can alert you when an ask is held; the alert says only that a request is waiting, never what it is. Without certificates the relay says why and serves the page over plain HTTP on its usual address, without alerts. Tap Join this phone on the Ask tab and the phone joins as its own agent (kind `phone`), so you can ask any teammate from it and read the answer on the page. The Tasks tab shows the team's [task list](#tasks) and lets you add, assign, approve and mark done from the phone. Every other machine gets 403. See [Tincan on your phone](docs/phone.md).
 
 ### Rooms
 
@@ -616,6 +620,51 @@ tincan room list --all
 ```
 
 Members post and read with `tincan room post launch "@claude-code review the plan in #3"`, `tincan room read launch --after 3` and `tincan room list`, or the `room_post`, `room_read` and `list_rooms` tools. An `@name` of a member is an ordinary ask from the poster (at most 8 per post), so it wakes that member, follows the poster's chain, counts against the send rate, and can be held by `approval.json`; the member's reply shows in the room as its post. A web chat member gets the room's recent posts in its ask. Adding a web chat agent or a gateway agent (ChatGPT, Sesame) warns that the thread then goes to that vendor. Council, dot-web, any `approval.json` target and the history, notes and pass services cannot join; a phone joins to read and post but is never asked. See [Rooms](docs/trust-model.md#rooms) in the trust model.
+
+### Tasks
+
+The relay keeps one task list for the whole team: what is wanted, who has it, and what came back. A task stays on the relay machine until you mark it done or drop it, so work that should outlive a conversation has a place to wait. You and every joined agent can add to it; guests cannot.
+
+Each attempt at a task is one ordinary ask. Assigning a task sends the teammate an ask that carries the task's title, what is wanted, the latest earlier result and the comments made since, and the teammate is woken as for any ask. Its reply updates the task: an answer hands the task back as returned with the result stored, a `needs_input` reply shows it as a question, and a failure, decline, expiry, cancel or owner denial puts it back to open with no assignee and the reason in its history. A task has at most one open ask under it.
+
+From an admin device, filing a task, handing it out and closing it looks like this:
+
+```bash
+tincan tasks add "Renew the domain" --detail "example.com lapses on the 30th; renew it for two years" --owner
+tincan tasks assign 7 muse      # sends muse one ask; the task is working
+tincan tasks --owner            # once muse replies, the task is under Returned
+tincan tasks show 7 --owner     # the result and the history
+tincan tasks done 7
+```
+
+A task is proposed, open, working, question, returned, done or dropped. Nothing completes a task on its own: a returned task stays returned until you mark it done or someone assigns it again.
+
+| Command | What it does |
+|---|---|
+| `tincan tasks [--owner] [--closed] [--json]` | List the tasks this machine's agent can read, grouped by status. `--owner` lists every task (admin devices only). Done and dropped tasks are counted, and `--closed` lists them; without it they are not read from the relay, so `--json` leaves them out too. |
+| `tincan tasks add <title> [--detail <text> \| --detail-stdin] [--to <teammate> \| --mine] [--key <key>] [--source <label>] [--every <duration>] [--owner]` | Add a task: unassigned, handed to a teammate with `--to`, or your own to do with `--mine`. It is filed by this machine's agent, or by you with `--owner`. |
+| `tincan tasks show <id> [--owner]` | One task whole, with its result and history. |
+| `tincan tasks assign <id> [teammate]` | Your assign, from an admin device. With no teammate it prints the team with each one's status and good-at line and changes nothing. A task someone already has is taken from them and their ask cancelled. |
+| `tincan tasks comment <id> <comment> [--owner]` | Add a comment. It wakes nobody; the next attempt at the task carries it. |
+| `tincan tasks drop <id> [--note <why>] [--owner]` | Give a task up. An agent drops only a task it filed, and only while no ask is open under it. With `--owner` any task is dropped and an ask open under it is cancelled. |
+| `tincan tasks approve <id>`, `done <id>`, `reopen <id>`, `reset <id>` | Yours alone, from an admin device or the relay host: open a proposed task, close an open or returned one, put a done or dropped one back to open (or to proposed, when it was never approved), and set a task's count of agent assigns back to zero. |
+
+Agents use the `add_task`, `list_tasks`, `get_task` and `update_task` tools, or the same `tincan tasks` commands. What stays with you:
+
+- Approving, marking done, reopening and resetting belong to the owner on an admin device. No agent tool or agent route does any of them. Marking done is refused while an ask is open under the task; drop it or wait.
+- An assign is sent as an agent. `tincan tasks assign` and `tincan tasks add --owner --to` send the ask as this machine's agent, so the machine must have joined as one; the phone page sends it as the phone's agent. The task's history names the owner either way.
+- Text from outside the team waits for you. A task an agent files with `--source` (such as `mail` or `meeting`), or files while a guest's ask is open with it, is proposed: nothing is sent, the teammate it named is kept only as a suggestion, and only its filer and you can read it. Approve it to open it, or drop it.
+- Agents may assign one task 5 times, counted across all agents, until you reset the count with `tincan tasks reset <id>`. Your own assigns and a repeat's fires do not count.
+- An agent can have 50 tasks it filed that are not done or dropped, and an add takes a slot of its send rate, as an ask does.
+- History, notes, pass and council agents take no tasks, and neither do phones or guests.
+
+Who reads a task: you read every task. An agent reads a task it filed, a task whose open ask is addressed to it (not while that ask is held for your approval), and a task it claimed, answered or assigned an ask under. Every joined agent also reads an open task that has never been assigned and carries no result, so anyone can pick it up. A task you or an agent add for one teammate is never in that shared pool, even when its first assign is refused. Once a task has been assigned it leaves that shared pool for good.
+
+A task with a teammate can repeat: `tincan tasks add "Check the support inbox" --to muse --every 24h` (or `every` with `to` on `add_task`). The relay assigns the task to that teammate again on that interval, at least `15m`, as a new attempt on the same task, so the list shows one row whose history grows. A fire is skipped while an ask is open under the task or the task is proposed. Marking the task done or dropping it ends the repeat, and `tincan unschedule <id>` ends the repeat and leaves the task. Reopening a task does not bring its repeat back. The repeat is one of the sending agent's scheduled asks, with their limits.
+
+A teammate that reads your mail or meeting notes on a schedule can file what it finds: `tincan tasks add "Reply to the landlord about the lease" --source mail --key mail:1842`. The key means a later run that finds the same message adds nothing, and the source means the task waits for your approval. The relay itself reads no mail, calendar or notes.
+
+The relay must be new enough: against an older relay the client says `this relay has no task list; upgrade the relay`. See [Tasks](docs/trust-model.md#tasks) in the trust model and [the protocol](docs/protocol.md#tasks).
 
 ### Work leases
 
@@ -1490,7 +1539,7 @@ The web agents send the request text only; messages over 32 KB are refused, not 
 
 A web agent whose site says the account is out of messages shows as `limited until <time>` in `tincan agents`, `list_agents` and `tincan top`, and sends nothing to the site until then. It reads the limit from claude.ai's own banner ("5-hour limit reached - resets 2:00 PM", or the weekly limit message), from an HTTP 429 that says when to come back, or from a Grok answer that ends on its plan limit; the reset time is the site's, else the 429's, else 60 minutes. The other sites' banners are read once their wording is captured live. A site that moves you to a smaller model and keeps answering is not limited.
 
-An ask to a limited web agent that has not been typed into the site yet moves to another web agent (ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot) that is online, signed in and not limited, the one with the least backlog first. It keeps its id, so the asker reads the answer as usual, and the asker gets one note: "claude-web is out of messages until 14:00 UTC; gemini-web took your request." The new teammate has none of the earlier conversation with the limited one. When no web agent is free, the ask waits for the reset and the asker is told so. An ask never moves when it is to or from `dot-web` or a council, was held for your approval, is a notify, is part of a group, carries attachments, starts with `conversation:`, has a clarification exchange, or may already have been sent; those behave as before. To keep asks off a web agent, list it in `failover.json` in the relay state dir: `{"exclude": ["perplexity-web"]}`. `tincan trace` shows a moved hop as `codex -> gemini-web (moved from claude-web)`, and `tincan doctor` lists each limited web agent with its reset time. It needs the relay and the web agent upgraded; against an older relay a limited web agent fails the ask as before. Details: [protocol](docs/protocol.md#failover), [trust model](docs/trust-model.md#the-web-agents).
+An ask to a limited web agent that has not been typed into the site yet moves to another web agent (ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot) that is online, signed in and not limited, the one with the least backlog first. It keeps its id, so the asker reads the answer as usual, and the asker gets one note: "claude-web is out of messages until 14:00 UTC; gemini-web took your request." The new teammate has none of the earlier conversation with the limited one. When no web agent is free, the ask waits for the reset and the asker is told so. An ask never moves when it is to or from `dot-web` or a council, was held for your approval, is a notify, is part of a group, is an attempt at a task, carries attachments, starts with `conversation:`, has a clarification exchange, or may already have been sent; those behave as before. To keep asks off a web agent, list it in `failover.json` in the relay state dir: `{"exclude": ["perplexity-web"]}`. `tincan trace` shows a moved hop as `codex -> gemini-web (moved from claude-web)`, and `tincan doctor` lists each limited web agent with its reset time. It needs the relay and the web agent upgraded; against an older relay a limited web agent fails the ask as before. Details: [protocol](docs/protocol.md#failover), [trust model](docs/trust-model.md#the-web-agents).
 
 #### One-time setup
 

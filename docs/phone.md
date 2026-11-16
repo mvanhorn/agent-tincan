@@ -1,6 +1,6 @@
 # Tincan on your phone
 
-The relay serves a page for your phone at `/phone/`. It shows the team as `tincan top` does, with the same status for every agent, and lists the asks held for your approval with their sender, target and attachment names. You approve or deny a held ask from the page, and once the phone joins as its own agent you can ask any teammate and read the answer there.
+The relay serves a page for your phone at `/phone/`. It shows the team as `tincan top` does, with the same status for every agent, and lists the asks held for your approval with their sender, target and attachment names. You approve or deny a held ask from the page, and once the phone joins as its own agent you can ask any teammate and read the answer there. The Tasks tab shows the team's task list and lets you add, assign and close tasks.
 
 The page works only from an admin device: a machine named in the relay's `--admin` list, untagged, and (with `--admin-login`) owned by a listed login. Any other machine gets 403 for the page and every file it loads. Nothing is hosted anywhere else; the page talks only to your relay over your tailnet.
 
@@ -44,6 +44,32 @@ The Rooms tab lists every room and lets you create one, add members and remove t
 
 Pick a room to read it. The page reads and posts as the phone's agent, so the phone must be a member; it checks for new posts every 5 seconds while the tab is open. Each post shows its author, time and whether it is a question, a failure or a decline, and a mention shows who it is still waiting on. An `@name` of a member in your post asks that member, and its reply shows in the room; the page lists any mention that was not sent and why. Posts are teammates' text and are shown as text only.
 
+## Tasks from the phone
+
+The Tasks tab shows the team's shared task list (see [Tasks](../README.md#tasks) in the README): every task, since the page is an admin client. The tab's count is the number of tasks waiting on you: proposed ones, questions for you, and returned ones.
+
+To add a task, write a title and what is wanted, pick who it is for (no one, you, or a teammate) and tap Add task. Handing a task to a teammate sends an ask as the phone's agent, so the teammate choices need the phone joined; without that the page says so beside Join this phone. Adding an unassigned task or one of your own needs only the admin device. The page does not make repeating tasks; a task that repeats, added with `tincan tasks add --every` or `add_task`, shows its interval and teammate.
+
+Tasks are grouped, each group with a count:
+
+- Proposed: tasks waiting for your approval, with why (the source the filer declared, or that it was filed while the filer was handling a guest's ask) and the teammate the filer suggested. Nothing was sent to that teammate. Approve opens the task and offers to assign it, with the suggestion marked; Drop gives it up.
+- Needs your answer: a task whose assignee asked a question on an ask this phone's agent sent, with a box to answer. The answer goes on the same ask and the task goes back to working. A question on an ask another agent sent stays under Working and names who it waits on.
+- Returned: tasks with a result nobody has acted on. Done closes one, and Assign again sends it out for another attempt, which carries the result and the comments made since.
+- Working: tasks with an ask open, and where that ask stands: held for your approval, waiting to be picked up, or picked up.
+- Open: tasks with no ask under them and no assignee.
+- Yours: open tasks marked as your own to do.
+- Done and Dropped: closed tasks, folded away behind their counts. The page reads only the counts until you open one of the two, so a long history costs the page nothing; it then reads the closed tasks, and keeps them current while either is open. Reopen puts a task back to open, or to proposed when it was never approved. Past 10,000 tasks in all, the page shows the oldest closed ones and says how many; `tincan tasks --owner --closed` lists every one.
+
+Tap a task to open it. It shows what is wanted, the latest result, the history (the latest 5 entries, with the older ones behind a control) and a comment box. A comment wakes nobody; the next attempt at the task carries it. The buttons depend on the task's status:
+
+- Assign lists the teammates that can take a task, each with its status and good-at line as the Team tab shows them. Guests, phones and history, notes, pass and council agents are left out. On a task someone already has the button says Reassign: the task is taken from them and their ask cancelled.
+- Done is refused while an ask is open under the task. Drop the task, which cancels the ask, or wait for the ask to end.
+- Reset assign count shows once agents have assigned the task, with how many times. Agents may assign one task 5 times until you reset it.
+
+Approve, Done, Reopen, Drop and Reset each use a one-time code from the relay, as Approve and Deny on a held ask do: the task list the page reads carries one code for each decision a task's status allows, good only from this device, for that task and decision, for 10 minutes. A decision that lands ends the task's other codes, and the page reads the list again after every decision. When a code has expired the relay says so and the next read replaces it. Adding, commenting and assigning need no code.
+
+Task titles, details, results, comments and history are teammates' text and are shown as text only. The page does not send alerts for tasks: an alert is sent only for a held ask, which includes a task's ask when your rules hold it.
+
 ## Alerts
 
 With HTTPS, the page can alert you when an ask is held. The row under the team says which state applies:
@@ -59,6 +85,7 @@ An alert says only "A request is waiting for your approval" (or how many are). I
 ## What the page shows
 
 - Held for approval, at the top, with a count. Each held ask shows who asked whom (with the target's kind, so a council or dot-web ask is plain), how long it has been held, its chain, the start of its text, and each attachment's name and size. Deny is on the left, Approve on the right.
+- Tasks, on its own tab, with the count of tasks waiting on you. See [Tasks from the phone](#tasks-from-the-phone).
 - Team, below. Every agent with its status (busy, idle, stuck, offline, with the same detail `tincan agents` shows), kind, queue, good-at line and what it is working on, ordered as `tincan top` orders them: stuck and signed-out agents first.
 
 The page refreshes every 5 seconds while it is open. A request the relay has not answered in 15 seconds counts as failed. When a refresh fails it says "Offline, last updated" with the time and turns off Approve and Deny until the relay answers again. When the device is not an admin it says so.
@@ -72,4 +99,4 @@ Each held ask in the page's list comes with two one-time codes from the relay, o
 - A second tap, or a decision another device or the CLI already made, shows "Already decided" with the result instead of an error. Approving twice never releases twice.
 - After the page has been in the background, it fetches fresh codes before Approve and Deny turn on again.
 
-The relay audits each decision as `approved` or `denied` with the device's machine name. Approval stays with people: no agent tool lists, approves or denies held asks.
+The relay audits each decision as `approved` or `denied` with the device's machine name. Approval stays with people: no agent tool lists, approves or denies held asks, and none approves a proposed task or marks a task done.
