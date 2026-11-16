@@ -253,6 +253,10 @@ type Server struct {
 	// current silent episode, for the owner's wake notice.
 	silent map[string]silentEpisode
 
+	// taskNoticeMu lets one drain of the task notice outbox run at a time
+	// (drainTaskNotices).
+	taskNoticeMu sync.Mutex
+
 	// failoverMu guards failoverErr, the failover.json problem last
 	// logged, so each is logged once.
 	failoverMu  sync.Mutex
@@ -631,6 +635,10 @@ func (s *Server) Sweep(ctx context.Context) {
 	s.checkWatches(ctx, "")
 	s.expireLeases(ctx)
 	s.fireSchedules(ctx)
+	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
+	// held acknowledgement closed, a guest removed) and of any change an
+	// earlier drain could not finish telling.
+	s.drainTaskNotices(ctx)
 }
 
 // wakeRequeued wakes req's target for a request it may have looked past: a
@@ -1712,6 +1720,9 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	}
 	s.record(ctx, event, id, "", agent, store.DetailJSON(detail))
 	s.recordSuperseded(ctx, id, "replied", rep.Superseded)
+	// A reply to a task's ask returned the task, asked a question or
+	// released it.
+	s.drainTaskNotices(ctx)
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
 	if req, _, err := s.store.Request(ctx, id); err == nil {
@@ -1801,6 +1812,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	s.hub.notify(requestKey(id))
 	s.record(r.Context(), "cancelled", id, "", name, "")
 	s.recordSuperseded(r.Context(), id, "cancelled", closed)
+	s.drainTaskNotices(r.Context())
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": string(envelope.StatusCancelled)})
 }
 
@@ -2260,6 +2272,9 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	delete(s.workingOn, in.Name)
 	delete(s.hostStatus, in.Name)
 	s.mu.Unlock()
+	// After the agent is gone from the roster, so a removed host is not
+	// told of the tasks its own removal released.
+	s.drainTaskNotices(r.Context())
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	if before.TaskHost {
 		// The mark went with the agent's row.
@@ -2903,6 +2918,8 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 	s.nonces.void(req.ID)
 	s.record(r.Context(), "denied", req.ID, req.TraceID, s.remote(r), s.deviceDetail(r))
+	// The owner's denial is told to no host; the drain clears its row.
+	s.drainTaskNotices(r.Context())
 	s.hub.notify(requestKey(req.ID))
 	s.hub.notify(inboxKey(req.From))
 	if replier, ok := s.events.(Replier); ok {

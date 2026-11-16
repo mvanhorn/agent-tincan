@@ -134,6 +134,9 @@ func (s *Server) reassignTask(ctx context.Context, a taskAssign) (envelope.Reque
 		return envelope.Request{}, taskStatusError(err)
 	}
 	s.taskAsksCancelled(ctx, a.TaskID, cancelled, "task_reassigned")
+	// The release is the owner's change, told to no host; the drain clears
+	// its row.
+	s.drainTaskNotices(ctx)
 	return s.assignTask(ctx, a)
 }
 
@@ -412,6 +415,9 @@ func (s *Server) addTask(ctx context.Context, in taskAdd, filer, from string, ch
 		s.scheduleCreated(ctx, envelope.Schedule{ID: task.RepeatSchedule, From: from, To: task.RepeatTo, EverySeconds: task.RepeatEverySeconds, NextAt: s.cfg.Now().Add(time.Duration(task.RepeatEverySeconds) * time.Second), TaskID: task.ID})
 	}
 	out := taskReply{Task: task, Existing: !created}
+	if created && proposed {
+		s.drainTaskNotices(ctx)
+	}
 	if !created || proposed || in.Assignee == "" || in.Assignee == envelope.TaskOwner {
 		return out, nil
 	}

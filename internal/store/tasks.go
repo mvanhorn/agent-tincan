@@ -294,6 +294,12 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: t.Filer, Kind: envelope.TaskEventAdded, Status: t.Status, Chain: t.Chain}, now); err != nil {
 		return envelope.Task{}, false, err
 	}
+	if t.Status == envelope.TaskProposed {
+		// A task that waits for the owner is news for the task hosts.
+		if err := taskNoticeTx(ctx, tx, id, t.Status, t.Filer, "", now); err != nil {
+			return envelope.Task{}, false, err
+		}
+	}
 	if repeat != nil {
 		repeat.TaskID = id
 		if _, err := s.addScheduleTx(ctx, tx, *repeat); err != nil {
@@ -526,7 +532,9 @@ func forgetHeldTargetTx(ctx context.Context, tx *sql.Tx, reqID string) error {
 // for a request that is no attempt at a task, and changes nothing unless
 // the request is still the task's open ask, so a write about an ask the
 // task has moved on from leaves the task alone. Every store write that
-// ends, pauses or moves a request calls it, or a wrapper of it.
+// ends, pauses or moves a request calls it, or a wrapper of it. A status
+// entry that is news for the task hosts gets its outbox row here too
+// (taskAskNoticeTx), so no such write can leave the row out.
 func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string, args []any, ev envelope.TaskEvent) error {
 	var task sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `SELECT task_id FROM requests WHERE id = ?`, reqID).Scan(&task); err != nil || !task.Valid {
@@ -543,8 +551,16 @@ func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string,
 		return err
 	}
 	ev.TaskID = task.Int64
-	_, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
-	return err
+	now := s.now().UnixMilli()
+	if _, err = addTaskEvent(ctx, tx, ev, now); err != nil {
+		return err
+	}
+	// A task that came back, asks a question or is open again is news for
+	// the task hosts; one that is working again is not.
+	if ev.Kind == envelope.TaskEventStatus && ev.Status != envelope.TaskWorking {
+		return taskAskNoticeTx(ctx, tx, reqID, ev.Status, ev.Actor, now)
+	}
+	return nil
 }
 
 // taskReleasedTx is followTaskTx for an ask that ended with no result: the
@@ -600,10 +616,13 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 		if n, err := res.RowsAffected(); err != nil || n == 0 {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at)
+		now := s.now().UnixMilli()
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at)
 			SELECT task_id, ?, ?, ?, ?, ? FROM requests WHERE id = ?`,
-			rep.From, envelope.TaskEventStatus, taskNote(string(rep.Status), "replaced the earlier acknowledgement"), string(envelope.TaskReturned), s.now().UnixMilli(), rep.RequestID)
-		return err
+			rep.From, envelope.TaskEventStatus, taskNote(string(rep.Status), "replaced the earlier acknowledgement"), string(envelope.TaskReturned), now, rep.RequestID); err != nil {
+			return err
+		}
+		return taskAskNoticeTx(ctx, tx, rep.RequestID, envelope.TaskReturned, rep.From, now)
 	}
 	if rep.Status != envelope.StatusAnswered {
 		return s.taskReleasedTx(ctx, tx, rep.RequestID, rep.From, taskNote(string(rep.Status), rep.Body))

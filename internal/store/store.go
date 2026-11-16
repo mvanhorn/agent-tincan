@@ -288,6 +288,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate tasks: %w", err)
 	}
+	if err := s.migrateTaskNotices(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate task notices: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
