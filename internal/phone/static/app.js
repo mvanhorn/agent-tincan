@@ -1014,7 +1014,7 @@ function taskStatusText(task) {
       return "question from " + who + ", waiting on " + ((ask && ask.sender) || "the agent that assigned it") + " to answer";
     }
     case "returned": return task.assignee ? "returned by " + who : "returned";
-    case "open": return task.assignee === TASK_OWNER ? "open, yours" : "open";
+    case "open": return task.assignee === TASK_OWNER ? "open, yours to do" : "open";
     default: return task.status;
   }
 }
@@ -1029,8 +1029,11 @@ function repeatEvery(seconds) {
 
 function taskFacts(task) {
   const facts = [];
-  if (task.assignee === TASK_OWNER) facts.push("yours");
-  else if (task.assignee) facts.push("assigned to " + task.assignee);
+  // The owner's own open task says so in its status line; a closed one's
+  // status line does not, so it says so here.
+  if (task.assignee === TASK_OWNER) {
+    if (task.status !== "open") facts.push("yours");
+  } else if (task.assignee) facts.push("assigned to " + task.assignee);
   else facts.push("unassigned");
   if (task.repeat_every_seconds) facts.push("repeats every " + repeatEvery(task.repeat_every_seconds) + (task.repeat_to ? " for " + task.repeat_to : ""));
   if (task.created_at) facts.push("added " + age(task.created_at) + " ago");

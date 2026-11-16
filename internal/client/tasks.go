@@ -312,6 +312,16 @@ func TaskEverySeconds(every, to string, now time.Time, noTo error) (int64, error
 	return int64(interval / time.Second), nil
 }
 
+// FormatTaskHeld is the sentence that follows the news of an assignment
+// whose ask the relay holds for the owner, "" for any other: the task
+// reads as working, and its assignee has not been sent it yet.
+func FormatTaskHeld(t envelope.Task) string {
+	if t.AskStatus != envelope.StatusHeld {
+		return ""
+	}
+	return fmt.Sprintf(" The ask is held for the owner's approval: %s gets the task only once the owner approves it.", t.Assignee)
+}
+
 // FormatTaskRepeat is the sentence tincan tasks add and the add_task tool
 // end with for a task that repeats, and "" for one that does not.
 func FormatTaskRepeat(t envelope.Task) string {
