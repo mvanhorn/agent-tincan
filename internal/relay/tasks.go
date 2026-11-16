@@ -196,9 +196,10 @@ const taskReturnLine = "To hand the task back, reply to this request with the re
 // The contributors are the filer, the author of a carried result and the
 // authors of carried comments, without the owner, whose text needs no
 // approval of the owner's. With them go the agents in the chain the filer
-// held a claim under as it filed the task (filedUnder), and those in the
-// chain each carried comment's author held as it wrote: text written while
-// working a request may hold what that request's chain sent.
+// held a claim under as it filed the task and that request's contributors
+// (filedUnder), and the same for each carried comment's author as it wrote:
+// text written while working a request may hold what that request's chain
+// and contributors sent.
 func taskBody(task envelope.Task, actor, resultBy string, filedUnder []string, comments []envelope.TaskEvent, limit int) (string, []string) {
 	var contributors []string
 	carries := func(agent string) {
@@ -360,14 +361,20 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 // kept as the filer's suggestion. An assign the relay refuses leaves the
 // task stored, open and unassigned, and the refusal in the reply.
 //
+// Whoever in names is stored on the task with it (envelope.Task.NamedFor),
+// so a task added for one teammate is never in the shared pool: not between
+// the insert and the assign, not when the assign is refused, and not when a
+// proposed one is approved. The filer and the owner read it and can assign
+// it again.
+//
 // A task with a repeat is stored with its schedule or not at all. The
 // schedule is from's, the agent the task's asks are sent as, and counts
 // toward its store.MaxSchedules; its first fire is one interval from now,
 // the add itself being the first attempt. The caller has run
-// checkScheduleCaller for from. chain is the chain of the request the filer
-// holds a claim on, nil for none, which the task keeps (envelope.Task).
+// checkScheduleCaller for from. chain is what claimChain gives for the
+// filer, nil for none, which the task keeps (envelope.Task).
 func (s *Server) addTask(ctx context.Context, in taskAdd, filer, from string, chain []string, proposed bool, assign func(id int64) error) (taskReply, error) {
-	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source, Chain: chain}
+	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source, Chain: chain, NamedFor: in.Assignee}
 	switch {
 	case proposed:
 		task.Status, task.SuggestedAssignee = envelope.TaskProposed, in.Assignee
@@ -493,8 +500,9 @@ func writeTaskErr(w http.ResponseWriter, err error) {
 // team waits for the owner as proposed, with nothing sent: one that
 // declares a source, and any filed while a guest's ask is open with the
 // caller, claimed or not, as a schedule made then is refused. A task filed
-// while the caller holds a claim keeps that request's chain, which every
-// ask under the task then names as contributors. An add takes
+// while the caller holds a claim keeps that request's chain and
+// contributors, which every ask under the task then names as contributors.
+// An add takes
 // a slot of the caller's send rate, as an ask does. A repeating task makes
 // a schedule, so it is refused when a schedule from the caller would be.
 func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
@@ -708,7 +716,8 @@ func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, id int64, 
 // read. The next ask under the task carries it; nobody is woken for it. A
 // caller a guest's ask is open with is refused, as it is a schedule. A
 // comment written while the caller holds a claim keeps that request's
-// chain, which an ask that carries the comment names as contributors.
+// chain and contributors, which an ask that carries the comment names as
+// contributors.
 func (s *Server) handleCommentTask(w http.ResponseWriter, r *http.Request) {
 	from := s.agent(w, r)
 	if from == "" {

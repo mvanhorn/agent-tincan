@@ -1887,3 +1887,195 @@ func TestTaskTextWrittenUnderClaimKeepsItsChain(t *testing.T) {
 		t.Fatalf("task read = %v, %v", raw, err)
 	}
 }
+
+// A task added for one teammate is addressed to that teammate, so it is
+// never in the shared pool: not when the relay refuses the assign and
+// leaves it open and unassigned, for an agent's add, a repeating one and
+// the owner's, and not when a proposed one is approved. Its filer and the
+// owner read it and assign it again. A task added for nobody is in the pool
+// as before.
+func TestTaskAddedForATeammateStaysOutOfThePool(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	phone := m.JoinOnMachineOf(t, "admin", "phone")
+	m.clk.advance(2 * time.Second)
+	// One send a minute: an add takes it, so the assign that follows is
+	// refused.
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	refused := func(c *client.Relay, path string, in map[string]any) int64 {
+		t.Helper()
+		out := taskDo(t, c, "POST", path, in)
+		if got := out.Task; !strings.Contains(out.AssignError, policy.ErrRateLimited.Error()) || got.Status != envelope.TaskOpen || got.Assignee != "" || got.CurrentRequest != "" || m.asks(t, got.ID) != 0 {
+			t.Fatalf("add with a refused assign = %+v", out)
+		}
+		return out.Task.ID
+	}
+	adminSees := func(id int64) bool {
+		t.Helper()
+		return slices.ContainsFunc(listTasks(t, m.admin, "/v1/admin/tasks"), func(task listedTask) bool { return task.ID == id })
+	}
+	hidden := func(id int64, filer *client.Relay) {
+		t.Helper()
+		for name, c := range map[string]*client.Relay{"instinct": m.instinct, "scout": m.scout, "muse": m.muse, "grokbot": m.grok} {
+			if c != filer && seesTask(t, c, id) {
+				t.Fatalf("%s reads task %d, which was added for one teammate", name, id)
+			}
+		}
+		if filer != nil && !seesTask(t, filer, id) {
+			t.Fatalf("the filer cannot read task %d", id)
+		}
+		if !adminSees(id) {
+			t.Fatalf("the owner cannot read task %d", id)
+		}
+	}
+
+	byAgent := refused(m.grok, "/v1/tasks", map[string]any{"title": "Read the contract", "detail": "The draft is in the vault.", "assignee": "muse"})
+	hidden(byAgent, m.grok)
+	m.clk.advance(2 * time.Minute)
+	repeating := refused(m.grok, "/v1/tasks", map[string]any{"title": "Check the vault", "assignee": "muse", "every_seconds": 3600})
+	hidden(repeating, m.grok)
+
+	// The owner's add takes no slot, so the phone's agent spends it first.
+	m.clk.advance(2 * time.Minute)
+	if _, err := phone.Send(ctx, "instinct", "hello", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	byOwner := refused(phone, "/v1/admin/tasks", map[string]any{"title": "Sign the contract", "assignee": "muse"})
+	hidden(byOwner, nil)
+
+	// The filer and the owner assign again, and the teammate then reads it.
+	m.clk.advance(2 * time.Minute)
+	if got := taskDo(t, m.grok, "POST", taskPath(byAgent, "/assign"), map[string]string{"to": "muse"}).Task; got.Status != envelope.TaskWorking || got.Assignee != "muse" {
+		t.Fatalf("the filer's second assign = %+v", got)
+	}
+	m.clk.advance(2 * time.Minute)
+	if got := taskDo(t, phone, "POST", adminTaskPath(byOwner, "/assign"), map[string]string{"to": "muse"}).Task; got.Status != envelope.TaskWorking || got.Assignee != "muse" {
+		t.Fatalf("the owner's second assign = %+v", got)
+	}
+	for _, id := range []int64{byAgent, byOwner} {
+		if !seesTask(t, m.muse, id) || seesTask(t, m.instinct, id) {
+			t.Fatalf("task %d once assigned: want muse to read it and instinct not", id)
+		}
+	}
+
+	// A proposed task keeps the teammate its filer named through the
+	// owner's approval.
+	m.clk.advance(2 * time.Minute)
+	proposed := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]any{"title": "Reply to the vendor", "source": "mail", "assignee": "muse"}).Task.ID
+	if got := taskDo(t, m.admin, "POST", adminTaskPath(proposed, "/approve"), nil).Task; got.Status != envelope.TaskOpen || got.Assignee != "" {
+		t.Fatalf("approved task = %+v", got)
+	}
+	hidden(proposed, m.grok)
+
+	m.clk.advance(2 * time.Minute)
+	pool := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]any{"title": "Anyone: tidy the wiki"}).Task.ID
+	if !seesTask(t, m.instinct, pool) || !seesTask(t, m.muse, pool) {
+		t.Fatal("a task added for nobody is not in the shared pool")
+	}
+}
+
+// The agents whose text a task's ask carries stay named on every ask its
+// assignee sends while handling it, and on what those lead to, so a rule
+// that holds one of them from a target holds the delegated work too. With
+// none of them behind it, the same ask is not held. A send cannot name
+// contributors itself.
+func TestTaskContributorsFollowAsksSentWhileHandling(t *testing.T) {
+	m := newTaskMesh(t)
+	ctx := t.Context()
+	hermes := m.JoinOnMachineOf(t, "instinct", "hermes")
+	m.clk.advance(2 * time.Second)
+	m.gate(t, `{"gate":{"muse":{"from":["scout"]}},"hold_ttl":"1h"}`)
+	stored := func(id string) envelope.Request {
+		t.Helper()
+		req, status, err := m.Store.Request(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Status = status
+		return req
+	}
+	file := func(c *client.Relay, title string) int64 {
+		t.Helper()
+		return taskDo(t, c, "POST", "/v1/tasks", map[string]string{"title": title}).Task.ID
+	}
+	// handling has grokbot assign task id to instinct, which claims the ask.
+	handling := func(id int64) {
+		t.Helper()
+		ask := taskDo(t, m.grok, "POST", taskPath(id, "/assign"), map[string]string{"to": "instinct"}).Task.CurrentRequest
+		if req := stored(ask); req.Status == envelope.StatusHeld {
+			t.Fatalf("the ask to an ungated assignee was held: %+v", req)
+		}
+		claimOne(t, m.instinct, ask)
+	}
+	done := func(c *client.Relay, id string) {
+		t.Helper()
+		if _, err := c.Reply(ctx, id, "done", envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// sent has c ask to, and returns the request as stored.
+	sent := func(c *client.Relay, to string) envelope.Request {
+		t.Helper()
+		res, err := c.Send(ctx, to, "please look into this", envelope.KindAsk, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored(res.ID)
+	}
+	wantHeld := func(req envelope.Request, what string) {
+		t.Helper()
+		if req.Status != envelope.StatusHeld || !slices.Contains(req.Contributors, "scout") || slices.Contains(req.Chain, "scout") {
+			t.Fatalf("%s = %+v, want it held for scout as a contributor and not in the chain", what, req)
+		}
+	}
+
+	// A send that names contributors is an ordinary send: the field is not
+	// on the wire.
+	var plain envelope.SendResponse
+	if err := m.grok.Raw(ctx, "POST", "/v1/send", map[string]any{"to": "muse", "body": "hello", "contributors": []string{"scout"}, "Contributors": []string{"scout"}}, &plain); err != nil {
+		t.Fatal(err)
+	}
+	if req := stored(plain.ID); req.Status == envelope.StatusHeld || req.Contributors != nil {
+		t.Fatalf("a send naming its own contributors = %+v", req)
+	}
+
+	filed := file(m.scout, "Chase the invoice")
+	handling(filed)
+	wantHeld(sent(m.instinct, "muse"), "the assignee's ask under a task the gated agent filed")
+	// Two hops on, through a teammate the rule does not name.
+	onward := sent(m.instinct, "hermes")
+	if onward.Status == envelope.StatusHeld || !slices.Contains(onward.Contributors, "scout") {
+		t.Fatalf("the assignee's ask to an ungated teammate = %+v", onward)
+	}
+	claimOne(t, hermes, onward.ID)
+	wantHeld(sent(hermes, "muse"), "an ask two hops from the task's ask")
+	done(hermes, onward.ID)
+
+	// A comment the assignee writes on another task while it holds the claim
+	// carries the gated agent, and so does that task's next ask.
+	other := file(m.grok, "Update the ledger")
+	taskDo(t, m.instinct, "POST", taskPath(other, "/comment"), map[string]string{"body": "The invoice says net 30."})
+	events := m.events(t, other)
+	if ev := events[len(events)-1]; ev.Kind != envelope.TaskEventComment || !slices.Contains(ev.Chain, "scout") || !slices.Contains(ev.Chain, "grokbot") {
+		t.Fatalf("comment written under the task's ask = %+v, want the ask's chain and contributors", ev)
+	}
+	done(m.instinct, m.task(t, filed).CurrentRequest)
+	wantHeld(stored(taskDo(t, m.grok, "POST", taskPath(other, "/assign"), map[string]string{"to": "muse"}).Task.CurrentRequest), "the ask of a task carrying that comment")
+
+	commented := file(m.grok, "Chase the receipt")
+	taskDo(t, m.scout, "POST", taskPath(commented, "/comment"), map[string]string{"body": "It went to the old address."})
+	handling(commented)
+	wantHeld(sent(m.instinct, "muse"), "the assignee's ask under a task the gated agent commented on")
+	done(m.instinct, m.task(t, commented).CurrentRequest)
+
+	clean := file(m.grok, "Chase the refund")
+	handling(clean)
+	if req := sent(m.instinct, "muse"); req.Status == envelope.StatusHeld || slices.Contains(req.Contributors, "scout") {
+		t.Fatalf("the assignee's ask under a task the gated agent took no part in = %+v", req)
+	}
+	onward = sent(m.instinct, "hermes")
+	claimOne(t, hermes, onward.ID)
+	if req := sent(hermes, "muse"); req.Status == envelope.StatusHeld {
+		t.Fatalf("an ask two hops from that task's ask = %+v", req)
+	}
+}

@@ -137,9 +137,10 @@ type Request struct {
 	TaskActor string `json:"-"`
 	// Contributors names the agents, beside the sender and the chain, whose
 	// text the body carries: on a task's ask, the agent that filed the task
-	// and the authors of the result and comments sent along. Relay-only.
-	// The owner's approval rules read them as they read the chain; the loop
-	// check does not.
+	// and the authors of the result and comments sent along, and on any
+	// request sent while handling one that has contributors, those too.
+	// Relay-only: a send cannot set it. The owner's approval rules read them
+	// as they read the chain; the loop and hop checks do not.
 	Contributors []string `json:"-"`
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
@@ -803,9 +804,14 @@ type Task struct {
 	RepeatEverySeconds int64  `json:"repeat_every_seconds,omitempty"`
 	RepeatTo           string `json:"repeat_to,omitempty"`
 	// Chain is set on a task being added only: the chain of the request its
-	// filer held a claim on at that moment, kept on the task's first history
-	// entry. It is never sent to a client.
+	// filer held a claim on at that moment, with that request's
+	// contributors, kept on the task's first history entry. It is never
+	// sent to a client.
 	Chain []string `json:"-"`
+	// NamedFor is set on a task being added only: the teammate, or
+	// TaskOwner, its filer named for it. A task stored with one is never in
+	// the shared pool. It is never sent to a client.
+	NamedFor string `json:"-"`
 }
 
 // What a task history entry records.
@@ -824,7 +830,8 @@ const (
 // comment is an entry whose Body is the comment. Status is the task's
 // status after an entry that changed it. Entries are never edited. Chain is
 // the chain of the request the actor held a claim on as it wrote an added
-// entry's task or a comment, nil for none: the text may hold what those
+// entry's task or a comment, with that request's contributors, nil for
+// none: the text may hold what those
 // agents sent, so an ask that carries it names them to the owner's approval
 // rules. It is never sent to a client.
 type TaskEvent struct {

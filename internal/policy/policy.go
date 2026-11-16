@@ -79,8 +79,8 @@ func New(st *store.Store, cfg Config) *Policy {
 	return p
 }
 
-// Prepare sets TraceID, Hop, Chain, and ParentID, then applies the loop and
-// rate checks.
+// Prepare sets TraceID, Hop, Chain, ParentID and Contributors, then applies
+// the loop and rate checks.
 func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	sender, _, err := p.st.AgentByName(ctx, req.From)
 	if err != nil {
@@ -126,6 +126,13 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	if req.Hop > p.cfg.HopLimit {
 		return reject(http.StatusConflict, fmt.Errorf("%w: hop %d exceeds %d", ErrHopLimit, req.Hop, p.cfg.HopLimit))
 	}
+	// After the loop and hop checks, which never read them. guard is the
+	// parent when there is one, and the session guard's claim otherwise.
+	var handled []string
+	if guarded {
+		handled = guard.Contributors
+	}
+	req.Contributors = contributors(req.Contributors, handled)
 	at, err := p.rate(req.From, req.Urgent)
 	if err != nil {
 		return err
@@ -162,6 +169,25 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	// follows covers that request, not whatever was queued to run after it.
 	p.holdByKind(ctx, req, parent, ok && req.FollowOf == "")
 	return nil
+}
+
+// contributors is the list a request being prepared carries: own, what the
+// relay set on it (a task's ask names the task's authors; a client's send
+// has none, the field is not on the wire), then handled, the contributors
+// of the request it is sent while handling: its parent, the request a
+// follow-on follows, or the session guard's claim. So the agents whose text
+// a task's ask carried stay named on every ask that work leads to, however
+// many hops on, and the owner's approval rules hold for them at each
+// (Approval.Held). Each name is listed once, and never the owner, whose
+// text needs no approval of the owner's. They are no part of the chain.
+func contributors(own, handled []string) []string {
+	var out []string
+	for _, name := range append(slices.Clone(own), handled...) {
+		if name != "" && name != envelope.TaskOwner && !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // markGuest sets FromGuest on a request a guest sent, and on one sent while

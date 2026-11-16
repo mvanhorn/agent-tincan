@@ -50,7 +50,10 @@ var (
 // the task afterwards; the target of an ask that ended while held for the
 // owner is taken out again. source is the outside source the filer declared for
 // the task's text, and suggested_assignee whom the filer asked to have a
-// proposed task go to; NULL for none. tasks_live is what a listing without
+// proposed task go to; NULL for none. named_for is whom the filer named for
+// the task as it added it, a teammate or the owner, NULL for none: a task
+// with one was addressed to that one and is never in the shared pool,
+// whatever became of its assign. tasks_live is what a listing without
 // the closed tasks walks, so it costs what the live tasks do however many
 // are done or dropped, and tasks_status is what counts those.
 func (s *Store) migrateTasks() error {
@@ -68,7 +71,8 @@ func (s *Store) migrateTasks() error {
   agent_assigns      INTEGER NOT NULL DEFAULT 0,
   created_at         INTEGER NOT NULL,
   source             TEXT,
-  suggested_assignee TEXT
+  suggested_assignee TEXT,
+  named_for          TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_filer ON tasks(filer, dedupe_key);
 CREATE TABLE IF NOT EXISTS task_events (
@@ -92,6 +96,15 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 		return err
 	}
 	var has bool
+	// A tasks table made before named_for gets the column here.
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'named_for')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN named_for TEXT`); err != nil {
+			return err
+		}
+	}
 	// task_id marks an ask that is an attempt at a task: the task it is
 	// for, NULL for every other request.
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'task_id')`).Scan(&has); err != nil {
@@ -117,8 +130,9 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 		}
 	}
 	// chain is the JSON list of agents in the chain of the request the
-	// entry's actor held a claim on as it wrote the entry's text; NULL for
-	// none. Only an added entry and a comment carry one.
+	// entry's actor held a claim on as it wrote the entry's text, and of
+	// that request's contributors; NULL for none. Only an added entry and a
+	// comment carry one.
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'chain')`).Scan(&has); err != nil {
 		return err
 	}
@@ -140,7 +154,11 @@ const taskSelect = `SELECT t.id, t.title, t.detail, t.status, t.filer, t.assigne
 // viewer is an admin's, every task. An agent reads a task it filed. It reads any other task only
 // once it is past proposed, and then when the ask open under it is
 // addressed to the agent, when the agent claimed an ask under it, or when
-// it is open, unassigned, carries no result and has never been assigned.
+// it is open, unassigned, carries no result, has never been assigned and
+// was added with nobody named for it (named_for). That last test does not
+// wait for an assign: a task added for one teammate is out of the shared
+// pool from the insert, through the moment before its ask is written and
+// for good when that ask is refused.
 // While the ask open under a task is held for the owner, its target reads
 // the task only if it filed it, whatever part it took in the task before:
 // the COALESCEs keep a task with no open ask, whose q columns are NULL, out
@@ -151,7 +169,7 @@ const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed'
 		AND NOT (COALESCE(q.to_agent, '') = ?1 AND COALESCE(q.status, '') = 'held') AND (
 		q.to_agent = ?1
 		OR EXISTS (SELECT 1 FROM task_claimants c WHERE c.task_id = t.id AND c.agent = ?1)
-		OR t.status = 'open' AND t.assignee = '' AND t.result = '' AND t.result_request = ''
+		OR t.status = 'open' AND t.assignee = '' AND t.result = '' AND t.result_request = '' AND t.named_for IS NULL
 			AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'assigned')))`
 
 const taskOpenStatuses = `status NOT IN ('done', 'dropped')`
@@ -173,7 +191,8 @@ func getTask(ctx context.Context, q queryer, id int64, viewer string) (envelope.
 }
 
 // AddTask stores a new task filed by t.Filer, open unless t.Status says
-// proposed, and starts its history; t.Chain is kept on the first entry. A task with a key the same filer
+// proposed, and starts its history; t.Chain is kept on the first entry, and
+// t.NamedFor on the task, which keeps it out of the shared pool. A task with a key the same filer
 // already has on a task that is not done or dropped is not stored: that
 // task is returned, with false. An agent with MaxOpenTasks such tasks gets
 // ErrTaskLimit; the owner has no limit. Both checks run in the insert's
@@ -201,8 +220,8 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	}
 	defer tx.Rollback()
 	now := s.now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, created_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`,
-		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`,
+		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now)
 	if err != nil {
 		return envelope.Task{}, false, err
 	}
@@ -614,9 +633,10 @@ func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) 
 
 // TaskCarry returns what the next ask under task id carries beside the
 // task's own text: who wrote its stored result ("" when it has none), the
-// chain its filer held a claim under as it filed the task (filedUnder, nil
-// for none), and the comments made since that result, oldest first, each
-// with the chain its author held.
+// chain its filer held a claim under as it filed the task, with that
+// request's contributors (filedUnder, nil for none), and the comments made
+// since that result, oldest first, each with what its author held the same
+// way.
 func (s *Store) TaskCarry(ctx context.Context, id int64) (resultBy string, filedUnder []string, comments []envelope.TaskEvent, err error) {
 	var last int64
 	err = s.db.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? ORDER BY id DESC LIMIT 1`,

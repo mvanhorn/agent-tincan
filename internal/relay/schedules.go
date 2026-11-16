@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -106,15 +107,22 @@ func (s *Server) heldClaim(ctx context.Context, agent, session string) (envelope
 }
 
 // claimChain returns the chain of the request agent holds a claim on in
-// session, nil when it holds none. Text the agent stores now, to be sent on
-// later, is kept with it: a send made now would carry that chain, and the
-// stored text must not shed it.
+// session, followed by that request's contributors, nil when it holds none.
+// Text the agent stores now, to be sent on later, is kept with it: a send
+// made now would carry that chain and those contributors, and the stored
+// text must not shed either.
 func (s *Server) claimChain(ctx context.Context, agent, session string) ([]string, error) {
 	req, ok, err := s.heldClaim(ctx, agent, session)
 	if err != nil || !ok {
 		return nil, err
 	}
-	return req.Chain, nil
+	out := slices.Clone(req.Chain)
+	for _, name := range req.Contributors {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
 }
 
 // handleCreateSchedule records an ask from the calling agent to fire later

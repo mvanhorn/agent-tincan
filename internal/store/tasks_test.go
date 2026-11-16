@@ -56,6 +56,15 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 	var first envelope.Task
 	for i := range 2 {
 		s, _ = open(t, path)
+		if i == 1 {
+			// A tasks table from before named_for gets the column on the
+			// next open.
+			if _, err := s.DB().Exec(`ALTER TABLE tasks DROP COLUMN named_for`); err != nil {
+				t.Fatal(err)
+			}
+			s.Close()
+			s, _ = open(t, path)
+		}
 		if got, _, err := s.Request(ctx, req.ID); err != nil || got.Body != "hi" || got.From != "codex" || got.To != "muse" || got.TaskID != 0 {
 			t.Fatalf("request = %+v %v", got, err)
 		}
@@ -893,4 +902,78 @@ func TestRequestKeepsContributors(t *testing.T) {
 	if got, _, err := s.Request(ctx, plain.ID); err != nil || got.Contributors != nil {
 		t.Fatalf("plain request = %+v, %v", got, err)
 	}
+}
+
+// A task stored with a teammate named for it is out of the shared pool from
+// the insert: before any ask is written under it, so before it has an
+// assigned entry, only its filer and an admin read it. The same row with
+// nobody named is in the pool.
+func TestTaskNamedForATeammateIsNeverInThePool(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	pool := addTask(t, s, envelope.Task{Filer: "codex", Title: "anyone"})
+	named := addTask(t, s, envelope.Task{Filer: "codex", Title: "for muse alone", NamedFor: "muse"})
+	owners := addTask(t, s, envelope.Task{Filer: envelope.TaskOwner, Title: "the owner's, for muse", NamedFor: "muse"})
+	if got := readTask(t, s, named.ID); got.Status != envelope.TaskOpen || got.Assignee != "" || got.CurrentRequest != "" {
+		t.Fatalf("named task as stored = %+v, want open with no assignee and no ask", got)
+	}
+	for _, ev := range taskHistory(t, s, named.ID) {
+		if ev.Kind == envelope.TaskEventAssigned {
+			t.Fatalf("named task already has an assigned entry: %+v", ev)
+		}
+	}
+	for viewer, want := range map[string][]int64{
+		"":       {pool.ID, named.ID, owners.ID},
+		"codex":  {pool.ID, named.ID},
+		"hermes": {pool.ID},
+		// The teammate it names reads it once an ask reaches it, not before.
+		"muse": {pool.ID},
+	} {
+		tasks, err := s.Tasks(ctx, viewer, 0, 10, true)
+		if err != nil || !slices.Equal(taskIDs(tasks), want) {
+			t.Errorf("%q lists %v, %v; want %v", viewer, taskIDs(tasks), err, want)
+		}
+		for _, id := range []int64{pool.ID, named.ID, owners.ID} {
+			_, err := s.Task(ctx, id, viewer)
+			if reads := slices.Contains(want, id); reads != (err == nil) || err != nil && !errors.Is(err, ErrNoTask) {
+				t.Errorf("%q reads task %d: %v, want readable %v", viewer, id, err, reads)
+			}
+		}
+	}
+	// Approving a proposed task named for a teammate does not put it there.
+	proposed := addTask(t, s, envelope.Task{Filer: "codex", Title: "from mail", Status: envelope.TaskProposed, SuggestedAssignee: "muse", NamedFor: "muse"})
+	if _, err := s.SetTaskStatus(ctx, proposed.ID, envelope.TaskOpen, envelope.TaskOwner, "", envelope.TaskProposed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Task(ctx, proposed.ID, "hermes"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("an unrelated agent reads an approved task named for a teammate: %v", err)
+	}
+	if _, err := s.Task(ctx, proposed.ID, "codex"); err != nil {
+		t.Fatalf("the filer cannot read it: %v", err)
+	}
+	// Once its ask is written the teammate reads it, as any assignee does.
+	if _, err := attempt(s, named.ID, "codex", "muse", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Task(ctx, named.ID, "muse"); err != nil {
+		t.Fatalf("the assignee cannot read the task: %v", err)
+	}
+}
+
+func readTask(t *testing.T, s *Store, id int64) envelope.Task {
+	t.Helper()
+	task, err := s.Task(context.Background(), id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+func taskHistory(t *testing.T, s *Store, id int64) []envelope.TaskEvent {
+	t.Helper()
+	events, err := s.TaskEvents(context.Background(), id, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
 }
