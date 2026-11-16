@@ -54,21 +54,33 @@ func taskNoticeBody(n store.TaskNotice) string {
 	return news + taskNoticeTail
 }
 
-// taskNoticeHosts picks, from roster, the task hosts that hear of change n:
-// every named host that may act as one now (taskHostRefusal), but the one
-// that caused the change, which knows, and the one that sent the ask, which
-// gets the reply itself. A change the owner made from an admin device goes
-// to no one: the owner knows.
-func (s *Server) taskNoticeHosts(n store.TaskNotice, roster []identity.Agent) []string {
+// eligibleTaskHosts is the named hosts in roster that may act as one now
+// (taskHostRefusal). A drain works it out once: the answer depends on the
+// agent's row and the owner's policy, neither of which a notice changes.
+func (s *Server) eligibleTaskHosts(roster []identity.Agent) []string {
+	var hosts []string
+	for _, a := range roster {
+		if a.TaskHost && s.taskHostRefusal(a) == "" {
+			hosts = append(hosts, a.Name)
+		}
+	}
+	return hosts
+}
+
+// taskNoticeHosts picks, from the eligible hosts, those that hear of change
+// n: every one but the one that caused the change, which knows, and the one
+// that sent the ask, which gets the reply itself. A change the owner made
+// from an admin device goes to no one: the owner knows.
+func taskNoticeHosts(n store.TaskNotice, eligible []string) []string {
 	if n.Actor == envelope.TaskOwner {
 		return nil
 	}
 	var hosts []string
-	for _, a := range roster {
-		if !a.TaskHost || a.Name == n.Actor || a.Name == n.Asker || s.taskHostRefusal(a) != "" {
+	for _, name := range eligible {
+		if name == n.Actor || name == n.Asker {
 			continue
 		}
-		hosts = append(hosts, a.Name)
+		hosts = append(hosts, name)
 	}
 	return hosts
 }
@@ -101,8 +113,9 @@ func (s *Server) drainTaskNotices(ctx context.Context) {
 		log.Printf("task notices: roster: %v", err)
 		return
 	}
+	eligible := s.eligibleTaskHosts(roster)
 	for _, n := range rows {
-		if err := s.tellTaskHosts(ctx, n, roster); err != nil {
+		if err := s.tellTaskHosts(ctx, n, eligible); err != nil {
 			log.Printf("task notices: task %d: %v (a later drain tries again)", n.TaskID, err)
 			continue
 		}
@@ -115,12 +128,12 @@ func (s *Server) drainTaskNotices(ctx context.Context) {
 // tellTaskHosts queues the notice of change n for each host that should
 // hear and wakes it by its own method. It stops at the first host it could
 // not queue for and returns the error.
-func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, roster []identity.Agent) error {
+func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, eligible []string) error {
 	body := taskNoticeBody(n)
 	if body == "" {
 		return nil
 	}
-	for _, host := range s.taskNoticeHosts(n, roster) {
+	for _, host := range taskNoticeHosts(n, eligible) {
 		// A relay notice, not a forwarded request: it bypasses the approval
 		// rules as the held-approval notice does, and carries no task text.
 		notice := envelope.Request{From: client.RelaySender, To: host, Kind: envelope.KindNotify, Hop: 1, Chain: []string{client.RelaySender}, Body: body}

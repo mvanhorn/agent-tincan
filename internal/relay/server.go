@@ -2277,7 +2277,6 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 	s.drainTaskNotices(r.Context())
 	s.record(r.Context(), "removed", "", "", in.Name, store.DetailJSON(map[string]any{"cancelled": len(ids)}))
 	if before.TaskHost {
-		// The mark went with the agent's row.
 		s.recordTaskHostCleared(r.Context(), in.Name, "removed")
 	}
 	for _, l := range leases {

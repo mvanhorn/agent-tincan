@@ -602,8 +602,8 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 	// owner's good-at line and fallback carry over; only SetAgentGoodAt and
 	// SetAgentFallback write those.
 	//
-	// The task host mark does not carry over that way. It stays only when a
-	// carries it and the stored row is on the same node, which is a rewrite
+	// The task host mark does not carry over that way. It stays only when the
+	// row passed in carries it and the stored row is on the same node, which is a rewrite
 	// of an agent in place (the login backfill). A row built for a new join
 	// carries no mark, and a rebind or a gateway bind changes the node, so
 	// each of those writes NULL. A row that claims a mark the stored row

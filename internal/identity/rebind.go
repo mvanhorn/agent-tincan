@@ -196,7 +196,6 @@ func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Re
 	}
 	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name, TaskHostCleared: a.TaskHost}
 	a.NodeID, a.NodeName, a.NodeUser = n.ID, n.Name, n.User
-	// PutAgent drops the mark for the new node; the row says so too.
 	a.TaskHost = false
 	if err := d.store.PutAgent(ctx, a); err != nil {
 		return Resolved{}, false, err
