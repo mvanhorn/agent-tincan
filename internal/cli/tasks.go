@@ -95,7 +95,12 @@ status, or with --owner every task. Done and dropped tasks are counted;
 
 add, show, comment and drop act as this machine's agent, or with --owner as
 the owner. assign, approve, done, reopen and reset are the owner's and need
-an admin device (or the relay host).`,
+an admin device (or the relay host).
+
+host set and host clear, also the owner's, name a teammate a task host: it
+reads every task through its list_tasks and get_task tools and keeps the
+list for you from a conversation with it. A task host cannot approve a task
+or mark one done.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, owner, err := side.relay()

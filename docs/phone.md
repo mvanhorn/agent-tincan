@@ -48,6 +48,8 @@ Pick a room to read it. The page reads and posts as the phone's agent, so the ph
 
 The Tasks tab shows the team's shared task list (see [Tasks](../README.md#tasks) in the README): every task, since the page is an admin client. The tab's count is the number of tasks waiting on you: proposed ones, questions for you, and returned ones.
 
+A teammate you name a task host (`tincan tasks host set <agent>`, see [Run the list from an agent](../README.md#run-the-list-from-an-agent)) can show you the same list in its own chat and hand tasks out there. Approving a proposed task and closing one stay on this page and the CLI.
+
 To add a task, write a title and what is wanted, pick who it is for (no one, you, or a teammate) and tap Add task. Handing a task to a teammate sends an ask as the phone's agent, so the teammate choices need the phone joined; without that the page says so beside Join this phone. Adding an unassigned task or one of your own needs only the admin device. The page does not make repeating tasks; a task that repeats, added with `tincan tasks add --every` or `add_task`, shows its interval and teammate.
 
 Tasks are grouped, each group with a count:
