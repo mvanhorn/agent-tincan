@@ -64,13 +64,20 @@ type TaskResult struct {
 	AssignError string              `json:"assign_error,omitempty"`
 }
 
-// The owner's decisions on a task, for DecideTask.
+// The owner's decisions on a task, for DecideTask. A task host makes
+// TaskDone, TaskReopen and TaskDrop on the owner's word, with
+// HostDecideTask.
 const (
 	TaskApprove = "approve"
 	TaskDone    = "done"
 	TaskReopen  = "reopen"
 	TaskReset   = "reset"
+	TaskDrop    = "drop"
 )
+
+// ErrTaskHostDecisionsUnsupported identifies a relay that predates a task
+// host's decisions. Nothing was sent.
+var ErrTaskHostDecisionsUnsupported = errors.New("this relay does not take a task host's decisions; upgrade the relay")
 
 // tasksPath is the task routes' root: the calling agent's, or with owner
 // the admin routes, which only an admin device may call.
@@ -284,6 +291,35 @@ func DecideTask(ctx context.Context, c Rawer, decision string, id int64, note st
 	return taskCall(ctx, c, taskPath(true, id, "/"+decision), map[string]string{"note": note})
 }
 
+// HostDecideTask is a task host's decision on task id on the owner's word:
+// TaskDone, TaskReopen or TaskDrop, with words, the owner's own words that
+// asked for it, which the task's history keeps under this agent's name. The
+// relay refuses an agent the owner has not named a task host, and refuses a
+// host while it holds a claimed request or a guest's ask is open with it. A
+// relay that does not advertise task host decisions is not called.
+func HostDecideTask(ctx context.Context, c Rawer, id int64, decision, words string) (envelope.Task, error) {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
+		return envelope.Task{}, err
+	}
+	if !caps.TaskHostDecisions {
+		return envelope.Task{}, ErrTaskHostDecisionsUnsupported
+	}
+	var out TaskResult
+	err = c.Raw(ctx, "POST", taskPath(false, id, "/decide"), map[string]string{"decision": decision, "owner_words": words}, &out)
+	return out.Task, err
+}
+
+// FormatHostDecision is the answer to a task host's decision: where the
+// task stands now and how to undo it, for the host to tell the owner.
+func FormatHostDecision(t envelope.Task, decision string) string {
+	undo := "reopen it the same way"
+	if decision == TaskReopen {
+		undo = "mark it done or drop it the same way"
+	}
+	return fmt.Sprintf("Task #%d (%s) is now %s, done for the owner under your name with the owner's words in its history. Tell the owner what changed; if they did not mean it, %s.", t.ID, taskTitle(t), t.Status, undo)
+}
+
 // taskCall posts in to a task route that answers with the task.
 func taskCall(ctx context.Context, c Rawer, path string, in any) (envelope.Task, error) {
 	if err := requireTasks(ctx, c); err != nil {
@@ -470,6 +506,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 		fmt.Fprintf(&b, "%s %s %s", clockTime(ev.At, now), envelope.TaskWho(ev.Actor), ev.Kind)
 		if ev.Status != "" {
 			fmt.Fprintf(&b, " (%s)", ev.Status)
+		}
+		if ev.ForOwner {
+			b.WriteString(" for the owner, who said")
 		}
 		if ev.Body != "" {
 			fmt.Fprintf(&b, ": %s", ev.Body)

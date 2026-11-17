@@ -509,18 +509,15 @@ func TestTaskHostClearedByGatewayConnect(t *testing.T) {
 	}
 }
 
-// A relay that stores task hosts says so.
+// A relay that stores task hosts and takes their decisions says so.
 func TestCapabilitiesAdvertiseTaskHosts(t *testing.T) {
 	m := newHostMesh(t)
 	var caps map[string]any
-	if err := m.Client(t, "grokbot").Raw(t.Context(), "GET", "/v1/capabilities", nil, &caps); err != nil || caps["task_hosts"] != true {
+	if err := m.Client(t, "grokbot").Raw(t.Context(), "GET", "/v1/capabilities", nil, &caps); err != nil || caps["task_hosts"] != true || caps["task_host_decisions"] != true {
 		t.Fatalf("capabilities = %v, %v", caps, err)
 	}
-	if _, has := caps["task_host_decisions"]; has {
-		t.Fatalf("capabilities advertise host decisions, which this relay does not take: %v", caps)
-	}
 	typed, err := m.admin.Capabilities(t.Context())
-	if err != nil || !typed.TaskHosts {
+	if err != nil || !typed.TaskHosts || !typed.TaskHostDecisions {
 		t.Fatalf("client capabilities = %+v, %v", typed, err)
 	}
 }

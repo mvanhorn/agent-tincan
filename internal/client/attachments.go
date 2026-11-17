@@ -77,7 +77,11 @@ type Capabilities struct {
 	// TaskHosts is set by a relay that stores task hosts and shows them on
 	// the roster. Naming one needs no check of this: an older relay has no
 	// such route and answers its plain 404.
-	TaskHosts          bool  `json:"task_hosts,omitempty"`
+	TaskHosts bool `json:"task_hosts,omitempty"`
+	// TaskHostDecisions is set by a relay that takes a task host's decisions
+	// on the owner's word (POST /v1/tasks/{id}/decide). An older relay has no
+	// such route, so a client checks this first and says to upgrade.
+	TaskHostDecisions  bool  `json:"task_host_decisions,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`

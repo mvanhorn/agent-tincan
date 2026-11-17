@@ -63,9 +63,11 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 	for i := range 2 {
 		s, _ = open(t, path)
 		if i == 1 {
-			// A tasks table from before named_for and result_authors gets
-			// the columns on the next open.
-			if _, err := s.DB().Exec(`ALTER TABLE tasks DROP COLUMN named_for; ALTER TABLE tasks DROP COLUMN result_authors;`); err != nil {
+			// A tasks table from before named_for and result_authors, and a
+			// history from before for_owner and prior, get the columns on
+			// the next open.
+			if _, err := s.DB().Exec(`ALTER TABLE tasks DROP COLUMN named_for; ALTER TABLE tasks DROP COLUMN result_authors;
+				ALTER TABLE task_events DROP COLUMN for_owner; ALTER TABLE task_events DROP COLUMN prior;`); err != nil {
 				t.Fatal(err)
 			}
 			s.Close()
@@ -79,6 +81,9 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 		}
 		if got, err := s.Task(ctx, first.ID, ""); err != nil || got.Title != "ship it" {
 			t.Fatalf("task after open %d = %+v %v", i, got, err)
+		}
+		if ev, err := s.TaskEvents(ctx, first.ID, 0, 10); err != nil || len(ev) != 1 || ev[0].ForOwner || ev[0].Prior != "" {
+			t.Fatalf("history after open %d = %+v %v", i, ev, err)
 		}
 		s.Close()
 	}
@@ -1253,5 +1258,71 @@ func TestHostTasksWithholdNeverApprovedText(t *testing.T) {
 	}
 	if got, err := s.HostTask(ctx, heldTask.ID, "muse"); err != nil || got.Title != "held for the owner" {
 		t.Fatalf("task after its held ask was approved = %+v, %v", got, err)
+	}
+}
+
+// A task host's done and drop are stored under the host's name, marked as
+// done for the owner, with the owner's words and the status the task had.
+// A reopen of such a task goes back to that status, its result untouched
+// and still the latest result an ask carries; the owner's own close
+// reopens to open. A task never approved reopens to proposed whoever
+// closed it.
+func TestTaskHostDecisionsRecordPriorAndReopenToIt(t *testing.T) {
+	s, _ := open(t, ":memory:")
+	ctx := context.Background()
+	task, req := taskUnderAsk(t, s, false)
+	claimAsk(t, s, req.ID, "muse")
+	reply(t, s, req, envelope.StatusAnswered, "the answer")
+
+	done, err := s.MarkTaskDoneForOwner(ctx, task.ID, "grokbot", "ship it is done")
+	if err != nil || done.Status != envelope.TaskDone {
+		t.Fatalf("host's done = %+v, %v", done, err)
+	}
+	if ev := lastTaskEvent(t, s, task.ID); ev.Actor != "grokbot" || !ev.ForOwner || ev.Body != "ship it is done" || ev.Prior != envelope.TaskReturned || ev.Status != envelope.TaskDone {
+		t.Fatalf("host's done entry = %+v", ev)
+	}
+	back, err := s.ReopenTask(ctx, task.ID, envelope.TaskOwner, "")
+	if err != nil || back.Status != envelope.TaskReturned || back.Result != "the answer" || back.ResultRequest != req.ID {
+		t.Fatalf("owner's reopen of the host's done = %+v, %v", back, err)
+	}
+	if ev := lastTaskEvent(t, s, task.ID); ev.ForOwner || ev.Prior != envelope.TaskDone {
+		t.Fatalf("owner's reopen entry = %+v", ev)
+	}
+	carried, err := s.TaskCarry(ctx, task.ID)
+	if err != nil || carried.ResultBy != "muse" {
+		t.Fatalf("carried after the reopen = %+v, %v", carried, err)
+	}
+	// An ask built from that result is still taken: the reopen stored no
+	// new version of it.
+	if _, err := attempt(s, task.ID, "codex", "muse", false); err != nil {
+		t.Fatalf("assign after the reopen: %v", err)
+	}
+
+	open := addTask(t, s, envelope.Task{Filer: "codex", Title: "water the plants"})
+	if _, err := s.DropTaskForOwner(ctx, open.ID, "grokbot", "drop the plants"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ReopenTaskForOwner(ctx, open.ID, "grokbot", "keep the plants"); err != nil || got.Status != envelope.TaskOpen {
+		t.Fatalf("host's reopen of its drop = %+v, %v", got, err)
+	}
+	if ev := lastTaskEvent(t, s, open.ID); !ev.ForOwner || ev.Actor != "grokbot" || ev.Body != "keep the plants" {
+		t.Fatalf("host's reopen entry = %+v", ev)
+	}
+	if _, err := s.DropTaskForOwner(ctx, task.ID, "grokbot", "drop it"); !errors.Is(err, ErrTaskState) {
+		t.Fatalf("host's drop of a working task: %v", err)
+	}
+
+	proposed := addTask(t, s, envelope.Task{Filer: "grokbot", Title: "from the mail", Status: envelope.TaskProposed, Source: "mail"})
+	if _, err := s.DropTaskForOwner(ctx, proposed.ID, "grokbot", "drop the mail one"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ReopenTaskForOwner(ctx, proposed.ID, "grokbot", "bring it back"); err != nil || got.Status != envelope.TaskProposed {
+		t.Fatalf("reopen of a never approved task = %+v, %v", got, err)
+	}
+	if _, err := s.ReopenTaskForOwner(ctx, 999, "grokbot", "x"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("reopen of a missing task: %v", err)
+	}
+	if _, err := s.MarkTaskDoneForOwner(ctx, 999, "grokbot", "x"); !errors.Is(err, ErrNoTask) {
+		t.Fatalf("done of a missing task: %v", err)
 	}
 }

@@ -466,3 +466,33 @@ func TestTasksHostViewFromTheShell(t *testing.T) {
 		}
 	}
 }
+
+// A task host marks a task done and reopens it from its shell with
+// tincan tasks decide, on the owner's words; --words is required, and an
+// agent that is no host is refused with the command that names one.
+func TestTasksHostDecideFromTheShell(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	tasksRun(t, []string{"add", "--owner", "--mine", "Book the dentist"}, "Added task #1")
+
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	if out, err := run(t, tasksCmd(), "decide", "1", "done", "--words", "booked it"); err == nil || !strings.Contains(err.Error(), "tincan tasks host set") {
+		t.Fatalf("decide by an agent that is no host = %q, %v", out, err)
+	}
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	tasksRun(t, []string{"host", "set", "muse"}, "\"muse\" is now a task host.")
+
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	if out, err := run(t, tasksCmd(), "decide", "1", "done"); err == nil || !strings.Contains(err.Error(), "--words is required") {
+		t.Fatalf("decide with no words = %q, %v", out, err)
+	}
+	tasksRun(t, []string{"decide", "#1", "done", "--words", "the dentist is booked"}, "Task #1 (Book the dentist) is now done", "reopen it the same way")
+	if got := taskNow(t, m, 1); got.Status != envelope.TaskDone {
+		t.Fatalf("task after decide = %+v", got)
+	}
+	tasksRun(t, []string{"show", "1", "--host"}, "muse status (done) for the owner, who said: the dentist is booked")
+	tasksRun(t, []string{"decide", "1", "reopen", "--words", "not booked yet"}, "is now open")
+	if out, err := run(t, tasksCmd(), "decide", "1", "approve", "--words", "approve it"); err == nil || !strings.Contains(err.Error(), "unknown decision") {
+		t.Fatalf("decide approve = %q, %v", out, err)
+	}
+}
