@@ -327,7 +327,7 @@ tincan tasks host set grokbot
 
 `tincan agents` then shows grokbot with `task_host=yes`. The command prints a warning when a guest may ask grokbot, since its replies to that guest can carry task text it has read.
 
-Grok Bot needs `tincan mcp` as an MCP server for this (section 4): the whole list is served to the `list_tasks` and `get_task` tools, and `tincan tasks` from its shell shows only its own tasks. Then ask it in the Grok Bot app:
+Grok Bot reads the whole list through the `list_tasks` and `get_task` tools of `tincan mcp` (section 4), or from its shell with `tincan tasks --host` and `tincan tasks show <id> --host`. The shell path works even when Grok Bot's connector still lists the tools of an older tincan build, since a connector's tool list is read when it is added. Without `--host`, `tincan tasks` shows only the tasks an ordinary agent reads. Then ask it in the Grok Bot app:
 
 - "what's on my list" lists every task, with what waits on you first.
 - "what did muse say on 12" reads one task with its result and history.

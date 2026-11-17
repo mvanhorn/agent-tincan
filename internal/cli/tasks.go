@@ -19,6 +19,10 @@ import (
 // identity, before anything reaches the relay.
 var errTaskNoAgent = errors.New("assigning a task sends an ask as an agent, and this machine has not joined as one, so nothing was changed; join here with `tincan join`, or assign from the Tasks tab of the owner page (/phone/ on the relay)")
 
+// errTaskHostOwner refuses --host with --owner: the owner already reads every
+// task, and the host view is an agent's.
+var errTaskHostOwner = errors.New("--host is a task host's view of the list; the owner reads every task with --owner alone")
+
 // taskSide holds the flags that say whose call a tasks command makes: the
 // local agent's, or the owner's through the admin routes.
 type taskSide struct {
@@ -83,7 +87,7 @@ func taskArg(arg string) (int64, error) {
 // done, reopen, reset) are the owner's, from an admin device.
 func tasksCmd() *cobra.Command {
 	var side taskSide
-	var closed, asJSON bool
+	var closed, asJSON, host bool
 	cmd := &cobra.Command{
 		Use:   "tasks",
 		Short: "The team's shared task list: what is wanted, who has it, and what came back",
@@ -91,7 +95,8 @@ func tasksCmd() *cobra.Command {
 
 With no subcommand it lists the tasks this agent may read, grouped by
 status, or with --owner every task. Done and dropped tasks are counted;
---closed lists them too.
+--closed lists them too. A task host the owner named passes --host to read
+the whole list from its shell, as its list_tasks tool does.
 
 add, show, comment and drop act as this machine's agent, or with --owner as
 the owner. assign, approve, done, reopen and reset are the owner's and need
@@ -108,6 +113,20 @@ or mark one done.`,
 				return err
 			}
 			defer printHeld(cmd, r)
+			if host {
+				if owner {
+					return errTaskHostOwner
+				}
+				list, counts, view, err := client.HostTasks(cmd.Context(), r, closed)
+				if err != nil {
+					return err
+				}
+				if asJSON {
+					return writeJSON(cmd.OutOrStdout(), list)
+				}
+				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatHostTasks(list, counts, view)))
+				return nil
+			}
 			list, counts, err := client.Tasks(cmd.Context(), r, owner, closed)
 			if err != nil {
 				return err
@@ -122,6 +141,7 @@ or mark one done.`,
 	side.flags(cmd, "list every task, as the owner")
 	cmd.Flags().BoolVar(&closed, "closed", false, "list done and dropped tasks too")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	cmd.Flags().BoolVar(&host, "host", false, "read the whole list, as a task host the owner named")
 	cmd.AddCommand(taskAddCmd(), taskShowCmd(), taskAssignCmd(), taskCommentCmd(), taskDropCmd(),
 		taskDecideCmd(client.TaskDone, "Mark an open or returned task done"),
 		taskDecideCmd(client.TaskApprove, "Approve a proposed task, so it can be assigned"),
@@ -302,7 +322,7 @@ the sending agent's scheduled asks, with their limits.`,
 
 func taskShowCmd() *cobra.Command {
 	var side taskSide
-	var asJSON bool
+	var asJSON, host bool
 	cmd := &cobra.Command{
 		Use:   "show <id>",
 		Short: "Show one task whole, with its result and history",
@@ -317,7 +337,16 @@ func taskShowCmd() *cobra.Command {
 				return err
 			}
 			defer printHeld(cmd, r)
-			task, events, err := client.Task(cmd.Context(), r, owner, id)
+			var task envelope.Task
+			var events []envelope.TaskEvent
+			switch {
+			case host && owner:
+				return errTaskHostOwner
+			case host:
+				task, events, err = client.HostTask(cmd.Context(), r, id)
+			default:
+				task, events, err = client.Task(cmd.Context(), r, owner, id)
+			}
 			if err != nil {
 				return err
 			}
@@ -329,6 +358,7 @@ func taskShowCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	cmd.Flags().BoolVar(&host, "host", false, "read the task as a task host the owner named")
 	side.flags(cmd, "read any task, as the owner")
 	return cmd
 }
