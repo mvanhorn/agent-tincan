@@ -445,3 +445,24 @@ func TestTasksHostAgainstOlderRelay(t *testing.T) {
 		t.Fatalf("tasks host set of an unknown agent = %q, %v", out, err)
 	}
 }
+
+// A task host reads the whole list from its shell with --host, as its
+// list_tasks and get_task tools do; without --host it gets its ordinary view.
+func TestTasksHostViewFromTheShell(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	tasksRun(t, []string{"host", "set", "muse"}, "\"muse\" is now a task host.")
+	tasksRun(t, []string{"add", "--owner", "--mine", "Book the dentist"}, "Added task #1")
+
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	if out := tasksRun(t, nil); strings.Contains(out, "Book the dentist") {
+		t.Fatalf("ordinary view shows the owner's own task:\n%s", out)
+	}
+	tasksRun(t, []string{"--host"}, "You are the owner's task host", "Book the dentist")
+	tasksRun(t, []string{"show", "1", "--host"}, "Book the dentist")
+	for _, args := range [][]string{{"--host", "--owner"}, {"show", "1", "--host", "--owner"}} {
+		if out, err := run(t, tasksCmd(), args...); err == nil || !strings.Contains(err.Error(), "--host is a task host's view") {
+			t.Errorf("tasks %v = %q, %v", args, out, err)
+		}
+	}
+}
