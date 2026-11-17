@@ -883,6 +883,153 @@ func (s *Server) handleDropTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, taskReply{Task: task})
 }
 
+var (
+	// errNotTaskHost refuses a host decision from an agent the owner has not
+	// named a task host.
+	errNotTaskHost = errors.New("only a task host the owner named can mark a task done, reopen it or drop it for the owner; the owner names one from an admin device with `tincan tasks host set <agent>`. Nothing was changed")
+	// errTaskDecideDuringGuestAsk and errTaskDecideWhileClaimed refuse a host
+	// decision while the host works on someone else's text: a decision made
+	// then could be that text speaking, not the owner.
+	errTaskDecideDuringGuestAsk = errors.New("a guest's ask is open with you, so you cannot decide on a task for the owner until it ends; nothing was changed")
+	errTaskDecideWhileClaimed   = errors.New("you hold a claimed request, so you cannot decide on a task for the owner now; reply to every request you claimed, then decide again. Nothing was changed")
+	// errTaskDecideWords refuses a host decision with no owner's words.
+	errTaskDecideWords = errors.New("owner_words is required: the owner's own words that asked for this, which the task's history keeps")
+	// errTaskDecideRepeat refuses a host decision on a repeating task.
+	errTaskDecideRepeat = errors.New("this task repeats, and ending or changing a repeat is the owner's to do from the owner page or with `tincan tasks done|drop --owner`; nothing was changed")
+	// errTaskHostDropAskOpen refuses a host's drop of a task with an ask
+	// open under it: only the owner cancels a teammate's live ask.
+	errTaskHostDropAskOpen = errors.New("an ask is open under the task, so only the owner can drop it now; nothing was changed")
+)
+
+// hostDecisions are the decisions a task host makes on the owner's word,
+// each with the audit event the owner's own route writes for it. Approve and
+// reset are not among them: they stay with admin devices.
+var hostDecisions = map[string]string{
+	decisionDone:   "task_done",
+	decisionReopen: "task_reopened",
+	decisionDrop:   "task_dropped",
+}
+
+// handleHostDecideTask is a task host marking a task done, reopening it or
+// dropping it on the owner's word: {"decision": "done"|"reopen"|"drop",
+// "owner_words": "..."}. The relay cannot check that the owner asked, so it
+// refuses a decision wherever the host could be acting on someone else's
+// text, records the words the host says it acted on, and keeps every
+// decision reversible. In order it refuses: an agent the owner never named
+// a host (with the command that names one); a host that is suspended (with
+// the reason); a host a guest's ask is open with, or that holds one or more
+// claimed requests in any of its sessions; a decision other than the three,
+// approve and reset among them; missing owner's words; a task the host
+// cannot read whole, unless it filed it, as not found; and a repeating
+// task. Then it takes a slot of the host's send rate and runs the decision
+// as the owner's route would, under the host's name: done and reopen call
+// the same store actions, and drop moves only a task with no open ask, so
+// a teammate's live ask is never cancelled. Wherever the owner's own action
+// would be refused, so is the host's. The answer is the task as the host
+// view shows it.
+func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
+	from := s.agent(w, r)
+	if from == "" {
+		return
+	}
+	id, ok := taskID(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Decision   string `json:"decision"`
+		OwnerWords string `json:"owner_words"`
+	}
+	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	ctx := r.Context()
+	a, named, err := s.dir.Agent(ctx, from)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !named || !a.TaskHost {
+		writeErr(w, http.StatusForbidden, errNotTaskHost)
+		return
+	}
+	if why := s.taskHostRefusal(a); why != "" {
+		writeErr(w, http.StatusForbidden, fmt.Errorf("you are suspended as a task host: %s; nothing was changed", why))
+		return
+	}
+	if open, err := s.store.OpenGuestAsks(ctx, from); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	} else if open > 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideDuringGuestAsk)
+		return
+	}
+	// Any claim in any session, counted, not the one-claim chain a schedule
+	// reads.
+	if claimed, err := s.store.HeldClaims(ctx, from, 1); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	} else if len(claimed) > 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideWhileClaimed)
+		return
+	}
+	event, known := hostDecisions[in.Decision]
+	if !known {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen or drop; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
+		return
+	}
+	if strings.TrimSpace(in.OwnerWords) == "" {
+		writeErr(w, http.StatusBadRequest, errTaskDecideWords)
+		return
+	}
+	if err := checkTaskText(in.OwnerWords, false); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	view := taskView{viewer: from, host: true}
+	task, err := view.whole(ctx, s.store, id)
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if task.RepeatSchedule != 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideRepeat)
+		return
+	}
+	if rp, ok := s.preparer().(RoomPolicy); ok {
+		if err := rp.Charge(from); err != nil {
+			writeErr(w, statusFor(err), err)
+			return
+		}
+	}
+	switch in.Decision {
+	case decisionDone:
+		_, err = s.store.MarkTaskDoneForOwner(ctx, id, from, in.OwnerWords)
+		if errors.Is(err, store.ErrTaskAskOpen) {
+			if now, terr := s.store.Task(ctx, id, ""); terr == nil && now.CurrentRequest != "" {
+				err = &StatusError{Code: http.StatusConflict, Err: fmt.Errorf("%w (request %s)", store.ErrTaskAskOpen, now.CurrentRequest)}
+			}
+		}
+	case decisionReopen:
+		_, err = s.store.ReopenTaskForOwner(ctx, id, from, in.OwnerWords)
+	case decisionDrop:
+		_, err = s.store.DropTaskForOwner(ctx, id, from, in.OwnerWords)
+		if errors.Is(err, store.ErrTaskState) {
+			if now, terr := s.store.Task(ctx, id, ""); terr == nil && now.CurrentRequest != "" {
+				err = &StatusError{Code: http.StatusConflict, Err: errTaskHostDropAskOpen}
+			}
+		}
+	}
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	// The task left the status the owner page's nonces were issued for.
+	s.nonces.void(taskNonceID(id))
+	s.recordTask(r, event, from, id, map[string]any{"for_owner": true, "bytes": len(in.OwnerWords)})
+	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
+}
+
 // adminOnly answers 403 and returns false unless the caller is an admin
 // device or the local admin socket.
 func (s *Server) adminOnly(w http.ResponseWriter, r *http.Request) bool {

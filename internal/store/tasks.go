@@ -153,6 +153,26 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 			return err
 		}
 	}
+	// for_owner marks a status entry a task host made on the owner's word,
+	// and prior is the status the task had before the entry, NULL for none:
+	// it is kept on a host's done or drop, so a reopen can put the task back
+	// where the host found it, and on every reopen.
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'for_owner')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN for_owner INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'prior')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN prior TEXT`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -212,8 +232,10 @@ const taskOpenStatuses = `status NOT IN ('done', 'dropped')`
 
 // taskResultEvent is the id of the history entry that last stored a result
 // on a row of tasks, 0 for a task with none. Every write of a result adds
-// one in its own transaction, so the id names one version of the result.
-const taskResultEvent = `COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = tasks.id AND e.kind = 'status' AND e.status = 'returned'), 0)`
+// one in its own transaction, so the id names one version of the result. A
+// reopen that puts a task back to returned stores no result and records
+// the status it left (prior), which is what keeps it out.
+const taskResultEvent = `COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = tasks.id AND e.kind = 'status' AND e.status = 'returned' AND e.prior IS NULL), 0)`
 
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -801,7 +823,19 @@ func (s *Store) ReleaseTask(ctx context.Context, id int64, actor, note string) (
 // Only an open or returned task can be done: one with an ask open under it
 // gets ErrTaskAskOpen, and any other status ErrTaskState.
 func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
-	out, err := s.SetTaskStatus(ctx, id, envelope.TaskDone, actor, note, envelope.TaskOpen, envelope.TaskReturned)
+	return s.markTaskDone(ctx, id, taskChange{actor: actor, note: note})
+}
+
+// MarkTaskDoneForOwner is MarkTaskDone for task host host acting on the
+// owner's words: the history entry names the host, is marked as done for
+// the owner (envelope.TaskEvent.ForOwner), quotes the words and records the
+// status the task had, which a later reopen returns it to.
+func (s *Store) MarkTaskDoneForOwner(ctx context.Context, id int64, host, words string) (envelope.Task, error) {
+	return s.markTaskDone(ctx, id, taskChange{actor: host, note: words, forOwner: true})
+}
+
+func (s *Store) markTaskDone(ctx context.Context, id int64, by taskChange) (envelope.Task, error) {
+	out, err := s.setTaskStatus(ctx, id, envelope.TaskDone, by, envelope.TaskOpen, envelope.TaskReturned)
 	if errors.Is(err, ErrTaskState) {
 		if t, terr := s.Task(ctx, id, ""); terr == nil && (t.Status == envelope.TaskWorking || t.Status == envelope.TaskQuestion) {
 			err = ErrTaskAskOpen
@@ -852,14 +886,14 @@ func (s *Store) TaskCarry(ctx context.Context, id int64) (TaskCarried, error) {
 	if c.Task, err = getTask(ctx, tx, id, ""); err != nil {
 		return TaskCarried{}, err
 	}
-	err = tx.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? ORDER BY id DESC LIMIT 1`,
+	err = tx.QueryRowContext(ctx, `SELECT id, actor FROM task_events WHERE task_id = ? AND kind = ? AND status = ? AND prior IS NULL ORDER BY id DESC LIMIT 1`,
 		id, envelope.TaskEventStatus, string(envelope.TaskReturned)).Scan(&c.ResultEvent, &c.ResultBy)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return TaskCarried{}, err
 	}
 	since := c.ResultEvent
 	if since != 0 {
-		err = tx.QueryRowContext(ctx, `SELECT MIN(id) FROM task_events WHERE task_id = ?1 AND kind = ?2 AND status = ?3
+		err = tx.QueryRowContext(ctx, `SELECT MIN(id) FROM task_events WHERE task_id = ?1 AND kind = ?2 AND status = ?3 AND prior IS NULL
 			AND id > COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?1 AND kind = ?4 AND id < ?5), 0)`,
 			id, envelope.TaskEventStatus, string(envelope.TaskReturned), envelope.TaskEventAssigned, c.ResultEvent).Scan(&since)
 		if err != nil {
@@ -900,30 +934,55 @@ func (s *Store) TaskCarry(ctx context.Context, id int64) (TaskCarried, error) {
 
 // ReopenTask puts a done or dropped task back as actor's change, with note
 // in its history, and returns ErrTaskState for a task in any other status.
-// It goes back to open, except a task that was filed as proposed and that
-// the owner never approved (taskNeverApproved): that one was dropped before
-// the owner's decision, and returns to proposed to wait for it. The check
-// and the change are one statement.
+// It goes back to open, with two exceptions. A task that was filed as
+// proposed and that the owner never approved (taskNeverApproved) was
+// dropped before the owner's decision, and returns to proposed to wait for
+// it, whoever closed it. A task a task host closed for the owner
+// (taskHostClosedPrior) returns to the status the host found it in, open or
+// returned, so a result the host closed on comes back to the owner's
+// attention with the result still on it. The check and the change are one
+// statement, and the entry records the status the task left.
 func (s *Store) ReopenTask(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
+	return s.reopenTask(ctx, id, taskChange{actor: actor, note: note})
+}
+
+// ReopenTaskForOwner is ReopenTask for task host host acting on the owner's
+// words, with the history entry marked as MarkTaskDoneForOwner marks it.
+func (s *Store) ReopenTaskForOwner(ctx context.Context, id int64, host, words string) (envelope.Task, error) {
+	return s.reopenTask(ctx, id, taskChange{actor: host, note: words, forOwner: true})
+}
+
+// taskHostClosedPrior is the status a task host found task t in when it
+// closed t for the owner, open or returned, and NULL when the entry that
+// closed t is not a host's: the owner's own done and drop, and an agent's
+// drop, reopen to open as before.
+const taskHostClosedPrior = `(SELECT e.prior FROM task_events e WHERE e.id = (SELECT MAX(c.id) FROM task_events c WHERE c.task_id = t.id AND c.kind = '` + envelope.TaskEventStatus + `' AND c.status IN ('done', 'dropped'))
+		AND e.for_owner = 1 AND e.prior IN ('open', 'returned'))`
+
+func (s *Store) reopenTask(ctx context.Context, id int64, by taskChange) (envelope.Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Task{}, err
 	}
 	defer tx.Rollback()
+	var prior string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, id).Scan(&prior); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = ErrNoTask
+		}
+		return envelope.Task{}, err
+	}
 	var to string
-	err = tx.QueryRowContext(ctx, `UPDATE tasks AS t SET status = CASE WHEN `+taskNeverApproved+` THEN ?1 ELSE ?2 END
+	err = tx.QueryRowContext(ctx, `UPDATE tasks AS t SET status = CASE WHEN `+taskNeverApproved+` THEN ?1 ELSE COALESCE(`+taskHostClosedPrior+`, ?2) END
 		WHERE id = ?3 AND status IN (?4, ?5) RETURNING status`,
 		string(envelope.TaskProposed), string(envelope.TaskOpen), id, string(envelope.TaskDone), string(envelope.TaskDropped)).Scan(&to)
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := getTask(ctx, tx, id, ""); err != nil {
-			return envelope.Task{}, err
-		}
 		return envelope.Task{}, ErrTaskState
 	}
 	if err != nil {
 		return envelope.Task{}, err
 	}
-	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskStatus(to)}, s.now().UnixMilli()); err != nil {
+	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: by.actor, Kind: envelope.TaskEventStatus, Body: by.note, Status: envelope.TaskStatus(to), ForOwner: by.forOwner, Prior: envelope.TaskStatus(prior)}, s.now().UnixMilli()); err != nil {
 		return envelope.Task{}, err
 	}
 	out, err := getTask(ctx, tx, id, "")
@@ -941,11 +1000,41 @@ func (s *Store) ReopenTask(ctx context.Context, id int64, actor, note string) (e
 // status. A task moved to done or dropped stops repeating: its schedule is
 // deleted in the same transaction.
 func (s *Store) SetTaskStatus(ctx context.Context, id int64, to envelope.TaskStatus, actor, note string, from ...envelope.TaskStatus) (envelope.Task, error) {
+	return s.setTaskStatus(ctx, id, to, taskChange{actor: actor, note: note}, from...)
+}
+
+// DropTaskForOwner drops task id for task host host acting on the owner's
+// words, from a status with no ask open under it (proposed, open or
+// returned), so it never cancels a teammate's ask: a task with one gets
+// ErrTaskState, as an agent's drop of its own task does. The history entry
+// is marked as MarkTaskDoneForOwner marks it.
+func (s *Store) DropTaskForOwner(ctx context.Context, id int64, host, words string) (envelope.Task, error) {
+	return s.setTaskStatus(ctx, id, envelope.TaskDropped, taskChange{actor: host, note: words, forOwner: true}, envelope.TaskProposed, envelope.TaskOpen, envelope.TaskReturned)
+}
+
+// taskChange is who changes a task's status and the note its history
+// entry keeps. forOwner marks a task host acting on the owner's words: the
+// note is those words, and the entry records the status the task had.
+type taskChange struct {
+	actor, note string
+	forOwner    bool
+}
+
+func (s *Store) setTaskStatus(ctx context.Context, id int64, to envelope.TaskStatus, by taskChange, from ...envelope.TaskStatus) (envelope.Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Task{}, err
 	}
 	defer tx.Rollback()
+	// The store has one connection, so nothing changes the task between
+	// this read and the update below.
+	var prior string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, id).Scan(&prior); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = ErrNoTask
+		}
+		return envelope.Task{}, err
+	}
 	cond, args := ``, []any{string(to), id}
 	if len(from) > 0 {
 		cond = ` AND status IN (?` + strings.Repeat(`, ?`, len(from)-1) + `)`
@@ -962,12 +1051,13 @@ func (s *Store) SetTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 		return envelope.Task{}, err
 	}
 	if n == 0 {
-		if _, err := getTask(ctx, tx, id, ""); err != nil {
-			return envelope.Task{}, err
-		}
 		return envelope.Task{}, ErrTaskState
 	}
-	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: to}, s.now().UnixMilli()); err != nil {
+	ev := envelope.TaskEvent{TaskID: id, Actor: by.actor, Kind: envelope.TaskEventStatus, Body: by.note, Status: to}
+	if by.forOwner {
+		ev.ForOwner, ev.Prior = true, envelope.TaskStatus(prior)
+	}
+	if _, err := addTaskEvent(ctx, tx, ev, s.now().UnixMilli()); err != nil {
 		return envelope.Task{}, err
 	}
 	if to == envelope.TaskDone || to == envelope.TaskDropped {
@@ -1045,9 +1135,9 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		chain = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain)
-		SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.TaskID)
+	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '') WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), ev.TaskID)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -1108,13 +1198,13 @@ func scanTaskAnd(sc scanner, more ...any) (envelope.Task, error) {
 	return t, nil
 }
 
-const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, '')`
+const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, '')`
 
 func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
 	var ev envelope.TaskEvent
-	var status, chain string
+	var status, chain, prior string
 	var at int64
-	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain); err != nil {
+	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	if chain != "" {
@@ -1122,7 +1212,7 @@ func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
 			return envelope.TaskEvent{}, err
 		}
 	}
-	ev.Status, ev.At = envelope.TaskStatus(status), time.UnixMilli(at).UTC()
+	ev.Status, ev.Prior, ev.At = envelope.TaskStatus(status), envelope.TaskStatus(prior), time.UnixMilli(at).UTC()
 	return ev, nil
 }
 

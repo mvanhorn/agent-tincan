@@ -1291,9 +1291,13 @@ func TestTaskAdminAddReadComment(t *testing.T) {
 	}
 }
 
-// No agent route marks a task done, approves it, reopens it or resets its
-// assign count, and every admin task route refuses an agent that is not on
-// an admin device.
+// Approving a task and resetting its assign count belong to admin devices
+// alone, and marking done and reopening to admin devices and to task hosts
+// the owner named. No agent route is named for any of these: the decide
+// route is the only agent route that reaches done, reopen or a drop of
+// another's task, it answers approve and reset as unknown even for a host,
+// and it refuses an agent that is no host. Every admin task route refuses
+// an agent that is not on an admin device, and their number is unchanged.
 func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 	m := newTaskMesh(t)
 	open := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "open"}).Task
@@ -1301,7 +1305,7 @@ func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 	dropped := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "dropped"}).Task
 	taskDo(t, m.grok, "POST", taskPath(dropped.ID, "/drop"), nil)
 
-	admin := 0
+	admin, decide := 0, 0
 	for _, pattern := range m.Server.Routes() {
 		method, path, _ := strings.Cut(pattern, " ")
 		if !strings.Contains(path, "/tasks") {
@@ -1320,9 +1324,15 @@ func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 				t.Errorf("agent route %s", pattern)
 			}
 		}
+		if strings.HasSuffix(path, "/decide") {
+			decide++
+		}
 	}
 	if admin != 10 {
 		t.Errorf("%d admin task routes checked, want 10", admin)
+	}
+	if decide != 1 {
+		t.Errorf("%d agent decide routes, want 1", decide)
 	}
 	for id, actions := range map[int64][]string{open.ID: {"done", "reset"}, proposed.ID: {"approve"}, dropped.ID: {"reopen"}} {
 		for _, action := range actions {
@@ -1331,6 +1341,18 @@ func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 					t.Errorf("%s %s as an agent was accepted", method, taskPath(id, "/"+action))
 				}
 			}
+			// The decide route refuses an agent that is no host, whatever it
+			// asks for.
+			if _, err := taskCall(t, m.grok, "POST", taskPath(id, "/decide"), map[string]string{"decision": action, "owner_words": "do it"}); !refusedWith(err, http.StatusForbidden, "tincan tasks host set") {
+				t.Errorf("decide %s by an agent that is no host: %v", action, err)
+			}
+		}
+	}
+	// A host's approve and reset are unknown decisions.
+	m.host(t, "muse")
+	for id, action := range map[int64]string{proposed.ID: "approve", open.ID: "reset"} {
+		if _, err := taskCall(t, m.muse, "POST", taskPath(id, "/decide"), map[string]string{"decision": action, "owner_words": "do it"}); !refusedWith(err, http.StatusBadRequest, "unknown decision") {
+			t.Errorf("decide %s by a host: %v", action, err)
 		}
 	}
 	for id, want := range map[int64]envelope.TaskStatus{open.ID: envelope.TaskOpen, proposed.ID: envelope.TaskProposed, dropped.ID: envelope.TaskDropped} {
@@ -1654,8 +1676,8 @@ func TestGuestCannotCallTaskRoutes(t *testing.T) {
 			t.Errorf("%s as a guest: %v", pattern, err)
 		}
 	}
-	if n != 16 {
-		t.Errorf("%d task routes checked, want 16", n)
+	if n != 17 {
+		t.Errorf("%d task routes checked, want 17", n)
 	}
 	if tasks := listTasks(t, m.Client(t, "admin"), "/v1/admin/tasks"); len(tasks) != 1 {
 		t.Errorf("%d tasks after the guest's calls, want 1", len(tasks))

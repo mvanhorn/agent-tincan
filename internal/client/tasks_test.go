@@ -16,13 +16,14 @@ import (
 type taskRelay struct {
 	calls   []string
 	answers map[string]string
-	// hosts makes it advertise task hosts as well.
-	hosts bool
+	// hosts makes it advertise task hosts as well, and decisions their
+	// decisions.
+	hosts, decisions bool
 }
 
 func (f *taskRelay) Raw(_ context.Context, method, path string, in, out any) error {
 	if path == "/v1/capabilities" {
-		*(out.(*Capabilities)) = Capabilities{Tasks: true, TaskHosts: f.hosts}
+		*(out.(*Capabilities)) = Capabilities{Tasks: true, TaskHosts: f.hosts, TaskHostDecisions: f.decisions}
 		return nil
 	}
 	call := method + " " + path
@@ -54,6 +55,7 @@ func TestTaskCallsRefuseOldRelay(t *testing.T) {
 		"comment": func() error { _, err := CommentTask(ctx, old, false, 1, "x"); return err },
 		"drop":    func() error { _, err := DropTask(ctx, old, false, 1, ""); return err },
 		"decide":  func() error { _, err := DecideTask(ctx, old, TaskDone, 1, ""); return err },
+		"host":    func() error { _, err := HostDecideTask(ctx, old, 1, TaskDone, "x"); return err },
 	}
 	for name, call := range calls {
 		if err := call(); !errors.Is(err, ErrTasksUnsupported) {
@@ -376,5 +378,42 @@ func TestFormatTaskWithheld(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("%q lacks %q", out, want)
 		}
+	}
+}
+
+// A host decision posts the decision and the owner's words to the decide
+// route, and only to a relay that advertises host decisions: an older one
+// is answered with the upgrade message and sent nothing.
+func TestHostDecideTask(t *testing.T) {
+	ctx := t.Context()
+	older := &taskRelay{hosts: true}
+	if _, err := HostDecideTask(ctx, older, 7, TaskDone, "done"); !errors.Is(err, ErrTaskHostDecisionsUnsupported) || len(older.calls) != 0 {
+		t.Fatalf("against an older relay: %v, calls %v", err, older.calls)
+	}
+	f := &taskRelay{hosts: true, decisions: true, answers: map[string]string{"POST /v1/tasks/7/decide": `{"task":{"id":7,"title":"sweep","status":"done"}}`}}
+	task, err := HostDecideTask(ctx, f, 7, TaskDrop, "drop the sweep")
+	if err != nil || task.Status != envelope.TaskDone {
+		t.Fatalf("task = %+v, %v", task, err)
+	}
+	if want := `POST /v1/tasks/7/decide {"decision":"drop","owner_words":"drop the sweep"}`; len(f.calls) != 1 || f.calls[0] != want {
+		t.Fatalf("calls = %q, want %q", f.calls, want)
+	}
+}
+
+// The answer to a host decision says where the task is and how to undo it,
+// and a history entry made for the owner says so before the words.
+func TestFormatHostDecision(t *testing.T) {
+	task := envelope.Task{ID: 3, Title: "sweep\x07 the porch", Status: envelope.TaskDone}
+	if got := FormatHostDecision(task, TaskDone); !strings.HasPrefix(got, "Task #3 (sweep the porch) is now done, done for the owner") || !strings.HasSuffix(got, "reopen it the same way.") {
+		t.Errorf("done = %q", got)
+	}
+	task.Status = envelope.TaskReturned
+	if got := FormatHostDecision(task, TaskReopen); !strings.Contains(got, "is now returned") || !strings.HasSuffix(got, "mark it done or drop it the same way.") {
+		t.Errorf("reopen = %q", got)
+	}
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	out := FormatTask(task, []envelope.TaskEvent{{ID: 1, Actor: "grokbot", Kind: envelope.TaskEventStatus, Status: envelope.TaskDone, ForOwner: true, Prior: envelope.TaskReturned, Body: "the porch is swept", At: now}}, now)
+	if !strings.Contains(out, " grokbot status (done) for the owner, who said: the porch is swept\n") {
+		t.Errorf("history = %q", out)
 	}
 }

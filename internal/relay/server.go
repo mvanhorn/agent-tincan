@@ -457,6 +457,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST /v1/tasks/{id}/assign", s.handleAssignTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/comment", s.handleCommentTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/drop", s.handleDropTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/decide", s.handleHostDecideTask)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)

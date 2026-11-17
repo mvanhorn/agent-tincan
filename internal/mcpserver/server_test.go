@@ -148,9 +148,14 @@ func TestToolListIsExactlyTheAgentTools(t *testing.T) {
 
 // Approval stays human-only: the phone page and the CLI on an admin device
 // approve and deny, and no agent tool can list held requests or decide one.
+// decide_task is a task host's done, reopen or drop on the owner's word,
+// which decides no held request and approves no task.
 func TestNoApprovalTool(t *testing.T) {
 	for _, n := range mcpserver.ToolNames {
 		for _, banned := range []string{"held", "hold", "approve", "approval", "deny", "decide"} {
+			if banned == "decide" && n == "decide_task" {
+				continue
+			}
 			if strings.Contains(n, banned) {
 				t.Errorf("tool %q exposes approval to agents", n)
 			}
