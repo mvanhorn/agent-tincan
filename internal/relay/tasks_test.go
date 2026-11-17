@@ -1676,8 +1676,8 @@ func TestGuestCannotCallTaskRoutes(t *testing.T) {
 			t.Errorf("%s as a guest: %v", pattern, err)
 		}
 	}
-	if n != 16 {
-		t.Errorf("%d task routes checked, want 16", n)
+	if n != 17 {
+		t.Errorf("%d task routes checked, want 17", n)
 	}
 	if tasks := listTasks(t, m.Client(t, "admin"), "/v1/admin/tasks"); len(tasks) != 1 {
 		t.Errorf("%d tasks after the guest's calls, want 1", len(tasks))
