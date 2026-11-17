@@ -71,7 +71,7 @@ Each nudge, the script:
      --session-id <id> --allow-tool 'agent-tincan(ask)' --allow-tool 'agent-tincan(check_inbox)' ...
    ```
 
-   with one `--allow-tool` for each Agent Tincan tool: ask, get_reply, check_inbox, claim, progress, reply, answer, cancel, list_agents, onboard, get_attachment, trace, search, lease, list_leases, add_task, list_tasks, get_task and update_task.
+   with one `--allow-tool` for each Agent Tincan tool: ask, get_reply, check_inbox, claim, progress, reply, answer, cancel, list_agents, onboard, get_attachment, trace, search, lease, list_leases, add_task, list_tasks, get_task, update_task and decide_task.
 6. Kills the run and everything it started after `TINCAN_WAKE_TIMEOUT` seconds, counts failures and backs off after three in a row, telling `TINCAN_WAKE_OPERATOR` once.
 
 The lock, failure count, backoff marker and the generated server file live in `<name>.wake-state` beside the teammate's config (mode 700). `TINCAN_WAKE_STATE_DIR` overrides it.

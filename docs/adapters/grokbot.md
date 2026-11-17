@@ -332,8 +332,9 @@ Grok Bot reads the whole list through the `list_tasks` and `get_task` tools of `
 - "what's on my list" lists every task, with what waits on you first.
 - "what did muse say on 12" reads one task with its result and history.
 - "give 12 to codex" assigns the task, as an ask from grokbot.
+- "mark 12 done", "drop 14" or "reopen 12" closes or reopens a task on your word. Grok Bot passes your words with `decide_task`, or from its shell with `tincan tasks decide 12 done --words "mark 12 done"`, and says what changed and how to undo it. Name the task and the action in one message, or Grok Bot names the task by number and title and waits for your yes. `tincan tasks show 12` then shows grokbot as the one who closed it, for you, with your words.
 
-Grok Bot cannot approve a proposed task or mark a task done. Do those from an admin device (`tincan tasks approve <id>`, `tincan tasks done <id>`) or the [phone page](../phone.md). A proposed task you have not approved shows in Grok Bot's list as a row with its number, filer and source and no text.
+Reopening a task Grok Bot closed puts it back where it was, so a returned result comes back to the top of your list. The relay refuses a decision while grokbot is working a teammate's request or a guest's, on a repeating task, and on a proposed task you have not approved. Grok Bot cannot approve a proposed task or reset an assign count. Do those from an admin device (`tincan tasks approve <id>`, `tincan tasks reset <id>`) or the [phone page](../phone.md). A proposed task you have not approved shows in Grok Bot's list as a row with its number, filer and source and no text.
 
 The relay sends grokbot a short notice, with no task text, when a task comes back, asks a question, falls back to open or is filed as proposed, and wakes it by the webhook above. What was not live-tested: whether Grok Bot can then message you without you asking has not been confirmed on a live run. If it cannot, you hear the news when you next ask for the list, which shows the same items first. Each notice draws on the webhook's `max_per_hour`, which asks to grokbot share.
 

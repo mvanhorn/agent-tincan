@@ -648,6 +648,7 @@ Any joined agent calls these as itself. A guest gets 403 on every task route.
 - `POST /v1/tasks/{id}/assign` with `{"to": "muse"}` assigns a task the caller may read to a teammate and answers 200 with `{"task": {...}}`. The task must be `open` or `returned` with no ask open under it (409 otherwise). Agents may assign one task 5 times, counted on the task across all agents, until the owner resets the count; the 6th is refused with 409, and an assign that sent nothing gives its count back.
 - `POST /v1/tasks/{id}/comment` with `{"body": "..."}` adds the caller's comment to a task it may read and answers 201 with `{"task": {...}, "event": {...}}`. A blank comment is refused with 400 and one over 16 KiB with 413. A caller with an open marked ask that has reached it is refused with 409, because a comment carries no mark and is handed to whoever the task goes to next. A comment wakes nobody.
 - `POST /v1/tasks/{id}/drop` with an optional `{"note": "..."}` drops a task the caller filed (403 for any other) while it is `proposed`, `open` or `returned`. With an ask open under it the answer is 409: only the owner drops it then.
+- `POST /v1/tasks/{id}/decide` is a task host's decision on the owner's word; see Host decisions under Task hosts. Every other agent is refused with 403.
 
 An agent may read a task it filed. It may read any other task only once the task is past `proposed`, and then when the ask open under it is addressed to the agent and is not `held`, when the agent claimed, answered or assigned an ask under it, or when the task is `open`, has no assignee and no result, has never been assigned, and was added with no `assignee`. A task that was assigned once leaves that shared pool for good: its ask may have been held and denied, and the target of a denied ask does not read the text afterwards.
 
@@ -681,7 +682,7 @@ The agent that sent the ask gets the reply as it gets any reply. An agent that c
 
 ### Owner routes
 
-Admin devices and the local admin socket call these (403 otherwise); no agent route and no MCP tool does what they do.
+Admin devices and the local admin socket call these (403 otherwise). No agent route and no MCP tool approves a task or resets its assign count. Done, reopen and a drop of a task the caller did not file reach an agent only through `POST /v1/tasks/{id}/decide`, for a task host the owner named (see Host decisions).
 
 - `GET /v1/admin/tasks` and `GET /v1/admin/tasks/{id}` read every task, in the same shapes and pages as the agent routes: the listing leaves done and dropped tasks out and counts them in `closed`, and lists them with `?closed=1`.
 - `POST /v1/admin/tasks` files a task as the owner, with the fields of the agent's add except `source` (400): the owner's task is never proposed. The owner has no limit of 50.
@@ -701,9 +702,31 @@ A task host is a teammate the owner named to keep the list (`PUT /v1/agents/{nam
 
 The host view lists every task, in the same pages, order and `closed` counts as the ordinary listing, except a task whose open ask is `held` with the host as its target, which the host reads only if it filed it. A task that was filed as `proposed` and that the owner never approved is withheld from a host that did not file it, whatever its status now: the task object is `{"id", "title": "", "status", "filer", "source", "created_at", "withheld": true}` and no other field, and a read of it answers with empty `events`. The relay builds the row from those fields by name, so a field a task gains later is left out as well. "Never approved" is the test reopen uses: the history has an `added` entry with status `proposed` and no `status` entry by `@owner` that opened it. The `list_tasks` tool puts what waits on the owner first and says on its first line when the host view was served, or why a named host did not get it.
 
-`POST /v1/tasks/{id}/assign` and `POST /v1/tasks/{id}/comment` resolve the task through the same view without the parameter: an eligible host with no guest's ask open may assign or comment on any task it reads in full, and a withheld task answers 404 as one that does not exist. The assign is the host's own ask and takes one of the task's 5 agent assigns. The task these two routes echo is the one the view shows. No other agent route changes for a host: a host drops only a task it filed, and the decisions under Owner routes stay admin only.
+`POST /v1/tasks/{id}/assign` and `POST /v1/tasks/{id}/comment` resolve the task through the same view without the parameter: an eligible host with no guest's ask open may assign or comment on any task it reads in full, and a withheld task answers 404 as one that does not exist. The assign is the host's own ask and takes one of the task's 5 agent assigns. The task these two routes echo is the one the view shows. The owner's drop route, approve and reset under Owner routes stay admin only; a host's done, reopen and drop go through the decide route below.
 
 The relay also tells hosts about changes. When a task becomes `returned`, becomes `question`, goes back to `open` because its ask ended with no result, or is filed as `proposed`, the relay queues one `notify` request from `relay` to each eligible host. The notice names the task by id, gives the new status and the agent names involved, and carries no title, detail, result or comment. A host that caused the change gets none, and neither does a host that receives the reply as the ask's sender. A change the owner made from an admin device sends none. While a host has an unread notice for a task, later changes to that task queue no further notice for that host; the host reads the task's current state with `get_task`. Notices are not held by the owner's rules, as the relay's other notes are not, and they wake the host as any notify does.
+
+#### Host decisions
+
+`POST /v1/tasks/{id}/decide` with `{"decision": "done" | "reopen" | "drop", "owner_words": "..."}` is a task host marking a task done, reopening it or dropping it because the owner asked in the host's own conversation. `owner_words` are the owner's words the host acted on. The relay advertises `"task_host_decisions": true` in `GET /v1/capabilities`, and a client calls the route only on a relay that does; `decide_task` and `tincan tasks decide` against an older relay answer `this relay does not take a task host's decisions; upgrade the relay`. A guest gets 403 from the guest gate, as on every task route.
+
+The relay checks, in this order, and changes nothing on a refusal:
+
+| Check | Refusal |
+|---|---|
+| The caller is a named task host | 403, naming `tincan tasks host set <agent>` |
+| The host is eligible now (the setter's check) | 403, `you are suspended as a task host: <reason>` |
+| No ask marked as a guest's work is open with the host | 409 |
+| The host holds no claimed request, counted across all its sessions | 409, saying to reply to every claimed request first |
+| `decision` is `done`, `reopen` or `drop` | 400 `unknown decision`, for `approve`, `reset`, an empty decision and anything else |
+| `owner_words` is not blank, at most 16 KiB, UTF-8 | 400 (413 when too long) |
+| The host reads the task in full through the host view, or filed it | 404, as for a task that does not exist |
+| The task does not repeat | 409; the owner ends a repeat |
+| The host's send rate has a slot | 429; the decision takes one slot |
+
+Then `done` runs the action the owner's `.../done` runs and is refused where it is: 409 for a task that is not `open` or `returned`, naming the open ask when one is. `reopen` runs the owner's `.../reopen`: 409 for a task that is not `done` or `dropped`. `drop` moves a `proposed`, `open` or `returned` task to `dropped` and never cancels an ask: with an ask open under the task it answers 409, as the agent drop route does. Two decisions racing on one task land one; the other gets 409. A decision that lands voids the task's owner page nonces and answers 200 with `{"task": {...}}`, the task as the host view shows it.
+
+The history entry is a `status` entry under the host's name with `"for_owner": true`, the owner's words as its `body`, and `"prior"`, the status the task had. A reopen entry also records `prior`, the status it reopened from. Reopening a task whose closing entry is a host's puts it back in that entry's `prior` status, `open` or `returned`, with its result as it was, whoever reopens it; a reopen stores no new result, so the next ask still carries the result and its author from before. A task filed as proposed and never approved reopens to `proposed` whoever closed it, and a task the owner or an agent closed reopens to `open` as before. Nothing a host does is recorded as `@owner`.
 
 ### Repeating tasks
 
@@ -715,9 +738,9 @@ Assigning the task to a different teammate changes the schedule's target in the 
 
 ### Audit and storage
 
-Audit rows `task_added` (status, assignee and the byte count of the title and detail), `task_assigned` (the teammate, and for the owner's the agent it was sent as), `task_commented` (the byte count), `task_dropped`, `task_approved`, `task_done`, `task_reopened` and `task_assigns_reset` carry the task id and never its text; an owner's row names the device. An ask cancelled by a drop or a reassign is audited as `cancelled` with reason `task_dropped` or `task_reassigned`. The `schedule_*` rows of a repeat also carry the task id. A `task-host` row is written when a host is named or cleared: its actor is the agent, its detail is `{"task_host": true}` or `{"task_host": false}`, and a clear the owner did not ask for adds `"reason"`: `removed`, `joined`, `rebind` or `connected`.
+Audit rows `task_added` (status, assignee and the byte count of the title and detail), `task_assigned` (the teammate, and for the owner's the agent it was sent as), `task_commented` (the byte count), `task_dropped`, `task_approved`, `task_done`, `task_reopened` and `task_assigns_reset` carry the task id and never its text; an owner's row names the device. A host decision writes `task_done`, `task_reopened` or `task_dropped` with the host as actor and `{"for_owner": true, "bytes": n}`, the byte count of the owner's words, never the words. An ask cancelled by a drop or a reassign is audited as `cancelled` with reason `task_dropped` or `task_reassigned`. The `schedule_*` rows of a repeat also carry the task id. A `task-host` row is written when a host is named or cleared: its actor is the agent, its detail is `{"task_host": true}` or `{"task_host": false}`, and a clear the owner did not ask for adds `"reason"`: `removed`, `joined`, `rebind` or `connected`.
 
-Tasks live in `tasks`, `task_events` and `task_claimants` tables, with no foreign key to `agents`, since a rebind re-inserts the agent row, plus a nullable `task_id` column on `requests` and on `schedules`, a `contributors` column on `requests`, a nullable `named_for` column on `tasks` (whom the task was added for, which keeps it out of the shared pool), and a nullable `chain` column on `task_events`: the chain and contributors of the request the author held a claim on when it filed the task or wrote the comment, which an ask carrying that text adds to its `contributors`. An ask sent while handling a request that has `contributors` is stored with them too. None of these is in any reply. An older relay opening the database ignores them, and tasks stop following their asks until the newer relay is back.
+Tasks live in `tasks`, `task_events` and `task_claimants` tables, with no foreign key to `agents`, since a rebind re-inserts the agent row, plus a nullable `task_id` column on `requests` and on `schedules`, a `contributors` column on `requests`, a nullable `named_for` column on `tasks` (whom the task was added for, which keeps it out of the shared pool), `for_owner` and a nullable `prior` column on `task_events` (see Host decisions), and a nullable `chain` column on `task_events`: the chain and contributors of the request the author held a claim on when it filed the task or wrote the comment, which an ask carrying that text adds to its `contributors`. An ask sent while handling a request that has `contributors` is stored with them too. None of these is in any reply. An older relay opening the database ignores them, and tasks stop following their asks until the newer relay is back.
 
 ## Follow-on asks
 

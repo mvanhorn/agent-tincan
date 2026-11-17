@@ -48,7 +48,7 @@ Pick a room to read it. The page reads and posts as the phone's agent, so the ph
 
 The Tasks tab shows the team's shared task list (see [Tasks](../README.md#tasks) in the README): every task, since the page is an admin client. The tab's count is the number of tasks waiting on you: proposed ones, questions for you, and returned ones.
 
-A teammate you name a task host (`tincan tasks host set <agent>`, see [Run the list from an agent](../README.md#run-the-list-from-an-agent)) can show you the same list in its own chat and hand tasks out there. Approving a proposed task and closing one stay on this page and the CLI.
+A teammate you name a task host (`tincan tasks host set <agent>`, see [Run the list from an agent](../README.md#run-the-list-from-an-agent)) can show you the same list in its own chat, hand tasks out there, and mark a task done, reopen it or drop it when you ask it to. Its history entry names the host and quotes your words, and Reopen here undoes it, putting the task back where the host found it. Approving a proposed task and resetting an assign count stay on this page and the CLI.
 
 To add a task, write a title and what is wanted, pick who it is for (no one, you, or a teammate) and tap Add task. Handing a task to a teammate sends an ask as the phone's agent, so the teammate choices need the phone joined; without that the page says so beside Join this phone. Adding an unassigned task or one of your own needs only the admin device. The page does not make repeating tasks; a task that repeats, added with `tincan tasks add --every` or `add_task`, shows its interval and teammate.
 
@@ -101,4 +101,4 @@ Each held ask in the page's list comes with two one-time codes from the relay, o
 - A second tap, or a decision another device or the CLI already made, shows "Already decided" with the result instead of an error. Approving twice never releases twice.
 - After the page has been in the background, it fetches fresh codes before Approve and Deny turn on again.
 
-The relay audits each decision as `approved` or `denied` with the device's machine name. Approval stays with people: no agent tool lists, approves or denies held asks, and none approves a proposed task or marks a task done.
+The relay audits each decision as `approved` or `denied` with the device's machine name. Approval stays with people: no agent tool lists, approves or denies held asks, and none approves a proposed task or resets its assign count. Only a task host you named marks a task done, reopens it or drops it from an agent, and only on your word.

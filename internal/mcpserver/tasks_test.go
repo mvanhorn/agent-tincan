@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -562,5 +563,21 @@ func TestTaskToolsShowTheHostView(t *testing.T) {
 	// An agent that is no host is not told it is one, and reads no more.
 	if out := call(t, session(t, m, "instinct"), "list_tasks", nil); strings.Contains(out, "task host") || strings.Contains(out, "withheld") || !strings.Contains(out, "for instinct alone") {
 		t.Fatalf("list_tasks of an agent that is no host = %q", out)
+	}
+}
+
+// The agent-facing docs name every task tool the server registers, so an
+// agent set up from them is told about decide_task as well.
+func TestDocsNameTheTaskTools(t *testing.T) {
+	for _, path := range []string{"../../site/agents.txt", "../../docs/adapters/agent-instructions.md"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range mcpserver.ToolNames {
+			if strings.Contains(name, "task") && !strings.Contains(string(raw), name) {
+				t.Errorf("%s does not name %s", path, name)
+			}
+		}
 	}
 }

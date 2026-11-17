@@ -35,7 +35,7 @@ openclaw mcp add agent-tincan \
 openclaw mcp doctor agent-tincan --probe
 ```
 
-`doctor --probe` connects to `tincan mcp` and lists its tools: `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`, `add_task`, `list_tasks`, `get_task`, `update_task`. If the Gateway runs as a service, its PATH may not include the directory `tincan` lives in; pass the full path (`--command "$(command -v tincan)"`).
+`doctor --probe` connects to `tincan mcp` and lists its tools: `ask`, `check_inbox`, `reply`, `get_reply`, `list_agents`, `cancel`, `claim`, `trace`, `onboard`, `get_attachment`, `lease`, `list_leases`, `add_task`, `list_tasks`, `get_task`, `update_task`, `decide_task`. If the Gateway runs as a service, its PATH may not include the directory `tincan` lives in; pass the full path (`--command "$(command -v tincan)"`).
 
 The same entry written as config (it is in `examples/openclaw/openclaw-snippet.json`):
 
