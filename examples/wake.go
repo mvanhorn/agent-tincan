@@ -7,6 +7,7 @@ package examples
 import (
 	_ "embed"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -67,12 +68,7 @@ var wakes = map[string]WakeScript{
 
 // WakeNames lists the wakes tincan listen install supports, sorted.
 func WakeNames() []string {
-	names := make([]string, 0, len(wakes))
-	for n := range wakes {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-	return names
+	return slices.Sorted(maps.Keys(wakes))
 }
 
 // Wake returns the named wake. Gemini CLI and Grok wakes are not offered:

@@ -260,10 +260,10 @@ var postUpgradeRefresh = func(exe string) (string, error) {
 // replace it.
 var postUpgradeWakeRefresh = func(exe string) (string, error) {
 	home, err := os.UserHomeDir()
-	if err != nil || len(installedListenerConfigs(home, runtime.GOOS)) == 0 {
+	if err != nil || len(listenServiceFiles(home, runtime.GOOS)) == 0 {
 		return "", nil
 	}
-	out, err := exec.Command(exe, "listen", "install", "--refresh").CombinedOutput()
+	out, err := exec.Command(exe, "listen", "refresh").CombinedOutput()
 	return string(out), err
 }
 

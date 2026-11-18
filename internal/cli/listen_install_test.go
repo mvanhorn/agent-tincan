@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,7 +33,6 @@ func installForTest(t *testing.T, goos, cfgPath string, w examples.WakeScript) (
 	o := listenInstallOptions{
 		GOOS: goos, Home: home, Binary: "/opt/tin can/tincan", UID: 501, Launcher: "/A/agent-tincan",
 		ConfigPath: cfgPath, Agent: "codex", DefaultConfig: filepath.Join(home, "default", "client.json"),
-		CodexConfig: filepath.Join(home, ".codex", "config.toml"),
 	}
 	var out bytes.Buffer
 	o.Out = &out
@@ -108,22 +109,28 @@ func TestListenInstallLinux(t *testing.T) {
 	}
 }
 
-// Agents on one machine keep their scripts apart, and a script whose path
-// has a space and an apostrophe still runs as one path through sh -c.
+// A script whose path has a space and an apostrophe still reaches sh -c,
+// which tincan listen runs it through, as one path.
 func TestListenInstallQuotesTheScript(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
 	dir := filepath.Join(t.TempDir(), "Ben's Configs")
 	cfg := filepath.Join(dir, "codex.json")
 	o, _ := installForTest(t, "linux", cfg, codexWake(t))
 	script := filepath.Join(dir, "codex.listen", "codex-wake.sh")
-	got := listenExecArg(script)
-	if _, err := exec.LookPath("sh"); err == nil {
-		out, err := exec.Command("sh", "-c", "printf %s "+got).Output()
-		if err != nil || string(out) != script {
-			t.Fatalf("sh -c saw %q (%v), want %q", out, err, script)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(o.Home, ".config", "systemd", "user", "tincan-listen-codex.service")); err != nil {
+	b, err := os.ReadFile(filepath.Join(o.Home, ".config", "systemd", "user", "tincan-listen-codex.service"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^ExecStart=.* "--exec" "((?:[^"\\]|\\.)*)"$`).FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("no --exec in unit:\n%s", b)
+	}
+	exec_ := strings.NewReplacer(`%%`, `%`, `\"`, `"`, `\\`, `\`).Replace(string(m[1]))
+	out, err := exec.Command("sh", "-c", "printf %s "+exec_).Output()
+	if err != nil || string(out) != script {
+		t.Fatalf("sh -c saw %q (%v), want %q", out, err, script)
 	}
 }
 
@@ -172,12 +179,17 @@ func TestListenInstallKeepsEditedScript(t *testing.T) {
 }
 
 func TestListenInstallRefusesUnjoined(t *testing.T) {
-	o := listenInstallOptions{GOOS: "linux", Home: t.TempDir(), Binary: "/opt/tincan", ConfigPath: "/x/c.json", Out: &bytes.Buffer{}}
+	cfg := filepath.Join(t.TempDir(), "c.json")
+	o := listenInstallOptions{GOOS: "linux", Home: t.TempDir(), Binary: "/opt/tincan", ConfigPath: cfg, Out: &bytes.Buffer{}}
 	if err := installListener(o, codexWake(t)); err == nil || !strings.Contains(err.Error(), "join") {
 		t.Fatalf("err = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(o.Home, ".config")); err == nil {
+	if _, err := os.Stat(listenDir(cfg)); err == nil {
 		t.Fatal("wrote files before refusing")
+	}
+	o.Agent = "bad name!"
+	if err := installListener(o, codexWake(t)); err == nil || !strings.Contains(err.Error(), "cannot name a service") {
+		t.Fatalf("invalid name: err = %v", err)
 	}
 	o.Agent = "codex"
 	o.GOOS = "windows"
@@ -262,6 +274,7 @@ func TestRefreshWakeScripts(t *testing.T) {
 	cfgB := filepath.Join(t.TempDir(), "codex2.json")
 	o2 := o
 	o2.ConfigPath, o2.Agent, o2.Out = cfgB, "codex2", &bytes.Buffer{}
+	o2.CodexHome = t.TempDir() // a second Codex agent needs its own Codex config
 	if err := installListener(o2, w); err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +337,10 @@ func TestListenerCheck(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "codex.json")
 	o, _ := installForTest(t, "darwin", cfg, w)
 	loaded := func(string) bool { return true }
-	run := func() check { return listenerCheck(o.GOOS, o.Home, cfg, o.CodexConfig, o.DefaultConfig, loaded) }
+	run := func() check {
+		c, _ := listenerCheck(o.GOOS, o.Home, cfg, "", o.DefaultConfig, loaded)
+		return c
+	}
 
 	if c := run(); c.Status != "ok" || !strings.Contains(c.Detail, "codex") {
 		t.Fatalf("installed: %+v", c)
@@ -368,20 +384,295 @@ func TestListenerCheck(t *testing.T) {
 	}
 	loaded = func(string) bool { return true }
 
-	if err := os.WriteFile(o.CodexConfig, []byte("[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \""+cfg+"\" }\n"), 0o600); err != nil {
+	if err := os.WriteFile(o.codexConfig(), []byte("[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \""+cfg+"\" }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if c := run(); c.Status != "warn" || !strings.Contains(c.Detail, "approval") {
 		t.Fatalf("no approval mode: %+v", c)
 	}
-	if err := os.WriteFile(o.CodexConfig, []byte("[mcp_servers.agent-tincan]\ncommand = \"tincan\"\ndefault_tools_approval_mode = \"approve\"\nenv = { TINCAN_CONFIG = \"/elsewhere/other.json\" }\n"), 0o600); err != nil {
+	if err := os.WriteFile(o.codexConfig(), []byte("[mcp_servers.agent-tincan]\ncommand = \"tincan\"\ndefault_tools_approval_mode = \"approve\"\nenv = { TINCAN_CONFIG = \"/elsewhere/other.json\" }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if c := run(); c.Status != "warn" || !strings.Contains(c.Detail, "other.json") {
 		t.Fatalf("other agent's config: %+v", c)
 	}
 
-	if c := listenerCheck(o.GOOS, o.Home, filepath.Join(t.TempDir(), "none.json"), o.CodexConfig, o.DefaultConfig, loaded); c.Name != "" {
-		t.Fatalf("no listener installed should add no line: %+v", c)
+	if _, ok := listenerCheck(o.GOOS, o.Home, filepath.Join(t.TempDir(), "none.json"), "", o.DefaultConfig, loaded); ok {
+		t.Fatalf("no listener installed should add no line")
+	}
+}
+
+func listenOptions(t *testing.T, goos, cfg string) listenInstallOptions {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("listen install writes POSIX services")
+	}
+	home := t.TempDir()
+	return listenInstallOptions{
+		GOOS: goos, Home: home, Binary: "/opt/tin can/tincan", UID: 501, Launcher: "/A/agent-tincan",
+		ConfigPath: cfg, Agent: "codex", DefaultConfig: filepath.Join(home, "default", "client.json"),
+		Out: &bytes.Buffer{},
+	}
+}
+
+// A Codex entry that runs tincan as another agent stops the install
+// before anything is written, so no listener can wake Codex as that agent.
+func TestListenInstallRefusesAnotherAgentsCodexEntry(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "codex.json")
+	o := listenOptions(t, "linux", cfg)
+	if err := os.MkdirAll(filepath.Dir(o.codexConfig()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pinned := "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\ndefault_tools_approval_mode = \"approve\"\nenv = { TINCAN_CONFIG = \"/elsewhere/claude.json\" }\n"
+	if err := os.WriteFile(o.codexConfig(), []byte(pinned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := installListener(o, codexWake(t))
+	if err == nil || !strings.Contains(err.Error(), "another agent") || !strings.Contains(err.Error(), "Nothing was installed") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(listenDir(cfg)); err == nil {
+		t.Error("wake scripts written for a refused install")
+	}
+	if _, err := os.Stat(listenServiceFile(o.Home, "linux", "codex")); err == nil {
+		t.Error("service written for a refused install")
+	}
+	if b, _ := os.ReadFile(o.codexConfig()); string(b) != pinned {
+		t.Errorf("Codex config changed:\n%s", b)
+	}
+}
+
+// The pin is read the way TOML means it: comments do not count, and
+// literal strings and quoted keys do.
+func TestCodexEntryReadsThePin(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	def := "/home/o/.config/tincan/client.json"
+	for _, tc := range []struct {
+		name, in, cfg string
+		changed       bool
+		notice        string
+	}{
+		{"commented pin does not count", "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \"/o/other.json\" }\n# env = { TINCAN_CONFIG = \"" + cfg + "\" }\n", cfg, false, "other.json"},
+		{"trailing comment does not count", "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \"/o/other.json\" } # was " + cfg + "\n", cfg, false, "other.json"},
+		{"literal string pin", "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = '/o/other.json' }\n", def, false, "other.json"},
+		{"quoted key pin", "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { \"TINCAN_CONFIG\" = \"/o/other.json\" }\n", def, false, "other.json"},
+		{"two different pins", "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \"" + cfg + "\" }\n[mcp_servers.agent-tincan.env]\nTINCAN_CONFIG = \"/o/other.json\"\n", cfg, false, "cannot read"},
+		{"literal string naming this agent", "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = '" + cfg + "' }\n", cfg, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tc.in), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, notice, err := setCodexApproval(path, "/opt/tincan", tc.cfg, def)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed != tc.changed || !strings.Contains(notice, tc.notice) {
+				t.Fatalf("changed = %v, notice = %q", changed, notice)
+			}
+			if b, _ := os.ReadFile(path); !tc.changed && string(b) != tc.in {
+				t.Fatalf("file changed:\n%s", b)
+			}
+		})
+	}
+}
+
+// A header with a comment is still the entry, so no second table is added.
+func TestSetCodexApprovalCommentedHeader(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := "[mcp_servers.agent-tincan] # tincan\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \"" + cfg + "\" }\n"
+	if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, notice, err := setCodexApproval(path, "/opt/tincan", cfg, "/def.json"); err != nil || !changed || notice != "" {
+		t.Fatalf("changed=%v notice=%q err=%v", changed, notice, err)
+	}
+	b, _ := os.ReadFile(path)
+	if n := strings.Count(string(b), "[mcp_servers.agent-tincan]"); n != 1 || !strings.Contains(string(b), "# tincan\ndefault_tools_approval_mode = \"approve\"") {
+		t.Fatalf("%d tables:\n%s", n, b)
+	}
+}
+
+// A dotfile-managed config.toml stays a link, and the file it points at
+// gets the approval mode.
+func TestSetCodexApprovalFollowsSymlink(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	dir := t.TempDir()
+	real := filepath.Join(dir, "dotfiles", "codex.toml")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \""+cfg+"\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.toml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	if changed, _, err := setCodexApproval(link, "/opt/tincan", cfg, "/def.json"); err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("config.toml is no longer a symlink")
+	}
+	if b, _ := os.ReadFile(real); !strings.Contains(string(b), `default_tools_approval_mode = "approve"`) {
+		t.Fatalf("linked file not updated:\n%s", b)
+	}
+}
+
+// With CODEX_HOME set, install edits that Codex config and the service
+// runs Codex with the same CODEX_HOME; doctor notices when they differ.
+func TestListenInstallCodexHome(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			cfg := filepath.Join(t.TempDir(), "codex.json")
+			o := listenOptions(t, goos, cfg)
+			o.CodexHome = filepath.Join(t.TempDir(), "codex home")
+			if err := installListener(o, codexWake(t)); err != nil {
+				t.Fatal(err)
+			}
+			if b, err := os.ReadFile(filepath.Join(o.CodexHome, "config.toml")); err != nil || !strings.Contains(string(b), "approve") {
+				t.Fatalf("Codex config under CODEX_HOME: %s %v", b, err)
+			}
+			svc, _ := os.ReadFile(listenServiceFile(o.Home, goos, "codex"))
+			if got := serviceEnv(svc, goos, "CODEX_HOME"); got != o.CodexHome {
+				t.Fatalf("service CODEX_HOME = %q, want %q:\n%s", got, o.CodexHome, svc)
+			}
+			loaded := func(string) bool { return true }
+			if c, _ := listenerCheck(goos, o.Home, cfg, o.CodexHome, o.DefaultConfig, loaded); c.Status != "ok" {
+				t.Fatalf("matching CODEX_HOME: %+v", c)
+			}
+			if c, _ := listenerCheck(goos, o.Home, cfg, "", o.DefaultConfig, loaded); c.Status != "warn" || !strings.Contains(c.Detail, "CODEX_HOME") {
+				t.Fatalf("different CODEX_HOME: %+v", c)
+			}
+		})
+	}
+}
+
+// The service can find the wake's tool and this tincan wherever they live.
+func TestListenInstallServicePath(t *testing.T) {
+	tools := filepath.Join(t.TempDir(), "fnm", "bin")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "copilot"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	w, err := examples.Wake("copilot-cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := listenOptions(t, "linux", filepath.Join(t.TempDir(), "copilot-cli.json"))
+	o.Agent = "copilot-cli"
+	if err := installListener(o, w); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := os.ReadFile(listenServiceFile(o.Home, "linux", "copilot-cli"))
+	path := serviceEnv(svc, "linux", "PATH")
+	for _, dir := range []string{tools, "/opt/tin can"} {
+		if !slices.Contains(filepath.SplitList(path), dir) {
+			t.Errorf("service PATH %q lacks %s", path, dir)
+		}
+	}
+	if got := serviceEnv(svc, "linux", "TINCAN_BIN"); got != o.Binary {
+		t.Errorf("TINCAN_BIN = %q, want %q", got, o.Binary)
+	}
+}
+
+// Install replaces a script from an older release that nobody edited, and
+// keeps a script it has no record of writing.
+func TestListenInstallStaleAndUnstamped(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "codex.json")
+	o, _ := installForTest(t, "linux", cfg, codexWake(t))
+	dir := listenDir(cfg)
+	script := filepath.Join(dir, "codex-wake.sh")
+	old := []byte("#!/bin/sh\n# older release\n")
+	if err := os.WriteFile(script, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := readWakeStamp(dir)
+	st.Files["codex-wake.sh"] = sha256Hex(old)
+	if err := writeWakeStamp(dir, st); err != nil {
+		t.Fatal(err)
+	}
+	o.Out = &bytes.Buffer{}
+	if err := installListener(o, codexWake(t)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(script); !bytes.Equal(b, codexWake(t).Script) {
+		t.Fatal("stale unedited script was not replaced")
+	}
+	if st, _ := readWakeStamp(dir); st.Files["codex-wake.sh"] != sha256Hex(codexWake(t).Script) {
+		t.Fatal("stamp not updated")
+	}
+
+	if err := os.WriteFile(script, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, listenStampFile)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	o.Out = &out
+	if err := installListener(o, codexWake(t)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(script); !bytes.Equal(b, old) || !strings.Contains(out.String(), "left "+script) {
+		t.Fatalf("unstamped script not kept and named:\n%s", out.String())
+	}
+}
+
+// When Codex's config cannot be written, install fails rather than leave a
+// listener whose wakes cannot call the tincan tools.
+func TestListenInstallFailsWhenCodexConfigUnwritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write a read-only folder")
+	}
+	o := listenOptions(t, "linux", filepath.Join(t.TempDir(), "codex.json"))
+	o.CodexHome = t.TempDir()
+	if err := os.Chmod(o.CodexHome, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(o.CodexHome, 0o755) })
+	var out bytes.Buffer
+	o.Out = &out
+	if err := installListener(o, codexWake(t)); err == nil || !strings.Contains(err.Error(), "could not update") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(out.String(), "start it with") {
+		t.Fatalf("printed a start command:\n%s", out.String())
+	}
+}
+
+// tincan upgrade runs the hidden tincan listen refresh.
+func TestListenRefreshCommand(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no listener services here")
+	}
+	cfg := filepath.Join(t.TempDir(), "codex.json")
+	o, _ := installForTest(t, runtime.GOOS, cfg, codexWake(t))
+	t.Setenv("HOME", o.Home)
+	script := filepath.Join(listenDir(cfg), "codex-wake.sh")
+	old := []byte("#!/bin/sh\n# older release\n")
+	if err := os.WriteFile(script, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := readWakeStamp(listenDir(cfg))
+	st.Files["codex-wake.sh"] = sha256Hex(old)
+	if err := writeWakeStamp(listenDir(cfg), st); err != nil {
+		t.Fatal(err)
+	}
+	cmd := listenCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"refresh"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "updated "+script) {
+		t.Fatalf("output:\n%s", out.String())
 	}
 }

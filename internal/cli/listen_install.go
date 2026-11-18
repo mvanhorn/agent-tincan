@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,8 +36,9 @@ const listenServicePrefix = "com.agenttincan.listen."
 const listenStampFile = "installed.json"
 
 // listenLaunchdTemplate is a listener's launchd agent. Placeholders:
-// __TINCAN_BINARY__, __HOME__, __PATH__, __AGENT__ and __TINCAN_CONFIG__,
-// XML-escaped when filled, and __ARGS__, the listen flags.
+// __TINCAN_BINARY__, __HOME__, __PATH__, __AGENT__, __TINCAN_CONFIG__ and
+// __TINCAN_BIN__, XML-escaped when filled, __ARGS__, the listen flags, and
+// __EXTRA_ENV__, more environment entries.
 const listenLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
@@ -60,6 +62,8 @@ const listenLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>__PATH__</string>
     <key>TINCAN_CONFIG</key>
     <string>__TINCAN_CONFIG__</string>
+    <key>TINCAN_BIN</key>
+    <string>__TINCAN_BIN__</string>__EXTRA_ENV__
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -77,7 +81,6 @@ const listenLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 `
 
-// listenSystemdTemplate is a listener's Linux user unit.
 const listenSystemdTemplate = `[Unit]
 Description=Agent Tincan listener for __AGENT__
 After=network-online.target
@@ -86,6 +89,7 @@ After=network-online.target
 ExecStart="__TINCAN_BINARY__" listen__ARGS__
 Environment="PATH=__PATH__"
 Environment="TINCAN_CONFIG=__TINCAN_CONFIG__"
+Environment="TINCAN_BIN=__TINCAN_BIN__"__EXTRA_ENV__
 Restart=always
 RestartSec=10
 
@@ -102,18 +106,30 @@ func listenDir(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), strings.TrimSuffix(filepath.Base(configPath), ".json")+".listen")
 }
 
-// listenExecArg is the --exec value for a script: tincan listen runs it
-// through sh -c, so the path is quoted to stay one word.
-func listenExecArg(script string) string { return shellQuote(script) }
+// listenService is what a listener's service runs: the agent, its wake
+// script and config, the tincan binary, and for Codex the CODEX_HOME the
+// install edited, so a woken Codex reads that same config.
+type listenService struct {
+	Agent, Script, Config, Binary, CodexHome string
+}
 
-func listenServiceDef(agent, script, configPath string) history.ServiceDef {
+func (s listenService) def() history.ServiceDef {
+	launchdEnv, systemdEnv := "", ""
+	vars := []string{"__AGENT__", s.Agent, "__TINCAN_CONFIG__", s.Config, "__TINCAN_BIN__", s.Binary}
+	if s.CodexHome != "" {
+		launchdEnv = "\n    <key>CODEX_HOME</key>\n    <string>__CODEX_HOME__</string>"
+		systemdEnv = "\nEnvironment=\"CODEX_HOME=__CODEX_HOME__\""
+		vars = append(vars, "__CODEX_HOME__", s.CodexHome)
+	}
 	return history.ServiceDef{
-		Label:       listenLabel(agent),
-		Unit:        listenUnit(agent),
-		Launchd:     listenLaunchdTemplate,
-		Systemd:     listenSystemdTemplate,
-		Vars:        []string{"__AGENT__", agent, "__TINCAN_CONFIG__", configPath},
-		Args:        []string{"--exec", listenExecArg(script)},
+		Label:   listenLabel(s.Agent),
+		Unit:    listenUnit(s.Agent),
+		Launchd: strings.Replace(listenLaunchdTemplate, "__EXTRA_ENV__", launchdEnv, 1),
+		Systemd: strings.Replace(listenSystemdTemplate, "__EXTRA_ENV__", systemdEnv, 1),
+		Vars:    vars,
+		// tincan listen runs the command through sh -c, so the path is
+		// quoted to stay one word.
+		Args:        []string{"--exec", shellQuote(s.Script)},
 		Unsupported: "tincan listen install writes launchd agents (macOS) and systemd user units (Linux); run tincan listen under your own service manager",
 	}
 }
@@ -162,16 +178,45 @@ func wakeFiles(w examples.WakeScript) map[string][]byte {
 	return files
 }
 
+type wakeFileState int
+
+const (
+	wakeFileCurrent wakeFileState = iota // this release's bytes
+	wakeFileStale                        // what tincan last wrote, from an older release
+	wakeFileEdited                       // not what tincan last wrote: the owner's
+	wakeFileMissing
+)
+
+// readWakeFile reads an installed wake file and says what it is against its
+// stamp and this release's body. Only a read error other than a missing
+// file is returned.
+func readWakeFile(path, stamped string, body []byte) (wakeFileState, error) {
+	cur, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return wakeFileMissing, nil
+	case err != nil:
+		return 0, err
+	case body != nil && bytes.Equal(cur, body):
+		return wakeFileCurrent, nil
+	case stamped == "" || sha256Hex(cur) != stamped:
+		return wakeFileEdited, nil
+	}
+	return wakeFileStale, nil
+}
+
 type listenInstallOptions struct {
 	GOOS, Home, Binary string
 	UID                int
 	Launcher           string
 	ConfigPath         string // the agent's config, absolute
 	Agent              string
-	DefaultConfig      string // the config tincan uses without TINCAN_CONFIG
-	CodexConfig        string
+	DefaultConfig      string
+	CodexHome          string // "" for ~/.codex
 	Out                io.Writer
 }
+
+func (o listenInstallOptions) codexConfig() string { return codexConfigPath(o.Home, o.CodexHome) }
 
 // installListener writes the wake's files beside the agent's config, the
 // listener service, and for Codex the approval mode on its MCP entry. It
@@ -185,13 +230,23 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 		return fmt.Errorf("agent name %q cannot name a service", o.Agent)
 	}
 	if o.GOOS != "darwin" && o.GOOS != "linux" {
-		return errors.New(listenServiceDef(o.Agent, "", o.ConfigPath).Unsupported)
+		return errors.New(listenService{Agent: o.Agent}.def().Unsupported)
+	}
+	isCodex := w.Name == "codex"
+	if isCodex {
+		if err := checkCodexEntry(o.codexConfig(), o.ConfigPath, o.DefaultConfig); err != nil {
+			return err
+		}
 	}
 	out := o.Out
 	fmt.Fprintf(out, "Before you start it: %s\n\n", w.Notice)
-	if _, err := exec.LookPath(w.Tool); err != nil {
-		fmt.Fprintf(out, "Note: %s is not on this PATH. The service looks for it on the PATH it is written with; install it, or put its folder on your PATH and run this again.\n", w.Tool)
+	var toolDirs []string
+	if p, err := exec.LookPath(w.Tool); err == nil {
+		toolDirs = append(toolDirs, filepath.Dir(p))
+	} else {
+		fmt.Fprintf(out, "Note: %s is not on this PATH, so the service cannot find it either. Install it, or put its folder on your PATH, and run this again.\n", w.Tool)
 	}
+	toolDirs = append(toolDirs, filepath.Dir(o.Binary))
 
 	dir := listenDir(o.ConfigPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -204,48 +259,51 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 	st := wakeStamp{Wake: w.Name, Agent: o.Agent, Files: map[string]string{}}
 	for name, body := range wakeFiles(w) {
 		path := filepath.Join(dir, name)
-		cur, rerr := os.ReadFile(path)
-		switch {
-		case rerr == nil && sha256Hex(cur) == sha256Hex(body):
+		state, err := readWakeFile(path, prior.Files[name], body)
+		if err != nil {
+			return err
+		}
+		switch state {
+		case wakeFileCurrent:
 			st.Files[name] = sha256Hex(body)
 			fmt.Fprintf(out, "current %s\n", path)
-			continue
-		case rerr == nil && (prior.Files[name] == "" || sha256Hex(cur) != prior.Files[name]):
-			// Not what tincan last wrote: the owner's file stays.
+		case wakeFileEdited:
 			st.Files[name] = prior.Files[name]
 			if st.Files[name] == "" {
 				st.Files[name] = sha256Hex(body)
 			}
 			fmt.Fprintf(out, "left %s: it differs from what tincan wrote, so your version was kept. This release's version is in the repo at examples/%s.\n", path, examplePath(w, name))
-			continue
+		default:
+			if err := writeFileReplacing(path, body, 0o755); err != nil {
+				return err
+			}
+			st.Files[name] = sha256Hex(body)
+			fmt.Fprintf(out, "wrote %s\n", path)
 		}
-		if err := writeFileReplacing(path, body, 0o755); err != nil {
-			return err
-		}
-		st.Files[name] = sha256Hex(body)
-		fmt.Fprintf(out, "wrote %s\n", path)
 	}
 	if err := writeWakeStamp(dir, st); err != nil {
 		return err
 	}
 
-	script := filepath.Join(dir, w.File)
-	res, err := history.InstallServiceDef(history.ServiceOptions{GOOS: o.GOOS, Home: o.Home, Binary: o.Binary, UID: o.UID, Launcher: o.Launcher},
-		listenServiceDef(o.Agent, script, o.ConfigPath))
+	svc := listenService{Agent: o.Agent, Script: filepath.Join(dir, w.File), Config: o.ConfigPath, Binary: o.Binary}
+	if isCodex {
+		svc.CodexHome = o.CodexHome
+	}
+	res, err := history.InstallServiceDef(history.ServiceOptions{GOOS: o.GOOS, Home: o.Home, Binary: o.Binary, UID: o.UID, Launcher: o.Launcher, ToolDirs: toolDirs}, svc.def())
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "listener service definition: %s (not started)\n", res.Path)
 
-	if w.Name == "codex" {
-		changed, notice, err := setCodexApproval(o.CodexConfig, o.Binary, o.ConfigPath, o.DefaultConfig)
+	if isCodex {
+		changed, notice, err := setCodexApproval(o.codexConfig(), o.Binary, o.ConfigPath, o.DefaultConfig)
 		switch {
 		case err != nil:
-			fmt.Fprintf(out, "Could not update %s (%v). Add default_tools_approval_mode = \"approve\" to its [mcp_servers.agent-tincan] table yourself.\n", o.CodexConfig, err)
+			return fmt.Errorf("could not update %s (%w), so a woken Codex could not call the tincan tools. Fix that and run this again, or add default_tools_approval_mode = \"approve\" to its [mcp_servers.agent-tincan] table yourself", o.codexConfig(), err)
 		case notice != "":
-			fmt.Fprintln(out, notice)
+			return errors.New(notice)
 		case changed:
-			fmt.Fprintf(out, "set default_tools_approval_mode = \"approve\" on the agent-tincan entry in %s\n", o.CodexConfig)
+			fmt.Fprintf(out, "set default_tools_approval_mode = \"approve\" on the agent-tincan entry in %s\n", o.codexConfig())
 		}
 	}
 
@@ -262,182 +320,38 @@ func examplePath(w examples.WakeScript, name string) string {
 	return w.Source
 }
 
-var (
-	tomlAnyTable    = regexp.MustCompile(`^\s*\[`)
-	tomlApprovalKey = regexp.MustCompile(`^\s*default_tools_approval_mode\s*=`)
-	tomlEnvConfig   = regexp.MustCompile(`TINCAN_CONFIG\s*=\s*"((?:[^"\\]|\\.)*)"`)
-)
-
-// codexEntry is the agent-tincan table of a Codex config.toml: its line
-// range (header to before the next table that is not its own sub-table),
-// whether it sets the approval mode to approve, and the TINCAN_CONFIG it
-// pins ("" when it pins none, meaning the default config).
-type codexEntry struct {
-	start, end int
-	approve    bool
-	hasKey     bool
-	config     string
-}
-
-func findCodexEntry(lines []string) (codexEntry, bool) {
-	e := codexEntry{start: -1}
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if e.start < 0 {
-			if m := tomlSection.FindStringSubmatch(trimmed); m != nil && m[1]+m[2] == "agent-tincan" {
-				e.start, e.end = i, len(lines)
-			}
-			continue
-		}
-		if tomlAnyTable.MatchString(line) && !strings.HasPrefix(trimmed, "[mcp_servers.agent-tincan.") && !strings.HasPrefix(trimmed, `[mcp_servers."agent-tincan".`) {
-			e.end = i
-			break
-		}
-		if tomlApprovalKey.MatchString(line) {
-			e.hasKey = true
-			e.approve = strings.Contains(strings.ReplaceAll(line, " ", ""), `="approve"`)
-		}
-		if m := tomlEnvConfig.FindStringSubmatch(line); m != nil {
-			e.config = strings.NewReplacer(`\\`, `\`, `\"`, `"`).Replace(m[1])
-		}
-	}
-	return e, e.start >= 0
-}
-
-// sameConfig reports whether an MCP entry's TINCAN_CONFIG value names cfg.
-// No value means the default config.
-func sameConfig(pinned, cfg, def string) bool {
-	if pinned == "" {
-		pinned = def
-	}
-	if rest, ok := strings.CutPrefix(pinned, "~/"); ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			pinned = filepath.Join(home, rest)
-		}
-	}
-	return filepath.Clean(pinned) == filepath.Clean(cfg)
-}
-
-func tomlQuote(s string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
-}
-
-// setCodexApproval sets default_tools_approval_mode = "approve" on the
-// agent-tincan entry of Codex's config.toml, line by line so the owner's
-// comments and order stay, or adds the entry when none names tincan. It
-// changes nothing, and returns a notice saying what to do, when a tincan
-// entry has another name or the entry pins another agent's config: a wake
-// would then act as that agent.
-func setCodexApproval(path, binary, cfg, def string) (changed bool, notice string, err error) {
-	raw, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, "", err
-	}
-	mode := os.FileMode(0o600)
-	if fi, serr := os.Stat(path); serr == nil {
-		mode = fi.Mode().Perm()
-	}
-	s := string(raw)
-	lines := strings.Split(s, "\n")
-	e, ok := findCodexEntry(lines)
-	if !ok {
-		for _, other := range tomlServers(s) {
-			return false, fmt.Sprintf("%s has a tincan entry named %s, not agent-tincan, so it was left alone. Add default_tools_approval_mode = \"approve\" to that table, or rename it agent-tincan and run this again.", path, other.Name), nil
-		}
-		var b strings.Builder
-		b.WriteString(s)
-		if s != "" && !strings.HasSuffix(s, "\n") {
-			b.WriteString("\n")
-		}
-		if s != "" {
-			b.WriteString("\n")
-		}
-		fmt.Fprintf(&b, "[mcp_servers.agent-tincan]\ncommand = %s\nargs = [\"mcp\"]\nenv = { TINCAN_CONFIG = %s }\ndefault_tools_approval_mode = \"approve\"\n", tomlQuote(binary), tomlQuote(cfg))
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return false, "", err
-		}
-		return true, "", writeFileReplacing(path, []byte(b.String()), mode)
-	}
-	if !sameConfig(e.config, cfg, def) {
-		pinned := e.config
-		if pinned == "" {
-			pinned = "the default config (" + def + ")"
-		}
-		return false, fmt.Sprintf("The agent-tincan entry in %s runs tincan as %s, not %s, so a wake would act as another agent. It was left alone: point its TINCAN_CONFIG at %s, add default_tools_approval_mode = \"approve\", and run this again.", path, pinned, cfg, cfg), nil
-	}
-	if e.approve {
-		return false, "", nil
-	}
-	const keyLine = `default_tools_approval_mode = "approve"`
-	if e.hasKey {
-		for i := e.start + 1; i < e.end; i++ {
-			if tomlApprovalKey.MatchString(lines[i]) {
-				lines[i] = keyLine
-			}
-		}
-	} else {
-		lines = append(lines[:e.start+1], append([]string{keyLine}, lines[e.start+1:]...)...)
-	}
-	return true, "", writeFileReplacing(path, []byte(strings.Join(lines, "\n")), mode)
-}
-
-// codexConfigPath is Codex's config file: $CODEX_HOME/config.toml, else
-// ~/.codex/config.toml.
-func codexConfigPath(home string) string {
-	if d := os.Getenv("CODEX_HOME"); d != "" {
-		return filepath.Join(d, "config.toml")
-	}
-	return filepath.Join(home, ".codex", "config.toml")
-}
-
-// defaultConfigPath is the config tincan uses when TINCAN_CONFIG is unset.
-func defaultConfigPath() string {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		dir = "."
-	}
-	return filepath.Join(dir, "tincan", "client.json")
-}
-
-var (
-	plistConfigRE   = regexp.MustCompile(`<key>TINCAN_CONFIG</key>\s*<string>([^<]*)</string>`)
-	systemdConfigRE = regexp.MustCompile(`(?m)^Environment="TINCAN_CONFIG=((?:[^"\\]|\\.)*)"`)
-)
-
-// installedListenerConfigs finds the config of every installed listener
-// from its service file, wherever that config lives.
-func installedListenerConfigs(home, goos string) []string {
+func listenServiceFiles(home, goos string) []string {
 	var files []string
-	var re *regexp.Regexp
 	switch goos {
 	case "darwin":
 		files, _ = filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", listenServicePrefix+"*.plist"))
-		re = plistConfigRE
 	case "linux":
 		files, _ = filepath.Glob(filepath.Join(home, ".config", "systemd", "user", "tincan-listen-*.service"))
-		re = systemdConfigRE
-	default:
-		return nil
 	}
-	var out []string
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		m := re.FindSubmatch(b)
-		if m == nil {
-			continue
-		}
-		v := string(m[1])
-		if goos == "darwin" {
-			v = html.UnescapeString(v)
-		} else {
-			v = strings.NewReplacer(`%%`, `%`, `\"`, `"`, `\\`, `\`).Replace(v)
-		}
-		out = append(out, v)
+	return files
+}
+
+func listenServiceFile(home, goos, agent string) string {
+	if goos == "darwin" {
+		return filepath.Join(home, "Library", "LaunchAgents", listenLabel(agent)+".plist")
 	}
-	return out
+	return filepath.Join(home, ".config", "systemd", "user", listenUnit(agent))
+}
+
+// serviceEnv is the value a listener's plist or unit sets for key, or ""
+// when it sets none.
+func serviceEnv(b []byte, goos, key string) string {
+	q := regexp.QuoteMeta(key)
+	if goos == "darwin" {
+		if m := regexp.MustCompile(`<key>` + q + `</key>\s*<string>([^<]*)</string>`).FindSubmatch(b); m != nil {
+			return html.UnescapeString(string(m[1]))
+		}
+		return ""
+	}
+	if m := regexp.MustCompile(`(?m)^Environment="` + q + `=((?:[^"\\]|\\.)*)"`).FindSubmatch(b); m != nil {
+		return strings.NewReplacer(`%%`, `%`, `\"`, `"`, `\\`, `\`).Replace(string(m[1]))
+	}
+	return ""
 }
 
 // refreshWakeScripts brings every installed listener's scripts up to this
@@ -446,7 +360,15 @@ func installedListenerConfigs(home, goos string) []string {
 // recreated, since the owner may have removed it on purpose.
 func refreshWakeScripts(out io.Writer, home, goos string) error {
 	var errs []error
-	for _, cfg := range installedListenerConfigs(home, goos) {
+	for _, f := range listenServiceFiles(home, goos) {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		cfg := serviceEnv(b, goos, "TINCAN_CONFIG")
+		if cfg == "" {
+			continue
+		}
 		dir := listenDir(cfg)
 		st, err := readWakeStamp(dir)
 		if err != nil {
@@ -468,27 +390,28 @@ func refreshWakeScripts(out io.Writer, home, goos string) error {
 				continue
 			}
 			path := filepath.Join(dir, name)
-			cur, err := os.ReadFile(path)
-			switch {
-			case errors.Is(err, fs.ErrNotExist):
+			state, err := readWakeFile(path, stamped, body)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			switch state {
+			case wakeFileMissing:
 				fmt.Fprintf(out, "missing %s: not recreated; run tincan listen install --wake %s again to write it\n", path, st.Wake)
-				continue
-			case err != nil:
-				errs = append(errs, err)
-				continue
-			case sha256Hex(cur) != stamped:
+			case wakeFileEdited:
 				fmt.Fprintf(out, "left %s: you edited it, so this release's version was not written (it is in the repo at examples/%s)\n", path, examplePath(w, name))
-				continue
-			case stamped == sha256Hex(body):
-				continue
+			case wakeFileCurrent:
+				if stamped != sha256Hex(body) {
+					st.Files[name], changed = sha256Hex(body), true
+				}
+			case wakeFileStale:
+				if err := writeFileReplacing(path, body, 0o755); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				st.Files[name], changed = sha256Hex(body), true
+				fmt.Fprintf(out, "updated %s\n", path)
 			}
-			if err := writeFileReplacing(path, body, 0o755); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			st.Files[name] = sha256Hex(body)
-			changed = true
-			fmt.Fprintf(out, "updated %s\n", path)
 		}
 		if changed {
 			if err := writeWakeStamp(dir, st); err != nil {
@@ -501,17 +424,18 @@ func refreshWakeScripts(out io.Writer, home, goos string) error {
 
 // listenerCheck reports the listener installed for the agent whose config
 // is cfg: its service file, whether launchd has it loaded, whether its
-// scripts are current, and for Codex the agent-tincan entry. It returns a
-// zero check, which doctor skips, when no listener is installed.
-func listenerCheck(goos, home, cfg, codexCfg, def string, loaded func(label string) bool) check {
+// scripts are current, and for Codex the agent-tincan entry in the Codex
+// config the service uses. shellCodexHome is CODEX_HOME in doctor's own
+// environment. ok is false when no listener is installed.
+func listenerCheck(goos, home, cfg, shellCodexHome, def string, loaded func(label string) bool) (c check, ok bool) {
 	const name = "listener"
 	dir := listenDir(cfg)
 	st, err := readWakeStamp(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return check{}
+		return check{}, false
 	}
 	if err != nil {
-		return check{name, "warn", err.Error(), "Run tincan listen install again."}
+		return check{name, "warn", err.Error(), "Run tincan listen install again."}, true
 	}
 	reinstall := fmt.Sprintf("Run tincan listen install --wake %s again.", st.Wake)
 	status := "ok"
@@ -525,60 +449,57 @@ func listenerCheck(goos, home, cfg, codexCfg, def string, loaded func(label stri
 		}
 	}
 
-	switch goos {
-	case "darwin":
-		plist := filepath.Join(home, "Library", "LaunchAgents", listenLabel(st.Agent)+".plist")
-		if _, err := os.Stat(plist); err != nil {
-			warn("no service file at "+plist, reinstall)
-		} else if !loaded(listenLabel(st.Agent)) {
-			warn("its service is not loaded", fmt.Sprintf("Start it with launchctl bootstrap gui/%d %s", os.Getuid(), plist))
-		}
-	case "linux":
-		unit := filepath.Join(home, ".config", "systemd", "user", listenUnit(st.Agent))
-		if _, err := os.Stat(unit); err != nil {
-			warn("no service file at "+unit, reinstall)
-		}
+	svcFile := listenServiceFile(home, goos, st.Agent)
+	svc, err := os.ReadFile(svcFile)
+	if err != nil {
+		warn("no service file at "+svcFile, reinstall)
+	} else if goos == "darwin" && !loaded(listenLabel(st.Agent)) {
+		warn("its service is not loaded", fmt.Sprintf("Start it with launchctl bootstrap gui/%d %s", os.Getuid(), svcFile))
 	}
 
-	w, werr := examples.Wake(st.Wake)
+	var files map[string][]byte
+	if w, err := examples.Wake(st.Wake); err == nil {
+		files = wakeFiles(w)
+	}
 	for file, stamped := range st.Files {
 		path := filepath.Join(dir, file)
-		cur, err := os.ReadFile(path)
+		body, known := files[file]
+		state, err := readWakeFile(path, stamped, body)
 		switch {
-		case err != nil:
+		case err != nil || state == wakeFileMissing:
 			warn("missing "+path, reinstall)
-		case sha256Hex(cur) != stamped:
+		case state == wakeFileEdited:
 			detail = append(detail, path+" edited by you; tincan upgrade leaves it alone")
-		case werr == nil && stamped != sha256Hex(wakeFiles(w)[file]) && wakeFiles(w)[file] != nil:
+		case state == wakeFileStale && known:
 			warn(path+" is from an older release", fmt.Sprintf("Run tincan upgrade, or tincan listen install --wake %s again, to update it.", st.Wake))
 		}
 	}
 
 	if st.Wake == "codex" {
-		raw, err := os.ReadFile(codexCfg)
-		if err != nil {
+		codexHome := serviceEnv(svc, goos, "CODEX_HOME")
+		codexCfg := codexConfigPath(home, codexHome)
+		if shellCodexHome != codexHome {
+			warn(fmt.Sprintf("CODEX_HOME here is %q but the listener runs Codex with %q, so a woken Codex reads %s", shellCodexHome, codexHome, codexCfg), "Run tincan listen install --wake codex again with the CODEX_HOME Codex should use.")
+		}
+		_, raw, err := readCodexConfig(codexCfg)
+		if err != nil || len(raw) == 0 {
 			warn("no Codex config at "+codexCfg, reinstall)
 		} else if e, ok := findCodexEntry(strings.Split(string(raw), "\n")); !ok {
 			warn("no agent-tincan entry in "+codexCfg, reinstall)
 		} else {
-			if !sameConfig(e.config, cfg, def) {
-				pinned := e.config
-				if pinned == "" {
-					pinned = def
-				}
-				warn("the agent-tincan entry in "+codexCfg+" runs tincan as "+pinned+", so wakes act as another agent", "Point its TINCAN_CONFIG at "+cfg+".")
+			if msg := codexEntryMismatch(e, codexCfg, cfg, def); msg != "" {
+				warn(msg, "")
 			}
 			if !e.approve {
 				warn("the agent-tincan entry in "+codexCfg+" does not set default_tools_approval_mode = \"approve\", so unattended wakes cannot call the tincan tools", reinstall)
 			}
 		}
 	}
-	return check{name, status, strings.Join(detail, "; "), strings.Join(fix, " ")}
+	return check{name, status, strings.Join(detail, "; "), strings.Join(fix, " ")}, true
 }
 
 func listenInstallCmd() *cobra.Command {
 	var wake, binary string
-	var refresh bool
 	cmd := &cobra.Command{
 		Use:   "install --wake <" + strings.Join(examples.WakeNames(), "|") + ">",
 		Short: "Write a wake script and a login service that keeps tincan listen running for this agent; does not start it",
@@ -595,14 +516,11 @@ service. It never writes a secret into the service. A script you edited is
 kept, here and by tincan upgrade, which updates the scripts you did not edit.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			home, err := os.UserHomeDir()
+			w, err := examples.Wake(wake)
 			if err != nil {
 				return err
 			}
-			if refresh {
-				return refreshWakeScripts(cmd.OutOrStdout(), home, runtime.GOOS)
-			}
-			w, err := examples.Wake(wake)
+			home, err := os.UserHomeDir()
 			if err != nil {
 				return err
 			}
@@ -621,14 +539,30 @@ kept, here and by tincan upgrade, which updates the scripts you did not edit.`,
 			}
 			return installListener(listenInstallOptions{
 				GOOS: runtime.GOOS, Home: home, Binary: binary, UID: os.Getuid(),
-				ConfigPath: cfgPath, Agent: cfg.Agent, DefaultConfig: defaultConfigPath(),
-				CodexConfig: codexConfigPath(home), Out: cmd.OutOrStdout(),
+				ConfigPath: cfgPath, Agent: cfg.Agent, DefaultConfig: client.DefaultConfigPath(),
+				CodexHome: os.Getenv("CODEX_HOME"), Out: cmd.OutOrStdout(),
 			}, w)
 		},
 	}
 	cmd.Flags().StringVar(&wake, "wake", "", "the wake to install: "+strings.Join(examples.WakeNames(), ", "))
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
-	cmd.Flags().BoolVar(&refresh, "refresh", false, "update installed wake scripts that were not edited (run by tincan upgrade)")
-	_ = cmd.Flags().MarkHidden("refresh")
 	return cmd
+}
+
+// listenRefreshCmd is run by tincan upgrade with the new binary, which
+// carries the new release's scripts.
+func listenRefreshCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "refresh",
+		Short:  "Update installed wake scripts that were not edited",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return err
+			}
+			return refreshWakeScripts(cmd.OutOrStdout(), home, runtime.GOOS)
+		},
+	}
 }

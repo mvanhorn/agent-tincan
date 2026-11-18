@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The release must carry the same scripts the docs link to, byte for byte.
+// Each wake's Source names the file its go:embed reads, which the docs link to.
 func TestWakeScriptsMatchTheRepo(t *testing.T) {
 	for _, name := range WakeNames() {
 		t.Run(name, func(t *testing.T) {
@@ -22,15 +22,6 @@ func TestWakeScriptsMatchTheRepo(t *testing.T) {
 			}
 			if !bytes.Equal(w.Script, want) {
 				t.Fatalf("%s: embedded script differs from %s", name, w.Source)
-			}
-			if w.NeedsLib {
-				lib, err := os.ReadFile(filepath.Join("lib", WakeLibName))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(WakeLib(), lib) {
-					t.Fatal("embedded wake library differs from lib/" + WakeLibName)
-				}
 			}
 			if w.Notice == "" {
 				t.Fatal("no install notice")

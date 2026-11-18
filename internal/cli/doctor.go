@@ -196,10 +196,9 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	// 6. tincan mcp servers left on another build by an upgrade.
 	add(buildCheck(launches, mcpserver.LaunchRunning))
 
-	// A listener installed by tincan listen install for this agent.
 	if home, err := os.UserHomeDir(); err == nil {
 		if cfg, err := filepath.Abs(client.ConfigPath()); err == nil {
-			if c := listenerCheck(runtime.GOOS, home, cfg, codexConfigPath(home), defaultConfigPath(), launchctl{uid: os.Getuid()}.Loaded); c.Name != "" {
+			if c, ok := listenerCheck(runtime.GOOS, home, cfg, os.Getenv("CODEX_HOME"), client.DefaultConfigPath(), launchctl{uid: os.Getuid()}.Loaded); ok {
 				add(c)
 			}
 		}

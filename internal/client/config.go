@@ -86,18 +86,28 @@ func WithoutProxyPassword(proxy string) string {
 // leading ~ is expanded, since MCP config files pass the value unexpanded.
 func ConfigPath() string {
 	if p := os.Getenv("TINCAN_CONFIG"); p != "" {
-		if rest, ok := strings.CutPrefix(p, "~/"); ok {
-			if home, err := os.UserHomeDir(); err == nil {
-				return filepath.Join(home, rest)
-			}
-		}
-		return p
+		return ExpandHome(p)
 	}
+	return DefaultConfigPath()
+}
+
+// DefaultConfigPath is the config used when TINCAN_CONFIG is unset.
+func DefaultConfigPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = "."
 	}
 	return filepath.Join(dir, "tincan", "client.json")
+}
+
+// ExpandHome expands a leading ~/ in a config path.
+func ExpandHome(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return p
 }
 
 // LoadConfig reads the saved config, then applies TINCAN_RELAY and

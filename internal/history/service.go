@@ -110,6 +110,9 @@ type ServiceOptions struct {
 	// ClaudeDir is put next on the service's PATH. Default: the directory
 	// of claude on PATH, if any.
 	ClaudeDir string
+	// ToolDirs are put on the service's PATH after CodexDir and ClaudeDir,
+	// for a service whose command runs other tools.
+	ToolDirs []string
 	// UID fills the printed launchctl command (default: os.Getuid()).
 	UID int
 	// Thread is a web agent's fixed thread (--thread), for a site whose
@@ -230,7 +233,7 @@ func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
 		return ServiceResult{}, err
 	}
 	o.findTools()
-	path := servicePath(o.GOOS, o.Home, o.CodexDir, o.ClaudeDir)
+	path := servicePath(o.GOOS, o.Home, append([]string{o.CodexDir, o.ClaudeDir}, o.ToolDirs...)...)
 	launcher := ""
 	if o.GOOS == "darwin" && !d.NoLauncher {
 		launcher = o.Launcher
