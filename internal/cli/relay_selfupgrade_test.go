@@ -18,10 +18,10 @@ import (
 func TestApplySelfUpgrade(t *testing.T) {
 	state := t.TempDir()
 	cmd := relayInstallCmd()
-	if err := applySelfUpgrade(cmd.Flags(), state); err != nil {
+	if err := cmd.Flags().Set("self-upgrade", "true"); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Flags().Set("self-upgrade", "true"); err != nil {
+	if err := applySelfUpgrade(cmd.Flags(), state); err != nil {
 		t.Fatal(err)
 	}
 	args := relayServiceArgs(cmd.Flags())
@@ -43,10 +43,11 @@ func TestApplySelfUpgrade(t *testing.T) {
 			t.Errorf("args %q lack %q", args, want)
 		}
 	}
-	if fi, err := os.Stat(dist); err != nil || !fi.IsDir() {
+	fi, err := os.Stat(dist)
+	if err != nil || !fi.IsDir() {
 		t.Fatalf("dist folder not created: %v", err)
 	}
-	if fi, _ := os.Stat(dist); runtime.GOOS != "windows" && fi.Mode().Perm()&0o022 != 0 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o022 != 0 {
 		t.Fatalf("dist folder is writable by group or others: %v", fi.Mode().Perm())
 	}
 
@@ -81,14 +82,23 @@ func TestApplySelfUpgradeKeepsStatePrivate(t *testing.T) {
 	if fi, err := os.Stat(state); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("state folder mode = %v, %v; want 0700", fi.Mode().Perm(), err)
 	}
+
+	state = filepath.Join(t.TempDir(), "tincan-relay")
+	cmd = relayInstallCmd()
+	if err := cmd.Flags().Set("dist", filepath.Join(state, "my-dist")); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelfUpgrade(cmd.Flags(), state); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(state); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("with --dist inside it, state folder mode = %v, %v; want 0700", fi.Mode().Perm(), err)
+	}
 }
 
 func TestSelfUpgradeOffer(t *testing.T) {
-	if got := selfUpgradeOffer(""); !strings.Contains(got, "--self-upgrade") || !strings.Contains(got, "relay-upgrade") {
+	if got := selfUpgradeOffer(); !strings.Contains(got, "--self-upgrade") || !strings.Contains(got, "relay-upgrade") {
 		t.Fatalf("offer = %q", got)
-	}
-	if got := selfUpgradeOffer("/srv/dist"); got != "" {
-		t.Fatalf("offer with --dist set = %q", got)
 	}
 }
 
@@ -113,10 +123,41 @@ func TestSelfUpgradeWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(bin, 0o755) })
-	if got := selfUpgradeWarning(exe, dist); !strings.Contains(got, bin) || !strings.Contains(got, "tincan relay-upgrade") {
+	if got := selfUpgradeWarning(exe, dist); !strings.Contains(got, bin) || !strings.Contains(got, "not writable by the relay user") {
 		t.Fatalf("read-only binary folder: warning %q", got)
 	}
 	os.Chmod(bin, 0o755)
+
+	// Whoever can write a parent can swap the whole dist folder.
+	parent := t.TempDir()
+	nested := filepath.Join(parent, "dist")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0o755) })
+	if got := selfUpgradeWarning(exe, nested); !strings.Contains(got, parent) || !strings.Contains(got, "other users") {
+		t.Fatalf("dist parent writable by others: warning %q", got)
+	}
+	// A sticky parent such as /tmp does not let others replace what they do not own.
+	if err := os.Chmod(parent, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	if got := selfUpgradeWarning(exe, nested); strings.Contains(got, parent) {
+		t.Fatalf("sticky parent flagged: warning %q", got)
+	}
+	os.Chmod(parent, 0o755)
+
+	// Writing into a folder also needs search permission.
+	if err := os.Chmod(dist, 0o655); err != nil {
+		t.Fatal(err)
+	}
+	if got := selfUpgradeWarning(exe, dist); !strings.Contains(got, dist) {
+		t.Fatalf("dist without search permission: warning %q", got)
+	}
+	os.Chmod(dist, 0o755)
 
 	if err := os.Chmod(dist, 0o777); err != nil {
 		t.Fatal(err)
@@ -166,9 +207,11 @@ func TestLatestReleaseTag(t *testing.T) {
 
 func TestRelayUpgradeLatestFlag(t *testing.T) {
 	var hits atomic.Int32
+	var tag atomic.Value
+	tag.Store("v0.9.0; bad")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		w.Write([]byte(`{"tag_name":"v0.9.0; bad"}`))
+		w.Write([]byte(`{"tag_name":"` + tag.Load().(string) + `"}`))
 	}))
 	t.Cleanup(ts.Close)
 	orig := latestReleaseURL
@@ -190,7 +233,21 @@ func TestRelayUpgradeLatestFlag(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Fatal("asked GitHub before refusing the flag pair")
 	}
-	if _, err := run("--latest"); err == nil || !strings.Contains(err.Error(), "tag") {
+	if _, err := run("--latest"); err == nil || !strings.Contains(err.Error(), "v0.9.0; bad") {
 		t.Fatalf("malformed tag: err = %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("GitHub asked %d times, want 1", hits.Load())
+	}
+
+	// A good tag is printed and used as --from-github; the relay at
+	// 127.0.0.1:1 then refuses the connection.
+	tag.Store("v0.9.0")
+	out, err := run("--latest")
+	if !strings.Contains(out, "latest release: v0.9.0") {
+		t.Fatalf("output %q lacks the resolved tag (err %v)", out, err)
+	}
+	if err == nil {
+		t.Fatal("upgrade against a closed port succeeded")
 	}
 }

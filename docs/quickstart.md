@@ -218,7 +218,7 @@ On the relay host, keep a dist directory and start the relay with it:
 tincan relay --admin my-laptop --dist ~/tincan-dist
 ```
 
-Or let the service carry it: `tincan relay install --admin my-laptop --self-upgrade` adds `--dist <state-dir>/dist` and `--release-url`, so `tincan relay-upgrade --from-github` works. At startup the relay warns if its user cannot replace its binary or write the dist folder, or if other users can write either.
+Or let the service carry it: `tincan relay install --admin my-laptop --self-upgrade` adds `--dist <state-dir>/dist` and `--release-url`, so `tincan relay-upgrade --from-github` works. At startup the relay warns if its user cannot replace its binary or write the dist folder, or if other users can write either one or a folder above it.
 
 For each release, either run `tincan relay-upgrade --from-github v0.8.0` from your admin device (see below; the relay needs `--release-url`), which has the relay fetch the release into that directory itself, or drop the raw binaries into it by hand, named `tincan_<os>_<arch>` (`tincan_linux_amd64`, `tincan_linux_arm64`, `tincan_darwin_arm64`, `tincan_darwin_amd64`), plus the release's `checksums.txt` and a `VERSION` file holding the release number (for example `0.4.0`). The relay serves only those names, and only to joined agents and admin devices. It never needs a restart to pick up a new release.
 

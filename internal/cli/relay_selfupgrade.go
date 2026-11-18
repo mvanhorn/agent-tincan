@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,12 +24,12 @@ var latestReleaseURL = "https://api.github.com/repos/mvanhorn/agent-tincan/relea
 // either one the operator gave, and creates the dist folder. The service
 // then carries the same explicit flags an operator could write by hand.
 func applySelfUpgrade(fs *pflag.FlagSet, stateDir string) error {
+	// The state folder holds every message, so a missing one is made 0700,
+	// as the relay itself makes it, before a dist folder that may sit in it.
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return err
+	}
 	if !fs.Changed("dist") {
-		// The state folder holds every message, so a missing one is made
-		// 0700, as the relay itself makes it, before the dist folder in it.
-		if err := os.MkdirAll(stateDir, 0o700); err != nil {
-			return err
-		}
 		if err := fs.Set("dist", filepath.Join(stateDir, "dist")); err != nil {
 			return err
 		}
@@ -41,12 +42,7 @@ func applySelfUpgrade(fs *pflag.FlagSet, stateDir string) error {
 	return os.MkdirAll(fs.Lookup("dist").Value.String(), 0o755)
 }
 
-// selfUpgradeOffer is what relay install says when it writes a relay that
-// cannot upgrade itself.
-func selfUpgradeOffer(dist string) string {
-	if dist != "" {
-		return ""
-	}
+func selfUpgradeOffer() string {
 	return "Self-upgrade is off: tincan relay-upgrade cannot update this relay, and agents cannot get new releases from it with tincan upgrade. " +
 		"To turn it on, run this install again with --self-upgrade (it adds --dist <state-dir>/dist and --release-url " + GitHubReleaseURL + "). " +
 		"The relay still downloads only a release an admin names with tincan relay-upgrade.\n"
@@ -69,18 +65,34 @@ func selfUpgradeWarning(exe, dist string) string {
 	if len(problems) > 0 {
 		msgs = append(msgs, "warning: tincan relay-upgrade will fail on this relay until this is fixed: "+strings.Join(problems, "; "))
 	}
-	// Whoever can write the dist folder or the binary's folder can run code
-	// as the relay at the next upgrade (docs/trust-model.md).
 	var open []string
 	for _, p := range []string{dist, filepath.Dir(exe)} {
-		if fi, err := os.Stat(p); p != "" && err == nil && fi.Mode().Perm()&0o022 != 0 {
-			open = append(open, p)
+		if p != "" {
+			open = append(open, writableByOthers(p)...)
 		}
 	}
+	open = slices.Compact(open)
 	if len(open) > 0 {
 		msgs = append(msgs, "warning: "+strings.Join(open, " and ")+" can be written by other users, and anyone who can write there can run code as the relay at the next tincan relay-upgrade; keep it writable only by the relay user (chmod go-w)")
 	}
 	return strings.Join(msgs, "\n")
+}
+
+// writableByOthers lists dir and each folder above it that a group or other
+// user can write. Whoever can write one of them can replace what the relay
+// upgrades from, and so run code as the relay at the next upgrade
+// (docs/trust-model.md). A sticky folder such as /tmp is left out: others
+// there cannot rename or remove what they do not own.
+func writableByOthers(dir string) []string {
+	var open []string
+	for p := filepath.Clean(dir); ; p = filepath.Dir(p) {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o022 != 0 && fi.Mode()&os.ModeSticky == 0 {
+			open = append(open, p)
+		}
+		if parent := filepath.Dir(p); parent == p {
+			return open
+		}
+	}
 }
 
 // latestReleaseTag asks GitHub for the newest stable release's tag, on the

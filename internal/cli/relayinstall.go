@@ -165,21 +165,21 @@ starting the service.`,
 				}
 				warnOtherRelayAgents(out, binary)
 			}
+			exe := binary
+			if exe == "" {
+				exe, _ = os.Executable()
+			}
 			if relayNeedsJoin(f) {
-				exe := binary
-				if exe == "" {
-					exe, _ = os.Executable()
-				}
 				fmt.Fprintf(out, "This relay has not joined your tailnet yet, and the service never stores TS_AUTHKEY. Run it once in a terminal first, stop it with Ctrl-C once it is up, then start the service:\n  TS_AUTHKEY=tskey-auth-... %s\n", shellCommand(append([]string{exe, "relay"}, args...)))
 			}
-			dist := cmd.Flags().Lookup("dist").Value.String()
-			fmt.Fprint(out, selfUpgradeOffer(dist))
-			if dist != "" {
-				exe := binary
-				if exe == "" {
-					exe, _ = os.Executable()
+			if f.dist == "" {
+				fmt.Fprint(out, selfUpgradeOffer())
+			} else {
+				// The running relay checks the file its symlinks lead to.
+				if real, err := filepath.EvalSymlinks(exe); err == nil {
+					exe = real
 				}
-				if msg := selfUpgradeWarning(exe, dist); msg != "" {
+				if msg := selfUpgradeWarning(exe, f.dist); msg != "" {
 					fmt.Fprintln(out, msg)
 				}
 			}
