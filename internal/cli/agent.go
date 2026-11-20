@@ -697,7 +697,11 @@ func inboxCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "inbox",
-		Short: "Get requests from teammates (claims them) and replies to your own requests",
+		Short: "Get and claim inbox items, including teammate requests and relay task notices",
+		Long: `Get and claim inbox items and read replies to your requests.
+The inbox identifies task hosts and shows task news when it arrives.
+In the owner's private chat, "what came back?" means read the live list
+with tincan tasks --host and show returned tasks, even if the inbox is empty.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, _, err := connect()
 			if err != nil {
@@ -776,13 +780,16 @@ func writeJSON(w io.Writer, v any) error {
 // with ClaimError saying why, when another session got to it first.
 type inboxRequestJSON struct {
 	envelope.Request
-	Claimed    bool   `json:"claimed"`
-	ClaimError string `json:"claim_error,omitempty"`
+	Claimed            bool   `json:"claimed"`
+	ClaimError         string `json:"claim_error,omitempty"`
+	TaskNoticeGuidance string `json:"task_notice_guidance,omitempty"`
 }
 
 // inboxJSON is what inbox --json prints. The lists are never null.
 type inboxJSON struct {
 	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
+	TaskHost         bool               `json:"task_host,omitempty"`
+	TaskHostGuidance string             `json:"task_host_guidance,omitempty"`
 	Requests         []inboxRequestJSON `json:"requests"`
 	Replies          []client.Result    `json:"replies"`
 	RepliesRemaining int                `json:"replies_remaining,omitempty"`
@@ -804,9 +811,13 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, errOut io.Writer) error {
 	doc := inboxJSON{
 		UpgradeAvailable: in.UpgradeAvailable,
+		TaskHost:         in.TaskHost,
 		Requests:         make([]inboxRequestJSON, 0, len(in.Requests)),
 		Replies:          in.Replies,
 		RepliesRemaining: in.RepliesRemaining,
+	}
+	if in.TaskHost {
+		doc.TaskHostGuidance = client.TaskHostInboxGuidance
 	}
 	if doc.Replies == nil {
 		doc.Replies = []client.Result{}
@@ -815,6 +826,8 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 		item := inboxRequestJSON{Request: req, Claimed: true}
 		if _, err := r.Claim(ctx, req.ID); err != nil {
 			item.Claimed, item.ClaimError = false, err.Error()
+		} else {
+			item.TaskNoticeGuidance = in.TaskNoticeGuidance(req)
 		}
 		doc.Requests = append(doc.Requests, item)
 	}
@@ -852,7 +865,7 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 	var b strings.Builder
 	if len(in.Requests) > 0 {
-		b.WriteString(client.FormatInbox(ctx, r, client.Inbox{Requests: in.Requests}))
+		b.WriteString(client.FormatInbox(ctx, r, client.Inbox{Requests: in.Requests, TaskHost: in.TaskHost}))
 	}
 	if len(in.Replies) > 0 {
 		b.WriteString(wake.WaitingMessage(0, len(in.Replies)) + "\n")

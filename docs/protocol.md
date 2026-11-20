@@ -111,7 +111,7 @@ A reply starts unseen by the agent that sent the request. It counts as seen once
 
 Any other `replies` value is a 400.
 
-A relay that is shutting down ends every held poll and get-reply wait at once with the answer its deadline would give (204, the upgrade-only 200, or the request's current state), and answers later ones without holding. Clients treat that as an ordinary empty poll and poll again.
+A relay that is shutting down ends every held poll and get-reply wait at once with the answer its deadline would give (204, an empty inbox with upgrade or task host metadata, or the request's current state), and answers later ones without holding. Clients treat that as an ordinary empty poll and poll again.
 
 `POST /v1/replies/ack` with `{"ids": ["<request id>", ...]}` marks those replies seen and returns 204. Ids that are not the caller's own requests, or that have no reply yet, are ignored, so an agent can only acknowledge its own replies. At most 500 ids per call. `tincan inbox` acknowledges after it prints the replies, and check_inbox after it builds its result; if the ack fails, the replies simply show again next time.
 
@@ -706,7 +706,9 @@ The host view lists every task, in the same pages, order and `closed` counts as 
 
 The relay also tells hosts about changes. When a task becomes `returned`, becomes `question`, goes back to `open` because its ask ended with no result, or is filed as `proposed`, the relay queues one `notify` request from `relay` to each eligible host. The notice names the task by id, gives the new status and the agent names involved, and carries no title, detail, result or comment. The relay skips the actor and changes the owner made from an admin device. It skips the original asker too, unless the asker is an eligible webhook host and the notice reports a return, question or failed attempt. A webhook routine can run in another session and see that notice while the normal reply stays subject to the existing session rules. While a host has an unread notice for a task, later changes to that task queue no further notice for that host. The host reads the task's current state with `get_task`. Notices are exempt from the owner's holds like the relay's other notes, and they wake the host as any notify does.
 
-A delivered task notice in the non-peek `GET /v1/poll` response carries optional `task_notice_id`, the numeric id the relay stored for the notice. It has no `task_id`, which marks an ask that attempts a task. Clients sending a request cannot set either marker. Older clients can ignore the new field and see the same notify body. Older relays omit it, so clients that need a trusted task notice marker treat those notifications as ordinary inbox items.
+A delivered task notice in the non-peek `GET /v1/poll` response carries optional `task_notice_id`, the numeric task id the relay stored for the notice, and `task_notice_status`, the status the notice reported when queued (`returned`, `question`, `open`, or `proposed`). The task may have changed since then. `task_id` marks a separate kind of item, an ask that attempts a task. Senders cannot set those fields. The original notify body still reaches older clients. A relay that predates either field omits it.
+
+A non-peek poll with `task_host=1` also returns `"task_host": true` when the authenticated agent can use the host view at response time. This can give an empty inbox an HTTP 200 response with an empty `requests` list. The role field is optional and carries no authority. Task reads and actions still apply their own checks. `tincan inbox --json` adds `task_host_guidance` for that caller and `task_notice_guidance` to a marked notice only after a successful claim.
 
 #### Host decisions
 

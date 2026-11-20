@@ -637,6 +637,7 @@ const (
 // replies to requests it sent that it has not seen yet.
 type Inbox struct {
 	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
+	TaskHost         bool               `json:"task_host,omitempty"`
 	Requests         []envelope.Request `json:"requests"`
 	Replies          []Result           `json:"replies,omitempty"`
 	// RepliesRemaining counts unseen replies left out of this poll to keep
@@ -703,7 +704,7 @@ func (r *Relay) Poll(ctx context.Context, hold time.Duration) (Inbox, error) {
 // (RepliesTake, RepliesKeep, or RepliesNone).
 func (r *Relay) PollReplies(ctx context.Context, hold time.Duration, replies string) (Inbox, error) {
 	var out Inbox
-	path := fmt.Sprintf("/v1/poll?hold=%d&replies=%s", int(hold.Seconds()), url.QueryEscape(replies))
+	path := fmt.Sprintf("/v1/poll?hold=%d&replies=%s&task_host=1", int(hold.Seconds()), url.QueryEscape(replies))
 	err := r.call(ctx, r.polls, "GET", path, nil, &out)
 	return out, err
 }

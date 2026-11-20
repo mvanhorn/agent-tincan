@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -74,6 +75,35 @@ func taskNoticeID(noticeFor string) int64 {
 		return 0
 	}
 	return id
+}
+
+// markTaskNotice exposes metadata from a stored relay notice. Existing
+// queued notices store the ID separately and the status in the relay's
+// fixed opening. Keep that opening readable across relay upgrades.
+func markTaskNotice(req *envelope.Request) {
+	if req.NoticeKind != store.NoteTask || req.From != client.RelaySender || req.Kind != envelope.KindNotify {
+		return
+	}
+	id := taskNoticeID(req.NoticeFor)
+	if id == 0 {
+		return
+	}
+	req.TaskNoticeID = id
+	opening := fmt.Sprintf("Task #%d is ", id)
+	body, ok := strings.CutPrefix(req.Body, opening)
+	if !ok {
+		return
+	}
+	switch {
+	case strings.HasPrefix(body, "returned:"):
+		req.TaskNoticeStatus = envelope.TaskReturned
+	case strings.HasPrefix(body, "at question:"):
+		req.TaskNoticeStatus = envelope.TaskQuestion
+	case strings.HasPrefix(body, "open again with no assignee:"):
+		req.TaskNoticeStatus = envelope.TaskOpen
+	case strings.HasPrefix(body, "proposed:"):
+		req.TaskNoticeStatus = envelope.TaskProposed
+	}
 }
 
 // drainTaskNotices tells the task hosts of every task change the store has

@@ -1236,24 +1236,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if len(reqs) > 0 || len(reps) > 0 {
 			for i := range reqs {
 				reqs[i].RedactFor(name)
-				if reqs[i].NoticeKind == store.NoteTask {
-					reqs[i].TaskNoticeID = taskNoticeID(reqs[i].NoticeFor)
-				}
+				markTaskNotice(&reqs[i])
 			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
 			}
-			out := map[string]any{"requests": emptyIfNil(reqs)}
-			if len(reps) > 0 {
-				out["replies"] = reps
-			}
-			if more > 0 {
-				out["replies_remaining"] = more
-			}
-			if v := s.upgradeFor(r); v != "" {
-				out["upgrade_available"] = v
-			}
-			writeJSON(w, http.StatusOK, out)
+			s.writeInbox(w, r, name, client.Inbox{Requests: reqs, Replies: reps, RepliesRemaining: more})
 			return
 		}
 		select {
@@ -1265,15 +1253,29 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.touch(r.Context(), name, s.wokenDuringPoll(name))
-		if v := s.upgradeFor(r); v != "" {
-			out := map[string]any{"upgrade_available": v}
-			out["requests"] = []envelope.Request{}
-			writeJSON(w, http.StatusOK, out)
-		} else {
-			w.WriteHeader(http.StatusNoContent)
-		}
+		s.writeInbox(w, r, name, client.Inbox{})
 		return
 	}
+}
+
+// writeInbox reports the caller's current host view only to clients asking
+// for it. An unavailable role lookup must not interrupt inbox delivery.
+func (s *Server) writeInbox(w http.ResponseWriter, r *http.Request, name string, out client.Inbox) {
+	if r.URL.Query().Get("task_host") == "1" {
+		view, err := s.hostTaskView(r.Context(), name)
+		if err != nil {
+			log.Printf("inbox task host view: %v", err)
+		} else {
+			out.TaskHost = view.host
+		}
+	}
+	out.UpgradeAvailable = s.upgradeFor(r)
+	if out.Empty() && !out.TaskHost && out.UpgradeAvailable == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	out.Requests = emptyIfNil(out.Requests)
+	writeJSON(w, http.StatusOK, out)
 }
 
 // MaxPeekPending caps how many queued requests one peek names, with a
