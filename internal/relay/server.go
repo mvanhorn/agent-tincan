@@ -1236,6 +1236,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if len(reqs) > 0 || len(reps) > 0 {
 			for i := range reqs {
 				reqs[i].RedactFor(name)
+				if reqs[i].NoticeKind == store.NoteTask {
+					reqs[i].TaskNoticeID = taskNoticeID(reqs[i].NoticeFor)
+				}
 			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
