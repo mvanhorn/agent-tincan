@@ -56,6 +56,39 @@ func TestAddTaskOverMCP(t *testing.T) {
 	onlyTask(t, m, "grokbot")
 }
 
+func TestTaskReplyInInboxPointsToTaskAndRequest(t *testing.T) {
+	for _, tc := range []struct {
+		status envelope.Status
+		action string
+	}{
+		{envelope.StatusAnswered, "Finish the work that was waiting on this reply."},
+		{envelope.StatusNeedsInput, "Answer with answer"},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			m := testrelay.New(t, relay.Config{})
+			asker := session(t, m, "grokbot")
+			call(t, asker, "add_task", map[string]any{"title": "Book dinner", "to": "muse"})
+			task := onlyTask(t, m, "grokbot")
+			worker := m.Client(t, "muse")
+			if _, err := worker.Claim(t.Context(), task.CurrentRequest); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := worker.Reply(t.Context(), task.CurrentRequest, "Reply text", tc.status); err != nil {
+				t.Fatal(err)
+			}
+			got := call(t, asker, "check_inbox", nil)
+			for _, want := range []string{
+				fmt.Sprintf("Task #%d. Read it with get_task", task.ID),
+				task.CurrentRequest, "Reply text", tc.action,
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("inbox = %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // add_task with to assigns at once: the teammate gets the ask, and the
 // answer names it. for_owner marks the task the owner's own and sends
 // nothing; both together are refused before anything is filed.

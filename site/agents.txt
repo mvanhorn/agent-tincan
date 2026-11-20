@@ -260,6 +260,9 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                        "command": "tincan hook claude-code", "timeout": 5}]}]
                      (docs/adapters/claude-code.md, "Check the inbox on every
                      prompt (hook)"). It only looks and never blocks a prompt.
+                     Add --tasks to SessionStart only for counts and IDs of
+                     visible questions and returned, open and working tasks.
+                     Use get_task or tincan tasks show <id> for the full row.
                      Optional operator-bound project/task session lookup and
                      official Desktop opening: docs/adapters/claude-code.md,
                      "Optional operator-bound project/task sessions". This is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -26,7 +27,8 @@ func hookCmd() *cobra.Command {
 }
 
 func claudeCodeHookCmd() *cobra.Command {
-	return &cobra.Command{
+	var tasks bool
+	cmd := &cobra.Command{
 		Use:   "claude-code",
 		Short: "Tell a Claude Code session when teammate requests are waiting (SessionStart and UserPromptSubmit hooks)",
 		Long: `Tell a Claude Code session when teammate requests or replies are waiting.
@@ -37,8 +39,12 @@ line, which Claude Code adds to the session's context:
 
   Agent Tincan: 2 teammate requests waiting (oldest 12m). Call check_inbox before anything else.
 
-With nothing waiting it prints nothing. It never blocks the prompt: it gives up
-after 3 seconds, and on any error it writes to stderr only and exits 0.
+Add --tasks to SessionStart only to also show counts and IDs of visible
+question, returned, open and working tasks. The hook shows the ordinary
+agent view and shares the same 3-second deadline between both reads.
+
+With nothing waiting or visible it prints nothing. It exits 0 on read
+errors, with inbox errors on stderr and an unavailable task summary on stdout.
 
 This reaches sessions a channel notice cannot: a session that was busy when
 the notice came, one started without channels, and SDK or desktop sessions.`,
@@ -46,28 +52,45 @@ the notice came, one started without channels, and SDK or desktop sessions.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), hookTimeout)
 			defer cancel()
-			line, err := claudeCodeHookLine(ctx, hookRelay, time.Now())
+			r, err := hookRelay()
 			if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "tincan hook claude-code: %v\n", client.RejoinHint(err, ""))
+				if tasks {
+					fmt.Fprintln(cmd.OutOrStdout(), hookTasksUnavailable)
+				}
 				return nil
 			}
-			if line != "" {
+			var group sync.WaitGroup
+			var summary string
+			if tasks {
+				group.Go(func() { summary = hookTaskSummary(ctx, r) })
+			}
+			line, err := claudeCodeHookLine(ctx, r, time.Now())
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "tincan hook claude-code: %v\n", client.RejoinHint(err, ""))
+			} else if line != "" {
 				fmt.Fprintln(cmd.OutOrStdout(), line)
+			}
+			group.Wait()
+			if summary != "" {
+				fmt.Fprintln(cmd.OutOrStdout(), summary)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&tasks, "tasks", false, "also summarize visible tasks (SessionStart only)")
+	return cmd
 }
 
-// peeker is the one relay call the hook makes.
-type peeker interface {
+type hookClient interface {
+	client.Rawer
 	Peek(ctx context.Context, hold time.Duration) (client.Waiting, error)
 }
 
 // hookRelay is the relay client for a hook: the saved config with this
 // session's project, and no relay-info refresh, which could outlast the
 // hook's timeout.
-var hookRelay = func() (peeker, error) {
+var hookRelay = func() (hookClient, error) {
 	cfg, err := client.LoadConfig()
 	if err != nil {
 		return nil, err
@@ -88,11 +111,7 @@ var hookRelay = func() (peeker, error) {
 // claudeCodeHookLine peeks at the relay once, with no hold, and returns the
 // line for the model, or "" when nothing waits. Pings are left out: they
 // are answered without the model.
-func claudeCodeHookLine(ctx context.Context, open func() (peeker, error), now time.Time) (string, error) {
-	r, err := open()
-	if err != nil {
-		return "", err
-	}
+func claudeCodeHookLine(ctx context.Context, r hookClient, now time.Time) (string, error) {
 	w, err := r.Peek(ctx, 0)
 	if err != nil {
 		return "", err
@@ -125,6 +144,43 @@ func claudeCodeHookLine(ctx context.Context, open func() (peeker, error), now ti
 		line += " (oldest " + client.QueueAge(now.Sub(oldest)) + ")"
 	}
 	return line + ". Call check_inbox before anything else.", nil
+}
+
+const hookTasksUnavailable = "Agent Tincan: visible tasks could not load. Try list_tasks or tincan tasks."
+
+func hookTaskSummary(ctx context.Context, r client.Rawer) string {
+	tasks, _, err := client.Tasks(ctx, r, false, false)
+	if err != nil {
+		return hookTasksUnavailable
+	}
+	const maxIDs = 5
+	var groups []string
+	for _, status := range []envelope.TaskStatus{envelope.TaskQuestion, envelope.TaskReturned, envelope.TaskOpen, envelope.TaskWorking} {
+		var ids []string
+		count := 0
+		for _, task := range tasks {
+			if task.Status != status || task.Withheld || task.AskStatus == envelope.StatusHeld {
+				continue
+			}
+			count++
+			if len(ids) < maxIDs {
+				ids = append(ids, fmt.Sprintf("#%d", task.ID))
+			}
+		}
+		if count == 0 {
+			continue
+		}
+		line := fmt.Sprintf("%s %d (%s)", status, count, strings.Join(ids, ", "))
+		if count > len(ids) {
+			line += fmt.Sprintf(" +%d more", count-len(ids))
+		}
+		groups = append(groups, line)
+	}
+	if len(groups) == 0 {
+		return ""
+	}
+	return "Agent Tincan: visible tasks: " + strings.Join(groups, "; ") +
+		". Use list_tasks or tincan tasks to list them, or get_task or tincan tasks show <id> for details."
 }
 
 // countNoun is "1 teammate request" or "2 teammate requests".
