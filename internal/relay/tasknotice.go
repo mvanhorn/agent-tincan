@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -67,22 +68,12 @@ func (s *Server) eligibleTaskHosts(roster []identity.Agent) []string {
 	return hosts
 }
 
-// taskNoticeHosts picks, from the eligible hosts, those that hear of change
-// n: every one but the one that caused the change, which knows, and the one
-// that sent the ask, which gets the reply itself. A change the owner made
-// from an admin device goes to no one: the owner knows.
-func taskNoticeHosts(n store.TaskNotice, eligible []string) []string {
-	if n.Actor == envelope.TaskOwner {
-		return nil
+func taskNoticeID(noticeFor string) int64 {
+	id, err := strconv.ParseInt(noticeFor, 10, 64)
+	if err != nil || id < 1 {
+		return 0
 	}
-	var hosts []string
-	for _, name := range eligible {
-		if name == n.Actor || name == n.Asker {
-			continue
-		}
-		hosts = append(hosts, name)
-	}
-	return hosts
+	return id
 }
 
 // drainTaskNotices tells the task hosts of every task change the store has
@@ -130,10 +121,18 @@ func (s *Server) drainTaskNotices(ctx context.Context) {
 // not queue for and returns the error.
 func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, eligible []string) error {
 	body := taskNoticeBody(n)
-	if body == "" {
+	if body == "" || n.Actor == envelope.TaskOwner {
 		return nil
 	}
-	for _, host := range taskNoticeHosts(n, eligible) {
+	for _, host := range eligible {
+		if host == n.Actor {
+			continue
+		}
+		// The asker gets the ordinary reply. A webhook host's routine
+		// can run in another session and needs the metadata notice too.
+		if host == n.Asker && (s.wake == nil || s.wake.WakeMethod(host) != "webhook" || n.Status == envelope.TaskProposed) {
+			continue
+		}
 		// A relay notice, not a forwarded request: it bypasses the approval
 		// rules as the held-approval notice does, and carries no task text.
 		notice := envelope.Request{From: client.RelaySender, To: host, Kind: envelope.KindNotify, Hop: 1, Chain: []string{client.RelaySender}, Body: body}

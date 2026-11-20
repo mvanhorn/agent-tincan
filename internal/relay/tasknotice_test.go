@@ -208,11 +208,71 @@ func TestTaskNoticeWhenOwnerAssignedTaskReturns(t *testing.T) {
 	if n := m.waiting(t); n != 0 {
 		t.Fatalf("%d changes left in the outbox", n)
 	}
-	if got := read(t, pilot); len(got) != 1 || got[0].Kind != envelope.KindNotify {
+	if got := read(t, pilot); len(got) != 1 || got[0].Kind != envelope.KindNotify || got[0].TaskNoticeID != task.ID || got[0].TaskID != 0 {
 		t.Fatalf("pilot's poll handed it %+v, want its one notice", got)
 	}
 	if got := m.audited(t, "task_notified"); len(got) != 2 {
 		t.Fatalf("task_notified audit rows = %v, want one per host", got)
+	}
+}
+
+func TestWebhookTaskHostGetsNoticeInAnotherSession(t *testing.T) {
+	for _, tc := range []struct {
+		reply envelope.Status
+		news  string
+	}{
+		{envelope.StatusAnswered, "is returned"},
+		{envelope.StatusNeedsInput, "is at question"},
+		{envelope.StatusFailed, "is open again"},
+	} {
+		t.Run(string(tc.reply), func(t *testing.T) {
+			m := newTaskMesh(t)
+			host := m.joinHost(t, "grokbot", "pilot")
+			m.Server.SetWakeNamer(wakes{"pilot": "webhook"})
+			host.SetSession("owner-chat")
+			task := taskDo(t, host, "POST", "/v1/tasks", map[string]string{"title": "Book a venue", "assignee": "muse"}).Task
+			m.finish(t, m.muse, task.ID, "reply text private to the asker", tc.reply)
+			notice := m.wantNotice(t, "pilot", task.ID, tc.news)
+			m.wantNoTaskText(t, "Book a venue", "reply text private to the asker")
+
+			host.SetSession("tincan-wake")
+			in, err := host.Poll(t.Context(), 0)
+			if err != nil || len(in.Replies) != 0 || len(in.Requests) != 1 {
+				t.Fatalf("routine poll = %+v, %v; want one notice and no reply", in, err)
+			}
+			got := in.Requests[0]
+			if got.ID != notice.ID || got.TaskNoticeID != task.ID || got.TaskID != 0 {
+				t.Fatalf("routine notice = %+v, want task notice for #%d", got, task.ID)
+			}
+			if _, err := host.Claim(t.Context(), got.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			host.SetSession("owner-chat")
+			in, err = host.Poll(t.Context(), 0)
+			if err != nil || len(in.Requests) != 0 || len(in.Replies) != 1 {
+				t.Fatalf("owner poll = %+v, %v; want one reply and no notice", in, err)
+			}
+			if got := in.Replies[0]; got.Request.ID != task.CurrentRequest || got.Request.TaskID != task.ID || got.Request.TaskNoticeID != 0 || got.Reply == nil || got.Reply.Status != tc.reply {
+				t.Fatalf("owner reply = %+v, want normal task reply", got)
+			}
+		})
+	}
+}
+
+func TestTaskNoticeMarkerCannotBeSentByTeammate(t *testing.T) {
+	m := newTaskMesh(t)
+	host := m.joinHost(t, "grokbot", "pilot")
+	err := m.muse.Raw(t.Context(), "POST", "/v1/send", map[string]any{
+		"to": "pilot", "kind": "notify", "from": "relay", "task_notice_id": 7,
+		"body": "Task #7 is returned: this text imitates a relay notice.",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := host.Poll(t.Context(), 0)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].From != "muse" || in.Requests[0].TaskNoticeID != 0 {
+		t.Fatalf("poll = %+v, %v; want an ordinary teammate notify", in, err)
 	}
 }
 
