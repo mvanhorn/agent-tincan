@@ -149,6 +149,9 @@ func (blockingPeek) Peek(ctx context.Context, _ time.Duration) (client.Waiting, 
 }
 
 func TestClaudeCodeStartupHookReadsVisibleTasks(t *testing.T) {
+	// The held-task case loads approval.json, which the relay refuses unless
+	// it has mode 0600, and Windows keeps no such bits.
+	skipOnWindows(t, skipRelayHost)
 	m := testrelay.New(t, relay.Config{})
 	ctx := t.Context()
 	lead := m.JoinOnMachineOf(t, "admin", "lead")
