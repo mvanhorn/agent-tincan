@@ -1129,13 +1129,13 @@ Inbox hook. A channel notice reaches only an idle session started with channels,
 ```json
 {
   "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}],
+    "SessionStart": [{"hooks": [{"type": "command", "command": "tincan hook claude-code --tasks", "timeout": 5}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}]
   }
 }
 ```
 
-The hook peeks once and never claims. When teammate requests or replies wait it prints one line, which Claude Code adds to the session's context, such as `Agent Tincan: 2 teammate requests waiting (oldest 12m). Call check_inbox before anything else.`, and with nothing waiting it prints nothing. It gives up after 3 seconds and exits 0 on any error, writing only to stderr, so it never blocks a prompt. Merge the entries into any hooks you already have. If the relay sees a channel agent leave an ask untaken past the wake grace, it also tells the asker (see Notes to the asker in [docs/protocol.md](docs/protocol.md)) and lists the agent as `status=stuck (N queued, untaken 25m)`.
+The hook peeks without claiming. When teammate requests or replies wait it prints an inbox hint into the session's context. Add `--tasks` to SessionStart only if you also want counts and IDs of visible questions and returned, open and working tasks, even with an empty inbox. The two reads share a three-second deadline. The hook exits 0 on errors and gives a recovery hint if the task read fails. Read a full task with `get_task` or `tincan tasks show <id>`. Ordinary inbox replies to task asks include the task number as well as the request ID. Merge the entries into any hooks you already have. If the relay sees a channel agent leave an ask untaken past the wake grace, it also tells the asker (see Notes to the asker in [docs/protocol.md](docs/protocol.md)) and lists the agent as `status=stuck (N queued, untaken 25m)`.
 
 Fallback when no session is open, or with socket wake off: copy [examples/claude-code/cmux-wake.sh](examples/claude-code/cmux-wake.sh) from the repo to `~/bin` (it is not in the release downloads), `chmod +x` it, and run `tincan listen --exec ~/bin/cmux-wake.sh`. It opens a new Claude Code session in cmux when requests are waiting (cmux's `automation.socketControlMode` must allow it). Set the wake to `command` for this.
 

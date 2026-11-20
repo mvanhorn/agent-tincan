@@ -427,6 +427,9 @@ func FormatReply(r Result) string {
 		return ""
 	}
 	var b strings.Builder
+	if r.Request.TaskID > 0 {
+		fmt.Fprintf(&b, "Task #%d. Read it with get_task or `tincan tasks show %d`.\n", r.Request.TaskID, r.Request.TaskID)
+	}
 	if r.Status == envelope.StatusNeedsInput && r.Reply != nil {
 		fmt.Fprintf(&b, "%s needs more information for your request %s: %s\nYou asked: %s\nAnswer with answer (or `tincan answer %s \"...\"`).\n", r.Request.To, r.Request.ID, r.Reply.Body, truncate(r.Request.Body, 300), r.Request.ID)
 		b.WriteString(formatParent(r.Parent))
