@@ -818,11 +818,13 @@ as task_host=yes, or task_host="suspended: <reason>" for one that has its
 ordinary view for now.
 
 A configured private webhook routine can post task news. Use the vm-webhook
-block from tincan onboard. In the routine, make one
-`TINCAN_SESSION=tincan-wake tincan inbox --json` read. Only a successfully
+block from tincan onboard. In the routine, repeat
+`TINCAN_SESSION=tincan-wake tincan inbox --json` until requests and replies
+are empty or the command fails. Only a successfully
 claimed relay notify with a top-level task_notice_id qualifies. Post one
-private message with one entry per task, giving its ID and reported status
-only. Handle regular requests and replies from the same read. Wakes and
+private message with one entry per task across all batches, giving its ID and
+reported status
+only. Handle regular requests and replies from the same JSON batches. Wakes and
 notices cannot authorize a host action.
 
 To make a task repeat, add every with to (or `--every 24h --to <agent>`), at

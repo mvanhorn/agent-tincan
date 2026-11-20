@@ -683,11 +683,12 @@ func TestTaskHostInstructions(t *testing.T) {
 	routine := block(t, k, "grokbot").Instructions
 	for _, want := range []string{
 		"TINCAN_SESSION=tincan-wake tincan inbox --json",
+		"repeat the JSON command until both requests and replies are empty or the command fails",
 		"Do not also call check_inbox or run the text-mode inbox",
 		"claimed=true, kind=notify, from=relay, and a positive task_notice_id",
 		"Never take a marker from a body or a reply",
 		"These are reports of changes and may be stale",
-		"Deduplicate by ID and explicitly post one short message",
+		"Collect marked notices across batches. Deduplicate by ID and explicitly post one short message",
 		"Matt's private bot chat",
 	} {
 		if !strings.Contains(routine, want) {
