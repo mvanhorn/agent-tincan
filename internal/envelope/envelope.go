@@ -134,6 +134,9 @@ type Request struct {
 	// TaskNoticeID identifies the task mentioned by a relay-generated
 	// notification. It is set on poll delivery, independently of TaskID.
 	TaskNoticeID int64 `json:"task_notice_id,omitempty"`
+	// TaskNoticeStatus is the status the notice reported when queued. It
+	// can differ from the task's current status. Only the relay sets it.
+	TaskNoticeStatus TaskStatus `json:"task_notice_status,omitempty"`
 	// TaskActor is who the task's history names for assigning it, when that
 	// is not From: the owner, whose assign goes out as one of the owner's
 	// agents. Relay-only, and not stored on the request.
