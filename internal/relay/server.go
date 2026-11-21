@@ -521,6 +521,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.handleVerify)
 	mux.HandleFunc("GET /v1/admin/wakes/{agent}", s.handleWakes)
 	mux.HandleFunc("POST /v1/admin/relay/upgrade", s.handleSelfUpgrade)
+	mux.HandleFunc("PUT /v1/admin/relay/notify", s.handleSetNotifyDestination)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/leases", s.handleLeases)
 	mux.HandleFunc("DELETE /v1/leases", s.handleLeaseRelease)

@@ -102,11 +102,7 @@ tincan approve <id>
 tincan deny <id> "reason"
 ```
 
-A held council expires after 2 hours (`hold_ttl` in `approval.json` changes that). Without `approval.json` the relay notifies nobody. To have it tell an agent about each held ask, create `approval.json` in the relay's state dir with mode 0600 and a `notify` field:
-
-```json
-{"gate": {}, "notify": "grokbot"}
-```
+A held council expires after 2 hours (`hold_ttl` in `approval.json` changes that). To have the relay tell an agent about each held ask, run `tincan relay notify grokbot` from an admin device. This sets `notify` in `approval.json` and keeps your existing approval rules. Run `tincan relay notify --clear` to turn off these notices.
 
 A gate entry for `council` replaces the default hold. `{"gate": {"council": {"from": []}}}` holds nothing, so any agent's council starts at once; any other rule holds as written. Your existing rules still apply to the asks Council sends its members, since the convener is in their chain: a rule that holds `chatgpt-web` asks from `codex` holds that member when codex convenes, and it counts absent as "held by a gate".
 

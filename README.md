@@ -586,11 +586,11 @@ To require approval before selected agents receive incoming requests, create `ap
 }
 ```
 
-`from: "*"` holds every request to that target. A `from` list holds requests when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]` in place of `from` to hold requests unless every agent in the chain is listed. `hold_ttl` defaults to `2h`; `notify` is optional. The file reloads on changes. A missing file disables the gate for every agent except [Council](#council). An unreadable, malformed, or overly accessible file holds all requests to the targets in the last valid copy; without a valid copy the relay refuses to start. A bad file first appearing at runtime rejects new sends until fixed.
+`from: "*"` holds every request to that target. A `from` list holds requests when any sender in the relay-recorded chain matches. Use `"unless": ["trusted"]` in place of `from` to hold requests unless every agent in the chain is listed. `hold_ttl` defaults to `2h`; `notify` is optional. Set the destination with `tincan relay notify <agent>` from an admin device or clear it with `tincan relay notify --clear`. The file reloads on changes. A missing file or omitted `gate` means only the built-in holds apply. An unreadable, malformed, or overly accessible file holds all requests to the targets in the last valid copy; without a valid copy the relay refuses to start. A bad file first appearing at runtime rejects new sends until fixed.
 
 The `pass` agent is held by default the same way: every ask to an agent of kind `pass` is held, because approving it sends one of your chats to another vendor ([Pass the conversation](#pass-the-conversation)).
 
-Council is held by default. Every request to an agent of kind `council` is held, with or without `approval.json`, because a council sends the question, its attachments and every member's answer to every model vendor on the team. Agents' leaderboard reads are held too, since the relay holds by target. Without `approval.json` nobody is notified: the convening agent tells you the request id, or add a `notify` agent with `{"gate": {}, "notify": "grokbot"}`. A gate entry for `council` replaces the default, so `{"gate": {"council": {"from": []}}}` holds nothing. When you run `tincan council "question"` yourself in a terminal on an admin device, it approves its own request and starts at once.
+Council is held by default. Every request to an agent of kind `council` is held, with or without `approval.json`, because a council sends the question, its attachments and every member's answer to every model vendor on the team. Agents' leaderboard reads are held too, since the relay holds by target. The convening agent tells you the request ID. To also receive notices through a joined agent, run `tincan relay notify grokbot` from an admin device. A gate entry for `council` replaces the default, so `{"gate": {"council": {"from": []}}}` holds nothing. When you run `tincan council "question"` yourself in a terminal on an admin device, it approves its own request and starts at once.
 
 From an admin device, or using `--socket <state-dir>/admin.sock` on the relay host:
 
@@ -663,7 +663,7 @@ In MCP, use `due` on `add_task` or `update_task` with action `due` and `when`. T
 
 The relay sends a morning briefing to named task hosts at 07:00 in the relay's task zone by default. It shows due or overdue work, tasks waiting on you, recent completions, one suggested task and unconfirmed news. Set `--task-briefing HH:MM` and `--task-briefing-zone <IANA-zone>` to change the schedule, or `--task-briefing off` to turn off the daily briefing.
 
-Set `notify` in the relay's `approval.json` to a joined agent that can alert you if task news exhausts the host's attempts. The relay logs a warning at startup if hosts have no fallback, and `tincan doctor` reports it on an admin device.
+Run `tincan relay notify <agent>` from an admin device to choose a joined agent that can alert you when the host runs out of attempts to deliver task news. The relay logs a warning at startup if hosts have no fallback, and `tincan doctor` reports it on an admin device.
 
 A named task host can assign on your direct words with `decide_task` decision `assign` and `to`, or `tincan tasks decide 12 assign --to muse --words "give 12 to muse"`. It can file from your words using `add_task` with `mine`, an optional `due`, and an optional `to`.
 

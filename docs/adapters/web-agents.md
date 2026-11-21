@@ -576,8 +576,9 @@ Asks return a pending request ID promptly. The warning does not cancel work,
 release a hold or prove nothing was sent. Check the request later as usual.
 
 The optional `notify` destination in `approval.json` also receives one metadata-only
-notice per sign-out episode. This queues a notification to an agent, not directly
-to a human. Queue failures are retried; recovery cancels an unqueued notice.
+notice per sign-out episode. Run `tincan relay notify <agent>` from an admin
+device to choose the joined agent that receives it. The relay retries queue
+failures and cancels an unqueued notice when the agent signs back in.
 Without a valid configured recipient, use roster, top and doctor. No push delivery
 or human acknowledgement is guaranteed.
 
