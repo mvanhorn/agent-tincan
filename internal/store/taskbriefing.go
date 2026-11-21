@@ -156,11 +156,27 @@ func briefingTasks(ctx context.Context, tx *sql.Tx, query string, args ...any) (
 }
 
 func missedBriefingNotices(ctx context.Context, tx *sql.Tx, since int64) ([]BriefingNotice, error) {
+	// A receipt confirms the original notice across hosts and retries. Old
+	// deliveries lack an outbox ID, so match their fixed text and metadata
+	// within the briefing window.
 	rows, err := tx.QueryContext(ctx, `SELECT CAST(r.notice_for AS INTEGER), r.notice_kind, d.reported_status
 		FROM task_notice_delivery d JOIN requests r ON r.id = d.request_id
+		JOIN agents h ON h.name = r.to_agent AND h.task_host = 1
+		LEFT JOIN tasks t ON t.id = CAST(r.notice_for AS INTEGER)
 		WHERE d.outcome IN ('', 'exhausted') AND r.created_at >= ?
+		AND (r.notice_kind = ? OR t.`+taskOpenStatuses+`)
+		AND NOT EXISTS (
+			SELECT 1 FROM task_notice_delivery ack
+			WHERE ack.outcome = 'told' AND ack.notice_id = d.notice_id
+		)
+		AND (d.notice_id IS NOT NULL OR NOT EXISTS (
+			SELECT 1 FROM task_notice_delivery ack JOIN requests receipt ON receipt.id = ack.request_id
+			WHERE ack.outcome = 'told' AND ack.notice_id IS NULL AND receipt.created_at >= ?
+			AND receipt.notice_kind = r.notice_kind AND receipt.notice_for = r.notice_for
+			AND ack.reported_status = d.reported_status AND receipt.body = r.body
+		))
 		GROUP BY r.notice_for, r.notice_kind, d.reported_status
-		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since)
+		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since, envelope.TaskNoticeBriefing, since)
 	if err != nil {
 		return nil, err
 	}
