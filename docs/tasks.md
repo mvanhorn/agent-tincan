@@ -1,5 +1,19 @@
 # Task deadlines, briefings and chat delegation
 
+## Put asks on the list
+
+When you name a task host with `tincan tasks host set <agent>`, the relay records each ask between teammates as a task when it sends the request. The first line becomes the title and the full message becomes the detail. The asking agent files it and the receiving agent is assigned. The sender sees the task number. Asks and replies still flow directly between agents on the same request ID, even when the host is offline.
+
+An answer returns the task with its result. A request for clarification puts the task at question. If an attempt ends without a result, the task reopens. Only you, or a host acting on your direct words, can mark it done. An agent can drop a task it filed after its ask closes.
+
+An ask sent while handling a claimed task attempt goes in that task's history. Explicit task assignments and repeats already have a task. Notifications, pings, and asks from the relay itself stay off the list. Guest and outside-source asks keep the proposed-task recovery path if they end without a result.
+
+Notes, history, pass and council asks, room mentions, follow-on hops, and scheduled asks start as quiet tasks. An answer still records the result and returns the task. Quiet tasks stay out of the default list and send no status notice. To look up a quiet task, run `tincan tasks --all` or call `list_tasks` with `include_quiet: true`. Use `tincan tasks show <id>` or `get_task` for the result and history. Room access and approval rules still apply. Follow up on a room ask in its room.
+
+A quiet task appears on the ordinary list and sends status news if its ask fails, is declined, expires, or spends four hours waiting for clarification. An escalated question stays open for the asker to answer. The briefing counts quiet answers since the last scheduled briefing and keeps their task details out.
+
+On the relay, `--file-all-asks auto` is the default and follows whether a task host is named. Use `--file-all-asks on` to file even without a host, or `--file-all-asks off` to disable filing at send. The existing recovery of eligible unfinished asks continues in every mode.
+
 ## Set a deadline
 
 ```bash

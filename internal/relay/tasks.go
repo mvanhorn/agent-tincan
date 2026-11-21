@@ -32,6 +32,8 @@ var errTaskAssignee = errors.New("history, notes, pass and council agents do not
 // errTaskToSender refuses taking a task from its assignee to give it to the
 // agent the new ask would be sent as. No agent can ask itself, so the send
 // would be refused as a loop after the open ask was already cancelled.
+var errTaskRoomFollowup = &StatusError{Code: http.StatusConflict, Err: errors.New("send a follow-up in the room to continue this task")}
+
 var errTaskToSender = errors.New("this is the agent the assignment is sent as, and an agent cannot ask itself; nothing was changed, name another teammate")
 
 // taskAssign is one assignment of a task: the ask that starts an attempt
@@ -87,6 +89,9 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
+	if carried.Task.RoomPostID != 0 {
+		return envelope.Request{}, errTaskRoomFollowup
+	}
 	if err := s.checkTaskTarget(ctx, a.To); err != nil {
 		return envelope.Request{}, err
 	}
@@ -132,6 +137,13 @@ func (s *Server) reassignTask(ctx context.Context, a taskAssign) (envelope.Reque
 	}
 	if a.To == a.From {
 		return envelope.Request{}, &StatusError{Code: http.StatusConflict, Err: fmt.Errorf("%s: %w", a.To, errTaskToSender)}
+	}
+	task, err := s.store.Task(ctx, a.TaskID, "")
+	if err != nil {
+		return envelope.Request{}, taskStatusError(err)
+	}
+	if task.RoomPostID != 0 {
+		return envelope.Request{}, errTaskRoomFollowup
 	}
 	cancelled, err := s.store.ReleaseTask(ctx, a.TaskID, a.actor(), "reassigned to "+a.To)
 	if err != nil {
@@ -641,7 +653,8 @@ func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, view taskView)
 		return nil, nil, false
 	}
 	closed := r.URL.Query().Get("closed") == "1"
-	tasks, err = view.tasks(r.Context(), s.store, after, MaxTaskPage+1, closed)
+	includeQuiet := r.URL.Query().Get("include_quiet") == "1"
+	tasks, err = view.tasks(r.Context(), s.store, after, MaxTaskPage+1, closed, includeQuiet)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return nil, nil, false
@@ -653,7 +666,7 @@ func (s *Server) taskPage(w http.ResponseWriter, r *http.Request, view taskView)
 	}
 	if !closed {
 		var counts closedTaskCounts
-		if counts.Done, counts.Dropped, err = view.closed(r.Context(), s.store); err != nil {
+		if counts.Done, counts.Dropped, err = view.closed(r.Context(), s.store, includeQuiet); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return nil, nil, false
 		}
@@ -771,8 +784,23 @@ func (s *Server) handleAssignTask(w http.ResponseWriter, r *http.Request) {
 // host: what a host is sent of a task is always what its view shows
 // (taskView.task), so no call a host makes hands it text the view withholds.
 func (s *Server) writeTaskNow(w http.ResponseWriter, r *http.Request, view taskView, id int64, code int, ev *envelope.TaskEvent) {
-	if !view.host {
-		view = taskView{}
+	if !view.host && view.viewer != "" {
+		// An ordinary caller may have acted on a task that is no longer
+		// visible in the ordinary view after the change. Check room
+		// visibility separately before echoing the updated row.
+		task, err := s.store.Task(r.Context(), id, "")
+		if err != nil {
+			writeTaskErr(w, err)
+			return
+		}
+		if task.RoomPostID != 0 {
+			if task, err = view.task(r.Context(), s.store, id); err != nil {
+				writeTaskErr(w, err)
+				return
+			}
+		}
+		writeJSON(w, code, taskReply{Task: task, Event: ev})
+		return
 	}
 	task, err := view.task(r.Context(), s.store, id)
 	if err != nil {
@@ -875,7 +903,8 @@ func (s *Server) handleDropTask(w http.ResponseWriter, r *http.Request) {
 		writeTaskErr(w, err)
 		return
 	}
-	task, err := s.store.Task(r.Context(), id, from)
+	view := taskView{viewer: from, roomAccess: s.mayReadRooms}
+	task, err := view.whole(r.Context(), s.store, id)
 	if err != nil {
 		writeTaskErr(w, err)
 		return
@@ -895,6 +924,10 @@ func (s *Server) handleDropTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordTask(r, "task_dropped", from, id, nil)
+	if task.RoomPostID != 0 {
+		s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, taskReply{Task: task})
 }
 

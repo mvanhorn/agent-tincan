@@ -130,6 +130,11 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	// parent when there is one, and the session guard's claim otherwise.
 	var handled []string
 	if guarded {
+		req.TaskContextParentID = guard.ID
+		req.TaskRoomScope = guard.RoomPostID
+		if req.TaskRoomScope == 0 {
+			req.TaskRoomScope = guard.TaskRoomScope
+		}
 		handled = guard.Contributors
 		req.SkipTaskRecovery = req.SkipTaskRecovery || guard.SkipTaskRecovery || guard.RoomPostID != 0
 		if req.RecoverySource == "" {

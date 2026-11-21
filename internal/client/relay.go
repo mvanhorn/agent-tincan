@@ -1516,7 +1516,12 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 				req.Attachments = append(req.Attachments, envelope.Attachment{ID: up.ID})
 			}
 			var sent envelope.SendResponse
-			err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent)
+			source, _ := ctx.Value(askSourceKey{}).(string)
+			in := struct {
+				envelope.Request
+				Source string `json:"source,omitempty"`
+			}{req, source}
+			err = r.call(ctx, r.api, "POST", "/v1/send", in, &sent)
 			if err == nil {
 				req = sent.Request
 				target = sent.Target

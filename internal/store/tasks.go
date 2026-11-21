@@ -13,7 +13,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-// MaxOpenTasks caps the tasks one agent filed that are not done or dropped.
+// MaxOpenTasks caps the tasks one agent explicitly filed that are not done or dropped.
 const MaxOpenTasks = 50
 
 // MaxAgentAssigns caps how many times agents may assign one task before the
@@ -130,6 +130,16 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_task ON requests(task_id) WHERE task_id IS NOT NULL`); err != nil {
 		return err
 	}
+	for _, col := range []string{"task_filed_on_send", "task_room_scope"} {
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, col).Scan(&has); err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN ` + col + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return err
+			}
+		}
+	}
 	// contributors is the JSON list of agents, beside the sender and the
 	// chain, whose text the request's body carries; '' for none. The owner's
 	// approval rules read it again when the request moves to a new target.
@@ -175,6 +185,7 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	}
 	for _, col := range []struct{ name, kind string }{
 		{"due_day", "TEXT"}, {"due_at", "INTEGER"}, {"reminded_at", "INTEGER"}, {"reminder_dropped_at", "INTEGER"},
+		{"quiet", "INTEGER NOT NULL DEFAULT 0"}, {"room_post_id", "INTEGER"},
 	} {
 		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col.name).Scan(&has); err != nil {
 			return err
@@ -193,17 +204,25 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 			return err
 		}
 	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'quiet_answer')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN quiet_answer INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
 	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS tasks_reminder_due ON tasks(due_at)
-		WHERE reminded_at IS NULL AND reminder_dropped_at IS NULL AND status NOT IN ('done', 'dropped')`)
+		WHERE reminded_at IS NULL AND reminder_dropped_at IS NULL AND status NOT IN ('done', 'dropped');
+		CREATE INDEX IF NOT EXISTS tasks_live_loud ON tasks(id) WHERE quiet != 1 AND status NOT IN ('done', 'dropped')`)
 	return err
 }
 
-// taskSelect reads tasks with the status of the ask open under each and
-// the schedule each repeats on, neither of which is copied onto the task.
-const taskSelect = `SELECT ` + taskCols + taskFrom
+// taskSelect reads task rows with the current ask, repeat and room visibility.
+const taskSelect = `SELECT ` + taskCols + `, ` + taskRoomWithheld + taskFrom
 
 const taskCols = `t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(t.due_day, ''), t.due_at, COALESCE(q.status, ''),
-		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, '')`
+		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, ''), t.quiet = 1, COALESCE(t.room_post_id, 0)`
 
 const taskFrom = `
 	FROM tasks t LEFT JOIN requests q ON q.id = t.current_request LEFT JOIN schedules r ON r.task_id = t.id`
@@ -223,7 +242,7 @@ const taskFrom = `
 // of that test. A task that was assigned once leaves the shared pool for
 // good: its ask may have been held and denied, and the target of a denied
 // ask must not read the text afterwards.
-const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed'
+const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed' AND NOT ` + taskOriginalAskUnapproved + `
 		AND NOT (COALESCE(q.to_agent, '') = ?1 AND COALESCE(q.status, '') = 'held') AND (
 		q.to_agent = ?1
 		OR EXISTS (SELECT 1 FROM task_claimants c WHERE c.task_id = t.id AND c.agent = ?1)
@@ -245,10 +264,20 @@ const taskNeverApproved = `(EXISTS (SELECT 1 FROM task_events e WHERE e.task_id 
 // gets as a row without text.
 const taskHostVisible = `(t.filer = ?1 OR NOT (COALESCE(q.to_agent, '') = ?1 AND COALESCE(q.status, '') = 'held'))`
 
+// An automatically filed task's original text is the held ask itself.
+// Keep it private even if the ask is denied and ceases to be current.
+const taskOriginalAskUnapproved = `EXISTS (SELECT 1 FROM requests r WHERE r.task_id = t.id AND r.task_filed_on_send = 1 AND r.was_held = 1 AND r.approved = 0)`
+
 // taskHostWithheld is true for a task whose text task host ?1 may not read:
-// one the owner never approved (taskNeverApproved) that the host did not
-// file.
-const taskHostWithheld = `(t.filer != ?1 AND ` + taskNeverApproved + `)`
+// a proposed task or an automatically filed ask whose text is still
+// unapproved, unless the host filed it.
+const taskHostWithheld = `(` + taskRoomWithheld + ` OR t.filer != ?1 AND (` + taskNeverApproved + ` OR ` + taskOriginalAskUnapproved + `))`
+
+const taskRoomWithheld = `(?1 != '' AND t.room_post_id IS NOT NULL AND NOT EXISTS (
+	SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ?1 WHERE p.id = t.room_post_id))`
+
+// quiet is 0 for ordinary tasks, 1 for quiet tasks and 2 after escalation.
+const taskListVisible = ` AND t.quiet != 1`
 
 const taskOpenStatuses = `status NOT IN ('done', 'dropped')`
 
@@ -268,7 +297,7 @@ type execer interface {
 }
 
 func getTask(ctx context.Context, q queryer, id int64, viewer string) (envelope.Task, error) {
-	t, err := scanTask(q.QueryRowContext(ctx, taskSelect+` WHERE `+taskVisible+` AND t.id = ?2`, viewer, id))
+	t, err := scanVisibleTask(q.QueryRowContext(ctx, taskSelect+` WHERE `+taskVisible+` AND t.id = ?2`, viewer, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return envelope.Task{}, ErrNoTask
 	}
@@ -305,12 +334,7 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	}
 	defer tx.Rollback()
 	now := s.now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at, due_day, due_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?)`,
-		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now, t.DueDay, t.DueAt)
-	if err != nil {
-		return envelope.Task{}, false, err
-	}
-	id, err := res.LastInsertId()
+	id, err := insertTask(ctx, tx, t, now)
 	if err != nil {
 		return envelope.Task{}, false, err
 	}
@@ -328,7 +352,8 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	}
 	if t.Filer != envelope.TaskOwner {
 		var live int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE filer = ? AND `+taskOpenStatuses, t.Filer).Scan(&live); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks t WHERE t.filer = ? AND t.`+taskOpenStatuses+`
+			AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.task_id = t.id AND r.task_filed_on_send = 1)`, t.Filer).Scan(&live); err != nil {
 			return envelope.Task{}, false, err
 		}
 		if live > MaxOpenTasks {
@@ -357,6 +382,15 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	return out, true, tx.Commit()
 }
 
+func insertTask(ctx context.Context, tx *sql.Tx, t envelope.Task, now int64) (int64, error) {
+	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at, due_day, due_at, quiet, room_post_id) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, 0))`,
+		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now, t.DueDay, t.DueAt, t.Quiet, t.RoomPostID)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 // Task returns task id as viewer may read it; viewer "" is an admin's, any
 // task. It returns ErrNoTask for a task viewer may not read, so a caller
 // learns nothing about it.
@@ -367,10 +401,10 @@ func (s *Store) Task(ctx context.Context, id int64, viewer string) (envelope.Tas
 // Tasks lists up to limit of the tasks viewer may read with an id above
 // after, oldest first; viewer "" is an admin's, every task. Done and dropped
 // tasks are listed only with closed.
-func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int, closed bool) ([]envelope.Task, error) {
-	live := ""
+func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int, closed bool, includeQuiet ...bool) ([]envelope.Task, error) {
+	live := taskQuietFilter(includeQuiet)
 	if !closed {
-		live = ` AND t.` + taskOpenStatuses
+		live += ` AND t.` + taskOpenStatuses
 	}
 	rows, err := s.db.QueryContext(ctx, taskSelect+` WHERE `+taskVisible+live+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, viewer, after, limit)
 	if err != nil {
@@ -379,7 +413,7 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 	defer rows.Close()
 	out := []envelope.Task{}
 	for rows.Next() {
-		t, err := scanTask(rows)
+		t, err := scanVisibleTask(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -390,12 +424,18 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 
 // ClosedTasks counts the done and the dropped tasks viewer may read; viewer
 // "" is an admin's, every one.
-func (s *Store) ClosedTasks(ctx context.Context, viewer string) (done, dropped int, err error) {
+func (s *Store) ClosedTasks(ctx context.Context, viewer string, includeQuiet ...bool) (done, dropped int, err error) {
 	if viewer == "" {
-		// Every task: the count is read from the status index alone.
-		return s.closedTasks(ctx, `SELECT status, COUNT(*) FROM tasks WHERE status IN ('done', 'dropped') GROUP BY status`)
+		return s.closedTasks(ctx, `SELECT status, COUNT(*) FROM tasks t WHERE status IN ('done', 'dropped')`+taskQuietFilter(includeQuiet)+` GROUP BY status`)
 	}
-	return s.closedTasks(ctx, closedTasksWhere+taskVisible+closedTasksBy, viewer)
+	return s.closedTasks(ctx, closedTasksWhere+taskVisible+taskQuietFilter(includeQuiet)+closedTasksBy, viewer)
+}
+
+func taskQuietFilter(includeQuiet []bool) string {
+	if len(includeQuiet) != 0 && includeQuiet[0] {
+		return ""
+	}
+	return taskListVisible
 }
 
 const (
@@ -404,12 +444,12 @@ const (
 )
 
 // HostTask returns task id as task host host is shown it: whole, or as a
-// withheld row (withheldTask) when the owner never approved it and host did
-// not file it. It returns ErrNoTask for a task that is not shown to the
+// withheld row (WithheldTask) when an approval or room access rule holds
+// its text back from the host. It returns ErrNoTask for a task that is not shown to the
 // host at all. Whether host is a task host now is the caller's to have
 // checked.
 func (s *Store) HostTask(ctx context.Context, id int64, host string) (envelope.Task, error) {
-	t, err := scanHostTask(s.db.QueryRowContext(ctx, hostTaskSelect+` AND t.id = ?2`, host, id))
+	t, err := scanVisibleTask(s.db.QueryRowContext(ctx, hostTaskSelect+` AND t.id = ?2`, host, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return envelope.Task{}, ErrNoTask
 	}
@@ -418,10 +458,10 @@ func (s *Store) HostTask(ctx context.Context, id int64, host string) (envelope.T
 
 // HostTasks is Tasks for task host host: up to limit of the tasks it is
 // shown with an id above after, oldest first, each as HostTask returns it.
-func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit int, closed bool) ([]envelope.Task, error) {
-	live := ""
+func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit int, closed bool, includeQuiet ...bool) ([]envelope.Task, error) {
+	live := taskQuietFilter(includeQuiet)
 	if !closed {
-		live = ` AND t.` + taskOpenStatuses
+		live += ` AND t.` + taskOpenStatuses
 	}
 	rows, err := s.db.QueryContext(ctx, hostTaskSelect+live+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, host, after, limit)
 	if err != nil {
@@ -430,7 +470,7 @@ func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit i
 	defer rows.Close()
 	out := []envelope.Task{}
 	for rows.Next() {
-		t, err := scanHostTask(rows)
+		t, err := scanVisibleTask(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -441,8 +481,8 @@ func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit i
 
 // ClosedHostTasks counts the done and the dropped tasks task host host is
 // shown, withheld rows among them.
-func (s *Store) ClosedHostTasks(ctx context.Context, host string) (done, dropped int, err error) {
-	return s.closedTasks(ctx, closedTasksWhere+taskHostVisible+closedTasksBy, host)
+func (s *Store) ClosedHostTasks(ctx context.Context, host string, includeQuiet ...bool) (done, dropped int, err error) {
+	return s.closedTasks(ctx, closedTasksWhere+taskHostVisible+taskQuietFilter(includeQuiet)+closedTasksBy, host)
 }
 
 // hostTaskSelect reads the tasks task host ?1 is shown, each with whether
@@ -450,23 +490,22 @@ func (s *Store) ClosedHostTasks(ctx context.Context, host string) (done, dropped
 // and scanHostTask.
 const hostTaskSelect = `SELECT ` + taskCols + `, ` + taskHostWithheld + taskFrom + ` WHERE ` + taskHostVisible
 
-// scanHostTask reads one row of hostTaskSelect, and hands on a task whose
-// text is withheld as withheldTask makes it.
-func scanHostTask(sc scanner) (envelope.Task, error) {
+// scanVisibleTask reads the task and its visibility flag.
+func scanVisibleTask(sc scanner) (envelope.Task, error) {
 	var withheld bool
 	t, err := scanTaskAnd(sc, &withheld)
 	if err != nil || !withheld {
 		return t, err
 	}
-	return withheldTask(t), nil
+	return WithheldTask(t), nil
 }
 
-// withheldTask is the row a task host is shown of t, a task whose text it
+// WithheldTask is the row a task host is shown of t, a task whose text it
 // may not read. It is built from the fields named here and no others, so
 // the title, detail, result, key and suggested assignee are left out, and
 // so is any field a task gains later.
-func withheldTask(t envelope.Task) envelope.Task {
-	return envelope.Task{ID: t.ID, Status: t.Status, Filer: t.Filer, Source: t.Source, CreatedAt: t.CreatedAt, Withheld: true}
+func WithheldTask(t envelope.Task) envelope.Task {
+	return envelope.Task{ID: t.ID, Status: t.Status, Filer: t.Filer, Source: t.Source, CreatedAt: t.CreatedAt, Quiet: t.Quiet, Withheld: true}
 }
 
 // closedTasks runs query, which counts tasks by status, and returns the
@@ -591,14 +630,16 @@ func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string,
 		}
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE tasks SET `+set+` WHERE id = ? AND current_request = ?`, append(slices.Clone(args), task.Int64, reqID)...)
+	var quiet bool
+	err := tx.QueryRowContext(ctx, `UPDATE tasks SET `+set+` WHERE id = ? AND current_request = ? RETURNING quiet = 1`, append(slices.Clone(args), task.Int64, reqID)...).Scan(&quiet)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
-		return err
-	}
 	ev.TaskID = task.Int64
+	ev.QuietAnswer = quiet && ev.Kind == envelope.TaskEventStatus && ev.Status == envelope.TaskReturned
 	now := s.now().UnixMilli()
 	if _, err = addTaskEvent(ctx, tx, ev, now); err != nil {
 		return err
@@ -619,7 +660,7 @@ func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, no
 	if err := forgetHeldTargetTx(ctx, tx, reqID); err != nil {
 		return err
 	}
-	return s.followTaskTx(ctx, tx, reqID, `status = ?, assignee = '', current_request = ''`, []any{string(envelope.TaskOpen)},
+	return s.followTaskTx(ctx, tx, reqID, `status = ?, assignee = '', current_request = '', quiet = CASE quiet WHEN 1 THEN 2 ELSE quiet END`, []any{string(envelope.TaskOpen)},
 		envelope.TaskEvent{Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskOpen})
 }
 
@@ -1175,9 +1216,9 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		dueChange = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.TaskID)
+	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change, quiet_answer)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.QuietAnswer, ev.TaskID)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -1223,15 +1264,13 @@ func recordTaskClaimant(ctx context.Context, x execer, id int64, agent string) e
 	return err
 }
 
-func scanTask(sc scanner) (envelope.Task, error) { return scanTaskAnd(sc) }
-
 // scanTaskAnd reads the columns of taskCols into a task, and the columns a
 // query selects after them into more.
 func scanTaskAnd(sc scanner, more ...any) (envelope.Task, error) {
 	var t envelope.Task
 	var status, ask string
 	var created int64
-	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &t.DueDay, &t.DueAt, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo}, more...)...); err != nil {
+	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &t.DueDay, &t.DueAt, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo, &t.Quiet, &t.RoomPostID}, more...)...); err != nil {
 		return envelope.Task{}, err
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()

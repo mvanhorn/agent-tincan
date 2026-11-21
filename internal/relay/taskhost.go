@@ -162,6 +162,7 @@ const taskHostGuestAsk = "a guest's ask is open with you, so you have your ordin
 // withheld row: id, status, filer, source and creation time (the store's
 // HostTask).
 type taskView struct {
+	roomAccess func(context.Context, string) bool
 	// viewer is the agent, "" for an admin, who reads every task.
 	viewer string
 	// host is set when the caller reads with the host view.
@@ -180,7 +181,7 @@ type taskView struct {
 // the one place that decides it; whether the caller asked for the host
 // view is its caller's to weigh.
 func (s *Server) hostTaskView(ctx context.Context, name string) (taskView, error) {
-	view := taskView{viewer: name}
+	view := taskView{viewer: name, roomAccess: s.mayReadRooms}
 	a, ok, err := s.dir.Agent(ctx, name)
 	if err != nil || !ok || !a.TaskHost {
 		return view, err
@@ -208,7 +209,7 @@ func (s *Server) hostTaskView(ctx context.Context, name string) (taskView, error
 // and returns false when the view cannot be decided.
 func (s *Server) askedTaskView(w http.ResponseWriter, r *http.Request, name string) (taskView, bool) {
 	if r.URL.Query().Get("host") != "1" {
-		return taskView{viewer: name}, true
+		return taskView{viewer: name, roomAccess: s.mayReadRooms}, true
 	}
 	view, err := s.hostTaskView(r.Context(), name)
 	if err != nil {
@@ -245,10 +246,17 @@ func (v taskView) mark(out map[string]any) {
 // task reads task id as the view shows it. For a task host that may be a
 // withheld row.
 func (v taskView) task(ctx context.Context, st *store.Store, id int64) (envelope.Task, error) {
+	var task envelope.Task
+	var err error
 	if v.host {
-		return st.HostTask(ctx, id, v.viewer)
+		task, err = st.HostTask(ctx, id, v.viewer)
+	} else {
+		task, err = st.Task(ctx, id, v.viewer)
 	}
-	return st.Task(ctx, id, v.viewer)
+	if err == nil && task.RoomPostID != 0 && v.roomAccess != nil && !v.roomAccess(ctx, v.viewer) {
+		task = store.WithheldTask(task)
+	}
+	return task, err
 }
 
 // whole is task for a caller about to act on the task: a row whose text is
@@ -263,19 +271,39 @@ func (v taskView) whole(ctx context.Context, st *store.Store, id int64) (envelop
 }
 
 // tasks lists one page of the tasks the view shows, as store.Tasks does.
-func (v taskView) tasks(ctx context.Context, st *store.Store, after int64, limit int, closed bool) ([]envelope.Task, error) {
+func (v taskView) tasks(ctx context.Context, st *store.Store, after int64, limit int, closed, includeQuiet bool) ([]envelope.Task, error) {
+	var tasks []envelope.Task
+	var err error
 	if v.host {
-		return st.HostTasks(ctx, v.viewer, after, limit, closed)
+		tasks, err = st.HostTasks(ctx, v.viewer, after, limit, closed, includeQuiet)
+	} else {
+		tasks, err = st.Tasks(ctx, v.viewer, after, limit, closed, includeQuiet)
 	}
-	return st.Tasks(ctx, v.viewer, after, limit, closed)
+	if err != nil || v.roomAccess == nil {
+		return tasks, err
+	}
+	for i, task := range tasks {
+		if task.RoomPostID == 0 {
+			continue
+		}
+		if !v.roomAccess(ctx, v.viewer) {
+			for j := i; j < len(tasks); j++ {
+				if tasks[j].RoomPostID != 0 {
+					tasks[j] = store.WithheldTask(tasks[j])
+				}
+			}
+		}
+		break
+	}
+	return tasks, nil
 }
 
 // closed counts the done and dropped tasks the view shows.
-func (v taskView) closed(ctx context.Context, st *store.Store) (done, dropped int, err error) {
+func (v taskView) closed(ctx context.Context, st *store.Store, includeQuiet bool) (done, dropped int, err error) {
 	if v.host {
-		return st.ClosedHostTasks(ctx, v.viewer)
+		return st.ClosedHostTasks(ctx, v.viewer, includeQuiet)
 	}
-	return st.ClosedTasks(ctx, v.viewer)
+	return st.ClosedTasks(ctx, v.viewer, includeQuiet)
 }
 
 // hostMayActForOwner guards actions the named host takes from a direct chat.

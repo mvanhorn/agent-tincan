@@ -82,6 +82,9 @@ func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 	writeTasks("Due today or overdue", b.Due)
 	writeTasks("Waiting on you", b.Waiting)
 	writeTasks("Done since the last briefing", b.Done)
+	if b.SmallAsksAnswered > 0 {
+		fmt.Fprintf(&msg, " Small asks answered since last briefing: %d.", b.SmallAsksAnswered)
+	}
 	if b.Suggested != 0 {
 		fmt.Fprintf(&msg, " Suggested today: task #%d.", b.Suggested)
 	}

@@ -131,6 +131,15 @@ type Request struct {
 	// the id of that task. Only the relay sets it (a send cannot); older
 	// clients ignore it and see an ordinary ask.
 	TaskID int64 `json:"task_id,omitempty"`
+	// TaskFiledOnSend distinguishes an ordinary ask filed as it was sent
+	// from an assignment that may carry other teammates' task text.
+	TaskFiledOnSend bool `json:"-"`
+	// TaskContextParentID identifies a verified policy parent when a
+	// session starts its own trace. Task filing still inherits room scope.
+	TaskContextParentID string `json:"-"`
+	// TaskRoomScope records inherited room context without making this ask
+	// itself a room mention or changing where its reply is delivered.
+	TaskRoomScope int64 `json:"-"`
 	// TaskNoticeID identifies the task mentioned by a relay-generated
 	// notification. It is set on poll delivery, independently of TaskID.
 	TaskNoticeID int64 `json:"task_notice_id,omitempty"`
@@ -832,6 +841,9 @@ const (
 // names its schedule in RepeatSchedule, how often it fires in
 // RepeatEverySeconds, and the teammate each fire assigns it to in RepeatTo.
 type Task struct {
+	Quiet bool `json:"quiet,omitempty"`
+	// RoomPostID identifies a room whose membership governs this task's text.
+	RoomPostID int64 `json:"-"`
 	TaskDue
 	DueZone           string     `json:"-"` // client-side display zone from relay capabilities
 	ID                int64      `json:"id"`
@@ -877,6 +889,7 @@ const (
 	TaskEventStatus          = "status"
 	TaskEventComment         = "comment"
 	TaskEventProgress        = "progress"
+	TaskEventAsked           = "asked"
 	TaskEventDue             = "due"
 	TaskEventReminderDropped = "reminder_dropped"
 	// TaskEventAssignsReset is the owner setting the count of agent assigns
@@ -893,12 +906,14 @@ const (
 // agents sent, so an ask that carries it names them to the owner's approval
 // rules. It is never sent to a client.
 type TaskEvent struct {
-	ID     int64      `json:"id"`
-	TaskID int64      `json:"task_id"`
-	Actor  string     `json:"actor"`
-	Kind   string     `json:"kind"`
-	Body   string     `json:"body,omitempty"`
-	Status TaskStatus `json:"status,omitempty"`
+	// QuietAnswer records that the reply completed a quiet attempt, for briefings.
+	QuietAnswer bool       `json:"-"`
+	ID          int64      `json:"id"`
+	TaskID      int64      `json:"task_id"`
+	Actor       string     `json:"actor"`
+	Kind        string     `json:"kind"`
+	Body        string     `json:"body,omitempty"`
+	Status      TaskStatus `json:"status,omitempty"`
 	// ForOwner marks an entry a task host made on the owner's word:
 	// Actor is the host, and Body the owner's words it says it acted on.
 	ForOwner bool `json:"for_owner,omitempty"`

@@ -33,8 +33,12 @@ type taskMesh struct {
 }
 
 func newTaskMesh(t *testing.T) *taskMesh {
+	return newTaskMeshWithConfig(t, relay.Config{})
+}
+
+func newTaskMeshWithConfig(t *testing.T, cfg relay.Config) *taskMesh {
 	t.Helper()
-	m := newScheduleMesh(t)
+	m := newScheduleMeshWithConfig(t, cfg)
 	scout := m.JoinOnMachineOf(t, "instinct", "scout")
 	// Joins are stamped by the real clock; move the injected one past them.
 	m.clk.advance(2 * time.Second)

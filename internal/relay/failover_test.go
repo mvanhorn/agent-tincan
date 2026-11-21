@@ -739,3 +739,22 @@ func TestFailOutlivedHoldSparesChangedAsk(t *testing.T) {
 		})
 	}
 }
+
+func TestFailoverPreservesTaskFiledOnSend(t *testing.T) {
+	h, clk := failoverHarness(t)
+	h.do(macAddr, "PUT", "/v1/agents/instinct/task-host", `{"task_host":true}`, http.StatusOK, nil)
+	req := h.send(instinctAddr, "grokbot", "summarize this paper")
+	if req.TaskID == 0 {
+		t.Fatalf("no task for request %s", req.ID)
+	}
+	h.do(grokAddr, "POST", "/v1/requests/"+req.ID+"/claim", "", http.StatusOK, nil)
+	until := limitAt(h, clk, grokAddr, time.Hour)
+	out := handback(h, grokAddr, req.ID, until, http.StatusOK)
+	if out.Outcome != client.HandbackMoved || out.To != "muse" {
+		t.Fatalf("handback = %+v", out)
+	}
+	task, err := h.st.Task(t.Context(), req.TaskID, "")
+	if err != nil || task.Assignee != "muse" || task.CurrentRequest != req.ID {
+		t.Fatalf("task after move = %+v, %v", task, err)
+	}
+}

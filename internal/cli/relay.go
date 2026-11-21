@@ -42,6 +42,7 @@ import (
 
 type relayFlags struct {
 	unansweredQuestionAfter time.Duration
+	fileAllAsks             string
 
 	urgentPerHour int
 	listen        string
@@ -216,7 +217,8 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.StringVar(&f.taskBriefing, "task-briefing", relay.DefaultTaskBriefing, "daily task briefing time (HH:MM), or off")
 	fs.StringVar(&f.taskBriefingZone, "task-briefing-zone", "", "IANA time zone for the daily task briefing (defaults to --task-zone)")
 	fs.DurationVar(&f.taskNoticeAck, "task-notice-ack-timeout", relay.DefaultTaskNoticeAckTimeout, "how long after a task notice is claimed to wait for the host's acknowledgment before retrying")
-	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a plain ask can wait for clarification before the relay files it as a task")
+	fs.StringVar(&f.fileAllAsks, "file-all-asks", "auto", "file teammate asks as tasks: auto (when a task host is named), on, or off")
+	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a clarification waits before an unfinished ask is filed or a quiet task is surfaced")
 	fs.DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
 	fs.StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	fs.BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
@@ -229,6 +231,11 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 
 // validate checks the flags the way tincan relay does before it starts.
 func (f relayFlags) validate() error {
+	switch f.fileAllAsks {
+	case "auto", "on", "off":
+	default:
+		return errors.New("--file-all-asks must be auto, on or off")
+	}
 	if f.urgentPerHour < 1 {
 		return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
 	}
@@ -279,7 +286,7 @@ func (f relayFlags) relayConfig() relay.Config {
 		briefingZone, _ = envelope.TaskLocation(f.taskBriefingZone)
 	}
 	return relay.Config{Version: Version, TaskZone: zone, TaskBriefing: f.taskBriefing, TaskBriefingZone: briefingZone, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
-		TaskNoticeAckTimeout: f.taskNoticeAck, ParsePass: parsePassRef}
+		TaskNoticeAckTimeout: f.taskNoticeAck, FileAllAsks: f.fileAllAsks, ParsePass: parsePassRef}
 }
 
 // parsePassRef reads a pass request for the relay's held listing and
