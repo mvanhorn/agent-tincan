@@ -133,7 +133,8 @@ func TestTaskRecoveryClarification(t *testing.T) {
 				}
 				return
 			}
-			if len(expired) != 1 || expired[0] != req.ID || len(tasks) != 1 {
+			if len(expired) != 1 || expired[0].ID != req.ID || expired[0].Prev != envelope.StatusNeedsInput ||
+				expired[0].Status != envelope.StatusExpired || len(tasks) != 1 {
 				t.Fatalf("clarification recovery = %+v %+v", expired, tasks)
 			}
 			if _, err := s.Answer(ctx, req.ID, req.From, "Too late"); !errors.Is(err, ErrWrongState) {

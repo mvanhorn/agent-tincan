@@ -616,16 +616,7 @@ func (s *Server) Sweep(ctx context.Context) {
 		return
 	}
 	for _, t := range trs {
-		event := "requeued"
-		if t.Status == envelope.StatusExpired {
-			event = "expired"
-			if t.Held {
-				event = "hold_expired"
-			}
-		}
-		s.record(ctx, event, t.ID, t.TraceID, "relay", "")
-		s.hub.notify(requestKey(t.ID))
-		s.tellSwept(ctx, t)
+		s.notifySwept(ctx, t)
 		if t.Status == envelope.StatusQueued {
 			s.hub.notify(inboxKey(t.To))
 			// An agent woken by the relay has no poller to see the requeue,
@@ -648,13 +639,26 @@ func (s *Server) Sweep(ctx context.Context) {
 	if err != nil {
 		log.Printf("sweep: recover tasks: %v", err)
 	}
-	for _, id := range expiredQuestions {
-		s.hub.notify(requestKey(id))
+	for _, t := range expiredQuestions {
+		s.notifySwept(ctx, t)
 	}
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
 	s.drainTaskNotices(ctx)
+}
+
+func (s *Server) notifySwept(ctx context.Context, t store.Transition) {
+	event := "requeued"
+	if t.Status == envelope.StatusExpired {
+		event = "expired"
+		if t.Held {
+			event = "hold_expired"
+		}
+	}
+	s.record(ctx, event, t.ID, t.TraceID, "relay", "")
+	s.hub.notify(requestKey(t.ID))
+	s.tellSwept(ctx, t)
 }
 
 // wakeRequeued wakes req's target for a request it may have looked past: a

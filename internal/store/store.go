@@ -1673,7 +1673,7 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 	return ids, tx.Commit()
 }
 
-// Transition is one state change made by Sweep. Prev is the status the
+// Transition is one state change made by Sweep or RecoverTasks. Prev is the status the
 // request left, and ClaimedAt when its last claim began (zero if it was
 // never claimed).
 type Transition struct {

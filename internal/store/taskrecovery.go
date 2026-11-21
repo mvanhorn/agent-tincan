@@ -73,7 +73,8 @@ END;`)
 // RecoverTasks files a bounded batch from the durable outcome queue. The
 // request state, task, audit and notice are committed together. A stale
 // clarification is closed here, so an answer and a filing cannot both win.
-func (s *Store) RecoverTasks(ctx context.Context, questionAfter time.Duration) ([]string, error) {
+// The returned transitions describe the clarifications closed by this batch.
+func (s *Store) RecoverTasks(ctx context.Context, questionAfter time.Duration) ([]Transition, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -89,7 +90,7 @@ func (s *Store) RecoverTasks(ctx context.Context, questionAfter time.Duration) (
 	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
-	var expired []string
+	var expired []Transition
 	for _, id := range ids {
 		req, status, err := scanRequest(tx.QueryRowContext(ctx, `SELECT `+requestCols+` FROM requests WHERE id = ?`, id))
 		if err != nil {
@@ -98,10 +99,16 @@ func (s *Store) RecoverTasks(ctx context.Context, questionAfter time.Duration) (
 		reason := string(status)
 		if status == envelope.StatusNeedsInput {
 			reason = "clarification timed out"
-			if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'expired', lease_paused = 0, updated_at = ? WHERE id = ?`, now.UnixMilli(), id); err != nil {
+			var claimed int64
+			if err := tx.QueryRowContext(ctx, `UPDATE requests SET status = 'expired', lease_paused = 0, updated_at = ? WHERE id = ? RETURNING claimed_at`, now.UnixMilli(), id).Scan(&claimed); err != nil {
 				return nil, err
 			}
-			expired = append(expired, id)
+			transition := Transition{ID: id, TraceID: req.TraceID, From: req.From, To: req.To, Kind: req.Kind,
+				Urgent: req.Urgent, Prev: status, Status: envelope.StatusExpired}
+			if claimed > 0 {
+				transition.ClaimedAt = time.UnixMilli(claimed)
+			}
+			expired = append(expired, transition)
 		}
 		switch {
 		case status == envelope.StatusDeclined && req.WasHeld && !req.Approved:
