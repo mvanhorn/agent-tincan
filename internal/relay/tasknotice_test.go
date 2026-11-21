@@ -289,15 +289,20 @@ func TestPollReportsCurrentTaskHostView(t *testing.T) {
 		t.Fatalf("legacy poll = %+v, %v", legacy, err)
 	}
 
-	task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Read the memo", "source": "mail"}).Task
+	taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Read the memo", "source": "mail"})
+	if err := m.muse.Raw(t.Context(), "POST", "/v1/send", map[string]string{
+		"to": "pilot", "kind": "notify", "body": "Ordinary teammate notice",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.admin.SetTaskHost(t.Context(), "pilot", false); err != nil {
 		t.Fatal(err)
 	}
 	in, err = host.Poll(t.Context(), 0)
 	if err != nil || in.TaskHost || len(in.Requests) != 1 {
-		t.Fatalf("cleared host poll = %+v, %v; want queued notice without host view", in, err)
+		t.Fatalf("cleared host poll = %+v, %v, want ordinary notice without host view", in, err)
 	}
-	if req := in.Requests[0]; req.TaskNoticeID != task.ID || req.TaskNoticeStatus != envelope.TaskProposed || in.TaskNoticeGuidance(req) != "" {
+	if req := in.Requests[0]; req.Body != "Ordinary teammate notice" || req.TaskNoticeID != 0 {
 		t.Fatalf("notice after clearing host = %+v", req)
 	}
 }

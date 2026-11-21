@@ -624,6 +624,11 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 		return err
 	}
 	if !a.TaskHost || node.String != a.NodeID {
+		if taskHost.Valid {
+			if err := s.cancelTaskNoticesFor(ctx, tx, a.Name); err != nil {
+				return err
+			}
+		}
 		taskHost = sql.NullInt64{}
 	}
 	until, asks, err := encodeGuest(a.Guest)
@@ -656,6 +661,9 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return false, err
+	}
+	if err := s.cancelTaskNoticesFor(ctx, tx, name); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM wakes WHERE agent = ?`, name); err != nil {
@@ -719,16 +727,29 @@ func (s *Store) SetAgentFallback(ctx context.Context, name, to string) (bool, er
 // which stores NULL. It reports whether name exists. It is the only write
 // that sets the mark: PutAgent keeps or clears it and never grants it.
 func (s *Store) SetAgentTaskHost(ctx context.Context, name string, on bool) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
 	var mark any
 	if on {
 		mark = 1
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE agents SET task_host = ? WHERE name = ?`, mark, name)
+	res, err := tx.ExecContext(ctx, `UPDATE agents SET task_host = ? WHERE name = ?`, mark, name)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil || n == 0 {
+		return false, err
+	}
+	if !on {
+		if err := s.cancelTaskNoticesFor(ctx, tx, name); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit()
 }
 
 // TouchAgent records that name called the relay at t. It only moves the

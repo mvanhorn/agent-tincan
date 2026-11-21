@@ -69,7 +69,12 @@ func (s *Server) handleTaskNoticesTold(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) retryTaskNotices(ctx context.Context) {
-	due, err := s.store.TaskNoticesDue(ctx, s.cfg.TaskNoticeAckTimeout, taskNoticeBatch)
+	roster, err := s.dir.Agents(ctx)
+	if err != nil {
+		log.Printf("task notice receipts: roster: %v", err)
+		return
+	}
+	due, err := s.store.TaskNoticesDue(ctx, s.cfg.TaskNoticeAckTimeout, taskNoticeBatch, s.eligibleTaskHosts(roster))
 	if err != nil {
 		log.Printf("task notice receipts: %v", err)
 		return
@@ -86,7 +91,10 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 	taskID := taskNoticeID(old.NoticeFor)
 	next := envelope.Request{From: client.RelaySender, Kind: envelope.KindNotify, Hop: 1, Chain: []string{client.RelaySender}}
 	reason := "attempt limit"
-	if d.Attempt < taskNoticeAttempts {
+	if !d.CanRetry {
+		reason = "host ineligible or notice cancelled"
+	} else if d.Attempt < taskNoticeAttempts {
+		// Eligibility may have changed since the sweep collected its batch.
 		host, found, err := s.dir.Agent(ctx, old.To)
 		if err != nil {
 			return err
@@ -98,10 +106,12 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		}
 	}
 	if next.To == "" {
+		// The owner already chose where relay alerts go. Send only fixed
+		// task metadata there when this host can no longer deliver it.
 		next.To = s.notifyDestination()
 		old.From, old.Kind, old.NoticeKind = client.RelaySender, envelope.KindNotify, store.NoteTask
 		markTaskNotice(&old)
-		next.Body = fmt.Sprintf("Task #%d: %s did not acknowledge this task notice after %d attempts. %s",
+		next.Body = fmt.Sprintf("Task #%d: %s did not acknowledge this task notice by attempt %d. %s",
 			taskID, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
 	}
 	var ttl time.Duration
@@ -122,6 +132,7 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		s.wakeRequeued(ctx, next)
 		return nil
 	}
+	s.hub.notify(requestKey(old.ID))
 	detail["reason"] = reason
 	if next.ID != "" {
 		detail["fallback_request"], detail["to"] = next.ID, next.To

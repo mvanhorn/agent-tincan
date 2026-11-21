@@ -112,3 +112,85 @@ func TestTaskNoticeRetriesAndFallsBackAfterThirdAttempt(t *testing.T) {
 		t.Fatalf("delivery changed the task: %+v, %v", got, err)
 	}
 }
+
+func TestTaskNoticeFallsBackWhenHostLosesEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status envelope.Status
+		change func(*testing.T, *taskMesh)
+	}{
+		{"removed", envelope.StatusClaimed, func(t *testing.T, m *taskMesh) {
+			if err := m.admin.Remove(t.Context(), "pilot"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"cleared", envelope.StatusDelivered, func(t *testing.T, m *taskMesh) {
+			if _, err := m.admin.SetTaskHost(t.Context(), "pilot", false); err != nil {
+				t.Fatal(err)
+			}
+			// Regranting the mark does not revive notices from the old grant.
+			if _, err := m.admin.SetTaskHost(t.Context(), "pilot", true); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"suspended", envelope.StatusQueued, func(t *testing.T, m *taskMesh) {
+			m.gate(t, `{"gate":{"pilot":{"from":["muse"]}},"notify":"scout"}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTaskMesh(t)
+			pilot := m.joinHost(t, "instinct", "pilot")
+			m.gate(t, `{"gate":{},"notify":"scout"}`)
+			ctx := t.Context()
+
+			taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Already reported", "source": "mail"})
+			confirmed := m.wantNotices(t, "pilot", 1)[0]
+			if _, err := pilot.Claim(ctx, confirmed.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.TaskNoticesTold(ctx, pilot, []string{confirmed.ID}); err != nil {
+				t.Fatal(err)
+			}
+
+			task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Private title", "source": "mail"}).Task
+			notice := m.wantNotices(t, "pilot", 2)[1]
+			switch tc.status {
+			case envelope.StatusDelivered:
+				if got := read(t, pilot); len(got) != 1 || got[0].ID != notice.ID {
+					t.Fatalf("host inbox = %+v", got)
+				}
+			case envelope.StatusClaimed:
+				if _, err := pilot.Claim(ctx, notice.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			other := m.joinHost(t, "grokbot", "other")
+			tc.change(t, m)
+
+			// The next sweep sends the fallback before the receipt timeout.
+			m.Server.Sweep(ctx)
+			m.Server.Sweep(ctx)
+			in, err := m.scout.Poll(ctx, 0)
+			if err != nil || len(in.Requests) != 1 {
+				t.Fatalf("fallback inbox = %+v, %v", in, err)
+			}
+			fallback := in.Requests[0]
+			wantNews := fmt.Sprintf("Task #%d was proposed and is waiting for your approval.", task.ID)
+			if !strings.Contains(fallback.Body, wantNews) || strings.Contains(fallback.Body, "Private title") || fallback.TaskNoticeReceipt {
+				t.Fatalf("fallback = %+v", fallback)
+			}
+			if _, status, err := m.Store.Request(ctx, notice.ID); err != nil || status != envelope.StatusCancelled {
+				t.Fatalf("old notice status = %q, %v", status, err)
+			}
+			if got := read(t, other); len(got) != 0 {
+				t.Fatalf("other host inbox = %+v", got)
+			}
+			if got := m.audited(t, "task_notice_retried"); len(got) != 0 {
+				t.Fatalf("retry audit = %v", got)
+			}
+			if got := m.audited(t, "task_notice_fallback"); len(got) != 1 {
+				t.Fatalf("fallback audit = %v", got)
+			}
+		})
+	}
+}
