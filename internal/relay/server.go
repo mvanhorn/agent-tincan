@@ -319,6 +319,18 @@ type Server struct {
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
 	stopOnce sync.Once
+
+	// sendKeys holds a lock for each idempotency key a send is in flight
+	// under, keyed by sender and key (see lockSendKey).
+	sendKeyMu sync.Mutex
+	sendKeys  map[string]*sendKeyLock
+}
+
+// sendKeyLock is one in-flight idempotency key. refs counts the sends that
+// hold mu or wait for it; the entry is dropped when the last one is done.
+type sendKeyLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // persistEvery bounds how often an agent's activity is written to the store.
@@ -940,6 +952,21 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.IdempotencyKey != "" {
+		// A retry of a send the relay already took gets that request back
+		// before any check that could refuse it now: the rate limit the
+		// first send spent, its attachments already bound, a target removed
+		// since.
+		if s.replaySend(w, r, req, fromGuest) {
+			return
+		}
+		// Retries racing each other go on one at a time, so only the first
+		// spends a rate-limit slot and queues; the rest find its request.
+		defer s.lockSendKey(from, req.IdempotencyKey)()
+		if s.replaySend(w, r, req, fromGuest) {
+			return
+		}
+	}
 	if len(req.Attachments) > 0 && s.blobs == "" {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
 		return
@@ -978,7 +1005,13 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	asked := req
 	if req, err = s.submit(r.Context(), req); err != nil {
+		// The store refuses a second request under one key whatever got
+		// past the lock; that send is a retry too.
+		if errors.Is(err, store.ErrDuplicateSend) && s.replaySend(w, r, asked, fromGuest) {
+			return
+		}
 		writeErr(w, statusFor(err), err)
 		return
 	}
@@ -988,6 +1021,66 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		res.Target = s.withProjectMatch(s.recipientTarget(r.Context(), req.To), req)
 	}
 	writeJSON(w, http.StatusCreated, res)
+}
+
+// replaySend answers asked, a send under an idempotency key, when its sender
+// already used that key, and reports whether it answered. The key is looked
+// up under asked.From, the sender WhoIs named, so one agent's key never
+// finds or reveals another agent's request. A retry of the same send gets
+// 200 with the request the key named and its current status, and the
+// target facts a first send would get; a different send under the key gets
+// 409. Either way nothing is queued, woken, held again or audited.
+func (s *Server) replaySend(w http.ResponseWriter, r *http.Request, asked envelope.Request, fromGuest bool) bool {
+	orig, err := s.store.SentWithKey(r.Context(), asked.From, asked.IdempotencyKey)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err)
+		return true
+	case orig.SendHash != asked.SendHash:
+		// A key reused by mistake (a counter reset, a per-job name) must not
+		// drop a new send while telling the caller it worked.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "idempotency key already used for a different send; use a new key for a new send",
+			"id":    orig.ID,
+		})
+		return true
+	}
+	res := envelope.SendResponse{Request: orig}
+	if !fromGuest {
+		res.Target = s.withProjectMatch(s.recipientTarget(r.Context(), orig.To), orig)
+	}
+	writeJSON(w, http.StatusOK, res)
+	return true
+}
+
+// lockSendKey waits until no other send under sender's key is in flight,
+// and returns the func that lets the next one go. Entries are counted, not
+// deleted on unlock, so a send already waiting keeps the same mutex and a
+// later one cannot make a second mutex for the key.
+func (s *Server) lockSendKey(sender, key string) func() {
+	k := sender + "\x00" + key
+	s.sendKeyMu.Lock()
+	if s.sendKeys == nil {
+		s.sendKeys = map[string]*sendKeyLock{}
+	}
+	l := s.sendKeys[k]
+	if l == nil {
+		l = &sendKeyLock{}
+		s.sendKeys[k] = l
+	}
+	l.refs++
+	s.sendKeyMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		s.sendKeyMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(s.sendKeys, k)
+		}
+		s.sendKeyMu.Unlock()
+	}
 }
 
 // withProjectMatch adds to t whether a session of the project req names is
