@@ -1297,7 +1297,7 @@ func TestTaskAdminAddReadComment(t *testing.T) {
 // route is the only agent route that reaches done, reopen or a drop of
 // another's task, it answers approve and reset as unknown even for a host,
 // and it refuses an agent that is no host. Every admin task route refuses
-// an agent that is not on an admin device, and their number is unchanged.
+// an agent that is not on an admin device, including changes to the due date.
 func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 	m := newTaskMesh(t)
 	open := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "open"}).Task
@@ -1328,8 +1328,8 @@ func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 			decide++
 		}
 	}
-	if admin != 10 {
-		t.Errorf("%d admin task routes checked, want 10", admin)
+	if admin != 11 {
+		t.Errorf("%d admin task routes checked, want 11", admin)
 	}
 	if decide != 1 {
 		t.Errorf("%d agent decide routes, want 1", decide)
@@ -1676,8 +1676,8 @@ func TestGuestCannotCallTaskRoutes(t *testing.T) {
 			t.Errorf("%s as a guest: %v", pattern, err)
 		}
 	}
-	if n != 18 {
-		t.Errorf("%d task routes checked, want 18", n)
+	if n != 20 {
+		t.Errorf("%d task routes checked, want 20", n)
 	}
 	if tasks := listTasks(t, m.Client(t, "admin"), "/v1/admin/tasks"); len(tasks) != 1 {
 		t.Errorf("%d tasks after the guest's calls, want 1", len(tasks))

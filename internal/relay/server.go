@@ -68,6 +68,7 @@ type Config struct {
 	// TaskNoticeAckTimeout is how long a host has after claiming task news
 	// to confirm private delivery. The default is DefaultTaskNoticeAckTimeout.
 	TaskNoticeAckTimeout time.Duration
+	TaskZone             *time.Location // the owner's due-date calendar
 	// EmailPollEvery is how often the relay polls an opted-in agent's
 	// AgentMail inbox for replies to its request emails while the agent's
 	// window is open; default DefaultEmailPollEvery.
@@ -130,6 +131,9 @@ func (c *Config) defaults() {
 	}
 	if c.OwnerNoticeAfter == 0 {
 		c.OwnerNoticeAfter = DefaultOwnerNoticeAfter
+	}
+	if c.TaskZone == nil {
+		c.TaskZone, _ = envelope.TaskLocation("")
 	}
 	if c.TaskNoticeAckTimeout <= 0 {
 		c.TaskNoticeAckTimeout = DefaultTaskNoticeAckTimeout
@@ -472,6 +476,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST /v1/tasks/{id}/assign", s.handleAssignTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/comment", s.handleCommentTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/drop", s.handleDropTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/due", s.handleTaskDue)
 	mux.HandleFunc("POST /v1/tasks/{id}/decide", s.handleHostDecideTask)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
@@ -525,6 +530,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/admin/tasks", s.handleAdminTasks)
 	mux.HandleFunc("POST /v1/admin/tasks", s.handleAdminAddTask)
 	mux.HandleFunc("GET /v1/admin/tasks/{id}", s.handleAdminTask)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/due", s.handleAdminTaskDue)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/assign", s.handleAdminAssignTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/comment", s.handleAdminCommentTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/approve", s.handleApproveTask)
@@ -652,6 +658,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
+	s.queueTaskReminders(ctx)
 	s.drainTaskNotices(ctx)
 	s.retryTaskNotices(ctx)
 }
@@ -1583,7 +1590,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.notify(requestKey(req.ID))
 	detail := ""
-	if req.NoticeKind == store.NoteTask {
+	if store.IsTaskNotice(req.NoticeKind) {
 		if claimSession, err := s.store.TaskNoticeClaimSession(r.Context(), req.ID); err == nil && claimSession != "" {
 			detail = store.DetailJSON(map[string]any{"session": claimSession})
 		}

@@ -134,6 +134,8 @@ type Request struct {
 	// TaskNoticeID identifies the task mentioned by a relay-generated
 	// notification. It is set on poll delivery, independently of TaskID.
 	TaskNoticeID int64 `json:"task_notice_id,omitempty"`
+	// TaskNoticeKind distinguishes notices that need their own owner message.
+	TaskNoticeKind string `json:"task_notice_kind,omitempty"`
 	// TaskNoticeStatus is the status the notice reported when queued. It
 	// can differ from the task's current status. Only the relay sets it.
 	TaskNoticeStatus TaskStatus `json:"task_notice_status,omitempty"`
@@ -824,6 +826,8 @@ const (
 // names its schedule in RepeatSchedule, how often it fires in
 // RepeatEverySeconds, and the teammate each fire assigns it to in RepeatTo.
 type Task struct {
+	TaskDue
+	DueZone           string     `json:"-"` // client-side display zone from relay capabilities
 	ID                int64      `json:"id"`
 	Title             string     `json:"title"`
 	Detail            string     `json:"detail,omitempty"`
@@ -862,11 +866,13 @@ type Task struct {
 
 // What a task history entry records.
 const (
-	TaskEventAdded    = "added"
-	TaskEventAssigned = "assigned"
-	TaskEventStatus   = "status"
-	TaskEventComment  = "comment"
-	TaskEventProgress = "progress"
+	TaskEventAdded           = "added"
+	TaskEventAssigned        = "assigned"
+	TaskEventStatus          = "status"
+	TaskEventComment         = "comment"
+	TaskEventProgress        = "progress"
+	TaskEventDue             = "due"
+	TaskEventReminderDropped = "reminder_dropped"
 	// TaskEventAssignsReset is the owner setting the count of agent assigns
 	// back to zero.
 	TaskEventAssignsReset = "assigns_reset"

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"strconv"
 	"time"
 
@@ -22,10 +24,16 @@ import (
 // found.
 const NoteTask = "task"
 
+// IsTaskNotice identifies requests tracked by the task receipt path.
+func IsTaskNotice(kind string) bool {
+	return kind == NoteTask || kind == envelope.TaskNoticeReminder
+}
+
 // TaskNotice is one task change waiting to be told to the task hosts.
 type TaskNotice struct {
 	ID     int64
 	TaskID int64
+	Kind   string
 	// Status is the status the change gave the task.
 	Status envelope.TaskStatus
 	// Actor is who made the change: an agent, the owner, or the relay.
@@ -41,15 +49,36 @@ type TaskNotice struct {
 // has a foreign key to agents, since a rebind re-inserts the agent row. It
 // is a no-op when the tables exist.
 func (s *Store) migrateTaskNotices() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS task_notices (
-  id         INTEGER PRIMARY KEY,
-  task_id    INTEGER NOT NULL REFERENCES tasks(id),
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const schema = `CREATE TABLE IF NOT EXISTS task_notices (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER REFERENCES tasks(id),
   status     TEXT NOT NULL,
   actor      TEXT NOT NULL,
   asker      TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS task_notice_told (
+  created_at INTEGER NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'task'
+);`
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	var hasKind bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_notices') WHERE name = 'kind')`).Scan(&hasKind); err != nil {
+		return err
+	}
+	if !hasKind {
+		if _, err := tx.Exec(`ALTER TABLE task_notices RENAME TO task_notices_old;` + schema + `
+			INSERT INTO task_notices (id, task_id, status, actor, asker, created_at)
+			SELECT id, task_id, status, actor, asker, created_at FROM task_notices_old;
+			DROP TABLE task_notices_old;`); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS task_notice_told (
   notice_id INTEGER NOT NULL,
   host      TEXT NOT NULL,
   PRIMARY KEY (notice_id, host)
@@ -64,7 +93,19 @@ INSERT INTO task_notice_delivery (request_id, attempt)
   SELECT id, 1 FROM requests WHERE notice_kind = 'task' AND from_agent = 'relay' AND kind = 'notify'
     AND status IN ('queued', 'delivered')
   ON CONFLICT DO NOTHING;`)
-	return err
+	if err != nil {
+		return err
+	}
+	var hasStatus bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_notice_delivery') WHERE name = 'reported_status')`).Scan(&hasStatus); err != nil {
+		return err
+	}
+	if !hasStatus {
+		if _, err := tx.Exec(`ALTER TABLE task_notice_delivery ADD COLUMN reported_status TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // taskNoticeTx writes the outbox row for a change x, the transaction that
@@ -90,7 +131,7 @@ func taskAskNoticeTx(ctx context.Context, x execer, reqID string, status envelop
 // TaskNotices returns up to limit task changes not yet told to the hosts,
 // oldest first.
 func (s *Store) TaskNotices(ctx context.Context, limit int) ([]TaskNotice, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, status, actor, asker FROM task_notices ORDER BY id LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(task_id, 0), kind, status, actor, asker FROM task_notices ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +140,7 @@ func (s *Store) TaskNotices(ctx context.Context, limit int) ([]TaskNotice, error
 	for rows.Next() {
 		var n TaskNotice
 		var status string
-		if err := rows.Scan(&n.ID, &n.TaskID, &status, &n.Actor, &n.Asker); err != nil {
+		if err := rows.Scan(&n.ID, &n.TaskID, &n.Kind, &status, &n.Actor, &n.Asker); err != nil {
 			return nil, err
 		}
 		n.Status = envelope.TaskStatus(status)
@@ -121,27 +162,62 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 		return envelope.Request{}, false, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `INSERT INTO task_notice_told (notice_id, host) VALUES (?, ?) ON CONFLICT DO NOTHING`, n.ID, req.To)
+	// Read the current time in the transaction: a reminder can wait in
+	// the outbox beyond the cutoff, or be cancelled after a drain reads it.
+	if n.Kind == envelope.TaskNoticeReminder {
+		now := s.now()
+		var dueAt int64
+		err := tx.QueryRowContext(ctx, `SELECT due_at FROM tasks WHERE id = ?
+			AND due_at BETWEEN ? AND ? AND reminder_dropped_at IS NULL AND `+taskOpenStatuses,
+			n.TaskID, now.Add(-reminderLateness).Unix(), now.Unix()).Scan(&dueAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return envelope.Request{}, false, nil
+		}
+		if err != nil {
+			return envelope.Request{}, false, err
+		}
+		ttl = min(ttl, time.Unix(dueAt, 0).Add(reminderLateness).Sub(now))
+		if ttl <= 0 {
+			return envelope.Request{}, false, nil
+		}
+	}
+	// The outbox row must still exist when we queue it.
+	res, err := tx.ExecContext(ctx, `INSERT INTO task_notice_told (notice_id, host)
+		SELECT id, ? FROM task_notices WHERE id = ? ON CONFLICT DO NOTHING`, req.To, n.ID)
 	if err != nil {
 		return envelope.Request{}, false, err
 	}
 	if told, err := res.RowsAffected(); err != nil || told == 0 {
 		return envelope.Request{}, false, err
 	}
-	req.NoticeFor, req.NoticeKind = strconv.FormatInt(n.TaskID, 10), NoteTask
-	var unread bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE notice_for = ? AND notice_kind = ? AND to_agent = ? AND status = ? AND expires_at > ?)`,
-		req.NoticeFor, NoteTask, req.To, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&unread); err != nil {
-		return envelope.Request{}, false, err
+	req.NoticeKind = n.Kind
+	if req.NoticeKind == "" {
+		req.NoticeKind = NoteTask
 	}
-	if unread {
-		return envelope.Request{}, false, tx.Commit()
+	if n.TaskID != 0 {
+		req.NoticeFor = strconv.FormatInt(n.TaskID, 10)
+	}
+	if req.NoticeKind == NoteTask {
+		var unread bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE notice_for = ? AND notice_kind = ? AND to_agent = ? AND status = ? AND expires_at > ?)`,
+			req.NoticeFor, NoteTask, req.To, string(envelope.StatusQueued), s.now().UnixMilli()).Scan(&unread); err != nil {
+			return envelope.Request{}, false, err
+		}
+		if unread {
+			return envelope.Request{}, false, tx.Commit()
+		}
 	}
 	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
 		return envelope.Request{}, false, err
 	}
-	if err := trackTaskNotice(ctx, tx, req.ID, 1); err != nil {
+	req.TaskNoticeStatus = n.Status
+	if err := trackTaskNotice(ctx, tx, req, 1); err != nil {
 		return envelope.Request{}, false, err
+	}
+	if n.Kind == envelope.TaskNoticeReminder {
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET reminded_at = ? WHERE id = ? AND reminded_at IS NULL`, s.now().Unix(), n.TaskID); err != nil {
+			return envelope.Request{}, false, err
+		}
 	}
 	return req, true, tx.Commit()
 }

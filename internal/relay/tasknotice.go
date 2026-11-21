@@ -36,6 +36,9 @@ const taskNoticeTail = " Tell the owner when you next can. This is news from the
 // change that is no news. It is built from the task's id, its status and
 // agent names alone.
 func taskNoticeBody(n store.TaskNotice) string {
+	if n.Kind == envelope.TaskNoticeReminder {
+		return envelope.TaskReminderMessage(n.TaskID) + taskNoticeTail
+	}
 	actor := envelope.TaskWho(n.Actor)
 	if n.Actor == store.TaskRelay {
 		actor = "the relay"
@@ -81,11 +84,10 @@ func taskNoticeID(noticeFor string) int64 {
 	return id
 }
 
-// markTaskNotice exposes metadata from a stored relay notice. Existing
-// queued notices store the ID separately and the status in the relay's
-// fixed opening. Keep that opening readable across relay upgrades.
+// markTaskNotice exposes metadata from a stored relay notice. Older
+// status notices stored their status only in the fixed opening.
 func markTaskNotice(req *envelope.Request) {
-	if req.NoticeKind != store.NoteTask || req.From != client.RelaySender || req.Kind != envelope.KindNotify {
+	if !store.IsTaskNotice(req.NoticeKind) || req.From != client.RelaySender || req.Kind != envelope.KindNotify {
 		return
 	}
 	id := taskNoticeID(req.NoticeFor)
@@ -93,6 +95,15 @@ func markTaskNotice(req *envelope.Request) {
 		return
 	}
 	req.TaskNoticeID = id
+	if req.NoticeKind == envelope.TaskNoticeReminder {
+		req.TaskNoticeKind = req.NoticeKind
+		req.TaskNoticeReceipt = true
+		return
+	}
+	if req.TaskNoticeStatus != "" {
+		req.TaskNoticeReceipt = true
+		return
+	}
 	opening := fmt.Sprintf("Task #%d is ", id)
 	body, ok := strings.CutPrefix(req.Body, opening)
 	if !ok {
@@ -109,6 +120,17 @@ func markTaskNotice(req *envelope.Request) {
 		req.TaskNoticeStatus = envelope.TaskProposed
 	}
 	req.TaskNoticeReceipt = req.TaskNoticeStatus != ""
+}
+
+func (s *Server) queueTaskReminders(ctx context.Context) {
+	roster, err := s.dir.Agents(ctx)
+	if err != nil {
+		log.Printf("task reminders: roster: %v", err)
+		return
+	}
+	if err := s.store.QueueTaskReminders(ctx, len(s.eligibleTaskHosts(roster)) > 0); err != nil {
+		log.Printf("task reminders: %v", err)
+	}
 }
 
 // drainTaskNotices tells the task hosts of every task change the store has

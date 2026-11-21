@@ -368,3 +368,38 @@ func TestTaskHostDecisionRefusedDuringGuestAsk(t *testing.T) {
 		t.Fatalf("task after the refusals = %+v, %v", got, err)
 	}
 }
+
+func TestTaskDueOnlyOwnerFilerOrHostOnWords(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	ctx := t.Context()
+	task, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Call the dentist", Due: "2030-11-29"})
+	if err != nil || task.Task.DueDay != "2030-11-29" || task.Task.DueAt != nil {
+		t.Fatalf("day-only task = %+v, %v", task, err)
+	}
+	id := task.Task.ID
+	if _, err := client.SetTaskDue(ctx, m.scout, false, id, "tomorrow"); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("change by unrelated agent = %v", err)
+	}
+	if _, err := client.HostSetTaskDue(ctx, m.muse, id, "2030-11-29 3pm", ""); !client.IsStatus(err, http.StatusBadRequest) {
+		t.Fatalf("host change without words = %v", err)
+	}
+	words := "Make the dentist task due Friday at 3pm"
+	out, err := client.HostSetTaskDue(ctx, m.muse, id, "2030-11-29 3pm", words)
+	if err != nil || out.DueAt == nil || *out.DueAt != 1922223600 || out.Status != task.Task.Status {
+		t.Fatalf("host change = %+v, %v", out, err)
+	}
+	ev := m.lastEvent(t, id)
+	if ev.Kind != envelope.TaskEventDue || ev.Actor != "muse" || !ev.ForOwner || ev.Body != words {
+		t.Fatalf("host due history = %+v", ev)
+	}
+	if _, err := client.SetTaskDue(ctx, m.admin, true, id, "2026-11-29"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SetTaskDue(ctx, m.grok, false, id, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.task(t, id); got.DueDay != "" || got.DueAt != nil {
+		t.Fatalf("cleared task = %+v", got)
+	}
+}
