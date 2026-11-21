@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -350,6 +351,7 @@ func TestInboxJSONEmpty(t *testing.T) {
 }
 
 func TestInboxJSONReportsTaskNewsToHost(t *testing.T) {
+	skipOnWindows(t, "inbox and tasks use a local client config")
 	m := testrelay.New(t, relay.Config{})
 	host := m.Client(t, "grokbot")
 	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
@@ -369,8 +371,15 @@ func TestInboxJSONReportsTaskNewsToHost(t *testing.T) {
 		t.Fatalf("host inbox = %s, %v", stdout, err)
 	}
 	if req := got.Requests[0]; !req.Claimed || req.From != client.RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID != task.Task.ID || req.TaskNoticeStatus != envelope.TaskProposed ||
-		!strings.Contains(req.TaskNoticeGuidance, "owner's private chat") || !strings.Contains(req.TaskNoticeGuidance, "get_task") || strings.Contains(stdout, "Private meeting text") {
+		req.OwnerMessage != fmt.Sprintf("Task #%d was proposed and is waiting for your approval.", task.Task.ID) ||
+		!strings.Contains(got.TaskNoticePosting, "last tool call immediately before your final reply") ||
+		!strings.Contains(got.TaskNoticePosting, "final reply exactly the owner_message lines") ||
+		!strings.Contains(got.TaskNoticePosting, "Skip the acknowledgment if you are ending the run without posting the lines") ||
+		!strings.Contains(req.TaskNoticeGuidance, "get_task") || strings.Contains(stdout, "Private meeting text") {
 		t.Fatalf("host notice = %s", stdout)
+	}
+	if _, _, err := runSplit(t, tasksCmd(), "told", got.Requests[0].ID); err != nil {
+		t.Fatalf("acknowledge the claimed notice: %v", err)
 	}
 
 	// A notice that expires before its claim must not get posting guidance.
@@ -382,7 +391,8 @@ func TestInboxJSONReportsTaskNewsToHost(t *testing.T) {
 	if err := printInboxJSON(t.Context(), host, in, &expired, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(expired.Bytes(), &got); err != nil || len(got.Requests) != 1 || got.Requests[0].Claimed || strings.Contains(expired.String(), "task_notice_guidance") {
+	if err := json.Unmarshal(expired.Bytes(), &got); err != nil || len(got.Requests) != 1 || got.Requests[0].Claimed ||
+		strings.Contains(expired.String(), "task_notice_guidance") || strings.Contains(expired.String(), "owner_message") || strings.Contains(expired.String(), "task_notice_posting") {
 		t.Fatalf("expired notice = %s, %v", expired.String(), err)
 	}
 }

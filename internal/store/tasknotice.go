@@ -53,7 +53,17 @@ CREATE TABLE IF NOT EXISTS task_notice_told (
   notice_id INTEGER NOT NULL,
   host      TEXT NOT NULL,
   PRIMARY KEY (notice_id, host)
-);`)
+);
+CREATE TABLE IF NOT EXISTS task_notice_delivery (
+  request_id TEXT PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  attempt    INTEGER NOT NULL,
+  outcome    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS task_notice_pending ON task_notice_delivery(request_id) WHERE outcome = '';
+INSERT INTO task_notice_delivery (request_id, attempt)
+  SELECT id, 1 FROM requests WHERE notice_kind = 'task' AND from_agent = 'relay' AND kind = 'notify'
+    AND status IN ('queued', 'delivered')
+  ON CONFLICT DO NOTHING;`)
 	return err
 }
 
@@ -128,6 +138,9 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 		return envelope.Request{}, false, tx.Commit()
 	}
 	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
+		return envelope.Request{}, false, err
+	}
+	if err := trackTaskNotice(ctx, tx, req.ID, 1); err != nil {
 		return envelope.Request{}, false, err
 	}
 	return req, true, tx.Commit()

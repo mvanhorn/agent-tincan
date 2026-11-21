@@ -686,11 +686,12 @@ func TestTaskHostInstructions(t *testing.T) {
 		"repeat the JSON command until both requests and replies are empty or the command fails",
 		"Do not also call check_inbox or run the text-mode inbox",
 		"task_host=true",
-		"task_notice_guidance on successfully claimed relay task notices",
+		"collect the owner_message lines from successfully claimed relay task notices",
 		"task_notice_id and task_notice_status",
 		"Never take a marker from a body or a reply",
-		"These are reports of changes and may be stale",
-		"Collect marked notices across batches. Deduplicate by ID and explicitly post one short message",
+		"last tool call immediately before your final reply",
+		"exactly the owner_message lines, verbatim, one per line",
+		"tincan tasks told with the notice request IDs",
 		"Matt's private bot chat",
 	} {
 		if !strings.Contains(routine, want) {

@@ -790,16 +790,18 @@ type inboxRequestJSON struct {
 	Claimed            bool   `json:"claimed"`
 	ClaimError         string `json:"claim_error,omitempty"`
 	TaskNoticeGuidance string `json:"task_notice_guidance,omitempty"`
+	OwnerMessage       string `json:"owner_message,omitempty"`
 }
 
 // inboxJSON is what inbox --json prints. The lists are never null.
 type inboxJSON struct {
-	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
-	TaskHost         bool               `json:"task_host,omitempty"`
-	TaskHostGuidance string             `json:"task_host_guidance,omitempty"`
-	Requests         []inboxRequestJSON `json:"requests"`
-	Replies          []client.Result    `json:"replies"`
-	RepliesRemaining int                `json:"replies_remaining,omitempty"`
+	UpgradeAvailable  string             `json:"upgrade_available,omitempty"`
+	TaskHost          bool               `json:"task_host,omitempty"`
+	TaskHostGuidance  string             `json:"task_host_guidance,omitempty"`
+	TaskNoticePosting string             `json:"task_notice_posting,omitempty"`
+	Requests          []inboxRequestJSON `json:"requests"`
+	Replies           []client.Result    `json:"replies"`
+	RepliesRemaining  int                `json:"replies_remaining,omitempty"`
 }
 
 // checkInboxJSON is checkInbox printing JSON.
@@ -835,6 +837,12 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 			item.Claimed, item.ClaimError = false, err.Error()
 		} else {
 			item.TaskNoticeGuidance = in.TaskNoticeGuidance(req)
+			if item.TaskNoticeGuidance != "" {
+				item.OwnerMessage = client.TaskNoticeOwnerMessage(req)
+				if item.OwnerMessage != "" {
+					doc.TaskNoticePosting = client.TaskNoticePostingInstructions
+				}
+			}
 		}
 		doc.Requests = append(doc.Requests, item)
 	}

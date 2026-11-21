@@ -108,6 +108,7 @@ func markTaskNotice(req *envelope.Request) {
 	case strings.HasPrefix(body, "proposed:"):
 		req.TaskNoticeStatus = envelope.TaskProposed
 	}
+	req.TaskNoticeReceipt = req.TaskNoticeStatus != ""
 }
 
 // drainTaskNotices tells the task hosts of every task change the store has
@@ -118,8 +119,8 @@ func markTaskNotice(req *envelope.Request) {
 // A row is deleted only after a notice is queued for each host that should
 // hear. A failure leaves the row for the next drain, and the store keeps
 // which hosts it has settled for the row, so the next drain queues only for
-// the rest (store.EnqueueTaskNotice). The same call keeps a host to one
-// unread notice per task. One drain runs at a time.
+// the rest (store.EnqueueTaskNotice). The same call coalesces new changes
+// while an unread notice for the task is queued. One drain runs at a time.
 func (s *Server) drainTaskNotices(ctx context.Context) {
 	// The caller's request may end before the hosts are told.
 	ctx = context.WithoutCancel(ctx)

@@ -201,12 +201,11 @@ func TestDoctorProgressToolCount(t *testing.T) {
 	skipOnWindows(t, "the fake MCP server is a shell script")
 	for _, missingProgress := range []bool{false, true} {
 		t.Run(fmt.Sprint(missingProgress), func(t *testing.T) {
-			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment", "watch", "room_post", "room_read", "list_rooms", "lease", "list_leases", "list_schedules", "cancel_schedule", "add_task", "list_tasks", "get_task", "update_task", "decide_task"}
-			if !missingProgress {
-				names = append(names, "progress")
-			}
 			var tools []map[string]string
-			for _, name := range names {
+			for _, name := range mcpserver.ToolNames {
+				if missingProgress && name == "progress" {
+					continue
+				}
 				tools = append(tools, map[string]string{"name": name})
 			}
 			raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "result": map[string]any{"tools": tools}})
@@ -223,7 +222,7 @@ func TestDoctorProgressToolCount(t *testing.T) {
 				if got.Status != "fail" || !strings.Contains(got.Detail, "missing progress") {
 					t.Fatalf("old tools: %+v", got)
 				}
-			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 26 tools") {
+			} else if got.Status != "ok" || !strings.Contains(got.Detail, fmt.Sprintf("lists all %d tools", len(mcpserver.ToolNames))) {
 				t.Fatalf("tools: %+v", got)
 			}
 		})
