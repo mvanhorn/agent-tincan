@@ -1181,6 +1181,127 @@ func TestWebRequeuedRequestIsNotSentAgain(t *testing.T) {
 	}
 }
 
+// dieAfterSend makes the agent die right after the site accepts its next
+// send, before Handle can record it, and has the relay requeue the
+// request once its claim lease runs out. It returns the asker's client
+// and the request id.
+func dieAfterSend(t *testing.T, rig *webRig, from, body string) (*client.Relay, string) {
+	t.Helper()
+	fb := rig.browser
+	crash := true
+	rig.agent.Native = &Client{Channel: channelFunc(func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		if req.Op == OpChatGPTSend && crash {
+			crash = false
+			if err := fb.Exchange(ctx, req, recv); err != nil {
+				return err
+			}
+			panic("agent died after the site accepted the send")
+		}
+		return fb.Exchange(ctx, req, recv)
+	})}
+	ctx := t.Context()
+	c := rig.mesh.Client(t, from)
+	sent, err := c.Send(ctx, "chatgpt-web", body, envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := PollAndHandle(ctx, rig.agent.Relay, time.Second, "web-serve", func(ctx context.Context, req envelope.Request) {
+		defer func() { _ = recover() }()
+		rig.agent.Handle(ctx, req)
+	})
+	if err != nil || n != 1 {
+		t.Fatalf("first delivery: %d %v", n, err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	rig.mesh.Server.Sweep(ctx)
+	return c, sent.ID
+}
+
+// The agent dies after the site took a new chat's message but before it
+// learned the conversation id. The requeued request is not typed again:
+// it fails, telling the asker to check the site.
+func TestWebDiedAfterSendNewChatIsNotSentAgain(t *testing.T) {
+	rig := newWebRigWith(t, relay.Config{ClaimLease: time.Millisecond}, true)
+	c, id := dieAfterSend(t, rig, "grokbot", "only once, please")
+	if got := rig.browser.sent(); len(got) != 1 {
+		t.Fatalf("first delivery sends = %+v", got)
+	}
+	res := rig.serve(t, c, id)
+	if got := rig.browser.sent(); len(got) != 1 {
+		t.Fatalf("the requeued request was typed in again: %+v", got)
+	}
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "may have been sent") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+}
+
+// The same death in a conversation the agent already knew: the requeued
+// request is not typed again, and its answer is read from that
+// conversation.
+func TestWebDiedAfterSendInKnownConversationReadsTheAnswer(t *testing.T) {
+	rig := newWebRigWith(t, relay.Config{ClaimLease: time.Millisecond}, true)
+	rig.ask(t, "grokbot", "hello") // conv-1, remembered for grokbot
+	c, id := dieAfterSend(t, rig, "grokbot", "only once, please")
+	res := rig.serve(t, c, id)
+	if got := rig.browser.sent(); len(got) != 2 {
+		t.Fatalf("the requeued request was typed in again: %+v", got)
+	}
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "You said: only once, please") || !strings.Contains(res.Reply.Body, "conv-1") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+}
+
+// A send the site refused before its button was clicked is handed back
+// and requeued to this agent (no other web chat agent can take it). Once
+// the limit ends, the redelivery is sent: nothing was typed the first
+// time.
+func TestWebHandedBackRequestIsSentOnRedelivery(t *testing.T) {
+	clk := &fakeClock{t: time.Now()}
+	rig := newWebRigWith(t, relay.Config{Now: clk.Now}, true)
+	rig.mesh.Store.SetClock(clk.Now)
+	rig.agent.Native = &Client{Channel: rig.browser, Cooldown: &SiteCooldown{Now: clk.Now}}
+	rig.agent.clock = clk
+	if ok, err := rig.mesh.Store.SetAgentKind(t.Context(), "chatgpt-web", "chatgpt-web"); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	rig.browser.sendErr, rig.browser.sendRetryAfter = "rate_limited", 900
+	c, id := rig.sendAsk(t, "codex", "summarize this paper")
+	if res, err := c.Get(t.Context(), id, 0); err != nil || res.Reply != nil || res.Status != envelope.StatusQueued || res.Request.To != "chatgpt-web" {
+		t.Fatalf("after the handback: %+v %v", res, err)
+	}
+	rig.browser.mu.Lock()
+	rig.browser.sendErr, rig.browser.sendRetryAfter = "", 0
+	rig.browser.mu.Unlock()
+	if err := clk.Sleep(t.Context(), 16*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	res := rig.serve(t, c, id)
+	if res.Status != envelope.StatusAnswered || !strings.Contains(res.Reply.Body, "You said: summarize this paper") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if got := rig.browser.sent(); len(got) != 2 {
+		t.Fatalf("sends = %+v, want the refused one and the redelivered one", got)
+	}
+}
+
+// A text ask is not typed in when its send cannot be recorded first.
+func TestWebUnreadableJournalSendsNothing(t *testing.T) {
+	rig := newWebRig(t)
+	if err := os.MkdirAll(filepath.Dir(rig.agent.JournalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.agent.JournalPath, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := rig.ask(t, "grokbot", "hello")
+	if res.Status != envelope.StatusFailed || !strings.Contains(res.Reply.Body, "send journal") {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	if got := rig.browser.sent(); len(got) != 0 {
+		t.Fatalf("typed in without a record: %+v", got)
+	}
+}
+
 // Journal entries older than the retention are pruned; newer ones stay.
 func TestWebJournalPrunesOldEntries(t *testing.T) {
 	rig := newWebRig(t)

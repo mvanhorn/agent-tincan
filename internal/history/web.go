@@ -472,6 +472,16 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 			w.reply(ctx, req, "Image submission is uncertain. Files may already have reached the vendor. This request will not be sent again automatically; inspect the conversation before a new ask.", envelope.StatusFailed, nil)
 			return
 		}
+		// A text send that was started but never confirmed (the agent
+		// died mid-send) may already be in the conversation, so it is not
+		// typed in again. In a known conversation its answer is read like
+		// any sent request's; a new chat's id was never learned, so the
+		// asker is told to look.
+		if e.State == webSendTextIntent && e.ConversationID == "" {
+			w.logf("request %s from %s: an earlier send to a new chat was not confirmed; not sending again", req.ID, req.From)
+			w.reply(ctx, req, fmt.Sprintf("Sorry, an earlier attempt to send this to %s was interrupted, so the message may have been sent in a new chat. It is not sent again; check %s before asking again.", label, theConv(w.Site)), envelope.StatusFailed, nil)
+			return
+		}
 		if seed && !w.markPassed(ctx, req, e.ConversationID, label) {
 			return
 		}
@@ -565,6 +575,13 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 			w.observeAuth(err)
 		}
 	} else {
+		// Recorded before it is typed in, so that a redelivery after the
+		// agent dies mid-send never types it a second time.
+		if err := w.recordTextIntent(req.ID, convID, anchor.prevUser); err != nil {
+			w.logf("request %s from %s: journal: %v; not sending", req.ID, req.From, err)
+			w.reply(ctx, req, w.journalFailure(), envelope.StatusFailed, nil)
+			return
+		}
 		res, err = w.authSend(ctx, w.Site, wr.message, convID, newChat)
 	}
 	if !images && remembered && convID != "" && errors.Is(err, ErrNotFound) {
@@ -572,6 +589,11 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		delete(st.Conversations, req.From)
 		convID = ""
 		anchor = replyAnchor{message: wr.message}
+		if err := w.recordTextIntent(req.ID, "", ""); err != nil {
+			w.logf("request %s from %s: journal: %v; not sending", req.ID, req.From, err)
+			w.reply(ctx, req, w.journalFailure(), envelope.StatusFailed, nil)
+			return
+		}
 		res, err = w.authSend(ctx, w.Site, wr.message, "", true)
 	}
 	if err != nil {
@@ -581,6 +603,13 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		until, limited := w.sendLimit(err)
 		var ue *UnavailableError
 		if limited && !images && errors.As(err, &ue) && !ue.Clicked {
+			// Nothing was typed in. A handback can requeue the request to
+			// this agent, and that delivery must be free to send it.
+			if w.JournalPath != "" {
+				if err := w.unjournal(req.ID); err != nil {
+					w.logf("request %s from %s: journal: %v", req.ID, req.From, err)
+				}
+			}
 			if !w.handBack(ctx, req, until) {
 				w.reply(ctx, req, w.limitReply(until), envelope.StatusFailed, nil)
 			}
@@ -651,6 +680,21 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 	st.Conversations[req.From] = webMemory{ID: res.ConversationID, Updated: time.Now().UTC()}
 	w.saveState(st)
 	w.answer(ctx, req, anchor, entry, note)
+}
+
+// recordTextIntent journals a text send before it is typed in. A send
+// that cannot be recorded is not made; with no journal there is nothing
+// to record.
+func (w *WebAgent) recordTextIntent(reqID, convID, prevUser string) error {
+	if w.JournalPath == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	return w.journalStrict(reqID, webSend{ConversationID: convID, PrevUserID: prevUser, SubmittedAt: now, Recorded: now, State: webSendTextIntent, Provenance: true})
+}
+
+func (w *WebAgent) journalFailure() string {
+	return fmt.Sprintf("Nothing was sent to %s: the %s agent's send journal could not be read or written, so the message was not typed in.", siteLabel(w.Site), w.Name)
 }
 
 // resume answers a request the journal says was already sent: it waits
