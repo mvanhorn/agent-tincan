@@ -13,3 +13,5 @@ import (
 func writable(string) error {
 	return fmt.Errorf("%w: relay self-upgrade needs unix file permissions; the relay runs on Linux and macOS", relay.ErrUpgradeNotWritable)
 }
+
+func dirWritable(string) error { return nil }

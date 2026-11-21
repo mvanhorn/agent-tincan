@@ -827,7 +827,10 @@ The relay upgrades itself the same way, from an admin device, with no shell on t
 ```bash
 tincan relay-upgrade --relay http://tincan-relay                       # install the release already in --dist
 tincan relay-upgrade --relay http://tincan-relay --from-github v0.8.0  # download that release into --dist first
+tincan relay-upgrade --relay http://tincan-relay --latest              # look up the newest stable tag on this machine, then the same
 ```
+
+`tincan relay install --self-upgrade` writes `--dist <state-dir>/dist` and `--release-url` into the relay's service, so the relay can upgrade this way; without `--dist`, install says self-upgrade is off. A relay started with `--dist` logs a warning at startup when its user cannot replace its binary or write the dist folder, or when other users can write either one or a folder above it. Nothing upgrades the relay without an admin's command.
 
 The relay picks its own platform's build from `--dist`, checks its sha256 against the dist `checksums.txt`, writes it next to its running binary, keeps the old one as `<binary>.<old version>`, and renames the new one into place. It replies with the old and new versions, then restarts: it drains its connections, closes its store, and re-executes itself with the same arguments. Started with `--upgrade-exit`, it exits with status 75 instead, for systemd (`Restart=on-failure` or `always`) or a keep-alive loop to start the new build. `tincan relay-upgrade` then waits up to `--wait` (a minute) for the relay to answer on the new build. A release that is not newer is refused unless `--force`; a missing build, a checksum mismatch, or a binary the relay user cannot replace is refused with nothing changed. Only admin devices and the relay's local admin socket may run it, and each upgrade is audited as `relay_upgraded` with the two versions.
 
