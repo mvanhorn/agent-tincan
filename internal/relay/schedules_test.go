@@ -976,7 +976,7 @@ func TestRepeatingTaskAddRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	repeat := map[string]any{"title": "Check the backups", "assignee": "muse", "every_seconds": 3600}
-	if err := add(m.grok, "/v1/tasks", repeat); !refusedWith(err, http.StatusConflict, "you hold a claimed request and a scheduled ask starts a new chain") {
+	if err := add(m.grok, "/v1/tasks", repeat); !refusedWith(err, http.StatusConflict, "you have an open request and a scheduled ask starts a new chain") {
 		t.Fatalf("repeating task during a claim: %v", err)
 	}
 	if _, err := m.grok.Reply(ctx, asked.ID, "ok", envelope.StatusAnswered); err != nil {

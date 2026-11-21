@@ -209,6 +209,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate lease lapsed: %w", err)
 	}
+	if err := s.migrateReadBy(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate read by: %w", err)
+	}
 	if err := s.migrateSearch(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate search: %w", err)
@@ -319,6 +323,28 @@ func (s *Store) migrateUrgent() error {
 		return nil
 	}
 	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+// migrateReadBy adds read_by, the target that was last handed the request's
+// text (by a poll, a claim or a read of the request), so an ask that went
+// back to the queue still counts among that target's open asks
+// (OpenAskNames). A move to another target leaves it naming the old one.
+func (s *Store) migrateReadBy() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'read_by')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN read_by TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// MarkRead records that agent, request id's target, was handed its text.
+func (s *Store) MarkRead(ctx context.Context, id, agent string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE requests SET read_by = ? WHERE id = ? AND to_agent = ? AND read_by != ?`, agent, id, agent, agent)
 	return err
 }
 
@@ -1093,7 +1119,7 @@ func (s *Store) DeliverFor(ctx context.Context, agent string, scope QueueScope, 
 	args := []any{string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
 		agent, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli()}
 	args = append(append(args, filterArgs...), limit, maxDeliverBytes)
-	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?
+	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?, read_by = to_agent
 		WHERE id IN (SELECT id FROM (
 			SELECT id, SUM(length(body) + length(exchanges)) OVER (ORDER BY urgent DESC, created_at, rowid) AS running,
 				ROW_NUMBER() OVER (ORDER BY urgent DESC, created_at, rowid) AS n
@@ -1416,7 +1442,7 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 	}
 	res, err := x.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
 		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
-		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL
+		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL, read_by = to_agent
 		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?) AND expires_at > ? AND (status != ? OR deliver_after <= ?)`+filter, append(args, filterArgs...)...)
 	if err != nil {
 		return envelope.Request{}, err
@@ -1853,6 +1879,54 @@ func (s *Store) openClaim(ctx context.Context, query string, args ...any) (envel
 		return envelope.Request{}, false, err
 	}
 	return reqs[0], true, nil
+}
+
+// OpenAskNames lists every agent whose text reached agent through an ask it
+// has open: the chain and contributors of each ask addressed to it that is
+// delivered, claimed, waiting on its question, or queued again after agent
+// was handed it (a lapsed lease, a handback, or a read by id). The owner's approval rules read
+// these on what agent sends next, whichever ask (if any) the send continues,
+// so holding a second claim or naming another parent does not drop a name.
+// A needs_input ask counts, unlike in OpenGuestClaims: on a send a hold only
+// waits for the owner, so an asker that never answers cannot block agent's
+// sends (it does block a schedule until the ask ends). Each name is listed
+// once.
+func (s *Store) OpenAskNames(ctx context.Context, agent string) ([]string, error) {
+	return openAskNames(ctx, s.db, agent)
+}
+
+func openAskNames(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, agent string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT chain, contributors FROM requests WHERE to_agent = ? AND kind = ?
+		AND (status IN (?, ?, ?) OR (status = ? AND (claimed_at > 0 OR read_by = to_agent)))`,
+		agent, string(envelope.KindAsk), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusQueued))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var chain, contributors string
+		if err := rows.Scan(&chain, &contributors); err != nil {
+			return nil, err
+		}
+		for _, list := range []string{chain, contributors} {
+			if list == "" {
+				continue
+			}
+			var names []string
+			if err := json.Unmarshal([]byte(list), &names); err != nil {
+				return nil, err
+			}
+			for _, name := range names {
+				if name != "" && !slices.Contains(out, name) {
+					out = append(out, name)
+				}
+			}
+		}
+	}
+	return out, rows.Err()
 }
 
 // Request returns a stored request regardless of caller (relay-internal).

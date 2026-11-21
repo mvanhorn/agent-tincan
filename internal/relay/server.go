@@ -1857,6 +1857,12 @@ func (s *Server) getAs(ctx context.Context, id, reader string) (envelope.Result,
 	if err != nil {
 		return res, err
 	}
+	// A target that reads its ask by id has read it as a poll would hand it.
+	if res.Request.To == reader && res.Request.Kind == envelope.KindAsk && res.Status != envelope.StatusHeld {
+		if err := s.store.MarkRead(ctx, id, reader); err != nil {
+			return res, err
+		}
+	}
 	one := []envelope.Result{res}
 	err = s.redactRooms(ctx, one, reader)
 	return one[0], err
@@ -2769,6 +2775,11 @@ func (s *Server) heldCut(ctx context.Context, reqs []envelope.Request) map[strin
 		if req.Then != nil {
 			texts = append(texts, req.Then.Body)
 		}
+		// A request held again on its asker's answer is released by approving
+		// that answer, so every question and answer is read whole too.
+		for _, ex := range req.Exchanges {
+			texts = append(texts, ex.Question, ex.Answer)
+		}
 		if len(texts) == 0 {
 			continue
 		}
@@ -2812,8 +2823,11 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 	// ones: over plain http a browser's same-origin GET carries no Origin and
 	// no Sec-Fetch-*, so the listing cannot tell the page from the CLI. The
 	// local admin socket has no device and gets none; old clients ignore them.
+	// contributors names the agents beside the sender and chain whose text
+	// the request may carry, so the owner sees why a rule held it.
 	type heldRequest struct {
 		envelope.Request
+		Contributors   []string  `json:"contributors,omitempty"`
 		ToKind         string    `json:"to_kind,omitempty"`
 		Pass           *PassRef  `json:"pass,omitempty"`
 		PassError      string    `json:"pass_error,omitempty"`
@@ -2844,7 +2858,13 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		if cut[req.ID] && req.Then != nil {
 			req.Then.Body = cutHeldText(req.Then.Body)
 		}
-		out[i] = heldRequest{Request: req}
+		if cut[req.ID] {
+			for j := range req.Exchanges {
+				req.Exchanges[j].Question = cutHeldText(req.Exchanges[j].Question)
+				req.Exchanges[j].Answer = cutHeldText(req.Exchanges[j].Answer)
+			}
+		}
+		out[i] = heldRequest{Request: req, Contributors: req.Contributors}
 		if node != "" {
 			out[i].ApproveNonce, out[i].NonceExpiresAt = s.nonces.issue(nonceKey{id: req.ID, decision: decisionApprove, node: node}, now)
 			out[i].DenyNonce, _ = s.nonces.issue(nonceKey{id: req.ID, decision: decisionDeny, node: node}, now)

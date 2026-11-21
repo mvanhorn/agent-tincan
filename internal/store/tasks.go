@@ -729,8 +729,9 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 // taskResultAuthorsTx is the JSON list a task keeps with the result rep
 // stores: the agents whose text the answer may hold. rep.From wrote it, and
 // wrote it while working the request it answers, so the request's sender,
-// chain and contributors are behind it as well. Never the owner, whose text
-// needs no approval of the owner's.
+// chain and contributors are behind it as well, and so is every name its
+// other open asks carry (openAskNames): it may have read those too. Never
+// the owner, whose text needs no approval of the owner's.
 func taskResultAuthorsTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) (string, error) {
 	var from, chain, contributors string
 	if err := tx.QueryRowContext(ctx, `SELECT from_agent, chain, contributors FROM requests WHERE id = ?`, rep.RequestID).Scan(&from, &chain, &contributors); err != nil {
@@ -748,6 +749,11 @@ func taskResultAuthorsTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) (s
 		names = append(names, more...)
 	}
 	names = append(names, from)
+	open, err := openAskNames(ctx, tx, rep.From)
+	if err != nil {
+		return "", err
+	}
+	names = append(names, open...)
 	authors := []string{}
 	for _, name := range names {
 		if name != "" && name != envelope.TaskOwner && !slices.Contains(authors, name) {

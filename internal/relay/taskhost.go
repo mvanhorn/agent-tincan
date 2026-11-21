@@ -399,7 +399,7 @@ func (s *Server) handleHostAddTask(w http.ResponseWriter, r *http.Request, in ta
 		return
 	}
 	if in.EverySeconds != 0 {
-		if err := s.checkScheduleCaller(ctx, from, sess); err != nil {
+		if err := s.checkScheduleCaller(ctx, from); err != nil {
 			writeTaskErr(w, err)
 			return
 		}

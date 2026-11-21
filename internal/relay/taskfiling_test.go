@@ -410,10 +410,10 @@ func TestWorkAskWithTwoClaimsUsesOnlyVerifiedParent(t *testing.T) {
 	m.muse.SetSession("same-session")
 	ctx := t.Context()
 	first := m.add(t, envelope.Task{Title: "first", Filer: "grokbot"})
-	second := m.add(t, envelope.Task{Title: "second", Filer: "grokbot"})
+	second := m.add(t, envelope.Task{Title: "second", Filer: "scout"})
 	firstAsk := m.assign(t, first.ID, "grokbot", "muse")
 	claimOne(t, m.muse, firstAsk.ID)
-	secondAsk := m.assign(t, second.ID, "grokbot", "muse")
+	secondAsk := m.assign(t, second.ID, "scout", "muse")
 	claimOne(t, m.muse, secondAsk.ID)
 	firstEvents, secondEvents := len(m.events(t, first.ID)), len(m.events(t, second.ID))
 	unrelated, err := m.muse.Send(ctx, "instinct", "Separate ask", envelope.KindAsk, "", false)
@@ -429,5 +429,13 @@ func TestWorkAskWithTwoClaimsUsesOnlyVerifiedParent(t *testing.T) {
 	}
 	if history := m.events(t, second.ID); len(history) != secondEvents {
 		t.Fatalf("second history = %+v", history)
+	}
+	m.gate(t, `{"gate":{"instinct":{"from":["scout"]}},"hold_ttl":"1h"}`)
+	held, err := m.muse.Send(ctx, "instinct", "Separate ask still sees the approval gate", envelope.KindAsk, "", false)
+	if err != nil || held.Status != envelope.StatusHeld || held.TaskID == 0 || held.ParentID != "" {
+		t.Fatalf("ambiguous ask under approval rules = %+v, %v", held, err)
+	}
+	if len(m.events(t, first.ID)) != firstEvents+1 || len(m.events(t, second.ID)) != secondEvents {
+		t.Fatal("held ambiguous ask changed a claimed task's history")
 	}
 }
