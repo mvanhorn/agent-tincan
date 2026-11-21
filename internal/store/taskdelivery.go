@@ -11,11 +11,6 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-func trackTaskNotice(ctx context.Context, tx *sql.Tx, req envelope.Request, attempt int) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO task_notice_delivery (request_id, attempt, reported_status) VALUES (?, ?, ?)`, req.ID, attempt, req.TaskNoticeStatus)
-	return err
-}
-
 // TaskDelivery identifies one attempt to deliver a task notice to the owner.
 type TaskDelivery struct {
 	Request  envelope.Request
@@ -169,7 +164,9 @@ func (s *Store) AdvanceTaskNotice(ctx context.Context, d TaskDelivery, next enve
 			return envelope.Request{}, false, err
 		}
 		if retry {
-			if err := trackTaskNotice(ctx, tx, next, d.Attempt+1); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO task_notice_delivery (request_id, attempt, reported_status, notice_id)
+				SELECT ?, attempt + 1, reported_status, notice_id FROM task_notice_delivery WHERE request_id = ?`,
+				next.ID, d.Request.ID); err != nil {
 				return envelope.Request{}, false, err
 			}
 		}

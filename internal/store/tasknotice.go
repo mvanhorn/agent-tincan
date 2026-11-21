@@ -110,6 +110,18 @@ INSERT INTO task_notice_delivery (request_id, attempt)
 			return err
 		}
 	}
+	var hasNoticeID bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_notice_delivery') WHERE name = 'notice_id')`).Scan(&hasNoticeID); err != nil {
+		return err
+	}
+	if !hasNoticeID {
+		if _, err := tx.Exec(`ALTER TABLE task_notice_delivery ADD COLUMN notice_id INTEGER`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS task_notice_receipts ON task_notice_delivery(notice_id) WHERE outcome = 'told'`); err != nil {
+		return err
+	}
 	var hasBriefing bool
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_notices') WHERE name = 'briefing')`).Scan(&hasBriefing); err != nil {
 		return err
@@ -241,7 +253,8 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 		return envelope.Request{}, false, err
 	}
 	req.TaskNoticeStatus = n.Status
-	if err := trackTaskNotice(ctx, tx, req, 1); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO task_notice_delivery (request_id, attempt, reported_status, notice_id) VALUES (?, 1, ?, ?)`,
+		req.ID, n.Status, n.ID); err != nil {
 		return envelope.Request{}, false, err
 	}
 	if n.Kind == envelope.TaskNoticeReminder {
