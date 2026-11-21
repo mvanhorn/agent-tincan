@@ -149,7 +149,7 @@ func (s *Server) tryFollowOn(ctx context.Context, id string) error {
 		return err
 	}
 	body := followOnBody(due.Then.Body, first.To, due.Reply, limit)
-	req, err := s.submit(ctx, envelope.Request{From: first.From, To: due.Then.To, Kind: envelope.KindAsk, Body: body, FollowOf: id, FromSession: due.FromSession})
+	req, err := s.submit(ctx, envelope.Request{From: first.From, To: due.Then.To, Kind: envelope.KindAsk, Body: body, FollowOf: id, FromSession: due.FromSession, Contributors: due.AnswererNames})
 	if err == nil {
 		s.record(ctx, "follow_on_sent", id, first.TraceID, "relay", store.DetailJSON(map[string]any{"follow_on": req.ID, "to": req.To, "status": req.Status}))
 		return nil
