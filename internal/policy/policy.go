@@ -420,3 +420,8 @@ func reject(code int, err error) error { return &relay.StatusError{Code: code, E
 
 // NotifyDestination exposes the configured operator destination.
 func (p *Policy) NotifyDestination() string { return p.cfg.Approval.NotifyDestination() }
+
+// SetNotifyDestination persists the operator destination. An empty name clears it.
+func (p *Policy) SetNotifyDestination(name string) error {
+	return p.cfg.Approval.setNotifyDestination(name)
+}

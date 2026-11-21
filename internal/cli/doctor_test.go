@@ -451,7 +451,7 @@ func TestDoctorWarnsWhenTaskHostsLackFallback(t *testing.T) {
 	status.Store(&client.TaskFallbackStatus{Hosts: []string{"grokbot"}})
 	got := taskFallbackCheck(t.Context(), r)
 	if got == nil || got.Status != "warn" || !strings.Contains(got.Detail, "grokbot") ||
-		!strings.Contains(got.Fix, "notify") || !strings.Contains(got.Fix, "approval.json") {
+		!strings.Contains(got.Fix, "tincan relay notify <agent>") {
 		t.Fatalf("missing destination check = %+v", got)
 	}
 	status.Store(&client.TaskFallbackStatus{Hosts: []string{"grokbot"}, NotifySet: true})

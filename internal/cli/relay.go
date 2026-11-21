@@ -93,7 +93,7 @@ tincan relay install, with the same flags, writes a launchd agent (macOS) or
 systemd user unit (Linux) that keeps the relay running; write no plist by
 hand, or macOS lists it under the signing certificate's name.
 
-Admin commands (invite, remove) are accepted from the local admin socket in
+Admin commands (invite, remove, relay notify) are accepted from the local admin socket in
 the state dir and from machines named in --admin that carry no Tailscale tags
 (and, with --admin-login, are owned by a listed login). Tag agent machines
 (e.g. tag:agent) so they can never be admins.
@@ -153,7 +153,45 @@ with --upgrade-exit exits with status 75 for its supervisor to restart it.`,
 		},
 	}
 	addRelayFlags(cmd.Flags(), &f)
-	cmd.AddCommand(relayInstallCmd())
+	cmd.AddCommand(relayInstallCmd(), relayNotifyCmd())
+	return cmd
+}
+
+func relayNotifyCmd() *cobra.Command {
+	var socket, relayURL string
+	var clear bool
+	cmd := &cobra.Command{
+		Use:   "notify <agent> | notify --clear",
+		Short: "Set or clear the relay's owner notification destination (admin)",
+		Args: func(_ *cobra.Command, args []string) error {
+			if clear && len(args) == 0 || !clear && len(args) == 1 && args[0] != "" {
+				return nil
+			}
+			return errors.New("specify a joined agent or use --clear")
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			var name string
+			if !clear {
+				name = args[0]
+			}
+			if err := r.SetNotifyDestination(cmd.Context(), name); err != nil {
+				return err
+			}
+			if clear {
+				cmd.Println("Relay notification destination cleared.")
+			} else {
+				cmd.Printf("Relay notification destination set to %s.\n", name)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&clear, "clear", false, "clear the notification destination")
+	cmd.Flags().StringVar(&socket, "socket", "", "path to the local admin socket")
+	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (defaults to the configured relay)")
 	return cmd
 }
 

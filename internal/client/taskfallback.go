@@ -6,7 +6,13 @@ import (
 	"strings"
 )
 
-const TaskFallbackFix = "Set notify in the relay's approval.json to a joined agent that can alert you."
+const TaskFallbackFix = "Run tincan relay notify <agent> with the name of a joined agent that can alert you."
+
+// SetNotifyDestination sets the relay's approval policy destination, or clears
+// it when name is empty. It requires an admin device or the local admin socket.
+func (r *Relay) SetNotifyDestination(ctx context.Context, name string) error {
+	return r.call(ctx, r.api, "PUT", "/v1/admin/relay/notify", map[string]string{"notify": name}, nil)
+}
 
 // TaskFallbackStatus is visible to admin callers of the relay roster.
 type TaskFallbackStatus struct {

@@ -37,13 +37,12 @@ The host acts on your direct words. You approve outside-source tasks and reset a
 
 Reminders and briefings carry task numbers, statuses, deadlines and agent names. The host uses `get_task` when you ask for details. It posts the exact `owner_message` lines in your private chat and records the acknowledgment immediately before posting them.
 
-When a host misses an acknowledgment, the relay tries up to three times. On exhaustion, it queues a notice for the `notify` agent in the relay's `approval.json`. Choose a joined agent with a wake method that can reach you. For an email-woken agent, its email prompts it to read the relay inbox and pass on the notice.
+When a host misses an acknowledgment, the relay tries up to three times. After the last attempt, it queues a notice for the `notify` agent in the relay's `approval.json`. Choose a joined agent with a wake method that can reach you. For an email-woken agent, its email prompts it to read the relay inbox and pass on the notice.
 
-```json
-{
-  "gate": {},
-  "notify": "instinct"
-}
+From an admin device or the relay's local admin socket, run:
+
+```sh
+tincan relay notify instinct
 ```
 
-Add `notify` to the existing policy and keep its other settings. Store the file in the relay's state directory with mode `0600`. The relay logs a startup warning when task hosts have no fallback destination. `tincan doctor` reports the same check from an admin device.
+Run `tincan relay notify --clear` to remove the destination. The relay saves the change in `approval.json` and keeps existing gate rules and hold settings. The relay logs a startup warning when task hosts have no fallback destination. `tincan doctor` reports the same check from an admin device.

@@ -303,7 +303,7 @@ func printGuestInvite(cmd *cobra.Command, name string, inv client.GuestInvited, 
 	cmd.Printf("2. Once they accept the share, have them run:\n  tincan join %s --relay %s\n\n", inv.Code, relay)
 	cmd.Printf("Its asks wait for you in tincan held, unless this guest has --no-hold.\n")
 	if !inv.HoldAlerts {
-		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Set notify in approval.json or subscribe a phone to push, or check tincan held yourself.\n")
+		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Run tincan relay notify <agent>, subscribe a phone to push, or check tincan held yourself.\n")
 	}
 }
 

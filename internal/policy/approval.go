@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -44,79 +45,80 @@ type Approval struct {
 // LoadApproval validates the initial policy. A missing file disables the gate.
 func LoadApproval(path string) (*Approval, error) {
 	a := &Approval{path: path}
-	if err := a.reload(); err != nil {
+	if _, err := a.reload(); err != nil {
 		return nil, err
 	}
 	return a, nil
 }
 
+const maxApprovalBytes = 1 << 20
+
 var approvalName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
-func (a *Approval) reload() error {
+func (a *Approval) reload() ([]byte, error) {
 	entry, err := os.Lstat(a.path)
 	if errors.Is(err, os.ErrNotExist) {
 		a.missing = true
 		a.info = nil
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read approval policy: %w", err)
+		return nil, fmt.Errorf("read approval policy: %w", err)
 	}
 	if !entry.Mode().IsRegular() {
-		return errors.New("approval.json must be a regular file")
+		return nil, errors.New("approval.json must be a regular file")
 	}
 	f, err := os.Open(a.path)
 	if err != nil {
-		return fmt.Errorf("read approval policy: %w", err)
+		return nil, fmt.Errorf("read approval policy: %w", err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		return errors.New("approval.json must be a regular file with mode 0600")
+		return nil, errors.New("approval.json must be a regular file with mode 0600")
 	}
 	// Read the file on every check (it is capped at 1 MiB): an in-place edit
 	// that keeps the size and modification time must still take effect.
-	raw, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
+	raw, err := io.ReadAll(io.LimitReader(f, maxApprovalBytes+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(raw) > 1<<20 {
-		return errors.New("approval.json too large")
+	if len(raw) > maxApprovalBytes {
+		return nil, errors.New("approval.json too large")
 	}
 	if err := approvalJSON(json.NewDecoder(bytes.NewReader(raw))); err != nil {
-		return errors.New("invalid approval.json: duplicate key, null, or malformed JSON")
+		return nil, errors.New("invalid approval.json: duplicate key, null, or malformed JSON")
 	}
 	var c approvalConfig
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
-		return errors.New("invalid approval.json")
+		return nil, errors.New("invalid approval.json")
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
-		return errors.New("approval.json must contain one object")
+		return nil, errors.New("approval.json must contain one object")
 	}
-	if c.Gate == nil {
-		return errors.New("approval.json requires gate object")
-	}
+	// An omitted gate means no configured rules. Malformed or ambiguous rules
+	// still fail closed because they may hide gates the owner intended to set.
 	ttl := defaultHoldTTL
 	if c.HoldTTL != "" {
 		ttl, err = time.ParseDuration(c.HoldTTL)
 		if err != nil || ttl < time.Millisecond {
-			return errors.New("hold_ttl must be a positive duration of at least 1ms")
+			return nil, errors.New("hold_ttl must be a positive duration of at least 1ms")
 		}
 	}
 	if c.Notify != "" && !approvalName.MatchString(c.Notify) {
-		return errors.New("invalid approval notify agent")
+		return nil, errors.New("invalid approval notify agent")
 	}
 	for target, rule := range c.Gate {
 		if !approvalName.MatchString(target) {
-			return errors.New("invalid approval target")
+			return nil, errors.New("invalid approval target")
 		}
 		if (len(rule.From) == 0) == (rule.Unless == nil) {
-			return errors.New("approval rule requires exactly one of from or unless")
+			return nil, errors.New("approval rule requires exactly one of from or unless")
 		}
 		names := rule.Unless
 		if len(rule.From) > 0 {
@@ -127,12 +129,12 @@ func (a *Approval) reload() error {
 				continue
 			}
 			if err := json.Unmarshal(rule.From, &names); err != nil || names == nil {
-				return errors.New("from must be '*' or an array of agent names")
+				return nil, errors.New("from must be '*' or an array of agent names")
 			}
 		}
 		for _, name := range names {
 			if !approvalName.MatchString(name) {
-				return errors.New("invalid approval agent name")
+				return nil, errors.New("invalid approval agent name")
 			}
 		}
 	}
@@ -140,7 +142,7 @@ func (a *Approval) reload() error {
 	a.good = &c
 	a.info = info
 	a.ttl = ttl
-	return nil
+	return raw, nil
 }
 
 // load reloads the policy and returns the copy to judge by with its hold
@@ -153,7 +155,7 @@ func (a *Approval) load() (*approvalConfig, time.Duration, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	err := a.reload()
+	_, err := a.reload()
 	if a.good == nil || (err == nil && a.missing) {
 		return nil, 0, err
 	}
@@ -283,8 +285,77 @@ func (a *Approval) NotifyDestination() string {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.reload() != nil || a.missing || a.good == nil {
+	if _, err := a.reload(); err != nil || a.missing || a.good == nil {
 		return ""
 	}
 	return a.good.Notify
+}
+
+// setNotifyDestination updates one field of a valid policy. Keep the raw
+// values of the other fields so even an empty "unless" array survives.
+func (a *Approval) setNotifyDestination(name string) error {
+	if a == nil {
+		return errors.New("approval policy updates are unavailable on this relay")
+	}
+	if name != "" && !approvalName.MatchString(name) {
+		return errors.New("invalid approval notify agent")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	raw, err := a.reload()
+	if err != nil {
+		return fmt.Errorf("cannot update approval.json: %w", err)
+	}
+	fields := map[string]json.RawMessage{}
+	if raw == nil {
+		fields["gate"] = json.RawMessage(`{}`)
+	} else if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for key := range fields {
+		if strings.EqualFold(key, "notify") {
+			delete(fields, key)
+		}
+	}
+	if name != "" {
+		fields["notify"], err = json.Marshal(name)
+		if err != nil {
+			return err
+		}
+	}
+	raw, err = json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	if len(raw) > maxApprovalBytes {
+		return errors.New("updated approval.json would be too large")
+	}
+	if err := writeApprovalAtomically(a.path, raw); err != nil {
+		return fmt.Errorf("save approval.json: %w", err)
+	}
+	_, err = a.reload()
+	return err
+}
+
+func writeApprovalAtomically(path string, raw []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".approval-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err := f.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := f.Write(raw); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }

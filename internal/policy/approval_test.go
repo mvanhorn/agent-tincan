@@ -63,7 +63,8 @@ func TestApprovalPolicy(t *testing.T) {
 
 func TestApprovalInvalidPolicies(t *testing.T) {
 	for _, body := range []string{
-		`null`, `{}`, `{"gate":null}`, `{"gate":{"muse":null}}`,
+		`null`, `{"gate":null}`, `{"gate":[]}`, `{"gate":{"muse":null}}`,
+		`{"notify":"instinct","gates":{}}`, `{"notify":"instinct","notify":"muse"}`,
 		`{"gate":{"muse":{"from":null}}}`, `{"gate":{"muse":{"unless":null}}}`,
 		`{"gate":{"muse":{"from":"*","unless":[]}}}`, `{"gate":{"muse":{"from":"everyone"}}}`,
 		`{"gate":{"muse":{"from":["bad name"]}}}`, `{"gate":{"Bad":{"from":"*"}}}`,
@@ -80,6 +81,23 @@ func TestApprovalInvalidPolicies(t *testing.T) {
 				t.Fatal("invalid policy accepted")
 			}
 		})
+	}
+}
+
+func TestApprovalNotifyWithoutGate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approval.json")
+	if err := os.WriteFile(path, []byte(`{"notify":"instinct"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.NotifyDestination(); got != "instinct" {
+		t.Fatalf("notify = %q, want instinct", got)
+	}
+	if gated, err := a.Gated("muse"); gated || err != nil {
+		t.Fatalf("gated = %v, err = %v", gated, err)
 	}
 }
 
