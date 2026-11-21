@@ -445,3 +445,26 @@ func TestTaskHostAssignsOnTheOwnersWords(t *testing.T) {
 		t.Fatalf("owner's assignment = %+v, %v", in, err)
 	}
 }
+
+func TestTaskHostAddChargesEvenWhenHandoffFails(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	ctx := t.Context()
+
+	// Self-assignment fails before it charges a send slot. The task it
+	// leaves on the list still has to count as a filing.
+	add := client.TaskAdd{Title: "File and give it to myself", Mine: true, Assignee: "grokbot"}
+	out, err := client.AddTask(ctx, m.grok, false, add)
+	if err != nil || out.Task.Filer != envelope.TaskOwner || out.Task.Status != envelope.TaskOpen || out.AssignError == "" {
+		t.Fatalf("first filing = %+v, %v", out, err)
+	}
+	add.Title = "Another self-assigned task"
+	if _, err := client.AddTask(ctx, m.grok, false, add); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+	tasks, _, err := client.Tasks(ctx, m.admin, true, false)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("owner tasks after refused filing = %+v, %v", tasks, err)
+	}
+}

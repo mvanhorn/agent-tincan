@@ -78,11 +78,14 @@ func (s *Store) QueueTaskBriefing(ctx context.Context, scheduledDay, today strin
 	return queued, tx.Commit()
 }
 
-const briefingTaskCols = `t.id, t.status, COALESCE(t.due_day, ''), t.due_at, t.assignee`
+// One snapshot is shared by all hosts, so it uses the withheld view even
+// when an individual host happens to be the filer.
+const briefingDeadlineVisible = `(t.status != 'proposed' AND NOT ` + taskNeverApproved + `)`
+const briefingTaskCols = `t.id, t.status, COALESCE(t.due_day, ''), t.due_at, t.assignee, ` + briefingDeadlineVisible
 
 func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Time, since, afterEvent int64) (b TaskBriefing, latestDone int64, err error) {
 	b.Due, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
-		WHERE t.status NOT IN ('done', 'dropped') AND t.due_day <= ?
+		WHERE t.status NOT IN ('done', 'dropped') AND t.due_day <= ? AND `+briefingDeadlineVisible+`
 		ORDER BY t.due_day, COALESCE(t.due_at, 9223372036854775807), t.id LIMIT 3`, today)
 	if err != nil {
 		return b, 0, err
@@ -113,8 +116,8 @@ func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Ti
 		return b, latestDone, nil
 	}
 	var earliest sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT (SELECT id FROM tasks
-		WHERE status NOT IN ('done', 'dropped') AND due_day > ?
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT t.id FROM tasks t
+		WHERE t.status NOT IN ('done', 'dropped') AND t.due_day > ? AND `+briefingDeadlineVisible+`
 		ORDER BY due_day, COALESCE(due_at, 9223372036854775807), id LIMIT 1)`, today).Scan(&earliest); err != nil {
 		return b, 0, err
 	}
@@ -139,8 +142,13 @@ func briefingTasks(ctx context.Context, tx *sql.Tx, query string, args ...any) (
 	var tasks []BriefingTask
 	for rows.Next() {
 		var task BriefingTask
-		if err := rows.Scan(&task.ID, &task.Status, &task.Due.DueDay, &task.Due.DueAt, &task.Assignee); err != nil {
+		var visible bool
+		if err := rows.Scan(&task.ID, &task.Status, &task.Due.DueDay, &task.Due.DueAt, &task.Assignee, &visible); err != nil {
 			return nil, err
+		}
+		if !visible {
+			task.Due = envelope.TaskDue{}
+			task.Assignee = ""
 		}
 		tasks = append(tasks, task)
 	}

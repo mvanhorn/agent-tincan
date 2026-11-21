@@ -241,3 +241,35 @@ func TestTaskBriefingDefaultsToTheTaskZone(t *testing.T) {
 	srv.Sweep(t.Context())
 	assertBriefing(t, takeBriefing(t, m.muse), "Morning briefing.")
 }
+
+func TestTaskBriefingWithholdsProposedDeadlineUntilApproval(t *testing.T) {
+	m, _ := newBriefingMesh(t, time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC), "off")
+	m.host(t, "muse")
+	ctx := t.Context()
+	result, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{
+		Title: "Private outside title", Source: "mail", Due: "2001-02-03",
+	})
+	if err != nil || result.Task.Status != envelope.TaskProposed {
+		t.Fatalf("file outside task = %+v, %v", result, err)
+	}
+	id := result.Task.ID
+	if queued, err := client.TaskBriefingNow(ctx, m.admin); err != nil || !queued {
+		t.Fatalf("queue briefing = %v, %v", queued, err)
+	}
+	req := takeBriefing(t, m.muse)
+	message := assertBriefing(t, req, fmt.Sprintf("Waiting on you: task #%d (proposed)", id))
+	if strings.Contains(message, "2001-02-03") || strings.Contains(message, "Suggested today:") || strings.Contains(message, "Due today or overdue:") {
+		t.Fatalf("briefing exposed a withheld deadline: %q", message)
+	}
+	if err := client.TaskNoticesTold(ctx, m.muse, []string{req.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := client.DecideTask(ctx, m.admin, client.TaskApprove, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := client.TaskBriefingNow(ctx, m.admin); err != nil || !queued {
+		t.Fatalf("queue briefing after approval = %v, %v", queued, err)
+	}
+	assertBriefing(t, takeBriefing(t, m.muse), fmt.Sprintf("Due today or overdue: task #%d (open, due 2001-02-03)", id))
+}
