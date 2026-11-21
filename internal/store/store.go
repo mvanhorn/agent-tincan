@@ -1840,6 +1840,42 @@ func (s *Store) openClaim(ctx context.Context, query string, args ...any) (envel
 	return reqs[0], true, nil
 }
 
+// OpenAskNames lists every agent whose text reached agent through an ask it
+// has open: the chain and contributors of each ask addressed to it that is
+// delivered, claimed or waiting on its question. The owner's approval rules
+// read these on what agent sends next, whichever ask (if any) the send
+// continues, so holding a second claim or naming another parent does not
+// drop a name. A needs_input ask counts, unlike in OpenGuestClaims: a hold
+// only waits for the owner, so an asker that never answers cannot block
+// agent's sends. Each name is listed once.
+func (s *Store) OpenAskNames(ctx context.Context, agent string) ([]string, error) {
+	return openAskNames(ctx, s.db, agent)
+}
+
+func openAskNames(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, agent string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+requestCols+` FROM requests WHERE to_agent = ? AND kind = ? AND status IN (?, ?, ?)`,
+		agent, string(envelope.KindAsk), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	reqs, err := scanRequests(rows)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range reqs {
+		for _, name := range append(slices.Clone(r.Chain), r.Contributors...) {
+			if name != "" && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
+	return out, nil
+}
+
 // Request returns a stored request regardless of caller (relay-internal).
 func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envelope.Status, error) {
 	return s.lookup(ctx, id)

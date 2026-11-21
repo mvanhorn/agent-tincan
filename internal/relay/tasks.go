@@ -565,7 +565,7 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 	}
 	proposed := in.Source != "" || guestAsks > 0
 	if in.EverySeconds != 0 {
-		if err := s.checkScheduleCaller(r.Context(), from, sess); err != nil {
+		if err := s.checkScheduleCaller(r.Context(), from); err != nil {
 			writeTaskErr(w, err)
 			return
 		}
@@ -1151,7 +1151,7 @@ func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.EverySeconds != 0 {
-		if err := s.checkScheduleCaller(r.Context(), from, sess); err != nil {
+		if err := s.checkScheduleCaller(r.Context(), from); err != nil {
 			writeTaskErr(w, err)
 			return
 		}

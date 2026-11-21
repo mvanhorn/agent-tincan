@@ -33,7 +33,7 @@ const (
 // errScheduleDuringClaim refuses a schedule from a caller with an open
 // claim. A fire starts a new chain, so a schedule made while handling a
 // request would shed that request's loop, hop and allowlist checks.
-var errScheduleDuringClaim = errors.New("you hold a claimed request and a scheduled ask starts a new chain; reply to it first, or send an ordinary ask")
+var errScheduleDuringClaim = errors.New("you have an open request and a scheduled ask starts a new chain; reply to it first, or send an ordinary ask")
 
 // errScheduleDuringGuestAsk refuses a schedule from a caller a guest's ask is
 // open with. A fire carries no mark and reads no claims, so one made now,
@@ -51,17 +51,20 @@ func checkScheduleEvery(every int64) error {
 	return nil
 }
 
-// checkScheduleCaller refuses a schedule from agent in session while a
-// guest's ask is open with it or it holds a claim.
-func (s *Server) checkScheduleCaller(ctx context.Context, agent, session string) error {
+// checkScheduleCaller refuses a schedule from agent while a guest's ask is
+// open with it or any ask is: delivered, claimed or waiting on its question,
+// in any session. A fire starts a new chain of the asker alone and reads no
+// claims, so a schedule made while an ask is open would carry that ask's text
+// past the owner's approval rules.
+func (s *Server) checkScheduleCaller(ctx context.Context, agent string) error {
 	if open, err := s.store.OpenGuestAsks(ctx, agent); err != nil {
 		return err
 	} else if open > 0 {
 		return &StatusError{Code: http.StatusConflict, Err: errScheduleDuringGuestAsk}
 	}
-	if held, err := s.holdsClaim(ctx, agent, session); err != nil {
+	if names, err := s.store.OpenAskNames(ctx, agent); err != nil {
 		return err
-	} else if held {
+	} else if len(names) > 0 {
 		return &StatusError{Code: http.StatusConflict, Err: errScheduleDuringClaim}
 	}
 	return nil
@@ -88,15 +91,9 @@ func (s *Server) scheduleCreated(ctx context.Context, sch envelope.Schedule) {
 	s.record(ctx, "schedule_created", "", "", sch.From, store.DetailJSON(detail))
 }
 
-// holdsClaim reports whether a send from agent in session would continue a
-// claim, the way policy.Prepare decides it: the session's own claim, or else
-// the agent-wide one, which a session cannot step out of.
-func (s *Server) holdsClaim(ctx context.Context, agent, session string) (bool, error) {
-	_, ok, err := s.heldClaim(ctx, agent, session)
-	return ok, err
-}
-
-// heldClaim is holdsClaim with the claimed request.
+// heldClaim returns the claim a send from agent in session would continue,
+// the way policy.Prepare decides it: the session's own claim, or else the
+// agent-wide one, which a session cannot step out of.
 func (s *Server) heldClaim(ctx context.Context, agent, session string) (envelope.Request, bool, error) {
 	if session != "" {
 		if req, ok, err := s.store.OpenClaimFor(ctx, agent, session); ok || err != nil {
@@ -107,18 +104,27 @@ func (s *Server) heldClaim(ctx context.Context, agent, session string) (envelope
 }
 
 // claimChain returns the chain of the request agent holds a claim on in
-// session, followed by that request's contributors, nil when it holds none.
+// session, followed by that request's contributors and then every name its
+// other open asks carry (store.OpenAskNames), nil when it has none open.
 // Text the agent stores now, to be sent on later, is kept with it: a send
-// made now would carry that chain and those contributors, and the stored
-// text must not shed either.
+// made now would carry that chain and those names, and the stored text must
+// not shed any of them.
 func (s *Server) claimChain(ctx context.Context, agent, session string) ([]string, error) {
 	req, ok, err := s.heldClaim(ctx, agent, session)
-	if err != nil || !ok {
+	if err != nil {
 		return nil, err
 	}
-	out := slices.Clone(req.Chain)
-	for _, name := range req.Contributors {
-		if !slices.Contains(out, name) {
+	open, err := s.store.OpenAskNames(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	if ok {
+		out = slices.Clone(req.Chain)
+		open = append(slices.Clone(req.Contributors), open...)
+	}
+	for _, name := range open {
+		if name != agent && !slices.Contains(out, name) {
 			out = append(out, name)
 		}
 	}
@@ -184,12 +190,11 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	sess, err := session(r)
-	if err != nil {
+	if _, err := session(r); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.checkScheduleCaller(r.Context(), from, sess); err != nil {
+	if err := s.checkScheduleCaller(r.Context(), from); err != nil {
 		writeTaskErr(w, err)
 		return
 	}

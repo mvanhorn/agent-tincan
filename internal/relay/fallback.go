@@ -90,6 +90,8 @@ func (s *Server) rerouteRefusal(ctx context.Context, req envelope.Request, roste
 		return "the fallback cannot take asks moved to it"
 	case len(req.MovedFrom) > 0:
 		return "it moved once already"
+	case req.FollowOf != "":
+		return "it is a follow-on"
 	case req.Group != "":
 		return "it is part of a group"
 	case req.RoomPostID != 0:

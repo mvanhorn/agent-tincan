@@ -1113,9 +1113,10 @@ func heldCmd() *cobra.Command {
 			// predates them.
 			var reqs []struct {
 				envelope.Request
-				ToKind    string         `json:"to_kind"`
-				Pass      *relay.PassRef `json:"pass"`
-				PassError string         `json:"pass_error"`
+				Contributors []string       `json:"contributors"`
+				ToKind       string         `json:"to_kind"`
+				Pass         *relay.PassRef `json:"pass"`
+				PassError    string         `json:"pass_error"`
 			}
 			if err := r.Raw(cmd.Context(), "GET", "/v1/admin/held", nil, &reqs); err != nil {
 				return err
@@ -1130,6 +1131,12 @@ func heldCmd() *cobra.Command {
 					cmd.Printf("guest: the next entry is a guest's ask, or work that follows from one\n")
 				}
 				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, to, strings.Join(req.Chain, " -> "), heldText(req.Body))
+				if len(req.Contributors) > 0 {
+					cmd.Printf("  also carries text from: %s\n", strings.Join(req.Contributors, ", "))
+				}
+				if n := len(req.Exchanges); n > 0 && req.Exchanges[n-1].Answer != "" {
+					cmd.Printf("  %s asked: %s\n  %s answered: %s\n", req.To, heldText(req.Exchanges[n-1].Question), req.From, heldText(req.Exchanges[n-1].Answer))
+				}
 				switch {
 				case req.Pass != nil:
 					cmd.Printf("  pass: %s conversation %s -> %s\n", history.SourceLabel(history.Source(req.Pass.Source)), req.Pass.ConversationID, req.Pass.To)

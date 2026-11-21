@@ -85,17 +85,35 @@ func (s *Store) needsInput(ctx context.Context, id, agent string, rep envelope.R
 
 // Answer records input from the original sender and queues the same request again.
 func (s *Store) Answer(ctx context.Context, id, agent, body string) (envelope.Request, error) {
-	return s.answer(ctx, id, agent, body, false)
+	return s.answer(ctx, id, agent, body, false, AnswerCheck{})
+}
+
+// AnswerCheck is what the owner's approval rules made of a teammate's answer
+// (relay.AnswerChecker): the request's contributors with the names the
+// answer may carry, and whether the answered request waits for the owner
+// again, for HoldTTL from now.
+type AnswerCheck struct {
+	Contributors []string
+	Held         bool
+	HoldTTL      time.Duration
+}
+
+// AnswerChecked is Answer with the owner's approval rules applied to the
+// answer: the request keeps check's contributors, and when check holds it,
+// it goes back to held, unapproved, rather than to its target. The owner
+// approved the request it was, not the text the asker adds to it.
+func (s *Store) AnswerChecked(ctx context.Context, id, agent, body string, check AnswerCheck) (envelope.Request, error) {
+	return s.answer(ctx, id, agent, body, false, check)
 }
 
 // AnswerAsGuest is Answer for a guest. The owner approved the ask, not this
 // answer, so the answer goes in framed as the guest's text and the request
 // stops being approved: what the teammate does next on it is held again.
 func (s *Store) AnswerAsGuest(ctx context.Context, id, agent, body string) (envelope.Request, error) {
-	return s.answer(ctx, id, agent, body, true)
+	return s.answer(ctx, id, agent, body, true, AnswerCheck{})
 }
 
-func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool) (envelope.Request, error) {
+func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool, check AnswerCheck) (envelope.Request, error) {
 	if err := envelope.ValidateInput(body); err != nil {
 		return envelope.Request{}, err
 	}
@@ -127,12 +145,30 @@ func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool) 
 	if err != nil {
 		return envelope.Request{}, err
 	}
+	if check.Contributors != nil {
+		req.Contributors = check.Contributors
+	}
+	contributors := ""
+	if len(req.Contributors) > 0 {
+		b, err := json.Marshal(req.Contributors)
+		if err != nil {
+			return envelope.Request{}, err
+		}
+		contributors = string(b)
+	}
 	now := s.now().UnixMilli()
+	status, expires := envelope.StatusQueued, int64(0)
+	if check.Held {
+		status, expires = envelope.StatusHeld, s.now().Add(check.HoldTTL).UnixMilli()
+	}
 	// The asker's answer queues the request afresh, so its project gets the
-	// first look again rather than whichever window polls next.
+	// first look again rather than whichever window polls next. One the
+	// owner's rules hold waits for the owner as a fresh held request does.
 	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, exchanges = ?, lease_paused = 0, lease_until = 0, resumed = 1, held_ack = '', updated_at = ?, reply_seen_at = ?, queued_at = ?, fallback_woken = 0,
-		progress_note = '', progress_at = 0, guest_approved = guest_approved AND ?
-		WHERE id = ? AND status = ? AND expires_at > ?`, envelope.StatusQueued, string(exchanges), now, now, now, !guest, id, envelope.StatusNeedsInput, now)
+		progress_note = '', progress_at = 0, guest_approved = guest_approved AND ?, contributors = ?,
+		was_held = was_held OR ?, approved = approved AND NOT ?, expires_at = CASE WHEN ? THEN ? ELSE expires_at END
+		WHERE id = ? AND status = ? AND expires_at > ?`, status, string(exchanges), now, now, now, !guest, contributors,
+		check.Held, check.Held, check.Held, expires, id, envelope.StatusNeedsInput, now)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -148,5 +184,9 @@ func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool) 
 	}
 	req.Resumed = true
 	req.GuestApproved = req.GuestApproved && !guest
+	req.Status = status
+	if check.Held {
+		req.WasHeld, req.Approved = true, false
+	}
 	return req, tx.Commit()
 }

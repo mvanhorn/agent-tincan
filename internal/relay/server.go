@@ -2802,8 +2802,11 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 	// ones: over plain http a browser's same-origin GET carries no Origin and
 	// no Sec-Fetch-*, so the listing cannot tell the page from the CLI. The
 	// local admin socket has no device and gets none; old clients ignore them.
+	// contributors names the agents beside the sender and chain whose text
+	// the request may carry, so the owner sees why a rule held it.
 	type heldRequest struct {
 		envelope.Request
+		Contributors   []string  `json:"contributors,omitempty"`
 		ToKind         string    `json:"to_kind,omitempty"`
 		Pass           *PassRef  `json:"pass,omitempty"`
 		PassError      string    `json:"pass_error,omitempty"`
@@ -2834,7 +2837,7 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		if cut[req.ID] && req.Then != nil {
 			req.Then.Body = cutHeldText(req.Then.Body)
 		}
-		out[i] = heldRequest{Request: req}
+		out[i] = heldRequest{Request: req, Contributors: req.Contributors}
 		if node != "" {
 			out[i].ApproveNonce, out[i].NonceExpiresAt = s.nonces.issue(nonceKey{id: req.ID, decision: decisionApprove, node: node}, now)
 			out[i].DenyNonce, _ = s.nonces.issue(nonceKey{id: req.ID, decision: decisionDeny, node: node}, now)
