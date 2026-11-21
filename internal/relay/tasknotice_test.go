@@ -777,3 +777,36 @@ func TestUnreadReminderExpiresInsteadOfSendingLate(t *testing.T) {
 		t.Fatalf("late reminder history = %+v", events)
 	}
 }
+
+func TestTaskReminderFallbackCancelledWhenDueChanges(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private title", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	for range 3 {
+		got := read(t, m.muse)
+		if len(got) != 1 {
+			t.Fatalf("reminder attempt = %+v", got)
+		}
+		if _, err := m.muse.Claim(ctx, got[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+		m.Server.Sweep(ctx)
+	}
+	waiting, err := m.Store.QueuedIDs(ctx, "scout")
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("queued fallback = %v, %v", waiting, err)
+	}
+	if _, err := client.SetTaskDue(ctx, m.admin, true, res.Task.ID, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, m.scout); len(got) != 0 {
+		t.Fatalf("fallback delivered after due cleared = %+v", got)
+	}
+}

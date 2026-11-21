@@ -279,9 +279,7 @@ func readTask(ctx context.Context, c Rawer, path, zone string) (envelope.Task, [
 		}
 		task, events = out.Task, append(events, out.Events...)
 		if out.NextAfter == 0 {
-			if task.DueDay != "" {
-				task.DueZone = zone
-			}
+			task.DueZone = zone
 			return task, events, nil
 		}
 		if out.NextAfter <= after {
@@ -592,6 +590,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 		fmt.Fprintf(&b, "%s %s %s", clockTime(ev.At, now), envelope.TaskWho(ev.Actor), ev.Kind)
 		if ev.Status != "" {
 			fmt.Fprintf(&b, " (%s)", ev.Status)
+		}
+		if ev.DueChange != nil {
+			fmt.Fprintf(&b, " changed from %s to %s", formatTaskDueValue(ev.DueChange.Before, t.DueZone), formatTaskDueValue(ev.DueChange.After, t.DueZone))
 		}
 		if ev.ForOwner {
 			b.WriteString(" for the owner, who said")

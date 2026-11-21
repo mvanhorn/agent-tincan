@@ -736,6 +736,12 @@ add_task (or run `tincan tasks add "<title>" --detail "<what is wanted>"`). to
 and for_owner (or `--mine`) marks it as the owner's own to do. list_tasks (or
 `tincan tasks`) shows the tasks you can see, grouped by status, and get_task
 (or `tincan tasks show <id>`) reads one whole, with its result and history.
+
+Use due on add_task (CLI: --due) for deadlines such as "Friday" or "Friday 3pm".
+A time sends one reminder. The relay uses --task-zone (America/Los_Angeles
+by default). The filer sets or clears a deadline with update_task action due
+and when, or `tincan tasks due <id> <when|clear>`. A named host uses
+decide_task decision due with when and the owner's direct words.
 Done and dropped tasks are only counted; closed: true (or `--closed`) lists
 them too.
 update_task assigns an open or returned task to the teammate whose good_at

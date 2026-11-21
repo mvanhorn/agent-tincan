@@ -110,6 +110,9 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		// The owner already chose where relay alerts go. Send only fixed
 		// task metadata there when this host can no longer deliver it.
 		next.To = s.notifyDestination()
+		if old.NoticeKind == envelope.TaskNoticeReminder {
+			next.NoticeKind, next.NoticeFor = store.NoteTaskReminderFallback, old.NoticeFor
+		}
 		old.From, old.Kind = client.RelaySender, envelope.KindNotify
 		markTaskNotice(&old)
 		next.Body = fmt.Sprintf("Task #%d: %s did not acknowledge this task notice by attempt %d. %s",

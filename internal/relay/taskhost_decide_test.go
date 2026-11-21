@@ -390,7 +390,9 @@ func TestTaskDueOnlyOwnerFilerOrHostOnWords(t *testing.T) {
 		t.Fatalf("host change = %+v, %v", out, err)
 	}
 	ev := m.lastEvent(t, id)
-	if ev.Kind != envelope.TaskEventDue || ev.Actor != "muse" || !ev.ForOwner || ev.Body != words {
+	if ev.Kind != envelope.TaskEventDue || ev.Actor != "muse" || !ev.ForOwner || ev.Body != words ||
+		ev.DueChange == nil || ev.DueChange.Before.DueDay != "2030-11-29" || ev.DueChange.Before.DueAt != nil ||
+		ev.DueChange.After.DueAt == nil || *ev.DueChange.After.DueAt != *out.DueAt {
 		t.Fatalf("host due history = %+v", ev)
 	}
 	if _, err := client.SetTaskDue(ctx, m.admin, true, id, "2026-11-29"); err != nil {

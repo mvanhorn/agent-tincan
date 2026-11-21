@@ -23,6 +23,12 @@ type TaskDue struct {
 	DueAt  *int64 `json:"due_at,omitempty"`
 }
 
+// TaskDueChange preserves both deadlines independently of any owner words.
+type TaskDueChange struct {
+	Before TaskDue `json:"before"`
+	After  TaskDue `json:"after"`
+}
+
 // TaskLocation resolves the configured IANA zone independently of the process zone.
 func TaskLocation(zone string) (*time.Location, error) {
 	if zone == "" {

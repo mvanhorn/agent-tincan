@@ -185,6 +185,14 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 			}
 		}
 	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'due_change')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN due_change TEXT`); err != nil {
+			return err
+		}
+	}
 	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS tasks_reminder_due ON tasks(due_at)
 		WHERE reminded_at IS NULL AND reminder_dropped_at IS NULL AND status NOT IN ('done', 'dropped')`)
 	return err
@@ -1155,9 +1163,17 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		chain = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '') WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), ev.TaskID)
+	var dueChange sql.NullString
+	if ev.DueChange != nil {
+		b, err := json.Marshal(ev.DueChange)
+		if err != nil {
+			return envelope.TaskEvent{}, err
+		}
+		dueChange = sql.NullString{String: string(b), Valid: true}
+	}
+	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.TaskID)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -1218,17 +1234,22 @@ func scanTaskAnd(sc scanner, more ...any) (envelope.Task, error) {
 	return t, nil
 }
 
-const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, '')`
+const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, ''), COALESCE(due_change, '')`
 
 func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
 	var ev envelope.TaskEvent
-	var status, chain, prior string
+	var status, chain, prior, dueChange string
 	var at int64
-	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior); err != nil {
+	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior, &dueChange); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	if chain != "" {
 		if err := json.Unmarshal([]byte(chain), &ev.Chain); err != nil {
+			return envelope.TaskEvent{}, err
+		}
+	}
+	if dueChange != "" {
+		if err := json.Unmarshal([]byte(dueChange), &ev.DueChange); err != nil {
 			return envelope.TaskEvent{}, err
 		}
 	}

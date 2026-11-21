@@ -893,14 +893,15 @@ type TaskEvent struct {
 	Kind   string     `json:"kind"`
 	Body   string     `json:"body,omitempty"`
 	Status TaskStatus `json:"status,omitempty"`
-	// ForOwner marks a status entry a task host made on the owner's word:
+	// ForOwner marks an entry a task host made on the owner's word:
 	// Actor is the host, and Body the owner's words it says it acted on.
 	ForOwner bool `json:"for_owner,omitempty"`
 	// Prior is the status the task had before the entry, on a task host's
 	// done or drop and on every reopen; "" on any other entry.
-	Prior TaskStatus `json:"prior,omitempty"`
-	At    time.Time  `json:"at"`
-	Chain []string   `json:"-"`
+	Prior     TaskStatus     `json:"prior,omitempty"`
+	DueChange *TaskDueChange `json:"due_change,omitempty"`
+	At        time.Time      `json:"at"`
+	Chain     []string       `json:"-"`
 }
 
 // MaxRoomPost caps a room post's body in bytes.

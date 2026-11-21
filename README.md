@@ -643,7 +643,8 @@ A task is proposed, open, working, question, returned, done or dropped. Nothing 
 | Command | What it does |
 |---|---|
 | `tincan tasks [--owner] [--closed] [--json]` | List the tasks this machine's agent can read, grouped by status. `--owner` lists every task (admin devices only). Done and dropped tasks are counted, and `--closed` lists them; without it they are not read from the relay, so `--json` leaves them out too. |
-| `tincan tasks add <title> [--detail <text> \| --detail-stdin] [--to <teammate> \| --mine] [--key <key>] [--source <label>] [--every <duration>] [--owner]` | Add a task: unassigned, handed to a teammate with `--to`, or your own to do with `--mine`. It is filed by this machine's agent, or by you with `--owner`. |
+| `tincan tasks add <title> [--detail <text> \| --detail-stdin] [--to <teammate> \| --mine] [--key <key>] [--source <label>] [--every <duration>] [--due <when>] [--owner]` | Add a task: unassigned, handed to a teammate with `--to`, or your own to do with `--mine`. It is filed by this machine's agent, or by you with `--owner`. |
+| `tincan tasks due <id> <when\|clear> [--owner]` | Set or clear a task's deadline as its filer or the owner. |
 | `tincan tasks show <id> [--owner]` | One task whole, with its result and history. |
 | `tincan tasks assign <id> [teammate]` | Your assign, from an admin device. With no teammate it prints the team with each one's status and good-at line and changes nothing. A task someone already has is taken from them and their ask cancelled. |
 | `tincan tasks comment <id> <comment> [--owner]` | Add a comment. It wakes nobody; the next attempt at the task carries it. |
@@ -652,6 +653,10 @@ A task is proposed, open, working, question, returned, done or dropped. Nothing 
 | `tincan tasks host set <agent>` | Name a teammate a task host, from an admin device or the relay host. It prints a warning when the agent reaches the relay through the MCP gateway, when its wake method cannot start a turn, and for each guest that may ask it. |
 | `tincan tasks host clear <agent>` | Stop a teammate being a task host. Tasks it assigned earlier stay under its name. |
 | `tincan tasks decide <id> <done\|reopen\|drop> --words <text>` | A task host's decision on your word, from its shell, as its `decide_task` tool makes it. |
+
+Add a deadline with `tincan tasks add "Call the dentist" --due "Friday 3pm"`. Use a date such as `2026-11-27`, a weekday, `today`, `tomorrow`, a relative time like `in 2h`, or an RFC 3339 timestamp. The relay's `--task-zone` option defaults to `America/Los_Angeles`. Overdue tasks and tasks due today appear first. A day without a time appears on the list. A deadline with a time sends one reminder to named task hosts, with a six-hour delivery window. Closing the task cancels the reminder.
+
+In MCP, use `due` on `add_task` or `update_task` with action `due` and `when`. The owner or filer can change the deadline. A named host takes changes on the owner's direct words through `decide_task` with decision `due` and `when`, or `tincan tasks decide 12 due Friday 3pm --words "make 12 due Friday at 3pm"`.
 
 Agents use the `add_task`, `list_tasks`, `get_task` and `update_task` tools, or the same `tincan tasks` commands; a task host also has `decide_task`. What stays with you:
 

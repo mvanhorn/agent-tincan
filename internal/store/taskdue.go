@@ -46,7 +46,8 @@ func (s *Store) SetTaskDue(ctx context.Context, id int64, due envelope.TaskDue, 
 			return envelope.Task{}, err
 		}
 	}
-	ev := envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventDue, Body: words, ForOwner: forOwner}
+	ev := envelope.TaskEvent{TaskID: id, Actor: actor, Kind: envelope.TaskEventDue, Body: words, ForOwner: forOwner,
+		DueChange: &envelope.TaskDueChange{Before: t.TaskDue, After: due}}
 	if _, err := addTaskEvent(ctx, tx, ev, s.now().UnixMilli()); err != nil {
 		return envelope.Task{}, err
 	}
@@ -136,7 +137,8 @@ func (s *Store) cancelTaskReminderTx(ctx context.Context, tx *sql.Tx, id int64) 
 		WHERE r.notice_kind = ? AND r.notice_for = ? AND d.outcome = ''`
 	task := strconv.FormatInt(id, 10)
 	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'cancelled', lease_until = 0, updated_at = ?
-		WHERE id IN (`+attempts+`) AND status IN ('queued', 'delivered', 'claimed')`, s.now().UnixMilli(), kind, task); err != nil {
+		WHERE (id IN (`+attempts+`) OR (notice_kind = ? AND notice_for = ?))
+		AND status IN ('queued', 'delivered', 'claimed')`, s.now().UnixMilli(), kind, task, NoteTaskReminderFallback, task); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE task_notice_delivery SET outcome = 'cancelled' WHERE request_id IN (`+attempts+`)`, kind, task)

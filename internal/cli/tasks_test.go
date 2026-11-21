@@ -515,4 +515,5 @@ func TestTasksDueCommands(t *testing.T) {
 	tasksRun(t, []string{"show", "2", "--owner"}, "Overdue: 2000-11-21")
 	tasksRun(t, []string{"due", "2", "2030-11-29", "3pm", "--owner"}, "Task #2 is due 2030-11-29 15:00 PST.")
 	tasksRun(t, []string{"due", "2", "clear", "--owner"}, "Cleared the due date for task #2.")
+	tasksRun(t, []string{"show", "2", "--owner"}, "changed from 2000-11-21 to 2030-11-29 15:00 PST", "changed from 2030-11-29 15:00 PST to no deadline")
 }

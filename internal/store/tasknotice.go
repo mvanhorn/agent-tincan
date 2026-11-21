@@ -24,6 +24,9 @@ import (
 // found.
 const NoteTask = "task"
 
+// NoteTaskReminderFallback links the final alert to a reminder for cancellation.
+const NoteTaskReminderFallback = "task-reminder-fallback"
+
 // IsTaskNotice identifies requests tracked by the task receipt path.
 func IsTaskNotice(kind string) bool {
 	return kind == NoteTask || kind == envelope.TaskNoticeReminder

@@ -162,6 +162,13 @@ func FormatTaskDue(t envelope.Task) string {
 	return t.DueDay
 }
 
+func formatTaskDueValue(due envelope.TaskDue, zone string) string {
+	if due.DueDay == "" {
+		return "no deadline"
+	}
+	return FormatTaskDue(envelope.Task{TaskDue: due, DueZone: zone})
+}
+
 // FormatTaskDueChange describes the result of setting or clearing the due date.
 func FormatTaskDueChange(t envelope.Task) string {
 	if due := FormatTaskDue(t); due != "" {
