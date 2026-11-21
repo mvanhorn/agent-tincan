@@ -2759,6 +2759,11 @@ func (s *Server) heldCut(ctx context.Context, reqs []envelope.Request) map[strin
 		if req.Then != nil {
 			texts = append(texts, req.Then.Body)
 		}
+		// A request held again on its asker's answer is released by approving
+		// that answer, so every question and answer is read whole too.
+		for _, ex := range req.Exchanges {
+			texts = append(texts, ex.Question, ex.Answer)
+		}
 		if len(texts) == 0 {
 			continue
 		}
@@ -2836,6 +2841,12 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		}
 		if cut[req.ID] && req.Then != nil {
 			req.Then.Body = cutHeldText(req.Then.Body)
+		}
+		if cut[req.ID] {
+			for j := range req.Exchanges {
+				req.Exchanges[j].Question = cutHeldText(req.Exchanges[j].Question)
+				req.Exchanges[j].Answer = cutHeldText(req.Exchanges[j].Answer)
+			}
 		}
 		out[i] = heldRequest{Request: req, Contributors: req.Contributors}
 		if node != "" {

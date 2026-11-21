@@ -359,8 +359,9 @@ check, which runs after the relay's cycle, hop and rate checks and before
 delivery. Both asks and notifies are gated.
 
 The rule reads every ask open with the sender, not only the one a send
-continues. Each ask the sender has delivered, claimed or waiting on its
-question adds its chain and contributors to the new request's contributors,
+continues. Each ask the sender has delivered, claimed, waiting on its
+question, or queued again after a lapsed claim or handback adds its chain and
+contributors to the new request's contributors,
 so a sender cannot drop an agent the rule names by holding a second claim,
 naming a different request as `parent_id`, or replying with a question. The
 same names go with a task the sender files, a reply that a `then` follow-on
@@ -368,9 +369,18 @@ or a task result carries on, and an answer to a question. An answer is checked
 as a new ask would be: when the rule or the target's kind would hold it, the
 request goes back to held, unapproved, even if the owner approved it before,
 since the owner approved the request and not the answer. `tincan held` lists
-these names (`also carries text from`) and the latest question and answer.
-The limits: an ask the sender has already answered stops counting, and a
-claimed `notify` never counts.
+these names (`also carries text from`) and the latest question and answer,
+and so does the phone page.
+
+The gate follows text only along requests: the chain, contributors, and the
+asks open with the sender. It is not information-flow tracking. An agent that
+read a gated agent's text some other way sends on unheld: the reply to an ask
+it sent the gated agent itself, an ask it has already answered or that was
+cancelled or expired, a `notify`, a task, room post, search hit or trace it
+read, or a queued ask it fetched by id without claiming. To keep a gated
+agent's text away from a target, gate that target for every teammate that
+talks to the gated agent too, or use `unless` with the teammates you trust
+to have read nothing from it.
 
 A missing file disables the gate for every target except agents of kind
 `council`, `dot-web`, `duet-web` and `pass`, which are held by default (see [Council](#council)

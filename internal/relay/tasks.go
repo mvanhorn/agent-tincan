@@ -1150,9 +1150,15 @@ func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The owner's own repeating task carries only the owner's text, whatever
+	// the agent on the owner's device has open, so only a guest's open ask
+	// refuses it.
 	if in.EverySeconds != 0 {
-		if err := s.checkScheduleCaller(r.Context(), from); err != nil {
-			writeTaskErr(w, err)
+		if open, err := s.store.OpenGuestAsks(r.Context(), from); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		} else if open > 0 {
+			writeTaskErr(w, &StatusError{Code: http.StatusConflict, Err: errScheduleDuringGuestAsk})
 			return
 		}
 	}

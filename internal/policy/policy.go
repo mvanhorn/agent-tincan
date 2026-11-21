@@ -291,8 +291,9 @@ func (p *Policy) addOpenAskNames(ctx context.Context, req *envelope.Request, sen
 	if err != nil {
 		return reject(http.StatusServiceUnavailable, err)
 	}
-	// The chain and the sender are read by the rules already.
-	names = slices.DeleteFunc(names, func(n string) bool { return n == req.From || slices.Contains(req.Chain, n) })
+	// The chain and the sender are read by the rules already, and the
+	// target's own text coming back to it needs no approval.
+	names = slices.DeleteFunc(names, func(n string) bool { return n == req.From || n == req.To || slices.Contains(req.Chain, n) })
 	req.Contributors = contributors(req.Contributors, names)
 	return nil
 }

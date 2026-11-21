@@ -252,6 +252,17 @@ function heldCard(entry) {
     li.append(el("p", "meta", "chain: " + item.chain.join(" > ")));
   }
   li.append(el("p", "body", item.body));
+  if (item.contributors && item.contributors.length) {
+    li.append(el("p", "meta", "also carries text from: " + item.contributors.join(", ")));
+  }
+  const exchanges = item.exchanges || [];
+  const last = exchanges[exchanges.length - 1];
+  if (last && last.answer) {
+    li.append(el("p", "meta", item.to + " asked:"));
+    li.append(el("p", "body", last.question));
+    li.append(el("p", "meta", item.from + " answered:"));
+    li.append(el("p", "body", last.answer));
+  }
   if (item.then) {
     li.append(el("p", "meta", "Then, once answered, asks " + item.then.to + ":"));
     li.append(el("p", "body", item.then.body));

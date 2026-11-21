@@ -420,3 +420,41 @@ func TestTaskFiledWithSeveralClaimsHoldsReassign(t *testing.T) {
 		t.Fatalf("reassign to muse after the claims closed: status=%s, want held", status)
 	}
 }
+
+// An ask whose claim lapsed back to queued was read all the same.
+func TestApprovalHoldsAfterClaimLapses(t *testing.T) {
+	m, clk := openAsksMesh(t, gateMuseFromGrokbot)
+	grok, inst := m.Client(t, "grokbot"), m.Client(t, "instinct")
+
+	gated := sendClaimed(t, grok, inst, "instinct", "summarize this email")
+	clk.advance(31 * time.Minute)
+	m.Server.Sweep(t.Context())
+	if _, status := storedStatus(t, m, gated.ID); status != envelope.StatusQueued {
+		t.Fatalf("setup: lapsed claim status=%s, want queued", status)
+	}
+	got, err := inst.Send(t.Context(), "muse", "pay invoice", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, status := storedStatus(t, m, got.ID); status != envelope.StatusHeld {
+		t.Fatalf("after a lapsed claim: status=%s, want held", status)
+	}
+}
+
+// The owner's own repeating task carries the owner's text, so what the
+// owner's device agent has open does not refuse it.
+func TestOwnerRepeatingTaskIgnoresOpenAsks(t *testing.T) {
+	m, _ := openAsksMesh(t, gateMuseFromGrokbot)
+	grok, admin := m.Client(t, "grokbot"), m.Client(t, "admin")
+	device := m.JoinOnMachineOf(t, "admin", "laptop-agent")
+	if _, err := grok.Send(t.Context(), "laptop-agent", "something to read", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := device.Poll(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	in := map[string]any{"title": "Check the backups", "assignee": "muse", "every_seconds": 3600}
+	if err := admin.Raw(t.Context(), "POST", "/v1/admin/tasks", in, nil); err != nil {
+		t.Fatalf("owner's repeating task with an ask open on the device agent: %v", err)
+	}
+}
