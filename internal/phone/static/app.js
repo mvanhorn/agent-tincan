@@ -1908,7 +1908,7 @@ async function refresh() {
 
 // heldText is what a held card shows the owner before they decide.
 function heldText(item) {
-  return JSON.stringify([item.body, item.then && item.then.body]);
+  return JSON.stringify([item.body, item.then && item.then.body, item.exchanges || [], item.contributors || []]);
 }
 
 function mergeHeld(items) {

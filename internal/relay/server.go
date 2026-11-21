@@ -1847,6 +1847,12 @@ func (s *Server) getAs(ctx context.Context, id, reader string) (envelope.Result,
 	if err != nil {
 		return res, err
 	}
+	// A target that reads its ask by id has read it as a poll would hand it.
+	if res.Request.To == reader && res.Request.Kind == envelope.KindAsk && res.Status != envelope.StatusHeld {
+		if err := s.store.MarkRead(ctx, id, reader); err != nil {
+			return res, err
+		}
+	}
 	one := []envelope.Result{res}
 	err = s.redactRooms(ctx, one, reader)
 	return one[0], err

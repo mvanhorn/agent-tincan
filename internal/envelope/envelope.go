@@ -283,6 +283,11 @@ func (r *Request) RedactFor(agent string) {
 		r.Body = "waiting for the owner's approval"
 		r.Attachments = nil
 		r.Project = ""
+		// A request held again on its asker's answer waits on that answer.
+		// In place, so a result's copy of the slice is redacted too.
+		if n := len(r.Exchanges); n > 0 && r.Exchanges[n-1].Answer != "" {
+			r.Exchanges[n-1].Answer = "waiting for the owner's approval"
+		}
 	}
 }
 

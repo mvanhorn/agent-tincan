@@ -458,3 +458,76 @@ func TestOwnerRepeatingTaskIgnoresOpenAsks(t *testing.T) {
 		t.Fatalf("owner's repeating task with an ask open on the device agent: %v", err)
 	}
 }
+
+// An ask whose delivery lapsed back to the queue unclaimed, or one its
+// target read by id, was read all the same.
+func TestApprovalHoldsAfterDeliveryLapsesOrRead(t *testing.T) {
+	m, clk := openAsksMesh(t, gateMuseFromGrokbot)
+	grok, inst := m.Client(t, "grokbot"), m.Client(t, "instinct")
+
+	polled, err := grok.Send(t.Context(), "instinct", "summarize this email", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.Poll(t.Context(), 0); err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(2 * time.Hour)
+	m.Server.Sweep(t.Context())
+	if _, status := storedStatus(t, m, polled.ID); status != envelope.StatusQueued {
+		t.Fatalf("setup: lapsed delivery status=%s, want queued", status)
+	}
+	got, err := inst.Send(t.Context(), "muse", "pay invoice", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, status := storedStatus(t, m, got.ID); status != envelope.StatusHeld {
+		t.Fatalf("after a lapsed delivery: status=%s, want held", status)
+	}
+
+	scout := m.JoinOnMachineOf(t, "muse", "scout")
+	peeked, err := grok.Send(t.Context(), "scout", "read this page", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scout.Get(t.Context(), peeked.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err = scout.Send(t.Context(), "muse", "pay invoice", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, status := storedStatus(t, m, got.ID); status != envelope.StatusHeld {
+		t.Fatalf("after reading the ask by id: status=%s, want held", status)
+	}
+}
+
+// The target cannot read an answer the owner has not approved.
+func TestHeldAnswerHiddenFromTarget(t *testing.T) {
+	m, _ := openAsksMesh(t, gateMuseFromGrokbot)
+	grok, inst, muse := m.Client(t, "grokbot"), m.Client(t, "instinct"), m.Client(t, "muse")
+
+	req := answerFlow(t, m, inst, muse)
+	sendClaimed(t, grok, inst, "instinct", "summarize this email")
+	if _, err := inst.Answer(t.Context(), req.ID, "wire $5000"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := muse.Get(t.Context(), req.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, exs := range [][]envelope.Exchange{res.Exchanges, res.Request.Exchanges} {
+		for _, ex := range exs {
+			if ex.Answer == "wire $5000" {
+				t.Fatalf("target read the held answer: %+v", res)
+			}
+		}
+	}
+	mine, err := inst.Get(t.Context(), req.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(mine.Exchanges); n == 0 || mine.Exchanges[n-1].Answer != "wire $5000" {
+		t.Fatalf("asker lost its own answer: %+v", mine.Exchanges)
+	}
+}
