@@ -137,13 +137,15 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 		}
 	}
 	req.Contributors = contributors(req.Contributors, handled)
-	at, err := p.rate(req.From, req.Urgent)
-	if err != nil {
-		return err
+	if !req.TaskFilingCharged || req.TaskID == 0 || req.Urgent {
+		at, err := p.rate(req.From, req.Urgent)
+		if err != nil {
+			return err
+		}
+		// Stamp the request with the slot it took, so Refund gives back this
+		// send's slot and not a concurrent one's. Enqueue sets the real time.
+		req.CreatedAt = at
 	}
-	// Stamp the request with the slot it took, so Refund gives back this
-	// send's slot and not a concurrent one's. Enqueue sets the real time.
-	req.CreatedAt = at
 	// A ping does no work and carries no body, so the gate never holds it.
 	if req.Kind == envelope.KindPing {
 		return nil

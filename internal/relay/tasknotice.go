@@ -90,6 +90,11 @@ func markTaskNotice(req *envelope.Request) {
 	if !store.IsTaskNotice(req.NoticeKind) || req.From != client.RelaySender || req.Kind != envelope.KindNotify {
 		return
 	}
+	if req.NoticeKind == envelope.TaskNoticeBriefing {
+		req.TaskNoticeKind = req.NoticeKind
+		req.TaskNoticeReceipt = true
+		return
+	}
 	id := taskNoticeID(req.NoticeFor)
 	if id == 0 {
 		return
@@ -163,6 +168,9 @@ func (s *Server) drainTaskNotices(ctx context.Context) {
 	}
 	eligible := s.eligibleTaskHosts(roster)
 	for _, n := range rows {
+		if n.Kind == envelope.TaskNoticeBriefing && len(eligible) == 0 {
+			continue
+		}
 		if err := s.tellTaskHosts(ctx, n, eligible); err != nil {
 			log.Printf("task notices: task %d: %v (a later drain tries again)", n.TaskID, err)
 			continue
@@ -178,6 +186,9 @@ func (s *Server) drainTaskNotices(ctx context.Context) {
 // not queue for and returns the error.
 func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, eligible []string) error {
 	body := taskNoticeBody(n)
+	if n.Briefing != nil {
+		body = taskBriefingMessage(*n.Briefing, s.cfg.TaskZone.String())
+	}
 	if body == "" || n.Actor == envelope.TaskOwner {
 		return nil
 	}

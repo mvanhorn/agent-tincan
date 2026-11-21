@@ -30,6 +30,9 @@ func FormatRequest(req envelope.Request) string {
 		if !req.CreatedAt.IsZero() {
 			sent = ", sent " + UTCClock(req.CreatedAt, time.Now())
 		}
+		if req.TaskNoticeKind == envelope.TaskNoticeBriefing && req.TaskNoticeReceipt {
+			return fmt.Sprintf("Relay task briefing %s%s. No reply needed.\n", req.ID, sent)
+		}
 		if req.TaskNoticeID > 0 && req.TaskNoticeStatus != "" {
 			if req.TaskNoticeReceipt {
 				return fmt.Sprintf("Relay task notice %s%s. Task #%d, reported status %s.\n",
@@ -507,10 +510,10 @@ const TaskHostInboxGuidance = "You are the owner's task host. In the owner's pri
 // successfully claimed notices.
 const TaskNoticePostingInstructions = "Gather every owner_message line from this run. As your last tool call immediately before your final reply, run tincan tasks told <notice request IDs> (or tell_task_notices with notice_ids) for every claimed notice with an owner_message. This acknowledges your commitment to post. Make your final reply exactly the owner_message lines, verbatim, one per line, in the owner's private chat. Skip the acknowledgment if you are ending the run without posting the lines, so the relay can retry."
 
-// TaskNoticeOwnerMessage renders the relay's metadata as a fixed sentence.
-// It never includes the request body or any task content.
+// TaskNoticeOwnerMessage renders task news from the relay's metadata.
+// A briefing is already rendered from metadata by the relay.
 func TaskNoticeOwnerMessage(req envelope.Request) string {
-	if !req.TaskNoticeReceipt || req.From != RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID <= 0 {
+	if !req.TaskNoticeReceipt || req.From != RelaySender || req.Kind != envelope.KindNotify {
 		return ""
 	}
 	message := taskNoticeMessage(req)
@@ -521,6 +524,12 @@ func TaskNoticeOwnerMessage(req envelope.Request) string {
 }
 
 func taskNoticeMessage(req envelope.Request) string {
+	if req.TaskNoticeKind == envelope.TaskNoticeBriefing {
+		return req.Body
+	}
+	if req.TaskNoticeID <= 0 {
+		return ""
+	}
 	if req.TaskNoticeKind == envelope.TaskNoticeReminder {
 		return envelope.TaskReminderMessage(req.TaskNoticeID)
 	}
@@ -543,7 +552,13 @@ func taskNoticeMessage(req envelope.Request) string {
 // TaskNoticeGuidance is for successfully claimed relay notices only. A
 // notice's status is news as of when it was queued.
 func (in Inbox) TaskNoticeGuidance(req envelope.Request) string {
-	if !in.TaskHost || req.From != RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID <= 0 || req.TaskNoticeStatus == "" && req.TaskNoticeKind != envelope.TaskNoticeReminder {
+	if !in.TaskHost || req.From != RelaySender || req.Kind != envelope.KindNotify {
+		return ""
+	}
+	if req.TaskNoticeKind == envelope.TaskNoticeBriefing && req.TaskNoticeReceipt {
+		return "This is a task briefing for the owner's private chat. Use get_task for current details when asked."
+	}
+	if req.TaskNoticeID <= 0 || req.TaskNoticeStatus == "" && req.TaskNoticeKind != envelope.TaskNoticeReminder {
 		return ""
 	}
 	if req.TaskNoticeReceipt {

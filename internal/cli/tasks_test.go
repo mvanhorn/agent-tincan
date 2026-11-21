@@ -517,3 +517,47 @@ func TestTasksDueCommands(t *testing.T) {
 	tasksRun(t, []string{"due", "2", "clear", "--owner"}, "Cleared the due date for task #2.")
 	tasksRun(t, []string{"show", "2", "--owner"}, "changed from 2000-11-21 to 2030-11-29 15:00 PST", "changed from 2030-11-29 15:00 PST to no deadline")
 }
+
+func TestTasksBriefingNowCommand(t *testing.T) {
+	m := testrelay.New(t, relay.Config{TaskBriefing: "off"})
+	ownerDesk(t, m)
+	ctx := t.Context()
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "muse", true); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"briefing", "--now"}, "No briefing queued.")
+	tasksRun(t, []string{"add", "Private deadline", "--owner", "--due", "2000-11-21"}, "Added task #1")
+	tasksRun(t, []string{"briefing", "--now"}, "Queued a task briefing.")
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	stdout, _, err := runSplit(t, inboxCmd(), "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var in inboxJSON
+	if err := json.Unmarshal([]byte(stdout), &in); err != nil || !in.TaskHost || len(in.Requests) != 1 {
+		t.Fatalf("briefing inbox = %s, %v", stdout, err)
+	}
+	req := in.Requests[0]
+	if req.TaskNoticeKind != envelope.TaskNoticeBriefing || !req.Claimed ||
+		!strings.Contains(req.OwnerMessage, "task #1 (open, due 2000-11-21)") ||
+		!strings.Contains(in.TaskNoticePosting, "last tool call") || strings.Contains(stdout, "Private deadline") {
+		t.Fatalf("briefing owner message = %s", stdout)
+	}
+	if err := client.TaskNoticesTold(ctx, m.Client(t, "muse"), []string{req.ID}); err != nil {
+		t.Fatalf("acknowledge the claimed briefing: %v", err)
+	}
+}
+
+func TestTasksDecideAssignCommand(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "grokbot", true); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"add", "Call the dentist"}, "Added task #1")
+	tasksRun(t, []string{"decide", "1", "assign", "--to", "muse", "--words", "give 1 to muse"}, "Assigned task #1 to muse for the owner.")
+	if got := taskNow(t, m, 1); got.Assignee != "muse" || got.AgentAssigns != 0 {
+		t.Fatalf("host assigned task = %+v", got)
+	}
+}

@@ -1328,8 +1328,8 @@ func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 			decide++
 		}
 	}
-	if admin != 11 {
-		t.Errorf("%d admin task routes checked, want 11", admin)
+	if admin != 12 {
+		t.Errorf("%d admin task routes checked, want 12", admin)
 	}
 	if decide != 1 {
 		t.Errorf("%d agent decide routes, want 1", decide)
@@ -1676,8 +1676,8 @@ func TestGuestCannotCallTaskRoutes(t *testing.T) {
 			t.Errorf("%s as a guest: %v", pattern, err)
 		}
 	}
-	if n != 20 {
-		t.Errorf("%d task routes checked, want 20", n)
+	if n != 21 {
+		t.Errorf("%d task routes checked, want 21", n)
 	}
 	if tasks := listTasks(t, m.Client(t, "admin"), "/v1/admin/tasks"); len(tasks) != 1 {
 		t.Errorf("%d tasks after the guest's calls, want 1", len(tasks))

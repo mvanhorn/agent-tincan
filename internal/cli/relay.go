@@ -63,6 +63,9 @@ type relayFlags struct {
 	upgradeExit   bool
 	releaseURL    string
 
+	taskBriefing     string
+	taskBriefingZone string
+
 	gateway         bool
 	gatewayHostname string
 	gatewayListen   string
@@ -172,6 +175,8 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.DurationVar(&f.urgentLease, "urgent-claim-lease", relay.DefaultUrgentClaimLease, "how long a claim on an urgent request lasts without a reply or progress note before it is requeued, the target woken again and the asker told (other requests keep 30m)")
 	fs.IntVar(&f.ownerNotice, "owner-notice-after", relay.DefaultOwnerNoticeAfter, "how many wakes in a row a webhook or email agent may leave unanswered before the owner is told, once per silent episode, through the approval policy's notify destination")
 	fs.StringVar(&f.taskZone, "task-zone", envelope.DefaultTaskZone, "IANA time zone for task due dates")
+	fs.StringVar(&f.taskBriefing, "task-briefing", relay.DefaultTaskBriefing, "daily task briefing time (HH:MM), or off")
+	fs.StringVar(&f.taskBriefingZone, "task-briefing-zone", "", "IANA time zone for the daily task briefing (defaults to --task-zone)")
 	fs.DurationVar(&f.taskNoticeAck, "task-notice-ack-timeout", relay.DefaultTaskNoticeAckTimeout, "how long after a task notice is claimed to wait for the host's acknowledgment before retrying")
 	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a plain ask can wait for clarification before the relay files it as a task")
 	fs.DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
@@ -207,6 +212,15 @@ func (f relayFlags) validate() error {
 	if _, err := envelope.TaskLocation(f.taskZone); err != nil {
 		return fmt.Errorf("--task-zone: %w", err)
 	}
+	if _, err := envelope.TaskLocation(f.taskBriefingZone); err != nil {
+		return fmt.Errorf("--task-briefing-zone: %w", err)
+	}
+	if f.taskBriefing != "" && f.taskBriefing != "off" {
+		when, err := time.Parse("15:04", f.taskBriefing)
+		if err != nil || when.Format("15:04") != f.taskBriefing {
+			return errors.New("--task-briefing must be a time in HH:MM format or off")
+		}
+	}
 	if f.taskNoticeAck <= 0 {
 		return errors.New("--task-notice-ack-timeout must be positive")
 	}
@@ -222,7 +236,11 @@ func (f relayFlags) validate() error {
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
 	zone, _ := envelope.TaskLocation(f.taskZone)
-	return relay.Config{Version: Version, TaskZone: zone, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
+	var briefingZone *time.Location
+	if f.taskBriefingZone != "" {
+		briefingZone, _ = envelope.TaskLocation(f.taskBriefingZone)
+	}
+	return relay.Config{Version: Version, TaskZone: zone, TaskBriefing: f.taskBriefing, TaskBriefingZone: briefingZone, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
 		TaskNoticeAckTimeout: f.taskNoticeAck, ParsePass: parsePassRef}
 }
 

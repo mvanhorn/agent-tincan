@@ -69,6 +69,8 @@ type Config struct {
 	// to confirm private delivery. The default is DefaultTaskNoticeAckTimeout.
 	TaskNoticeAckTimeout time.Duration
 	TaskZone             *time.Location // the owner's due-date calendar
+	TaskBriefing         string         // HH:MM or off
+	TaskBriefingZone     *time.Location
 	// EmailPollEvery is how often the relay polls an opted-in agent's
 	// AgentMail inbox for replies to its request emails while the agent's
 	// window is open; default DefaultEmailPollEvery.
@@ -134,6 +136,12 @@ func (c *Config) defaults() {
 	}
 	if c.TaskZone == nil {
 		c.TaskZone, _ = envelope.TaskLocation("")
+	}
+	if c.TaskBriefing == "" {
+		c.TaskBriefing = DefaultTaskBriefing
+	}
+	if c.TaskBriefingZone == nil {
+		c.TaskBriefingZone = c.TaskZone
 	}
 	if c.TaskNoticeAckTimeout <= 0 {
 		c.TaskNoticeAckTimeout = DefaultTaskNoticeAckTimeout
@@ -530,6 +538,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/admin/tasks", s.handleAdminTasks)
 	mux.HandleFunc("POST /v1/admin/tasks", s.handleAdminAddTask)
 	mux.HandleFunc("GET /v1/admin/tasks/{id}", s.handleAdminTask)
+	mux.HandleFunc("POST /v1/admin/tasks/briefing", s.handleTaskBriefingNow)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/due", s.handleAdminTaskDue)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/assign", s.handleAdminAssignTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/comment", s.handleAdminCommentTask)
@@ -659,6 +668,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
 	s.queueTaskReminders(ctx)
+	s.sweepTaskBriefing(ctx)
 	s.drainTaskNotices(ctx)
 	s.retryTaskNotices(ctx)
 }

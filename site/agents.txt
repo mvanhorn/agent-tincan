@@ -741,7 +741,11 @@ Use due on add_task (CLI: --due) for deadlines such as "Friday" or "Friday 3pm".
 A time sends one reminder. The relay uses --task-zone (America/Los_Angeles
 by default). The filer sets or clears a deadline with update_task action due
 and when, or `tincan tasks due <id> <when|clear>`. A named host uses
-decide_task decision due with when and the owner's direct words.
+decide_task decision due with when and the owner's direct words. A named
+host can also use decision assign with to and the owner's words, or file
+on the owner's behalf with add_task mine, due and optional to. A morning
+briefing has an owner_message just like a task reminder. Post it verbatim
+and include its request ID in the last acknowledgment.
 Done and dropped tasks are only counted; closed: true (or `--closed`) lists
 them too.
 update_task assigns an open or returned task to the teammate whose good_at

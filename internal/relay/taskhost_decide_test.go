@@ -405,3 +405,80 @@ func TestTaskDueOnlyOwnerFilerOrHostOnWords(t *testing.T) {
 		t.Fatalf("cleared task = %+v", got)
 	}
 }
+
+func TestTaskHostAssignsOnTheOwnersWords(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	ctx := t.Context()
+	task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Send the contract"}).Task
+	// A host acting for the owner does not use up an agent assignment.
+	for range store.MaxAgentAssigns {
+		if err := m.Store.CountTaskAssign(ctx, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	words := "give the contract task to Instinct"
+	if _, err := client.HostAssignTask(ctx, m.muse, task.ID, "instinct", words); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("non-host assign = %v", err)
+	}
+	if _, err := client.HostAssignTask(ctx, m.grok, task.ID, "instinct", ""); !client.IsStatus(err, http.StatusBadRequest) {
+		t.Fatalf("assign with missing owner words = %v", err)
+	}
+	proposed := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Unapproved task", "source": "mail"}).Task
+	if _, err := client.HostAssignTask(ctx, m.grok, proposed.ID, "instinct", "assign it"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("assign of a proposed task = %v", err)
+	}
+	if got := m.task(t, proposed.ID); got.Status != envelope.TaskProposed || got.CurrentRequest != "" {
+		t.Fatalf("proposed task changed: %+v", got)
+	}
+	out, err := client.HostAssignTask(ctx, m.grok, task.ID, "instinct", words)
+	if err != nil || out.Status != envelope.TaskWorking || out.Assignee != "instinct" || out.AgentAssigns != store.MaxAgentAssigns {
+		t.Fatalf("host assignment = %+v, %v", out, err)
+	}
+	ev := m.lastEvent(t, task.ID)
+	if ev.Kind != envelope.TaskEventAssigned || ev.Actor != "grokbot" || !ev.ForOwner || ev.Body != words {
+		t.Fatalf("assignment event = %+v", ev)
+	}
+	in, err := m.instinct.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].TaskID != task.ID || in.Requests[0].From != "grokbot" ||
+		!strings.Contains(in.Requests[0].Body, "the owner assigned to you") || strings.Contains(in.Requests[0].Body, words) {
+		t.Fatalf("owner's assignment = %+v, %v", in, err)
+	}
+}
+
+func TestTaskHostAddChargesEvenWhenHandoffFails(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	ctx := t.Context()
+
+	// Self-assignment fails before it charges a send slot. The task it
+	// leaves on the list still has to count as a filing.
+	add := client.TaskAdd{Title: "File and give it to myself", Mine: true, Assignee: "grokbot"}
+	out, err := client.AddTask(ctx, m.grok, false, add)
+	if err != nil || out.Task.Filer != envelope.TaskOwner || out.Task.Status != envelope.TaskOpen || out.AssignError == "" {
+		t.Fatalf("first filing = %+v, %v", out, err)
+	}
+	add.Title = "Another self-assigned task"
+	if _, err := client.AddTask(ctx, m.grok, false, add); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+	tasks, _, err := client.Tasks(ctx, m.admin, true, false)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("owner tasks after refused filing = %+v, %v", tasks, err)
+	}
+}
+
+func TestTaskHostAddAndAssignShareOneRateSlot(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	ctx := t.Context()
+	out, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "File and delegate", Mine: true, Assignee: "instinct"})
+	if err != nil || out.Task.Status != envelope.TaskWorking || out.Task.Assignee != "instinct" || out.AssignError != "" {
+		t.Fatalf("filing and handoff with one available slot = %+v, %v", out, err)
+	}
+	if _, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Another task", Mine: true}); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+}

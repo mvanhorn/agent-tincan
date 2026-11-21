@@ -100,16 +100,16 @@ status, or with --owner every task. Done and dropped tasks are counted;
 --closed lists them too. A task host the owner named passes --host to read
 the whole list from its shell, as its list_tasks tool does.
 
-add, show, comment and drop act as this machine's agent, or with --owner as
+add, show, comment, due and drop act as this machine's agent, or with --owner as
 the owner. assign, approve, done, reopen and reset are the owner's and need
 an admin device (or the relay host).
 
 host set and host clear, also the owner's, name a teammate a task host: it
 reads every task through its list_tasks and get_task tools and keeps the
-list for you from a conversation with it. On your word a task host marks a
-task done, reopens it or drops it, with its decide_task tool or tincan tasks
-decide. Approving a task and resetting its assign count stay with admin
-devices.`,
+list for you from a conversation with it. On your word a task host
+can mark done, reopen, drop, assign or change a deadline using decide_task
+or tincan tasks decide. Approving a task and resetting its assign count
+stay with admin devices.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, owner, err := side.relay()
@@ -151,7 +151,7 @@ devices.`,
 		taskDecideCmd(client.TaskApprove, "Approve a proposed task, so it can be assigned"),
 		taskDecideCmd(client.TaskReopen, "Put a done or dropped task back to open, or to proposed if it was never approved"),
 		taskDecideCmd(client.TaskReset, "Set a task's count of agent assigns back to zero"),
-		taskHostCmd(), taskHostDecideCmd(), taskNoticesToldCmd())
+		taskHostCmd(), taskHostDecideCmd(), taskNoticesToldCmd(), taskBriefingCmd())
 	return cmd
 }
 
@@ -507,12 +507,12 @@ func taskDropCmd() *cobra.Command {
 // owner's word, for a host whose app reaches tincan only through its shell.
 // It is the decide_task tool's call.
 func taskHostDecideCmd() *cobra.Command {
-	var relayURL, words string
+	var relayURL, words, to string
 	cmd := &cobra.Command{
-		Use:   "decide <id> <done|reopen|drop|due> [when]",
+		Use:   "decide <id> <done|reopen|drop|assign|due> [when]",
 		Short: "Make a task decision on the owner's word as a named host",
-		Long: `As a task host the owner named, mark a task done, reopen it, drop it, or
-change its due date because the owner asked you to in a message they wrote or spoke to you.
+		Long: `As a task host the owner named, mark a task done, reopen it, drop it,
+assign it or change its due date because the owner asked you to in a message they wrote or spoke to you.
 --words is required: the owner's own words, which the task's history keeps
 under this agent's name, marked as done for the owner.
 
@@ -527,6 +527,7 @@ A reopen undoes a host's done or drop: the task goes back to the status the
 host found it in.
 
   tincan tasks decide 12 done --words "12 is done, thanks"
+  tincan tasks decide 12 assign --to muse --words "give 12 to muse"
   tincan tasks decide 12 due Friday 3pm --words "make 12 due Friday at 3pm"`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) >= 2 && args[1] == client.TaskDue {
@@ -548,9 +549,15 @@ host found it in.
 			}
 			defer printHeld(cmd, r)
 			var task envelope.Task
-			if args[1] == client.TaskDue {
+			switch args[1] {
+			case client.TaskDue:
 				task, err = client.HostSetTaskDue(cmd.Context(), r, id, strings.Join(args[2:], " "), words)
-			} else {
+			case client.TaskAssign:
+				if to == "" {
+					return errors.New("assign needs --to, the teammate to give the task to")
+				}
+				task, err = client.HostAssignTask(cmd.Context(), r, id, to, words)
+			default:
 				task, err = client.HostDecideTask(cmd.Context(), r, id, args[1], words)
 			}
 			if err != nil {
@@ -560,6 +567,7 @@ host found it in.
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&to, "to", "", "teammate for an assign decision")
 	cmd.Flags().StringVar(&words, "words", "", "the owner's own words that asked for this (required)")
 	cmd.Flags().StringVar(&relayURL, "relay", "", "relay URL (default: saved config)")
 	return cmd
@@ -631,5 +639,37 @@ func taskDueCmd() *cobra.Command {
 	}
 	side.flags(cmd, "change the due date as the owner")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+func taskBriefingCmd() *cobra.Command {
+	var socket, relayURL string
+	var now bool
+	cmd := &cobra.Command{
+		Use:   "briefing --now",
+		Short: "Send a task briefing to the owner's task hosts now",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !now {
+				return errors.New("pass --now to queue a task briefing")
+			}
+			r, err := adminRelay(socket, relayURL)
+			if err != nil {
+				return err
+			}
+			queued, err := client.TaskBriefingNow(cmd.Context(), r)
+			if err != nil {
+				return err
+			}
+			if queued {
+				cmd.Println("Queued a task briefing.")
+			} else {
+				cmd.Println("No briefing queued. A briefing needs task news and an eligible task host.")
+			}
+			return nil
+		},
+	}
+	adminFlags(cmd, &relayURL, &socket)
+	cmd.Flags().BoolVar(&now, "now", false, "send without changing the daily briefing schedule")
 	return cmd
 }
