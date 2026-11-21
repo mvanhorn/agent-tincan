@@ -588,6 +588,7 @@ func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 // request emails (SetEmailInboxes), polls their inboxes for replies at
 // start and every EmailPollEvery, until ctx ends.
 func (s *Server) Run(ctx context.Context) {
+	s.warnTaskFallback(ctx)
 	t := time.NewTicker(s.cfg.SweepEvery)
 	defer t.Stop()
 	at := time.NewTicker(s.cfg.Attachments.SweepEvery)
@@ -1997,6 +1998,15 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		out[i].Self = out[i].Name == self
 	}
 	res := map[string]any{"agents": out}
+	if admin {
+		fallback := client.TaskFallbackStatus{Hosts: []string{}, NotifySet: s.notifyDestination() != ""}
+		for _, agent := range out {
+			if agent.TaskHost {
+				fallback.Hosts = append(fallback.Hosts, agent.Name)
+			}
+		}
+		res["task_fallback"] = fallback
+	}
 	if s.cfg.Version != "" {
 		res["relay_version"] = s.cfg.Version
 	}

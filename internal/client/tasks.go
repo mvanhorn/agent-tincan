@@ -492,7 +492,7 @@ func FormatHostTasks(list []envelope.Task, counts TaskCounts, view TaskHostView)
 	head := ""
 	switch {
 	case view.Served:
-		head = "You are the owner's task host: this is every task on the list, with what waits on the owner first.\n"
+		head = "You are the owner's task host: this is every task on the list, with overdue and due-today tasks first, then work waiting on the owner.\n"
 	case view.Refused != "":
 		head = "This is your ordinary view, not the task host view: " + ScheduleText(view.Refused) + ".\n"
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -424,5 +425,37 @@ func TestReadNativeHostsDropsDeadHosts(t *testing.T) {
 	}
 	if c := nativeHostsCheck(hosts); c.Status != "ok" {
 		t.Fatalf("dead waiting host still warned: %+v", c)
+	}
+}
+
+func TestDoctorWarnsWhenTaskHostsLackFallback(t *testing.T) {
+	var status atomic.Pointer[client.TaskFallbackStatus]
+	status.Store(&client.TaskFallbackStatus{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agents" {
+			t.Errorf("unexpected route %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(client.Roster{TaskFallback: status.Load()})
+	}))
+	defer srv.Close()
+	r, err := client.NewRelay(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := taskFallbackCheck(t.Context(), r); got != nil {
+		t.Fatalf("warning without any task hosts = %+v", got)
+	}
+	status.Store(&client.TaskFallbackStatus{Hosts: []string{"grokbot"}})
+	got := taskFallbackCheck(t.Context(), r)
+	if got == nil || got.Status != "warn" || !strings.Contains(got.Detail, "grokbot") ||
+		!strings.Contains(got.Fix, "notify") || !strings.Contains(got.Fix, "approval.json") {
+		t.Fatalf("missing destination check = %+v", got)
+	}
+	status.Store(&client.TaskFallbackStatus{Hosts: []string{"grokbot"}, NotifySet: true})
+	if got := taskFallbackCheck(t.Context(), r); got != nil {
+		t.Fatalf("warning with fallback configured = %+v", got)
 	}
 }
