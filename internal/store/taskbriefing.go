@@ -63,6 +63,9 @@ func (s *Store) QueueTaskBriefing(ctx context.Context, scheduledDay, today strin
 		if err != nil {
 			return false, err
 		}
+		if err := cancelOlderBriefings(ctx, tx, now); err != nil {
+			return false, err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_notices (kind, status, actor, created_at, briefing) VALUES (?, '', ?, ?, ?)`,
 			envelope.TaskNoticeBriefing, TaskRelay, now.UnixMilli(), string(payload)); err != nil {
 			return false, err
@@ -76,6 +79,28 @@ func (s *Store) QueueTaskBriefing(ctx context.Context, scheduledDay, today strin
 		}
 	}
 	return queued, tx.Commit()
+}
+
+// cancelOlderBriefings removes staged briefings and closes attempts that
+// still await receipts. A concurrent drain or retry must see either the
+// old briefing or its replacement in the same transaction.
+func cancelOlderBriefings(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	kind := envelope.TaskNoticeBriefing
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notice_told WHERE notice_id IN (
+		SELECT id FROM task_notices WHERE kind = ?)`, kind); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notices WHERE kind = ?`, kind); err != nil {
+		return err
+	}
+	const pending = `SELECT r.id FROM requests r JOIN task_notice_delivery d ON d.request_id = r.id
+		WHERE r.notice_kind = ? AND d.outcome = ''`
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'cancelled', lease_until = 0, updated_at = ?
+		WHERE id IN (`+pending+`) AND status IN ('queued', 'delivered', 'claimed')`, now.UnixMilli(), kind); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE task_notice_delivery SET outcome = 'cancelled' WHERE request_id IN (`+pending+`)`, kind)
+	return err
 }
 
 // One snapshot is shared by all hosts, so it uses the withheld view even
@@ -162,9 +187,9 @@ func missedBriefingNotices(ctx context.Context, tx *sql.Tx, since int64) ([]Brie
 	rows, err := tx.QueryContext(ctx, `SELECT CAST(r.notice_for AS INTEGER), r.notice_kind, d.reported_status
 		FROM task_notice_delivery d JOIN requests r ON r.id = d.request_id
 		JOIN agents h ON h.name = r.to_agent AND h.task_host = 1
-		LEFT JOIN tasks t ON t.id = CAST(r.notice_for AS INTEGER)
+		JOIN tasks t ON t.id = CAST(r.notice_for AS INTEGER)
 		WHERE d.outcome IN ('', 'exhausted') AND r.created_at >= ?
-		AND (r.notice_kind = ? OR t.`+taskOpenStatuses+`)
+		AND r.notice_kind IN (?, ?) AND t.`+taskOpenStatuses+`
 		AND NOT EXISTS (
 			SELECT 1 FROM task_notice_delivery ack
 			WHERE ack.outcome = 'told' AND ack.notice_id = d.notice_id
@@ -176,7 +201,7 @@ func missedBriefingNotices(ctx context.Context, tx *sql.Tx, since int64) ([]Brie
 			AND ack.reported_status = d.reported_status AND receipt.body = r.body
 		))
 		GROUP BY r.notice_for, r.notice_kind, d.reported_status
-		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since, envelope.TaskNoticeBriefing, since)
+		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since, NoteTask, envelope.TaskNoticeReminder, since)
 	if err != nil {
 		return nil, err
 	}

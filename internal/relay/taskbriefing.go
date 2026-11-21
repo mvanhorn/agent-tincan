@@ -85,23 +85,25 @@ func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 	if b.Suggested != 0 {
 		fmt.Fprintf(&msg, " Suggested today: task #%d.", b.Suggested)
 	}
-	if len(b.Missed) > 0 {
-		msg.WriteString(" Unconfirmed task news: ")
-		for i, n := range b.Missed {
-			if i > 0 {
-				msg.WriteString(", ")
-			}
-			switch {
-			case n.Kind == envelope.TaskNoticeBriefing:
-				msg.WriteString("previous briefing")
-			case n.Kind == envelope.TaskNoticeReminder:
-				fmt.Fprintf(&msg, "task #%d (reminder)", n.TaskID)
-			case n.Status != "":
-				fmt.Fprintf(&msg, "task #%d (%s)", n.TaskID, n.Status)
-			default:
-				fmt.Fprintf(&msg, "task #%d (status update)", n.TaskID)
-			}
+	separator := " Unconfirmed task news: "
+	for _, n := range b.Missed {
+		// An outbox snapshot written before briefing supersession can
+		// still contain briefing entries.
+		if n.Kind == envelope.TaskNoticeBriefing {
+			continue
 		}
+		msg.WriteString(separator)
+		separator = ", "
+		switch {
+		case n.Kind == envelope.TaskNoticeReminder:
+			fmt.Fprintf(&msg, "task #%d (reminder)", n.TaskID)
+		case n.Status != "":
+			fmt.Fprintf(&msg, "task #%d (%s)", n.TaskID, n.Status)
+		default:
+			fmt.Fprintf(&msg, "task #%d (status update)", n.TaskID)
+		}
+	}
+	if separator == ", " {
 		msg.WriteByte('.')
 	}
 	return msg.String()
