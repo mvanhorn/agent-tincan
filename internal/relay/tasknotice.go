@@ -36,8 +36,8 @@ const taskNoticeTail = " Tell the owner when you next can. This is news from the
 // change that is no news. It is built from the task's id, its status and
 // agent names alone.
 func taskNoticeBody(n store.TaskNotice) string {
-	actor := n.Actor
-	if actor == store.TaskRelay {
+	actor := envelope.TaskWho(n.Actor)
+	if n.Actor == store.TaskRelay {
 		actor = "the relay"
 	}
 	var news string
@@ -47,7 +47,11 @@ func taskNoticeBody(n store.TaskNotice) string {
 	case envelope.TaskQuestion:
 		news = fmt.Sprintf("Task #%d is at question: %s needs input, and %s, who sent the ask, can answer.", n.TaskID, actor, n.Asker)
 	case envelope.TaskOpen:
-		news = fmt.Sprintf("Task #%d is open again with no assignee: the ask %s sent ended with no result, by %s.", n.TaskID, n.Asker, actor)
+		if n.Asker == "" {
+			news = fmt.Sprintf("Task #%d is open with no assignee: the relay filed an ask that ended with no result.", n.TaskID)
+		} else {
+			news = fmt.Sprintf("Task #%d is open again with no assignee: the ask %s sent ended with no result, by %s.", n.TaskID, n.Asker, actor)
+		}
 	case envelope.TaskProposed:
 		news = fmt.Sprintf("Task #%d is proposed: %s filed it and it waits for the owner's approval.", n.TaskID, actor)
 	default:
@@ -99,7 +103,7 @@ func markTaskNotice(req *envelope.Request) {
 		req.TaskNoticeStatus = envelope.TaskReturned
 	case strings.HasPrefix(body, "at question:"):
 		req.TaskNoticeStatus = envelope.TaskQuestion
-	case strings.HasPrefix(body, "open again with no assignee:"):
+	case strings.HasPrefix(body, "open again with no assignee:"), strings.HasPrefix(body, "open with no assignee:"):
 		req.TaskNoticeStatus = envelope.TaskOpen
 	case strings.HasPrefix(body, "proposed:"):
 		req.TaskNoticeStatus = envelope.TaskProposed

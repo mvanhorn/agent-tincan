@@ -157,6 +157,8 @@ func (s *Server) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.Kind != envelope.KindAsk:
 		err = errors.New("schedule: only an ask can be scheduled")
+	case req.RecoverySource != "":
+		err = errors.New("schedule: use add_task with a source for outside text")
 	case req.ParentID != "":
 		err = errors.New("schedule: a scheduled ask starts a new chain and takes no parent")
 	case req.Group != "" || len(in.Also) > 0:
@@ -338,7 +340,11 @@ func (s *Server) fireSchedule(ctx context.Context, sch envelope.Schedule) {
 	_, err = s.checkSendTarget(ctx, sch.To)
 	var req envelope.Request
 	if err == nil {
-		req, err = s.submit(ctx, envelope.Request{From: sch.From, To: sch.To, Kind: envelope.KindAsk, Body: sch.Body, Urgent: sch.Urgent, NoParent: true})
+		ask := envelope.Request{From: sch.From, To: sch.To, Kind: envelope.KindAsk, Body: sch.Body, Urgent: sch.Urgent, NoParent: true}
+		if sch.EverySeconds != 0 {
+			ask.RecoveryRepeat = sch.ID
+		}
+		req, err = s.submit(ctx, ask)
 	}
 	if err != nil {
 		s.scheduleBlocked(ctx, sch, err)

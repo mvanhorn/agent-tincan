@@ -164,3 +164,19 @@ func TestEmailReplyInboxes(t *testing.T) {
 		t.Fatal("an agent without include_requests is polled")
 	}
 }
+
+func TestRelayUnansweredQuestionAfterFlag(t *testing.T) {
+	cmd := relayCmd()
+	if d, err := cmd.Flags().GetDuration("unanswered-question-after"); err != nil || d != 4*time.Hour {
+		t.Fatalf("default --unanswered-question-after = %v, %v", d, err)
+	}
+	if got := (relayFlags{unansweredQuestionAfter: 30 * time.Minute}).relayConfig().UnansweredQuestionAfter; got != 30*time.Minute {
+		t.Fatalf("relay config unanswered question threshold = %v", got)
+	}
+	if err := cmd.Flags().Parse([]string{"--unanswered-question-after", "0s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--unanswered-question-after") {
+		t.Fatalf("zero --unanswered-question-after: %v", err)
+	}
+}

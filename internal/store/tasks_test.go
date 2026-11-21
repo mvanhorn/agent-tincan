@@ -54,7 +54,7 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 	ctx := context.Background()
 	req := ask(t, s, "codex", "muse", "hi")
 	// A database from before tasks: drop what this version added.
-	if _, err := s.DB().Exec(`DROP TABLE task_claimants; DROP TABLE task_events; DROP TABLE tasks;
+	if _, err := s.DB().Exec(dropTaskRecoverySchema + `DROP TABLE task_claimants; DROP TABLE task_events; DROP TABLE tasks;
 		DROP INDEX requests_task; ALTER TABLE requests DROP COLUMN task_id; ALTER TABLE requests DROP COLUMN contributors;`); err != nil {
 		t.Fatal(err)
 	}

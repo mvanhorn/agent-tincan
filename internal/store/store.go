@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -291,6 +292,10 @@ func Open(path string) (*Store, error) {
 	if err := s.migrateTaskNotices(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate task notices: %w", err)
+	}
+	if err := s.migrateTaskRecovery(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate task recovery: %w", err)
 	}
 	for {
 		more, err := s.backfillSearchBatch()
@@ -986,11 +991,17 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
+	// Keep task recovery subject to the task filer's broader guest check.
+	// This labels recovery without changing ordinary send or hold behavior.
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors, recovery_source, skip_task_recovery, recovery_repeat)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			CASE WHEN ? AND EXISTS (SELECT 1 FROM requests WHERE to_agent = ? AND `+openGuestAsk+`) THEN 'guest' ELSE ? END,
+			? OR EXISTS (SELECT 1 FROM agents WHERE name IN (?, ?) AND kind IN ('history', 'notes', 'pass', 'council')), ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors,
+		req.Kind == envelope.KindAsk && !req.NoParent, req.From, req.RecoverySource,
+		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1599,7 +1610,7 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 		return nil, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`+cond,
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ?, skip_task_recovery = 1 WHERE id = ? AND status IN (?, ?, ?)`+cond,
 		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusHeld))
 	if err != nil {
 		return nil, err
@@ -1800,7 +1811,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors, recovery_source, skip_task_recovery`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1810,7 +1821,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var created, progressAt int64
 	var note string
 	var roomPost, task sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors, &r.RecoverySource, &r.SkipTaskRecovery); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID, r.TaskID = roomPost.Int64, task.Int64

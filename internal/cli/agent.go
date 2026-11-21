@@ -511,7 +511,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 
 func askCmd() *cobra.Command {
 	var wait time.Duration
-	var parent, project, at, every, thenTo string
+	var parent, project, at, every, thenTo, source string
 	var notify, asJSON, urgent bool
 	var attach []string
 	cmd := &cobra.Command{
@@ -527,6 +527,12 @@ instead, as a new request with every send check applied at that time.
 			if err := envelope.ValidProject(project); err != nil {
 				return err
 			}
+			if !envelope.ValidSource(source) || source != "" && notify {
+				return errors.New("--source takes a short lowercase label on an ask, such as mail or meeting")
+			}
+			if source != "" && (cmd.Flags().Changed("at") || cmd.Flags().Changed("every")) {
+				return errors.New("use tasks add --source for scheduled work from outside the team")
+			}
 			if err := checkThenArgs(thenTo, args, notify, attach); err != nil {
 				return err
 			}
@@ -535,7 +541,7 @@ instead, as a new request with every send check applied at that time.
 				return err
 			}
 			defer printHeld(cmd, r)
-			ctx := client.WithProject(cmd.Context(), project)
+			ctx := client.WithAskSource(client.WithProject(cmd.Context(), project), source)
 			body := strings.Join(args[1:], " ")
 			if thenTo != "" {
 				// The message and the follow-on are one argument each.
@@ -623,6 +629,7 @@ instead, as a new request with every send check applied at that time.
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
 	cmd.Flags().StringVar(&project, "project", "", "the project of the session this is for, usually its repo directory name: that session gets it first, any session after about 10 minutes")
+	cmd.Flags().StringVar(&source, "source", "", "outside source of an ask's text, such as mail or meeting; if auto-filed, it waits for owner approval")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")

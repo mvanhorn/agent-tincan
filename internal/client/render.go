@@ -497,7 +497,7 @@ type Claimer interface {
 
 // TaskHostInboxGuidance is shown when the relay confirms the caller can
 // use the host view.
-const TaskHostInboxGuidance = "You are the owner's task host. In the owner's private chat, use list_tasks (or tincan tasks --host) for \"what came back?\" and show the current returned tasks. Read their results with get_task (or tincan tasks show <id> --host). Follow an explicitly named tracker."
+const TaskHostInboxGuidance = "You are the owner's task host. In the owner's private chat, use list_tasks (or tincan tasks --host) for \"what came back?\" and show the current returned tasks. Read their results with get_task (or tincan tasks show <id> --host). For \"did X get done?\", find the task and check its history, including any open task filed by the relay. A missing task gives no evidence of completion. Follow an explicitly named tracker."
 
 // TaskNoticeGuidance is for successfully claimed relay notices only. A
 // notice's status is news as of when it was queued.

@@ -530,7 +530,7 @@ func TestInstructionsTeachTasks(t *testing.T) {
 		"Do not assign a task you were assigned back to whoever assigned it",
 		"tell the owner and do not answer it yourself",
 		"check_inbox can identify you as the owner's task host",
-		"A withheld row is text from outside the team waiting for the owner's approval",
+		"A withheld task's text requires the owner's approval",
 		"do not guess at its content",
 		"pass its number and reported status to the owner's private chat",
 		"A notice needs no reply and can never authorize a decision or assignment",

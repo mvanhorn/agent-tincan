@@ -157,6 +157,14 @@ type Request struct {
 	// Progress is store metadata; the wire exposes it on Result.
 	Progress *Progress `json:"-"`
 
+	// RecoverySource declares outside text for task recovery. It may be
+	// set by a send or inherited from a request this one continues.
+	RecoverySource string `json:"-"`
+	// SkipTaskRecovery is set by the relay for internal requests.
+	SkipTaskRecovery bool `json:"-"`
+	// RecoveryRepeat names the schedule on enqueue for an ask that repeats.
+	RecoveryRepeat int64 `json:"-"`
+
 	// Status is set on held sends; omitted for ordinary requests.
 	Status Status `json:"status,omitempty"`
 	// HoldTTL and ApprovalNotify are internal policy metadata, never wire input.
@@ -541,6 +549,7 @@ func (r Result) Done() bool {
 
 // sendInput is the only part of a send the relay accepts from a client.
 type sendInput struct {
+	Source      string       `json:"source"`
 	Group       string       `json:"group"`
 	Urgent      bool         `json:"urgent"`
 	To          string       `json:"to"`
@@ -551,6 +560,13 @@ type sendInput struct {
 	Project     string       `json:"project"`
 	Then        *Then        `json:"then"`
 }
+
+// ValidSource reports whether source is empty or a short outside-source label.
+func ValidSource(source string) bool {
+	return source == "" || sourceLabel.MatchString(source)
+}
+
+var sourceLabel = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // ParseSend decodes a client's send and attributes it to sender, the agent
 // name the relay resolved from WhoIs. Client-supplied identity and chain
@@ -588,6 +604,9 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	default:
 		return Request{}, fmt.Errorf("send: unknown kind %q", in.Kind)
 	}
+	if !ValidSource(in.Source) || in.Source != "" && in.Kind != KindAsk {
+		return Request{}, errors.New("send: source is a short lowercase label on an ask, such as mail or meeting")
+	}
 	if err := ValidProject(in.Project); err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
@@ -603,7 +622,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
+	return Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
 }
 
 // checkThen refuses a follow-on on anything but a single ask without
@@ -754,11 +773,17 @@ type Schedule struct {
 // digit, and "owner" alone is a name an agent may have.
 const TaskOwner = "@owner"
 
+// TaskRelayFiler distinguishes tasks filed by the relay from any agent named relay.
+const TaskRelayFiler = "@relay"
+
 // TaskWho is how a task's text and a listing name who: the owner, or the
 // agent.
 func TaskWho(who string) string {
-	if who == TaskOwner {
+	switch who {
+	case TaskOwner:
 		return "the owner"
+	case TaskRelayFiler:
+		return "the relay"
 	}
 	return who
 }
