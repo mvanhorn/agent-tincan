@@ -4,12 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
+
+// MaxTaskNoticeReceipts bounds one batch of private delivery receipts.
+const MaxTaskNoticeReceipts = 100
+
+// TaskNoticesTold records delivery of already posted task notices.
+func TaskNoticesTold(ctx context.Context, c Rawer, ids []string) error {
+	return c.Raw(ctx, http.MethodPost, "/v1/tasks/told", struct {
+		NoticeIDs []string `json:"notice_ids"`
+	}{NoticeIDs: ids}, nil)
+}
 
 // ErrTasksUnsupported identifies a relay that predates the shared task
 // list. Nothing was sent.

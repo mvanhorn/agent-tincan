@@ -65,6 +65,9 @@ type Config struct {
 	// through the approval policy's notify destination; default
 	// DefaultOwnerNoticeAfter.
 	OwnerNoticeAfter int
+	// TaskNoticeAckTimeout is how long a host has after claiming task news
+	// to confirm private delivery. The default is DefaultTaskNoticeAckTimeout.
+	TaskNoticeAckTimeout time.Duration
 	// EmailPollEvery is how often the relay polls an opted-in agent's
 	// AgentMail inbox for replies to its request emails while the agent's
 	// window is open; default DefaultEmailPollEvery.
@@ -127,6 +130,9 @@ func (c *Config) defaults() {
 	}
 	if c.OwnerNoticeAfter == 0 {
 		c.OwnerNoticeAfter = DefaultOwnerNoticeAfter
+	}
+	if c.TaskNoticeAckTimeout <= 0 {
+		c.TaskNoticeAckTimeout = DefaultTaskNoticeAckTimeout
 	}
 	if c.EmailPollEvery == 0 {
 		c.EmailPollEvery = DefaultEmailPollEvery
@@ -461,6 +467,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST /v1/rooms/{room}/posts", s.handleRoomPost)
 	mux.HandleFunc("POST /v1/tasks", s.handleAddTask)
 	mux.HandleFunc("GET /v1/tasks", s.handleTasks)
+	mux.HandleFunc("POST /v1/tasks/told", s.handleTaskNoticesTold)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/assign", s.handleAssignTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/comment", s.handleCommentTask)
@@ -646,6 +653,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
 	s.drainTaskNotices(ctx)
+	s.retryTaskNotices(ctx)
 }
 
 func (s *Server) notifySwept(ctx context.Context, t store.Transition) {
@@ -1574,7 +1582,13 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.notify(requestKey(req.ID))
-	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, "")
+	detail := ""
+	if req.NoticeKind == store.NoteTask {
+		if claimSession, err := s.store.TaskNoticeClaimSession(r.Context(), req.ID); err == nil && claimSession != "" {
+			detail = store.DetailJSON(map[string]any{"session": claimSession})
+		}
+	}
+	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, detail)
 	writeJSON(w, http.StatusOK, req)
 }
 

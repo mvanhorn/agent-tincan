@@ -720,6 +720,15 @@ A delivered task notice in the non-peek `GET /v1/poll` response carries optional
 
 A non-peek poll with `task_host=1` also returns `"task_host": true` when the authenticated agent can use the host view at response time. This can give an empty inbox an HTTP 200 response with an empty `requests` list. The role field is optional and carries no authority. Task reads and actions still apply their own checks. `tincan inbox --json` adds `task_host_guidance` for that caller and `task_notice_guidance` to a marked notice only after a successful claim.
 
+
+#### Task notice delivery receipts
+
+A relay that expects a delivery receipt includes `task_notice_receipt: true` in the task notice metadata. After a successful claim, the CLI adds `owner_message` to the notice and `task_notice_posting` to the JSON document. Text inbox and MCP `check_inbox` show the same lines and notice request IDs. Each line contains only the task number and its reported status. Hosts post the lines verbatim in one private message per run.
+
+After confirmed posting, the recipient calls `POST /v1/tasks/told` with `{"notice_ids":["<notice request id>", ...]}` (1 to 100 IDs), via `tincan tasks told <notice-id>...` or MCP `tell_task_notices`. The relay checks the active host role and looks up each ID among that host's tracked notices. The whole batch is recorded together. It returns 204 on success, including a repeat of a successful receipt, 404 for an unknown or other host's notice, and 409 for a notice that has yet to be claimed or whose attempt was already replaced or exhausted. A receipt changes no task or request state and grants no authority. The relay records `task_notice_told` and includes the first claim's session on new task notice `claimed` audit events when a session was supplied.
+
+The relay waits `--task-notice-ack-timeout` after the claim (default 10m). It then queues the same metadata with a new notice request ID and wakes the host again. An unclaimed notice that expires also advances the attempt. The relay tries up to three times total and keeps attempts and receipts across restarts. On exhaustion or loss of host eligibility it queues a metadata-only alert to the approval policy's `notify` destination, if configured. The relay audits these transitions as `task_notice_retried`, `task_notice_exhausted` and `task_notice_fallback`. A post without a receipt can be repeated. The first upgrade tracks new notices and existing queued or delivered notices. Historical claims are left alone.
+
 #### Host decisions
 
 `POST /v1/tasks/{id}/decide` with `{"decision": "done" | "reopen" | "drop", "owner_words": "..."}` is a task host marking a task done, reopening it or dropping it because the owner asked in the host's own conversation. `owner_words` are the owner's words the host acted on. The relay advertises `"task_host_decisions": true` in `GET /v1/capabilities`, and a client calls the route only on a relay that does; `decide_task` and `tincan tasks decide` against an older relay answer `this relay does not take a task host's decisions; upgrade the relay`. A guest gets 403 from the guest gate, as on every task route.

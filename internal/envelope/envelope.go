@@ -137,6 +137,8 @@ type Request struct {
 	// TaskNoticeStatus is the status the notice reported when queued. It
 	// can differ from the task's current status. Only the relay sets it.
 	TaskNoticeStatus TaskStatus `json:"task_notice_status,omitempty"`
+	// TaskNoticeReceipt says the relay expects a receipt after private delivery.
+	TaskNoticeReceipt bool `json:"task_notice_receipt,omitempty"`
 	// TaskActor is who the task's history names for assigning it, when that
 	// is not From: the owner, whose assign goes out as one of the owner's
 	// agents. Relay-only, and not stored on the request.

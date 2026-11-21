@@ -151,8 +151,23 @@ devices.`,
 		taskDecideCmd(client.TaskApprove, "Approve a proposed task, so it can be assigned"),
 		taskDecideCmd(client.TaskReopen, "Put a done or dropped task back to open, or to proposed if it was never approved"),
 		taskDecideCmd(client.TaskReset, "Set a task's count of agent assigns back to zero"),
-		taskHostCmd(), taskHostDecideCmd())
+		taskHostCmd(), taskHostDecideCmd(), taskNoticesToldCmd())
 	return cmd
+}
+
+func taskNoticesToldCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "told <notice-id> [notice-id...]",
+		Short: "Acknowledge task notices after posting them to the owner's private chat",
+		Args:  cobra.RangeArgs(1, client.MaxTaskNoticeReceipts),
+		RunE: func(cmd *cobra.Command, ids []string) error {
+			r, _, err := relayFor("")
+			if err != nil {
+				return err
+			}
+			return client.TaskNoticesTold(cmd.Context(), r, ids)
+		},
+	}
 }
 
 // taskHostCmd is tincan tasks host: the owner's choice of which teammates
