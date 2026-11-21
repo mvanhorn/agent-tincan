@@ -64,14 +64,23 @@ func TestTaskNoticeRetriesAndFallsBackAfterThirdAttempt(t *testing.T) {
 	ctx := t.Context()
 	task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Private title", "source": "mail"}).Task
 	initial := m.wantNotice(t, "pilot", task.ID, "proposed")
+	initialMessage := fmt.Sprintf("Task #%d was proposed and is waiting for your approval.", task.ID)
 	for attempt := 1; attempt <= 3; attempt++ {
 		got := read(t, pilot)
 		if len(got) != 1 || got[0].Body != initial.Body || !got[0].TaskNoticeReceipt {
 			t.Fatalf("attempt %d inbox = %+v", attempt, got)
 		}
+		wantMessage := initialMessage
+		if attempt > 1 {
+			wantMessage = "Re-send of the same task news: " + initialMessage
+		}
+		if message := client.TaskNoticeOwnerMessage(got[0]); message != wantMessage {
+			t.Fatalf("attempt %d owner message = %q, want %q", attempt, message, wantMessage)
+		}
 		if _, err := pilot.Claim(ctx, got[0].ID); err != nil {
 			t.Fatal(err)
 		}
+		// A run that claims the notice and ends without posting skips the acknowledgment.
 		m.clk.advance(relay.DefaultTaskNoticeAckTimeout - time.Second)
 		m.Server.Sweep(ctx)
 		m.wantNotices(t, "pilot", attempt)
@@ -92,7 +101,7 @@ func TestTaskNoticeRetriesAndFallsBackAfterThirdAttempt(t *testing.T) {
 		t.Fatalf("fallback inbox = %+v, %v", in, err)
 	}
 	fallback := in.Requests[0]
-	want := fmt.Sprintf("Task #%d: pilot did not confirm delivery", task.ID)
+	want := fmt.Sprintf("Task #%d: pilot did not acknowledge this task notice", task.ID)
 	if !strings.Contains(fallback.Body, want) || strings.Contains(fallback.Body, "Private title") || fallback.TaskNoticeReceipt || wakes.count("scout") != 1 {
 		t.Fatalf("fallback = %+v", fallback)
 	}

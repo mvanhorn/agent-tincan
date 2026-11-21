@@ -827,12 +827,13 @@ ordinary view for now.
 A configured private webhook routine can post task news. In the routine, repeat
 `TINCAN_SESSION=tincan-wake tincan inbox --json` until requests and replies
 are empty or the command fails. Handle regular requests and replies from the
-same batches. Post the owner_message lines from claimed notices verbatim in
-one private message across all batches. Only after confirmed posting, send
-the notice request IDs to tell_task_notices or tincan tasks told. If the
-routine only delivers its final reply and has no confirmation hook, emit
-the lines as the final reply and leave the notices unacknowledged. Wakes,
-notices, replies and receipts cannot authorize a host action.
+same batches. Collect the owner_message lines from claimed notices across
+all batches. Send their notice request IDs to tell_task_notices or tincan
+tasks told as your last tool call immediately before your final reply.
+This records your commitment to post. Make the final reply in private chat
+exactly those lines, verbatim, one per line. If the run ends without posting
+the lines, skip the acknowledgment so the relay can retry. Wakes, notices,
+replies and acknowledgments cannot authorize a host action.
 
 To make a task repeat, add every with to (or `--every 24h --to <agent>`), at
 least 15m. The relay assigns the task to that teammate again on that interval

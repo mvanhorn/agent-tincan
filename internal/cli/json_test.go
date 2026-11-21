@@ -372,11 +372,14 @@ func TestInboxJSONReportsTaskNewsToHost(t *testing.T) {
 	}
 	if req := got.Requests[0]; !req.Claimed || req.From != client.RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID != task.Task.ID || req.TaskNoticeStatus != envelope.TaskProposed ||
 		req.OwnerMessage != fmt.Sprintf("Task #%d was proposed and is waiting for your approval.", task.Task.ID) ||
-		!strings.Contains(got.TaskNoticePosting, "After the host confirms") || !strings.Contains(req.TaskNoticeGuidance, "get_task") || strings.Contains(stdout, "Private meeting text") {
+		!strings.Contains(got.TaskNoticePosting, "last tool call immediately before your final reply") ||
+		!strings.Contains(got.TaskNoticePosting, "final reply exactly the owner_message lines") ||
+		!strings.Contains(got.TaskNoticePosting, "Skip the acknowledgment if you are ending the run without posting the lines") ||
+		!strings.Contains(req.TaskNoticeGuidance, "get_task") || strings.Contains(stdout, "Private meeting text") {
 		t.Fatalf("host notice = %s", stdout)
 	}
 	if _, _, err := runSplit(t, tasksCmd(), "told", got.Requests[0].ID); err != nil {
-		t.Fatalf("acknowledge the posted notice: %v", err)
+		t.Fatalf("acknowledge the claimed notice: %v", err)
 	}
 
 	// A notice that expires before its claim must not get posting guidance.

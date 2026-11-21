@@ -12,10 +12,10 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-// MaxTaskNoticeReceipts bounds one batch of private delivery receipts.
+// MaxTaskNoticeReceipts bounds one batch of task notice acknowledgments.
 const MaxTaskNoticeReceipts = 100
 
-// TaskNoticesTold records delivery of already posted task notices.
+// TaskNoticesTold records a commitment to post the claimed task notices.
 func TaskNoticesTold(ctx context.Context, c Rawer, ids []string) error {
 	return c.Raw(ctx, http.MethodPost, "/v1/tasks/told", struct {
 		NoticeIDs []string `json:"notice_ids"`

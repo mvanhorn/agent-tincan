@@ -1064,13 +1064,25 @@ func (s *Store) DeliverFor(ctx context.Context, agent string, scope QueueScope, 
 			FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ?`+filter+`
 			ORDER BY urgent DESC, created_at, rowid LIMIT ?
 		) WHERE n = 1 OR running <= ?)
-		RETURNING `+requestCols, args...)
+		RETURNING `+requestCols+`,
+			CASE WHEN notice_kind = 'task' THEN EXISTS (
+				SELECT 1 FROM task_notice_delivery WHERE request_id = requests.id AND attempt > 1
+			) ELSE 0 END`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out, err := scanRequests(rows)
-	if err != nil {
+	var out []envelope.Request
+	for rows.Next() {
+		var resend bool
+		req, _, err := scanRequest(extraCols{rows, []any{&resend}})
+		if err != nil {
+			return nil, err
+		}
+		req.TaskNoticeResend = resend
+		out = append(out, req)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	sortByPriority(out)

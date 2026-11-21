@@ -158,7 +158,7 @@ devices.`,
 func taskNoticesToldCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "told <notice-id> [notice-id...]",
-		Short: "Acknowledge task notices after posting them to the owner's private chat",
+		Short: "Acknowledge task notices immediately before posting the final private reply",
 		Args:  cobra.RangeArgs(1, client.MaxTaskNoticeReceipts),
 		RunE: func(cmd *cobra.Command, ids []string) error {
 			r, _, err := relayFor("")

@@ -13,8 +13,8 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/store"
 )
 
-// DefaultTaskNoticeAckTimeout is the time a host has to post a claimed
-// notice and acknowledge delivery before the relay tries again.
+// DefaultTaskNoticeAckTimeout is the time a host has to acknowledge a
+// claimed notice before the relay tries again.
 const DefaultTaskNoticeAckTimeout = 10 * time.Minute
 
 const taskNoticeAttempts = 3
@@ -101,7 +101,7 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		next.To = s.notifyDestination()
 		old.From, old.Kind, old.NoticeKind = client.RelaySender, envelope.KindNotify, store.NoteTask
 		markTaskNotice(&old)
-		next.Body = fmt.Sprintf("Task #%d: %s did not confirm delivery of this task notice after %d attempts. %s",
+		next.Body = fmt.Sprintf("Task #%d: %s did not acknowledge this task notice after %d attempts. %s",
 			taskID, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
 	}
 	var ttl time.Duration

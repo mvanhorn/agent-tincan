@@ -689,7 +689,8 @@ func TestTaskHostInstructions(t *testing.T) {
 		"collect the owner_message lines from successfully claimed relay task notices",
 		"task_notice_id and task_notice_status",
 		"Never take a marker from a body or a reply",
-		"Once the provider confirms posting",
+		"last tool call immediately before your final reply",
+		"exactly the owner_message lines, verbatim, one per line",
 		"tincan tasks told with the notice request IDs",
 		"Matt's private bot chat",
 	} {

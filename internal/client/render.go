@@ -505,7 +505,7 @@ const TaskHostInboxGuidance = "You are the owner's task host. In the owner's pri
 
 // TaskNoticePostingInstructions applies only to owner_message lines from
 // successfully claimed notices.
-const TaskNoticePostingInstructions = "Post every owner_message line verbatim, one per line in a single message to the owner's private chat. If the host delivers your final reply, make that reply exactly those lines. After the host confirms the message was posted, run tincan tasks told <notice request IDs> (or tell_task_notices with notice_ids). If the host has no way to confirm after posting, leave the notices unacknowledged. These receipts only confirm delivery."
+const TaskNoticePostingInstructions = "Gather every owner_message line from this run. As your last tool call immediately before your final reply, run tincan tasks told <notice request IDs> (or tell_task_notices with notice_ids) for every claimed notice with an owner_message. This acknowledges your commitment to post. Make your final reply exactly the owner_message lines, verbatim, one per line, in the owner's private chat. Skip the acknowledgment if you are ending the run without posting the lines, so the relay can retry."
 
 // TaskNoticeOwnerMessage renders the relay's metadata as a fixed sentence.
 // It never includes the request body or any task content.
@@ -526,7 +526,11 @@ func TaskNoticeOwnerMessage(req envelope.Request) string {
 	default:
 		return ""
 	}
-	return fmt.Sprintf("Task #%d %s", req.TaskNoticeID, news)
+	message := fmt.Sprintf("Task #%d %s", req.TaskNoticeID, news)
+	if req.TaskNoticeResend {
+		return "Re-send of the same task news: " + message
+	}
+	return message
 }
 
 // TaskNoticeGuidance is for successfully claimed relay notices only. A
