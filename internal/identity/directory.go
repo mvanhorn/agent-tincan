@@ -35,6 +35,10 @@ var (
 	ErrNotAdmin     = errors.New("admin commands must come from an admin device")
 	ErrBadInvite    = errors.New("invite code is invalid, used, or expired")
 	ErrUnknownAgent = errors.New("no such agent")
+	// ErrLookupFailed marks a caller check that failed because the store
+	// could not read the node's agents. The relay could not serve the call;
+	// it says nothing about the caller.
+	ErrLookupFailed = errors.New("could not read the caller's agents")
 	// ErrAgentAmbiguous means several agents share the calling machine and the
 	// request did not say which one it comes from.
 	ErrAgentAmbiguous = errors.New("several agents share this machine; the client must name one (point TINCAN_CONFIG at that agent's config)")
@@ -313,7 +317,7 @@ func (d *Directory) Caller(ctx context.Context, remoteAddr string) (Caller, erro
 	}
 	agents, err := d.store.AgentsByNode(ctx, n.ID)
 	if err != nil {
-		return Caller{}, err
+		return Caller{}, fmt.Errorf("%w: %w", ErrLookupFailed, err)
 	}
 	return Caller{Node: n, Agents: agents}, nil
 }

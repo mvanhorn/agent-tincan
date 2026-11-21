@@ -52,6 +52,9 @@ type Config struct {
 	// Version is this relay's tincan build, reported to agents in the
 	// roster and whoami so a client behind it stands out; "" hides it.
 	Version string
+	// StallAfter is how long the sweep loop may go without completing a
+	// pass before /metrics reports the relay stalled; default 6*SweepEvery.
+	StallAfter time.Duration
 	// WakeGrace is how long a relay-woken agent may go without polling
 	// after a wake before it shows as unanswered and the waker sends the
 	// same webhook or email again; default DefaultWakeGrace.
@@ -121,6 +124,9 @@ func (c *Config) defaults() {
 	}
 	if c.SweepEvery == 0 {
 		c.SweepEvery = 5 * time.Second
+	}
+	if c.StallAfter == 0 {
+		c.StallAfter = 6 * c.SweepEvery
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -310,6 +316,9 @@ type Server struct {
 	// stopping is closed by Stop, when the relay begins to shut down.
 	stopping chan struct{}
 	stopOnce sync.Once
+
+	// health is what /metrics reports about the sweep loop (see health.go).
+	health health
 }
 
 // persistEvery bounds how often an agent's activity is written to the store.
@@ -492,6 +501,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /v1/dist", s.handleDistManifest)
 	mux.HandleFunc("GET /v1/dist/{name}", s.handleDistFile)
 	mux.HandleFunc("POST "+uploadPath, s.handleUpload)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.adminRoutes(mux)
 	return mux
 }
@@ -528,6 +538,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/schedules", s.handleSchedules)
 	mux.HandleFunc("DELETE /v1/schedules/{id}", s.handleCancelSchedule)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET "+phone.Prefix, s.handlePhone)
 	mux.HandleFunc("GET /v1/admin/push/key", s.handlePushKey)
 	mux.HandleFunc("PUT /v1/admin/push/subscription", s.handlePushSubscribe)
@@ -555,6 +566,7 @@ func (s *Server) adminRoutes(mux interface {
 func (s *Server) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/agents", s.handleAgents)
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("PUT /v1/agents/self/web-status", s.handleWebStatus)
 	mux.HandleFunc("PUT /v1/agents/self/working-on", s.handleWorkingOn)
 	mux.HandleFunc("DELETE /v1/agents/self/working-on", s.handleWorkingOn)
@@ -637,8 +649,12 @@ func (s *Server) Sweep(ctx context.Context) {
 	trs, err := s.store.Sweep(ctx)
 	if err != nil {
 		log.Printf("sweep: %v", err)
+		s.health.sweepErrors.Add(1)
 		return
 	}
+	// A pass counts as completed for /metrics only once every step below
+	// has returned, so one stuck in any of them shows as a stall.
+	defer s.swept()
 	for _, t := range trs {
 		s.notifySwept(ctx, t)
 		if t.Status == envelope.StatusQueued {

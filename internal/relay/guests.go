@@ -201,11 +201,19 @@ var (
 // a guest's. Its read of the caller is the only one the call gets, so the
 // handler judges the same caller it did (see resolve). A caller the gate
 // cannot place is refused, since it may be a guest; only routes that say
-// nothing about any caller stay open to it.
+// nothing about any caller stay open to it. A store that cannot read the
+// caller's agents is the relay's failure, not the caller's, so it answers
+// 500 rather than 403.
 func (s *Server) guestGate(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := mux.Handler(r)
-		c, err := s.dir.Caller(r.Context(), r.RemoteAddr)
+		lookup := r.Context()
+		if healthRoutes[pattern] {
+			var cancel context.CancelFunc
+			lookup, cancel = context.WithTimeout(lookup, healthLookup)
+			defer cancel()
+		}
+		c, err := s.dir.Caller(lookup, r.RemoteAddr)
 		var g identity.Agent
 		guest := false
 		if err == nil {
@@ -213,6 +221,9 @@ func (s *Server) guestGate(mux *http.ServeMux) http.Handler {
 		}
 		switch {
 		case err != nil && !guest && callerFreeRoutes[pattern]:
+		case errors.Is(err, identity.ErrLookupFailed):
+			writeErr(w, http.StatusInternalServerError, err)
+			return
 		case err != nil:
 			writeErr(w, http.StatusForbidden, err)
 			return
@@ -247,7 +258,20 @@ func (s *Server) guestTermOver(w http.ResponseWriter, r *http.Request) bool {
 
 // callerFreeRoutes answer the same to anyone, so a caller WhoIs cannot place
 // may still use them.
-var callerFreeRoutes = map[string]bool{"GET /v1/hello": true, "GET /v1/dist": true, "GET /v1/dist/{name}": true}
+var callerFreeRoutes = map[string]bool{"GET /v1/hello": true, "GET /v1/dist": true, "GET /v1/dist/{name}": true, "GET /healthz": true}
+
+// healthRoutes report on the relay itself, so they must answer promptly when
+// its store does not: the gate bounds its caller lookup for them by
+// healthLookup instead of waiting on a wedged store. When that lookup fails,
+// /healthz is still served (it is in callerFreeRoutes) and /metrics answers
+// 500 like any other route; the local admin socket, which needs no lookup,
+// still serves /metrics.
+var healthRoutes = map[string]bool{"GET /healthz": true, "GET /metrics": true}
+
+// healthLookup bounds the store read behind the gate's caller lookup, and
+// /metrics' admin check, on the health routes. A healthy store answers that
+// indexed read in well under a millisecond.
+const healthLookup = time.Second
 
 // guestSendFields are the only send fields a guest may set. kind is checked
 // by value in guestSendRefusal.
