@@ -328,6 +328,7 @@ func taskNonceID(id int64) string { return "task:" + strconv.FormatInt(id, 10) }
 // the task repeat: the relay assigns it to Assignee again that often, on a
 // schedule with the bounds of a scheduled ask's every_seconds.
 type taskAdd struct {
+	envelope.TaskDue
 	Title        string `json:"title"`
 	Detail       string `json:"detail"`
 	Assignee     string `json:"assignee"`
@@ -360,7 +361,10 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 	case in.EverySeconds != 0 && (in.Assignee == "" || in.Assignee == envelope.TaskOwner):
 		err = errors.New("task: a repeating task needs a teammate to go to; name one as its assignee")
 	default:
-		err = checkScheduleEvery(in.EverySeconds)
+		err = in.Validate(s.cfg.TaskZone)
+		if err == nil {
+			err = checkScheduleEvery(in.EverySeconds)
+		}
 	}
 	if err != nil {
 		return &StatusError{Code: http.StatusBadRequest, Err: err}
@@ -389,7 +393,7 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 // checkScheduleCaller for from. chain is what claimChain gives for the
 // filer, nil for none, which the task keeps (envelope.Task).
 func (s *Server) addTask(ctx context.Context, in taskAdd, filer, from string, chain []string, proposed bool, assign func(id int64) error) (taskReply, error) {
-	task := envelope.Task{Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source, Chain: chain, NamedFor: in.Assignee}
+	task := envelope.Task{TaskDue: in.TaskDue, Title: in.Title, Detail: in.Detail, Filer: filer, Key: in.Key, Source: in.Source, Chain: chain, NamedFor: in.Assignee}
 	switch {
 	case proposed:
 		task.Status, task.SuggestedAssignee = envelope.TaskProposed, in.Assignee
@@ -905,25 +909,14 @@ var hostDecisions = map[string]string{
 	decisionDone:   "task_done",
 	decisionReopen: "task_reopened",
 	decisionDrop:   "task_dropped",
+	client.TaskDue: "task_due",
 }
 
-// handleHostDecideTask is a task host marking a task done, reopening it or
-// dropping it on the owner's word: {"decision": "done"|"reopen"|"drop",
-// "owner_words": "..."}. The relay cannot check that the owner asked, so it
-// refuses a decision wherever the host could be acting on someone else's
-// text, records the words the host says it acted on, and keeps every
-// decision reversible. In order it refuses: an agent the owner never named
-// a host (with the command that names one); a host that is suspended (with
-// the reason); a host a guest's ask is open with, or that holds one or more
-// claimed requests in any of its sessions; a decision other than the three,
-// approve and reset among them; missing owner's words; a task the host
-// cannot read whole, unless it filed it, as not found; and a repeating
-// task. Then it takes a slot of the host's send rate and runs the decision
-// as the owner's route would, under the host's name: done and reopen call
-// the same store actions, and drop moves only a task with no open ask, so
-// a teammate's live ask is never cancelled. Wherever the owner's own action
-// would be refused, so is the host's. The answer is the task as the host
-// view shows it.
+// handleHostDecideTask applies a named host's decision on the owner's
+// direct words. The relay refuses hosts with guest work or live claims,
+// checks the host's view of the task, and records the words in its history.
+// Closing or reopening a repeating task and cancelling a live assignment
+// stay with an admin device.
 func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	from := s.agent(w, r)
 	if from == "" {
@@ -936,6 +929,7 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Decision   string `json:"decision"`
 		OwnerWords string `json:"owner_words"`
+		envelope.TaskDue
 	}
 	if !readTaskBody(w, r, &in, false) {
 		return
@@ -972,7 +966,7 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	}
 	event, known := hostDecisions[in.Decision]
 	if !known {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen or drop; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen, drop or due; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
 		return
 	}
 	if strings.TrimSpace(in.OwnerWords) == "" {
@@ -989,7 +983,7 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 		writeTaskErr(w, err)
 		return
 	}
-	if task.RepeatSchedule != 0 {
+	if in.Decision != client.TaskDue && task.RepeatSchedule != 0 {
 		writeErr(w, http.StatusConflict, errTaskDecideRepeat)
 		return
 	}
@@ -1000,6 +994,12 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch in.Decision {
+	case client.TaskDue:
+		if err := in.Validate(s.cfg.TaskZone); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		_, err = s.store.SetTaskDue(ctx, id, in.TaskDue, from, in.OwnerWords, true)
 	case decisionDone:
 		_, err = s.store.MarkTaskDoneForOwner(ctx, id, from, in.OwnerWords)
 		if errors.Is(err, store.ErrTaskAskOpen) {
@@ -1021,8 +1021,10 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 		writeTaskErr(w, err)
 		return
 	}
-	// The task left the status the owner page's nonces were issued for.
-	s.nonces.void(taskNonceID(id))
+	// Invalidate owner-page nonces when the decision can change task status.
+	if in.Decision != client.TaskDue {
+		s.nonces.void(taskNonceID(id))
+	}
 	s.recordTask(r, event, from, id, map[string]any{"for_owner": true, "bytes": len(in.OwnerWords)})
 	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
 }

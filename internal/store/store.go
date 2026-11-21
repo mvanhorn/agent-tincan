@@ -1086,21 +1086,22 @@ func (s *Store) DeliverFor(ctx context.Context, agent string, scope QueueScope, 
 			ORDER BY urgent DESC, created_at, rowid LIMIT ?
 		) WHERE n = 1 OR running <= ?)
 		RETURNING `+requestCols+`,
-			CASE WHEN notice_kind = 'task' THEN EXISTS (
-				SELECT 1 FROM task_notice_delivery WHERE request_id = requests.id AND attempt > 1
-			) ELSE 0 END`, args...)
+			COALESCE((SELECT attempt FROM task_notice_delivery WHERE request_id = requests.id), 0),
+			COALESCE((SELECT reported_status FROM task_notice_delivery WHERE request_id = requests.id), '')`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []envelope.Request
 	for rows.Next() {
-		var resend bool
-		req, _, err := scanRequest(extraCols{rows, []any{&resend}})
+		var attempt int
+		var reportedStatus envelope.TaskStatus
+		req, _, err := scanRequest(extraCols{rows, []any{&attempt, &reportedStatus}})
 		if err != nil {
 			return nil, err
 		}
-		req.TaskNoticeResend = resend
+		req.TaskNoticeResend = attempt > 1
+		req.TaskNoticeStatus = reportedStatus
 		out = append(out, req)
 	}
 	if err := rows.Err(); err != nil {

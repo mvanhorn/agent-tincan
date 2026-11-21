@@ -1326,3 +1326,31 @@ func TestTaskHostDecisionsRecordPriorAndReopenToIt(t *testing.T) {
 		t.Fatalf("done of a missing task: %v", err)
 	}
 }
+
+func TestTaskDueMigrationPreservesExistingTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, _ := open(t, path)
+	task := addTask(t, s, envelope.Task{Title: "Existing task", Filer: "muse"})
+	if _, err := s.DB().Exec(`DROP INDEX tasks_reminder_due`); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"due_day", "due_at", "reminded_at", "reminder_dropped_at"} {
+		if _, err := s.DB().Exec("ALTER TABLE tasks DROP COLUMN " + col); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+
+	s, _ = open(t, path)
+	got, err := s.Task(t.Context(), task.ID, "")
+	if err != nil || got.Title != task.Title || got.DueDay != "" || got.DueAt != nil {
+		t.Fatalf("migrated task = %+v, %v", got, err)
+	}
+	if _, err := s.SetTaskDue(t.Context(), task.ID, envelope.TaskDue{DueDay: "2026-11-27"}, "muse", "", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Task(t.Context(), task.ID, "")
+	if err != nil || got.DueDay != "2026-11-27" || got.DueAt != nil {
+		t.Fatalf("day-only task = %+v, %v", got, err)
+	}
+}

@@ -513,6 +513,17 @@ func TaskNoticeOwnerMessage(req envelope.Request) string {
 	if !req.TaskNoticeReceipt || req.From != RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID <= 0 {
 		return ""
 	}
+	message := taskNoticeMessage(req)
+	if message != "" && req.TaskNoticeResend {
+		return "Re-send of the same task news: " + message
+	}
+	return message
+}
+
+func taskNoticeMessage(req envelope.Request) string {
+	if req.TaskNoticeKind == envelope.TaskNoticeReminder {
+		return envelope.TaskReminderMessage(req.TaskNoticeID)
+	}
 	var news string
 	switch req.TaskNoticeStatus {
 	case envelope.TaskReturned:
@@ -526,17 +537,13 @@ func TaskNoticeOwnerMessage(req envelope.Request) string {
 	default:
 		return ""
 	}
-	message := fmt.Sprintf("Task #%d %s", req.TaskNoticeID, news)
-	if req.TaskNoticeResend {
-		return "Re-send of the same task news: " + message
-	}
-	return message
+	return fmt.Sprintf("Task #%d %s", req.TaskNoticeID, news)
 }
 
 // TaskNoticeGuidance is for successfully claimed relay notices only. A
 // notice's status is news as of when it was queued.
 func (in Inbox) TaskNoticeGuidance(req envelope.Request) string {
-	if !in.TaskHost || req.From != RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID <= 0 || req.TaskNoticeStatus == "" {
+	if !in.TaskHost || req.From != RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID <= 0 || req.TaskNoticeStatus == "" && req.TaskNoticeKind != envelope.TaskNoticeReminder {
 		return ""
 	}
 	if req.TaskNoticeReceipt {

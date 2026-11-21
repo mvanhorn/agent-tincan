@@ -20,6 +20,9 @@ func pendingNotices(t *testing.T, s *Store) []TaskNotice {
 	}
 	for i := range rows {
 		rows[i].ID = 0
+		if rows[i].Kind == NoteTask {
+			rows[i].Kind = ""
+		}
 	}
 	return rows
 }
@@ -372,5 +375,81 @@ func TestTaskNoticesMigrateOnExistingDatabase(t *testing.T) {
 			t.Fatalf("enqueue after opening again = %v, %v, want pilot still settled", queued, err)
 		}
 		s.Close()
+	}
+}
+
+func TestTaskReminderIsStampedOnlyWhenQueued(t *testing.T) {
+	s, clk := open(t, ":memory:")
+	ctx := t.Context()
+	at := clk.now().Unix()
+	due := envelope.TaskDue{DueDay: clk.now().Format(time.DateOnly), DueAt: &at}
+	task := addTask(t, s, envelope.Task{Title: "Due now", Filer: "muse", TaskDue: due})
+	if err := s.QueueTaskReminders(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if rows := pendingNotices(t, s); len(rows) != 0 {
+		t.Fatalf("outbox with no eligible host = %+v", rows)
+	}
+	if err := s.QueueTaskReminders(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.TaskNotices(ctx, 10)
+	if err != nil || len(rows) != 1 || rows[0].Kind != envelope.TaskNoticeReminder {
+		t.Fatalf("staged reminder = %+v, %v", rows, err)
+	}
+	checkStamp := func(want bool) {
+		t.Helper()
+		var got bool
+		if err := s.DB().QueryRow(`SELECT reminded_at IS NOT NULL FROM tasks WHERE id = ?`, task.ID).Scan(&got); err != nil || got != want {
+			t.Fatalf("reminded_at stamped = %v, %v, want %v", got, err, want)
+		}
+	}
+	checkStamp(false)
+	n := rows[0]
+	req, queued, err := s.EnqueueTaskNotice(ctx, n, hostNotice("pilot"), time.Hour)
+	if err != nil || !queued || req.NoticeKind != envelope.TaskNoticeReminder {
+		t.Fatalf("enqueue reminder = %+v, %v, %v", req, queued, err)
+	}
+	checkStamp(true)
+	if err := s.DeleteTaskNotice(ctx, n.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueTaskReminders(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if rows := pendingNotices(t, s); len(rows) != 0 {
+		t.Fatalf("outbox after enqueue = %+v", rows)
+	}
+}
+
+func TestTaskNoticeKindMigrationPreservesPendingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, _ := open(t, path)
+	task := addTask(t, s, envelope.Task{Title: "Pending", Filer: "muse", Status: envelope.TaskProposed})
+	rows, err := s.TaskNotices(t.Context(), 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("outbox = %+v, %v", rows, err)
+	}
+	n := rows[0]
+	if _, _, err := s.EnqueueTaskNotice(t.Context(), n, hostNotice("pilot"), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec(`ALTER TABLE task_notices RENAME TO task_notices_new;
+		CREATE TABLE task_notices (
+			id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
+			status TEXT NOT NULL, actor TEXT NOT NULL, asker TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+		);
+		INSERT INTO task_notices SELECT id, task_id, status, actor, asker, created_at FROM task_notices_new;
+		DROP TABLE task_notices_new;`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, _ = open(t, path)
+	rows, err = s.TaskNotices(t.Context(), 10)
+	if err != nil || len(rows) != 1 || rows[0] != n || rows[0].TaskID != task.ID {
+		t.Fatalf("migrated outbox = %+v, %v", rows, err)
+	}
+	if _, queued, err := s.EnqueueTaskNotice(t.Context(), rows[0], hostNotice("pilot"), time.Hour); err != nil || queued {
+		t.Fatalf("already settled host queued again = %v, %v", queued, err)
 	}
 }

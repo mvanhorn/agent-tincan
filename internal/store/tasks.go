@@ -173,14 +173,36 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 			return err
 		}
 	}
-	return nil
+	for _, col := range []struct{ name, kind string }{
+		{"due_day", "TEXT"}, {"due_at", "INTEGER"}, {"reminded_at", "INTEGER"}, {"reminder_dropped_at", "INTEGER"},
+	} {
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col.name).Scan(&has); err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN ` + col.name + " " + col.kind); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'due_change')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN due_change TEXT`); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS tasks_reminder_due ON tasks(due_at)
+		WHERE reminded_at IS NULL AND reminder_dropped_at IS NULL AND status NOT IN ('done', 'dropped')`)
+	return err
 }
 
 // taskSelect reads tasks with the status of the ask open under each and
 // the schedule each repeats on, neither of which is copied onto the task.
 const taskSelect = `SELECT ` + taskCols + taskFrom
 
-const taskCols = `t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(q.status, ''),
+const taskCols = `t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(t.due_day, ''), t.due_at, COALESCE(q.status, ''),
 		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, '')`
 
 const taskFrom = `
@@ -283,8 +305,8 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	}
 	defer tx.Rollback()
 	now := s.now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`,
-		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at, due_day, due_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?)`,
+		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now, t.DueDay, t.DueAt)
 	if err != nil {
 		return envelope.Task{}, false, err
 	}
@@ -785,6 +807,9 @@ func (s *Store) DropTask(ctx context.Context, id int64, actor, note string) (env
 	if err := endTaskRepeatTx(ctx, tx, id); err != nil {
 		return envelope.Task{}, nil, err
 	}
+	if err := s.closeTaskReminderTx(ctx, tx, id); err != nil {
+		return envelope.Task{}, nil, err
+	}
 	out, err := getTask(ctx, tx, id, "")
 	if err != nil {
 		return envelope.Task{}, nil, err
@@ -1064,6 +1089,9 @@ func (s *Store) setTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 		if err := endTaskRepeatTx(ctx, tx, id); err != nil {
 			return envelope.Task{}, err
 		}
+		if err := s.closeTaskReminderTx(ctx, tx, id); err != nil {
+			return envelope.Task{}, err
+		}
 	}
 	out, err := getTask(ctx, tx, id, "")
 	if err != nil {
@@ -1135,9 +1163,17 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		chain = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '') WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), ev.TaskID)
+	var dueChange sql.NullString
+	if ev.DueChange != nil {
+		b, err := json.Marshal(ev.DueChange)
+		if err != nil {
+			return envelope.TaskEvent{}, err
+		}
+		dueChange = sql.NullString{String: string(b), Valid: true}
+	}
+	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.TaskID)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -1191,24 +1227,29 @@ func scanTaskAnd(sc scanner, more ...any) (envelope.Task, error) {
 	var t envelope.Task
 	var status, ask string
 	var created int64
-	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo}, more...)...); err != nil {
+	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &t.DueDay, &t.DueAt, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo}, more...)...); err != nil {
 		return envelope.Task{}, err
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()
 	return t, nil
 }
 
-const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, '')`
+const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, ''), COALESCE(due_change, '')`
 
 func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
 	var ev envelope.TaskEvent
-	var status, chain, prior string
+	var status, chain, prior, dueChange string
 	var at int64
-	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior); err != nil {
+	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior, &dueChange); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	if chain != "" {
 		if err := json.Unmarshal([]byte(chain), &ev.Chain); err != nil {
+			return envelope.TaskEvent{}, err
+		}
+	}
+	if dueChange != "" {
+		if err := json.Unmarshal([]byte(dueChange), &ev.DueChange); err != nil {
 			return envelope.TaskEvent{}, err
 		}
 	}

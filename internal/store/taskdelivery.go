@@ -11,8 +11,8 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-func trackTaskNotice(ctx context.Context, tx *sql.Tx, id string, attempt int) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO task_notice_delivery (request_id, attempt) VALUES (?, ?)`, id, attempt)
+func trackTaskNotice(ctx context.Context, tx *sql.Tx, req envelope.Request, attempt int) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO task_notice_delivery (request_id, attempt, reported_status) VALUES (?, ?, ?)`, req.ID, attempt, req.TaskNoticeStatus)
 	return err
 }
 
@@ -48,7 +48,7 @@ func (s *Store) TaskNoticesDue(ctx context.Context, after time.Duration, limit i
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `WITH hosts AS (SELECT value FROM json_each(?) WHERE type = 'text')
-		SELECT r.id, r.trace_id, r.to_agent, r.notice_for, r.body, d.attempt,
+		SELECT r.id, r.trace_id, r.to_agent, r.notice_for, r.notice_kind, r.body, d.attempt, d.reported_status,
 			h.value IS NOT NULL AND r.status != 'cancelled'
 		FROM task_notice_delivery d JOIN requests r ON r.id = d.request_id
 		LEFT JOIN hosts h ON h.value = r.to_agent
@@ -62,7 +62,7 @@ func (s *Store) TaskNoticesDue(ctx context.Context, after time.Duration, limit i
 	var due []TaskDelivery
 	for rows.Next() {
 		var d TaskDelivery
-		if err := rows.Scan(&d.Request.ID, &d.Request.TraceID, &d.Request.To, &d.Request.NoticeFor, &d.Request.Body, &d.Attempt, &d.CanRetry); err != nil {
+		if err := rows.Scan(&d.Request.ID, &d.Request.TraceID, &d.Request.To, &d.Request.NoticeFor, &d.Request.NoticeKind, &d.Request.Body, &d.Attempt, &d.Request.TaskNoticeStatus, &d.CanRetry); err != nil {
 			return nil, err
 		}
 		due = append(due, d)
@@ -114,8 +114,38 @@ func (s *Store) AdvanceTaskNotice(ctx context.Context, d TaskDelivery, next enve
 		return envelope.Request{}, false, err
 	}
 	defer tx.Rollback()
+	now := s.now()
 	outcome := "exhausted"
-	retry := next.NoticeKind == NoteTask
+	if d.Request.NoticeKind == envelope.TaskNoticeReminder {
+		var id, dueAt int64
+		var dropped bool
+		// Read the deadline only while this attempt is still actionable.
+		// A due change cancels it in the same transaction as the change.
+		err := tx.QueryRowContext(ctx, `SELECT t.id, t.due_at, t.reminder_dropped_at IS NOT NULL
+			FROM tasks t JOIN requests r ON r.notice_for = CAST(t.id AS TEXT)
+			JOIN task_notice_delivery d ON d.request_id = r.id WHERE r.id = ? AND d.outcome = ''`,
+			d.Request.ID).Scan(&id, &dueAt, &dropped)
+		if errors.Is(err, sql.ErrNoRows) {
+			return envelope.Request{}, false, nil
+		}
+		if err != nil {
+			return envelope.Request{}, false, err
+		}
+		deadline := time.Unix(dueAt, 0).Add(reminderLateness)
+		ttl = min(ttl, deadline.Sub(now))
+		if !now.Before(deadline) {
+			next = envelope.Request{}
+			if !dropped {
+				if _, err := tx.ExecContext(ctx, `UPDATE tasks SET reminder_dropped_at = ? WHERE id = ?`, now.Unix(), id); err != nil {
+					return envelope.Request{}, false, err
+				}
+				if err := noteLateReminder(ctx, tx, id, now); err != nil {
+					return envelope.Request{}, false, err
+				}
+			}
+		}
+	}
+	retry := IsTaskNotice(next.NoticeKind)
 	if retry {
 		outcome = "retried"
 	}
@@ -139,7 +169,7 @@ func (s *Store) AdvanceTaskNotice(ctx context.Context, d TaskDelivery, next enve
 			return envelope.Request{}, false, err
 		}
 		if retry {
-			if err := trackTaskNotice(ctx, tx, next.ID, d.Attempt+1); err != nil {
+			if err := trackTaskNotice(ctx, tx, next, d.Attempt+1); err != nil {
 				return envelope.Request{}, false, err
 			}
 		}

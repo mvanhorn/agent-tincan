@@ -100,7 +100,8 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 			return err
 		}
 		if found && host.TaskHost && s.taskHostRefusal(host) == "" {
-			next.To, next.NoticeKind, next.NoticeFor, next.Body = old.To, store.NoteTask, old.NoticeFor, old.Body
+			next.To, next.NoticeKind, next.NoticeFor, next.Body = old.To, old.NoticeKind, old.NoticeFor, old.Body
+			next.TaskNoticeStatus = old.TaskNoticeStatus
 		} else {
 			reason = "host no longer eligible"
 		}
@@ -109,7 +110,10 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		// The owner already chose where relay alerts go. Send only fixed
 		// task metadata there when this host can no longer deliver it.
 		next.To = s.notifyDestination()
-		old.From, old.Kind, old.NoticeKind = client.RelaySender, envelope.KindNotify, store.NoteTask
+		if old.NoticeKind == envelope.TaskNoticeReminder {
+			next.NoticeKind, next.NoticeFor = store.NoteTaskReminderFallback, old.NoticeFor
+		}
+		old.From, old.Kind = client.RelaySender, envelope.KindNotify
 		markTaskNotice(&old)
 		next.Body = fmt.Sprintf("Task #%d: %s did not acknowledge this task notice by attempt %d. %s",
 			taskID, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
@@ -123,7 +127,7 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		return err
 	}
 	detail := map[string]any{"task": taskID, "host": old.To, "attempt": d.Attempt}
-	if next.NoticeKind == store.NoteTask {
+	if store.IsTaskNotice(next.NoticeKind) {
 		detail["next_request"] = next.ID
 		s.record(ctx, "task_notice_retried", old.ID, old.TraceID, client.RelaySender, store.DetailJSON(detail))
 		s.record(ctx, "task_notified", next.ID, next.TraceID, client.RelaySender,

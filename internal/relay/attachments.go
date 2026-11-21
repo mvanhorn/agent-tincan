@@ -126,6 +126,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.GatewayGuests = true
 	caps.Tasks = true
 	caps.TaskHosts = true
+	caps.TaskZone = s.cfg.TaskZone.String()
 	caps.TaskHostDecisions = true
 	writeJSON(w, http.StatusOK, caps)
 }

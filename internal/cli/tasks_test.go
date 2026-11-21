@@ -496,3 +496,24 @@ func TestTasksHostDecideFromTheShell(t *testing.T) {
 		t.Fatalf("decide approve = %q, %v", out, err)
 	}
 }
+
+func TestTasksDueCommands(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ownerDesk(t, m)
+	tasksRun(t, []string{"add", "Regular task", "--owner"}, "Added task #1")
+	tasksRun(t, []string{"add", "Overdue task", "--owner", "--due", "2000-11-21"}, "Due 2000-11-21.")
+	tasksRun(t, []string{"add", "Today's task", "--owner", "--due", "today"}, "Added task #3")
+	out := tasksRun(t, []string{"--owner"}, "Overdue (1)\n  #2", "Due today (1)\n  #3", "Open (1)\n  #1")
+	if strings.Index(out, "Overdue (1)") > strings.Index(out, "Due today (1)") || strings.Index(out, "Due today (1)") > strings.Index(out, "Open (1)") {
+		t.Fatalf("due task order = %q", out)
+	}
+	out = tasksRun(t, []string{"--owner", "--json"}, "2000-11-21")
+	var list []envelope.Task
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list) != 3 || list[0].ID != 2 || list[1].ID != 3 {
+		t.Fatalf("JSON due order = %s, %v", out, err)
+	}
+	tasksRun(t, []string{"show", "2", "--owner"}, "Overdue: 2000-11-21")
+	tasksRun(t, []string{"due", "2", "2030-11-29", "3pm", "--owner"}, "Task #2 is due 2030-11-29 15:00 PST.")
+	tasksRun(t, []string{"due", "2", "clear", "--owner"}, "Cleared the due date for task #2.")
+	tasksRun(t, []string{"show", "2", "--owner"}, "changed from 2000-11-21 to 2030-11-29 15:00 PST", "changed from 2030-11-29 15:00 PST to no deadline")
+}

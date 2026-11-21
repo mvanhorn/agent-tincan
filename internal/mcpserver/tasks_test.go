@@ -293,7 +293,7 @@ func TestUpdateTaskOverMCP(t *testing.T) {
 		return args
 	}
 
-	if out := call(t, grok, "update_task", with(map[string]any{"action": "finish"})); out != `ERROR: unknown action "finish": use assign, comment or drop` {
+	if out := call(t, grok, "update_task", with(map[string]any{"action": "finish"})); out != `ERROR: unknown action "finish": use assign, comment, drop or due` {
 		t.Fatalf("unknown action = %q", out)
 	}
 	if out := call(t, grok, "update_task", with(map[string]any{"action": "assign"})); !strings.HasPrefix(out, "ERROR:") || !strings.Contains(out, "assign needs to") {
@@ -683,5 +683,22 @@ func TestDocsNameTheTaskTools(t *testing.T) {
 				t.Errorf("%s does not name %s", path, name)
 			}
 		}
+	}
+}
+
+func TestTaskDueTools(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	cs := session(t, m, "grokbot")
+	out := call(t, cs, "add_task", map[string]any{"title": "Call the dentist", "due": "2030-11-29 3pm"})
+	if !strings.Contains(out, "Due 2030-11-29 15:00 PST.") {
+		t.Fatalf("addTask due = %q", out)
+	}
+	out = call(t, cs, "get_task", map[string]any{"task_id": 1})
+	if !strings.Contains(out, "Due: 2030-11-29 15:00 PST") {
+		t.Fatalf("getTask due = %q", out)
+	}
+	out = call(t, cs, "update_task", map[string]any{"task_id": 1, "action": "due", "when": "clear"})
+	if out != "Cleared the due date for task #1." {
+		t.Fatalf("updateTask due = %q", out)
 	}
 }

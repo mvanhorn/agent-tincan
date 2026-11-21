@@ -29,6 +29,7 @@ import (
 	"tailscale.com/tsnet"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/gateway"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/pass"
@@ -57,6 +58,7 @@ type relayFlags struct {
 	urgentLease   time.Duration
 	ownerNotice   int
 	taskNoticeAck time.Duration
+	taskZone      string
 	dist          string
 	upgradeExit   bool
 	releaseURL    string
@@ -169,6 +171,7 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.DurationVar(&f.urgentGrace, "urgent-wake-grace", relay.DefaultUrgentWakeGrace, "--wake-grace while an urgent request to the agent is queued, when shorter: how soon a silent webhook or email agent is woken again and the asker is told")
 	fs.DurationVar(&f.urgentLease, "urgent-claim-lease", relay.DefaultUrgentClaimLease, "how long a claim on an urgent request lasts without a reply or progress note before it is requeued, the target woken again and the asker told (other requests keep 30m)")
 	fs.IntVar(&f.ownerNotice, "owner-notice-after", relay.DefaultOwnerNoticeAfter, "how many wakes in a row a webhook or email agent may leave unanswered before the owner is told, once per silent episode, through the approval policy's notify destination")
+	fs.StringVar(&f.taskZone, "task-zone", envelope.DefaultTaskZone, "IANA time zone for task due dates")
 	fs.DurationVar(&f.taskNoticeAck, "task-notice-ack-timeout", relay.DefaultTaskNoticeAckTimeout, "how long after a task notice is claimed to wait for the host's acknowledgment before retrying")
 	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a plain ask can wait for clarification before the relay files it as a task")
 	fs.DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
@@ -201,6 +204,9 @@ func (f relayFlags) validate() error {
 	if f.ownerNotice < 1 {
 		return fmt.Errorf("--owner-notice-after must be at least 1, got %d", f.ownerNotice)
 	}
+	if _, err := envelope.TaskLocation(f.taskZone); err != nil {
+		return fmt.Errorf("--task-zone: %w", err)
+	}
 	if f.taskNoticeAck <= 0 {
 		return errors.New("--task-notice-ack-timeout must be positive")
 	}
@@ -215,7 +221,8 @@ func (f relayFlags) validate() error {
 
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
-	return relay.Config{Version: Version, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
+	zone, _ := envelope.TaskLocation(f.taskZone)
+	return relay.Config{Version: Version, TaskZone: zone, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
 		TaskNoticeAckTimeout: f.taskNoticeAck, ParsePass: parsePassRef}
 }
 

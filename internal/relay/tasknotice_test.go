@@ -59,7 +59,7 @@ func (m *taskMesh) joinHost(t *testing.T, machine, name string) *client.Relay {
 // notices returns every task notice ever queued for agent, oldest first.
 func (m *taskMesh) notices(t *testing.T, agent string) []sentNotice {
 	t.Helper()
-	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind = 'task' ORDER BY rowid`, agent)
+	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind IN ('task', 'task-reminder') ORDER BY rowid`, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,4 +626,189 @@ func TestTaskNoticeDrainRetryDoesNotTellAHostTwice(t *testing.T) {
 	m.Server.Sweep(t.Context())
 	m.wantNotices(t, told, 1)
 	m.wantNotices(t, failed, 1)
+}
+
+func TestTaskReminderDeliveryAndPrivacy(t *testing.T) {
+	m := newTaskMesh(t)
+	pilot := m.joinHost(t, "instinct", "pilot")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	at := m.clk.now().Add(time.Minute)
+	res, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Private title", Detail: "Private detail", Assignee: "instinct", Due: at.UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.finish(t, m.instinct, res.Task.ID, "Private result", envelope.StatusAnswered)
+	m.wantNotices(t, "pilot", 1) // returned still unread
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+	m.clk.advance(time.Minute)
+	m.Server.Sweep(ctx)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 2)
+	want := fmt.Sprintf("Reminder: task #%d is due now.", res.Task.ID)
+	for attempt := 1; attempt <= 3; attempt++ {
+		var reminder envelope.Request
+		for _, req := range read(t, pilot) {
+			if _, err := pilot.Claim(ctx, req.ID); err != nil {
+				t.Fatal(err)
+			}
+			if req.TaskNoticeKind == envelope.TaskNoticeReminder {
+				reminder = req
+			} else if err := client.TaskNoticesTold(ctx, pilot, []string{req.ID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		message := want
+		if attempt > 1 {
+			message = "Re-send of the same task news: " + want
+		}
+		if reminder.TaskNoticeID != res.Task.ID || client.TaskNoticeOwnerMessage(reminder) != message ||
+			strings.Contains(reminder.Body, "Private") || !strings.Contains(reminder.Body, want) {
+			t.Fatalf("reminder attempt %d = %+v", attempt, reminder)
+		}
+		m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+		m.Server.Sweep(ctx)
+	}
+	m.wantNotices(t, "pilot", 4)
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 1 || !strings.Contains(in.Requests[0].Body, want) || strings.Contains(in.Requests[0].Body, "Private") {
+		t.Fatalf("fallback = %+v, %v", in, err)
+	}
+
+	at = m.clk.now().Add(time.Minute)
+	if _, err := client.SetTaskDue(ctx, m.grok, false, res.Task.ID, at.UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(time.Minute)
+	m.Server.Sweep(ctx)
+	got := read(t, pilot)
+	if len(got) != 1 || client.TaskNoticeOwnerMessage(got[0]) != want {
+		t.Fatalf("moved reminder = %+v", got)
+	}
+	if _, err := pilot.Claim(ctx, got[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.TaskNoticesTold(ctx, pilot, []string{got[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 5)
+}
+
+func TestTaskRemindersSkipLateClosedAndDayOnlyTasks(t *testing.T) {
+	m := newTaskMesh(t)
+	m.joinHost(t, "instinct", "pilot")
+	ctx := t.Context()
+	at := m.clk.now().Add(time.Minute).UTC().Format(time.RFC3339)
+	add := func(title, due string) envelope.Task {
+		t.Helper()
+		res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: title, Due: due})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Task
+	}
+	late := add("Late", at)
+	done := add("Done before deadline", at)
+	dropped := add("Dropped before deadline", at)
+	add("Day only", "2000-11-21")
+	if _, err := client.DecideTask(ctx, m.admin, client.TaskDone, done.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DropTask(ctx, m.admin, true, dropped.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(7 * time.Hour)
+	m.Server.Sweep(ctx)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 0)
+	events := m.events(t, late.ID)
+	if len(events) != 2 || events[1].Kind != envelope.TaskEventReminderDropped || !strings.Contains(events[1].Body, "six hours") {
+		t.Fatalf("late reminder history = %+v", events)
+	}
+}
+
+func TestTaskReminderCancelledWhenTaskClosesAfterQueue(t *testing.T) {
+	m := newTaskMesh(t)
+	pilot := m.joinHost(t, "instinct", "pilot")
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private task", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+	if _, err := client.DecideTask(ctx, m.admin, client.TaskDone, res.Task.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, pilot); len(got) != 0 {
+		t.Fatalf("closed task reminded = %+v", got)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+}
+
+func TestUnreadReminderExpiresInsteadOfSendingLate(t *testing.T) {
+	m := newTaskMesh(t)
+	pilot := m.joinHost(t, "instinct", "pilot")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private task", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+
+	m.clk.advance(7 * time.Hour)
+	if got := read(t, pilot); len(got) != 0 {
+		t.Fatalf("late reminder delivered = %+v", got)
+	}
+	m.Server.Sweep(ctx)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 0 {
+		t.Fatalf("late reminder sent to fallback = %+v, %v", in, err)
+	}
+	events := m.events(t, res.Task.ID)
+	if len(events) != 2 || events[1].Kind != envelope.TaskEventReminderDropped {
+		t.Fatalf("late reminder history = %+v", events)
+	}
+}
+
+func TestTaskReminderFallbackCancelledWhenDueChanges(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private title", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	for range 3 {
+		got := read(t, m.muse)
+		if len(got) != 1 {
+			t.Fatalf("reminder attempt = %+v", got)
+		}
+		if _, err := m.muse.Claim(ctx, got[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+		m.Server.Sweep(ctx)
+	}
+	waiting, err := m.Store.QueuedIDs(ctx, "scout")
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("queued fallback = %v, %v", waiting, err)
+	}
+	if _, err := client.SetTaskDue(ctx, m.admin, true, res.Task.ID, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 0 {
+		t.Fatalf("fallback delivered after due cleared = %+v, %v", in, err)
+	}
 }

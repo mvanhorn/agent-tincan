@@ -134,6 +134,8 @@ type Request struct {
 	// TaskNoticeID identifies the task mentioned by a relay-generated
 	// notification. It is set on poll delivery, independently of TaskID.
 	TaskNoticeID int64 `json:"task_notice_id,omitempty"`
+	// TaskNoticeKind distinguishes notices that need their own owner message.
+	TaskNoticeKind string `json:"task_notice_kind,omitempty"`
 	// TaskNoticeStatus is the status the notice reported when queued. It
 	// can differ from the task's current status. Only the relay sets it.
 	TaskNoticeStatus TaskStatus `json:"task_notice_status,omitempty"`
@@ -824,6 +826,8 @@ const (
 // names its schedule in RepeatSchedule, how often it fires in
 // RepeatEverySeconds, and the teammate each fire assigns it to in RepeatTo.
 type Task struct {
+	TaskDue
+	DueZone           string     `json:"-"` // client-side display zone from relay capabilities
 	ID                int64      `json:"id"`
 	Title             string     `json:"title"`
 	Detail            string     `json:"detail,omitempty"`
@@ -862,11 +866,13 @@ type Task struct {
 
 // What a task history entry records.
 const (
-	TaskEventAdded    = "added"
-	TaskEventAssigned = "assigned"
-	TaskEventStatus   = "status"
-	TaskEventComment  = "comment"
-	TaskEventProgress = "progress"
+	TaskEventAdded           = "added"
+	TaskEventAssigned        = "assigned"
+	TaskEventStatus          = "status"
+	TaskEventComment         = "comment"
+	TaskEventProgress        = "progress"
+	TaskEventDue             = "due"
+	TaskEventReminderDropped = "reminder_dropped"
 	// TaskEventAssignsReset is the owner setting the count of agent assigns
 	// back to zero.
 	TaskEventAssignsReset = "assigns_reset"
@@ -887,14 +893,15 @@ type TaskEvent struct {
 	Kind   string     `json:"kind"`
 	Body   string     `json:"body,omitempty"`
 	Status TaskStatus `json:"status,omitempty"`
-	// ForOwner marks a status entry a task host made on the owner's word:
+	// ForOwner marks an entry a task host made on the owner's word:
 	// Actor is the host, and Body the owner's words it says it acted on.
 	ForOwner bool `json:"for_owner,omitempty"`
 	// Prior is the status the task had before the entry, on a task host's
 	// done or drop and on every reopen; "" on any other entry.
-	Prior TaskStatus `json:"prior,omitempty"`
-	At    time.Time  `json:"at"`
-	Chain []string   `json:"-"`
+	Prior     TaskStatus     `json:"prior,omitempty"`
+	DueChange *TaskDueChange `json:"due_change,omitempty"`
+	At        time.Time      `json:"at"`
+	Chain     []string       `json:"-"`
 }
 
 // MaxRoomPost caps a room post's body in bytes.

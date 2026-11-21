@@ -74,6 +74,8 @@ type Capabilities struct {
 	GatewayGuests bool `json:"gateway_guests,omitempty"`
 	// Tasks is set by a relay that keeps the shared task list (/v1/tasks).
 	Tasks bool `json:"tasks,omitempty"`
+	// TaskZone gives the IANA zone to use when resolving or displaying due dates.
+	TaskZone string `json:"task_zone,omitempty"`
 	// TaskHosts is set by a relay that stores task hosts and shows them on
 	// the roster. Naming one needs no check of this: an older relay has no
 	// such route and answers its plain 404.
