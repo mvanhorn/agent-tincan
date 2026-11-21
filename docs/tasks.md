@@ -16,7 +16,7 @@ A due day alone appears on the list. A timed deadline sends one reminder to name
 
 ## Get a morning briefing
 
-A relay with a named task host sends a briefing at 07:00 in the task time zone by default. It includes up to three tasks due today or overdue, tasks waiting on you, work completed since the last automatic briefing, one suggested task and unconfirmed news from the past day. The relay skips an empty briefing.
+A relay with a named task host sends a briefing at 07:00 in the task time zone by default. It includes up to three tasks due today or overdue, tasks waiting on you, work completed since the last automatic briefing, one suggested task and unconfirmed task updates or reminders from the past day. The relay skips an empty briefing. A newly queued briefing replaces any older briefing still awaiting delivery or acknowledgment.
 
 Set `--task-briefing HH:MM` and `--task-briefing-zone <IANA-zone>` on the relay to change the schedule. Use `--task-briefing off` to turn off the daily briefing. On an admin device, `tincan tasks briefing --now` queues the current briefing without changing that schedule.
 
