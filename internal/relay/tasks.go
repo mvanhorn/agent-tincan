@@ -54,8 +54,9 @@ type taskAssign struct {
 	// assignment keeps the parent and chain rules of an ask From sends.
 	Repeat bool
 	// OwnerHost starts a fresh chain for an action the owner asked the host to take.
-	OwnerHost  bool
-	OwnerWords string
+	OwnerHost     bool
+	OwnerWords    string
+	FilingCharged bool
 }
 
 // actor is who the task's history names for the assignment.
@@ -96,7 +97,8 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	actor := a.actor()
 	body, contributors := taskBody(carried, actor, limit)
 	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
-		TaskID: a.TaskID, TaskActor: actor, TaskOwnerWords: a.OwnerWords, TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat || a.OwnerHost})
+		TaskID: a.TaskID, TaskActor: actor, TaskOwnerWords: a.OwnerWords, TaskFilingCharged: a.FilingCharged,
+		TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat || a.OwnerHost})
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}

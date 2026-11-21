@@ -378,14 +378,19 @@ func (s *Server) handleHostAddTask(w http.ResponseWriter, r *http.Request, in ta
 	}
 	// The filing itself takes a slot even when a follow-up assignment
 	// is refused before the send policy would charge it.
+	var charged bool
 	if rp, ok := s.preparer().(RoomPolicy); ok {
 		if err := rp.Charge(from); err != nil {
 			writeErr(w, statusFor(err), err)
 			return
 		}
+		charged = true
 	}
 	out, err := s.addTask(ctx, in, envelope.TaskOwner, from, nil, false, func(id int64) error {
-		_, err := s.assignTask(ctx, taskAssign{TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner, Session: sess, OwnerHost: true})
+		_, err := s.assignTask(ctx, taskAssign{
+			TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner,
+			Session: sess, OwnerHost: true, FilingCharged: charged,
+		})
 		return err
 	})
 	s.writeAddedTask(w, r, in, from, out, err)

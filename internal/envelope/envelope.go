@@ -150,6 +150,9 @@ type Request struct {
 	// TaskOwnerWords records a task host's direct authorization to assign.
 	// Only the task history stores it. The assignment body never carries it.
 	TaskOwnerWords string `json:"-"`
+	// TaskFilingCharged marks a host's initial assignment whose rate slot
+	// was already taken before the task was filed. It never crosses the wire.
+	TaskFilingCharged bool `json:"-"`
 	// TaskResultEvent is, on a task's ask being sent, the id of the task
 	// history entry that stored the result its body carries, 0 for a task
 	// with none. The store takes the task for the ask only while that is

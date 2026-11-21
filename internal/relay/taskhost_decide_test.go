@@ -468,3 +468,17 @@ func TestTaskHostAddChargesEvenWhenHandoffFails(t *testing.T) {
 		t.Fatalf("owner tasks after refused filing = %+v, %v", tasks, err)
 	}
 }
+
+func TestTaskHostAddAndAssignShareOneRateSlot(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	ctx := t.Context()
+	out, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "File and delegate", Mine: true, Assignee: "instinct"})
+	if err != nil || out.Task.Status != envelope.TaskWorking || out.Task.Assignee != "instinct" || out.AssignError != "" {
+		t.Fatalf("filing and handoff with one available slot = %+v, %v", out, err)
+	}
+	if _, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Another task", Mine: true}); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+}
