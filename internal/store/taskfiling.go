@@ -72,7 +72,14 @@ func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request
 		return err
 	}
 	req.TaskRoomScope = roomPost
-	private := taskServiceKind(fromKind) || taskServiceKind(toKind) || (req.SkipTaskRecovery && roomPost == 0)
+	multipleRooms := roomPost == multipleRoomScope
+	if multipleRooms {
+		roomPost = 0
+	}
+	if req.TaskRoomScope != 0 {
+		req.SkipTaskRecovery = true
+	}
+	private := multipleRooms || taskServiceKind(fromKind) || taskServiceKind(toKind) || (req.SkipTaskRecovery && roomPost == 0)
 	now := s.now().UnixMilli()
 	// A scheduled or follow-on fire is independent of what the nominal
 	// sender is working on when the relay sends it.
@@ -116,31 +123,39 @@ func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request
 	return nil
 }
 
-// askRoomPost keeps task visibility tied to the room even when an ask
-// continues an older request or begins a new trace in another session.
+// multipleRoomScope restricts text to the participants and owner when
+// the ask could carry context from several rooms. It follows descendants.
+const multipleRoomScope = -1
+
+// askRoomPost checks every open ask that could have reached the sender,
+// independently of the single verified parent used for task history.
 func askRoomPost(ctx context.Context, tx *sql.Tx, req envelope.Request) (int64, error) {
-	if req.RoomPostID != 0 {
-		return req.RoomPostID, nil
-	}
-	if req.TaskRoomScope != 0 {
-		return req.TaskRoomScope, nil
-	}
 	parent := req.TaskContextParentID
 	if parent == "" {
 		parent = req.ParentID
 	}
-	if parent == "" || !req.SkipTaskRecovery {
-		return 0, nil
-	}
 	var post int64
-	err := tx.QueryRowContext(ctx, `WITH RECURSIVE chain AS (
-		SELECT q.parent_id, COALESCE(q.room_post_id, NULLIF(q.task_room_scope, 0), t.room_post_id, 0) AS post
-		FROM requests q LEFT JOIN tasks t ON t.id = q.task_id WHERE q.id = ?
-		UNION ALL
-		SELECT q.parent_id, COALESCE(q.room_post_id, NULLIF(q.task_room_scope, 0), t.room_post_id, 0)
-		FROM chain c JOIN requests q ON q.id = c.parent_id LEFT JOIN tasks t ON t.id = q.task_id WHERE c.post = 0
+	err := tx.QueryRowContext(ctx, `WITH RECURSIVE scope(parent_id, post) AS (
+		SELECT '', ?2
+		UNION SELECT '', ?3
+		UNION
+		SELECT q.parent_id, COALESCE(NULLIF(q.task_room_scope, 0), q.room_post_id, 0)
+		FROM requests q
+		WHERE q.id = ?4
+		UNION
+		SELECT q.parent_id, COALESCE(NULLIF(q.task_room_scope, 0), q.room_post_id, 0)
+		FROM requests q
+		WHERE NOT ?5 AND q.to_agent = ?1 AND q.kind = 'ask'
+			AND (q.status IN ('delivered', 'claimed', 'needs_input')
+				OR (q.status = 'queued' AND (q.claimed_at > 0 OR q.read_by = q.to_agent)))
+		UNION
+		SELECT q.parent_id, COALESCE(NULLIF(q.task_room_scope, 0), q.room_post_id, 0)
+		FROM scope s JOIN requests q ON q.id = s.parent_id WHERE s.post = 0
 	)
-	SELECT COALESCE(MAX(post), 0) FROM chain`, parent).Scan(&post)
+	SELECT CASE WHEN MIN(s.post) < 0 OR COUNT(DISTINCT p.room_id) > 1 THEN ?6
+		ELSE COALESCE(MAX(p.id), 0) END
+	FROM scope s LEFT JOIN room_posts p ON p.id = s.post`,
+		req.From, req.RoomPostID, req.TaskRoomScope, parent, req.NoParent, multipleRoomScope).Scan(&post)
 	return post, err
 }
 

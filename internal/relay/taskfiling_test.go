@@ -439,3 +439,74 @@ func TestWorkAskWithTwoClaimsUsesOnlyVerifiedParent(t *testing.T) {
 		t.Fatal("held ambiguous ask changed a claimed task's history")
 	}
 }
+
+func TestRoomTaskScopeSurvivesAmbiguousClaims(t *testing.T) {
+	m := roomMesh(t)
+	ctx := t.Context()
+	admin, poster, asker, outsider := m.Client(t, "admin"), m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "instinct")
+	for _, name := range []string{"grokbot", "instinct"} {
+		if _, err := admin.SetTaskHost(ctx, name, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asker.SetSession("same-session")
+	post, err := client.PostToRoom(ctx, poster, "launch", "@muse private room context")
+	if err != nil || len(post.Post.Mentions) != 1 {
+		t.Fatalf("room post = %+v, %v", post, err)
+	}
+	room := claimOne(t, asker, post.Post.Mentions[0].RequestID)
+	other, err := outsider.Send(ctx, "muse", "Unrelated work", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimOne(t, asker, other.ID)
+	// The two open claims make the parent ambiguous, but both still
+	// contribute to the sensitivity of this ask's text.
+	const body = "Follow up on the private room context"
+	sent, err := asker.Send(ctx, "grokbot", body, envelope.KindAsk, "", false)
+	if err != nil || sent.ParentID != "" || sent.TaskID == 0 || sent.TaskID == room.TaskID || sent.TaskID == other.TaskID {
+		t.Fatalf("separate ask = %+v, %v", sent, err)
+	}
+	got, history, err := client.HostTask(ctx, outsider, sent.TaskID)
+	if err != nil || !got.Withheld || got.Title != "" || got.Detail != "" || len(history) != 0 {
+		t.Fatalf("outside host reads %+v, history %+v, %v", got, history, err)
+	}
+	for _, c := range []*client.Relay{poster, admin} {
+		var got envelope.Task
+		var err error
+		if c == admin {
+			got, _, err = client.Task(ctx, c, true, sent.TaskID)
+		} else {
+			got, _, err = client.HostTask(ctx, c, sent.TaskID)
+		}
+		if err != nil || got.Withheld || got.Detail != body {
+			t.Fatalf("authorized task = %+v, %v", got, err)
+		}
+	}
+	if _, err := client.CreateRoom(ctx, admin, "other"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"muse", "instinct"} {
+		if _, err := client.AddRoomMember(ctx, admin, "other", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secondPost, err := client.PostToRoom(ctx, outsider, "other", "@muse another private room")
+	if err != nil || len(secondPost.Post.Mentions) != 1 {
+		t.Fatalf("second room post = %+v, %v", secondPost, err)
+	}
+	claimOne(t, asker, secondPost.Post.Mentions[0].RequestID)
+	multi, err := asker.Send(ctx, "grokbot", "Both rooms' context", envelope.KindAsk, "", false)
+	if err != nil || multi.TaskID == 0 {
+		t.Fatalf("multi-room ask = %+v, %v", multi, err)
+	}
+	got, _, err = client.HostTask(ctx, outsider, multi.TaskID)
+	if err != nil || !got.Withheld {
+		t.Fatalf("host from only one room reads multi-room task = %+v, %v", got, err)
+	}
+	got, _, err = client.HostTask(ctx, poster, multi.TaskID)
+	if err != nil || got.Withheld || got.Detail != "Both rooms' context" {
+		t.Fatalf("original recipient cannot read multi-room task = %+v, %v", got, err)
+	}
+
+}
