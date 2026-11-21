@@ -986,6 +986,8 @@ func TestLateFailedSendDoesNotReplaceNewerOK(t *testing.T) {
 	rc.firstBegin = make(chan struct{})
 	rc.firstDone = make(chan struct{})
 	ts := rc.server(t)
+	releaseFirst := sync.OnceFunc(func() { close(rc.holdFirst) })
+	t.Cleanup(releaseFirst)
 	path := filepath.Join(t.TempDir(), "relay.db")
 	st, err := store.Open(path)
 	if err != nil {
@@ -1015,17 +1017,25 @@ func TestLateFailedSendDoesNotReplaceNewerOK(t *testing.T) {
 	second := start.Add(time.Second)
 	now.set(second)
 	queued(w, "grokbot", 1)
-	waitCalls(t, &rc, 2)
-	if got, ok := w.LastWake("grokbot"); !ok || !got.At.Equal(second) || got.Result != envelope.WakeOK {
-		t.Fatalf("after second send = %+v %v, want ok at %v", got, ok, second)
+	// The webhook can receive the request before the waker saves its result.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, ok := w.LastWake("grokbot")
+		if ok && got.At.Equal(second) && got.Result == envelope.WakeOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after second send = %+v %v, want ok at %v", got, ok, second)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	close(rc.holdFirst)
+	releaseFirst()
 	select {
 	case <-rc.firstDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first send did not finish")
 	}
-	deadline := time.Now().Add(100 * time.Millisecond)
+	deadline = time.Now().Add(100 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		got, ok := w.LastWake("grokbot")
 		if !ok || got.Result != envelope.WakeOK || !got.At.Equal(second) {
@@ -1290,7 +1300,8 @@ func TestUrgentFollowUpUsesUrgentWakeGrace(t *testing.T) {
 	ts := rc.server(t)
 	var queuedN atomic.Int32
 	queuedN.Store(1)
-	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL}}, nil, Options{
+	// The test only needs the initial wake and its urgent follow-up.
+	w := New(Config{"grokbot": {Method: Webhook, URL: ts.URL, MaxPerHour: 2}}, nil, Options{
 		Debounce:        time.Millisecond,
 		WakeGrace:       time.Hour,
 		UrgentWakeGrace: 20 * time.Millisecond,

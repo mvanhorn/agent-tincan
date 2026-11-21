@@ -198,6 +198,153 @@ func TestTaskBriefingIncludesYesterdaysUnconfirmedReminder(t *testing.T) {
 	assertBriefing(t, briefing, fmt.Sprintf("Unconfirmed task news: task #%d (reminder)", due))
 }
 
+func TestTaskBriefingFiltersUnconfirmedNotices(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		decision   string
+		ack        bool
+		clearHost  bool
+		wantMissed bool
+	}{
+		{name: "done", decision: client.TaskDone},
+		{name: "dropped", decision: client.TaskDrop},
+		{name: "one host confirmed", ack: true},
+		{name: "host mark cleared", clearHost: true},
+		{name: "still unconfirmed", wantMissed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC)
+			m, _ := newBriefingMesh(t, start, "off")
+			m.host(t, "muse")
+			if tc.ack {
+				m.host(t, "grokbot")
+			}
+			ctx := t.Context()
+			var id int64
+			if tc.decision != "" {
+				id = m.returnedTask(t, "Private returned title")
+			} else {
+				id = taskDay(t, m, start.Format(time.RFC3339))
+				m.Server.Sweep(ctx)
+			}
+			notices := read(t, m.muse)
+			if len(notices) != 1 || notices[0].TaskNoticeID != id {
+				t.Fatalf("notices = %+v", notices)
+			}
+			if _, err := m.muse.Claim(ctx, notices[0].ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.ack {
+				reminders := read(t, m.grok)
+				if len(reminders) != 1 || reminders[0].TaskNoticeKind != envelope.TaskNoticeReminder {
+					t.Fatalf("reminders = %+v", reminders)
+				}
+				if _, err := m.grok.Claim(ctx, reminders[0].ID); err != nil {
+					t.Fatal(err)
+				}
+				m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+				m.Server.Sweep(ctx)
+				retries := read(t, m.grok)
+				if len(retries) != 1 || retries[0].ID == reminders[0].ID || retries[0].TaskNoticeID != id {
+					t.Fatalf("reminder retry = %+v", retries)
+				}
+				if _, err := m.grok.Claim(ctx, retries[0].ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := client.TaskNoticesTold(ctx, m.grok, []string{retries[0].ID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.decision != "" {
+				if _, err := client.DecideTask(ctx, m.admin, tc.decision, id, "Private decision"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recipient := m.muse
+			if tc.clearHost {
+				m.host(t, "grokbot")
+				if ok, err := m.Store.SetAgentTaskHost(ctx, "muse", false); err != nil || !ok {
+					t.Fatalf("clear task host = %v, %v", ok, err)
+				}
+				recipient = m.grok
+			}
+			taskDay(t, m, "2026-11-21") // Keep the briefing nonempty independently of the reminder.
+			if queued, err := client.TaskBriefingNow(ctx, m.admin); err != nil || !queued {
+				t.Fatalf("queue briefing = %v, %v", queued, err)
+			}
+			message := assertBriefing(t, takeBriefing(t, recipient), "Morning briefing.")
+			want := fmt.Sprintf("Unconfirmed task news: task #%d (reminder).", id)
+			if tc.wantMissed && !strings.Contains(message, want) ||
+				!tc.wantMissed && strings.Contains(message, "Unconfirmed task news:") {
+				t.Fatalf("want unconfirmed = %v, briefing = %q", tc.wantMissed, message)
+			}
+		})
+	}
+}
+
+func TestTaskBriefingRecognizesReceiptsFromBeforeNoticeIDs(t *testing.T) {
+	m, _ := newBriefingMesh(t, time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC), "off")
+	m.host(t, "muse")
+	m.host(t, "grokbot")
+	taskDay(t, m, "2026-11-21")
+	ctx := t.Context()
+	if queued, err := client.TaskBriefingNow(ctx, m.admin); err != nil || !queued {
+		t.Fatalf("queue briefing = %v, %v", queued, err)
+	}
+	first := takeBriefing(t, m.grok)
+	takeBriefing(t, m.muse)
+	if err := client.TaskNoticesTold(ctx, m.grok, []string{first.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Store.DB().ExecContext(ctx, `UPDATE task_notice_delivery SET notice_id = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	// A past receipt still confirms the briefing after its host is cleared.
+	if ok, err := m.Store.SetAgentTaskHost(ctx, "grokbot", false); err != nil || !ok {
+		t.Fatalf("clear task host = %v, %v", ok, err)
+	}
+	if queued, err := client.TaskBriefingNow(ctx, m.admin); err != nil || !queued {
+		t.Fatalf("queue briefing = %v, %v", queued, err)
+	}
+	if message := assertBriefing(t, takeBriefing(t, m.muse), "Morning briefing."); strings.Contains(message, "Unconfirmed task news") {
+		t.Fatalf("confirmed briefing repeated: %q", message)
+	}
+}
+
+func TestTaskBriefingOnlyReportsUnconfirmedBriefings(t *testing.T) {
+	m, _ := newBriefingMesh(t, time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC), "off")
+	m.host(t, "muse")
+	m.host(t, "grokbot")
+	taskDay(t, m, "2026-11-21")
+	ctx := t.Context()
+	queue := func() {
+		t.Helper()
+		if queued, err := client.TaskBriefingNow(ctx, m.admin); err != nil || !queued {
+			t.Fatalf("queue briefing = %v, %v", queued, err)
+		}
+	}
+
+	queue()
+	first := takeBriefing(t, m.grok)
+	takeBriefing(t, m.muse)
+	if err := client.TaskNoticesTold(ctx, m.grok, []string{first.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	queue()
+	second := takeBriefing(t, m.muse)
+	if message := assertBriefing(t, second, "Morning briefing."); strings.Contains(message, "Unconfirmed task news") {
+		t.Fatalf("confirmed briefing repeated: %q", message)
+	}
+	takeBriefing(t, m.grok)
+	if first.Body != second.Body {
+		t.Fatalf("briefing text changed between deliveries: %q, %q", first.Body, second.Body)
+	}
+
+	queue()
+	assertBriefing(t, takeBriefing(t, m.muse), "Unconfirmed task news: previous briefing.")
+}
+
 func TestTaskBriefingRetriesAndFallsBack(t *testing.T) {
 	start := time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC)
 	m, _ := newBriefingMesh(t, start, "off")
