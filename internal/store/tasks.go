@@ -185,7 +185,7 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	}
 	for _, col := range []struct{ name, kind string }{
 		{"due_day", "TEXT"}, {"due_at", "INTEGER"}, {"reminded_at", "INTEGER"}, {"reminder_dropped_at", "INTEGER"},
-		{"quiet", "INTEGER NOT NULL DEFAULT 0"}, {"room_post_id", "INTEGER"},
+		{"quiet", "INTEGER NOT NULL DEFAULT 0"}, {"room_post_id", "INTEGER"}, {"participant_only", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col.name).Scan(&has); err != nil {
 			return err
@@ -219,10 +219,10 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 }
 
 // taskSelect reads task rows with the current ask, repeat and room visibility.
-const taskSelect = `SELECT ` + taskCols + `, ` + taskRoomWithheld + taskFrom
+const taskSelect = `SELECT ` + taskCols + `, (` + taskRoomWithheld + ` OR ` + taskParticipantWithheld + `)` + taskFrom
 
 const taskCols = `t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(t.due_day, ''), t.due_at, COALESCE(q.status, ''),
-		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, ''), t.quiet = 1, COALESCE(t.room_post_id, 0)`
+		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, ''), t.quiet = 1, COALESCE(t.room_post_id, 0), t.participant_only`
 
 const taskFrom = `
 	FROM tasks t LEFT JOIN requests q ON q.id = t.current_request LEFT JOIN schedules r ON r.task_id = t.id`
@@ -271,10 +271,15 @@ const taskOriginalAskUnapproved = `EXISTS (SELECT 1 FROM requests r WHERE r.task
 // taskHostWithheld is true for a task whose text task host ?1 may not read:
 // a proposed task or an automatically filed ask whose text is still
 // unapproved, unless the host filed it.
-const taskHostWithheld = `(` + taskRoomWithheld + ` OR t.filer != ?1 AND (` + taskNeverApproved + ` OR ` + taskOriginalAskUnapproved + `))`
+const taskHostWithheld = `(` + taskRoomWithheld + ` OR ` + taskParticipantWithheld + ` OR t.filer != ?1 AND (` + taskNeverApproved + ` OR ` + taskOriginalAskUnapproved + `))`
 
 const taskRoomWithheld = `(?1 != '' AND t.room_post_id IS NOT NULL AND NOT EXISTS (
 	SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ?1 WHERE p.id = t.room_post_id))`
+
+// The host gets status metadata for service asks without gaining access
+// to the original request or private results from services.
+const taskParticipantWithheld = `(?1 != '' AND t.participant_only = 1 AND t.filer != ?1 AND NOT EXISTS (
+	SELECT 1 FROM requests r WHERE r.task_id = t.id AND r.task_filed_on_send = 1 AND r.to_agent = ?1))`
 
 // quiet is 0 for ordinary tasks, 1 for quiet tasks and 2 after escalation.
 const taskListVisible = ` AND t.quiet != 1`
@@ -383,8 +388,8 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 }
 
 func insertTask(ctx context.Context, tx *sql.Tx, t envelope.Task, now int64) (int64, error) {
-	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at, due_day, due_at, quiet, room_post_id) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, 0))`,
-		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now, t.DueDay, t.DueAt, t.Quiet, t.RoomPostID)
+	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at, due_day, due_at, quiet, room_post_id, participant_only) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, 0), ?)`,
+		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now, t.DueDay, t.DueAt, t.Quiet, t.RoomPostID, t.ParticipantOnly)
 	if err != nil {
 		return 0, err
 	}
@@ -1270,7 +1275,7 @@ func scanTaskAnd(sc scanner, more ...any) (envelope.Task, error) {
 	var t envelope.Task
 	var status, ask string
 	var created int64
-	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &t.DueDay, &t.DueAt, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo, &t.Quiet, &t.RoomPostID}, more...)...); err != nil {
+	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &t.DueDay, &t.DueAt, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo, &t.Quiet, &t.RoomPostID, &t.ParticipantOnly}, more...)...); err != nil {
 		return envelope.Task{}, err
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()

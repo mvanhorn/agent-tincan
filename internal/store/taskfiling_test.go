@@ -27,7 +27,7 @@ func TestClassifyAsk(t *testing.T) {
 		{name: "notes", toKind: onboard.KindNotes, want: quietTask},
 		{name: "history", toKind: onboard.KindHistory, want: quietTask},
 		{name: "pass", fromKind: onboard.KindPass, want: quietTask},
-		{name: "pass seed", change: func(req *envelope.Request) { req.Group = envelope.PassGroupPrefix + "1" }, want: quietTask},
+		{name: "pass seed", change: func(req *envelope.Request) { req.Group = envelope.PassGroupPrefix + "1" }},
 		{name: "council to", toKind: onboard.KindCouncil, want: quietTask},
 		{name: "council from", fromKind: onboard.KindCouncil, want: quietTask},
 		{name: "room mention", change: func(req *envelope.Request) { req.RoomPostID = 1 }, want: quietTask},

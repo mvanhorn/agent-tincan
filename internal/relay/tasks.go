@@ -34,6 +34,8 @@ var errTaskAssignee = errors.New("history, notes, pass and council agents do not
 // would be refused as a loop after the open ask was already cancelled.
 var errTaskRoomFollowup = &StatusError{Code: http.StatusConflict, Err: errors.New("send a follow-up in the room to continue this task")}
 
+var errTaskServiceFollowup = &StatusError{Code: http.StatusConflict, Err: errors.New("send a new ask to follow up with the service")}
+
 var errTaskToSender = errors.New("this is the agent the assignment is sent as, and an agent cannot ask itself; nothing was changed, name another teammate")
 
 // taskAssign is one assignment of a task: the ask that starts an attempt
@@ -92,6 +94,9 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	if carried.Task.RoomPostID != 0 {
 		return envelope.Request{}, errTaskRoomFollowup
 	}
+	if carried.Task.ParticipantOnly {
+		return envelope.Request{}, errTaskServiceFollowup
+	}
 	if err := s.checkTaskTarget(ctx, a.To); err != nil {
 		return envelope.Request{}, err
 	}
@@ -144,6 +149,9 @@ func (s *Server) reassignTask(ctx context.Context, a taskAssign) (envelope.Reque
 	}
 	if task.RoomPostID != 0 {
 		return envelope.Request{}, errTaskRoomFollowup
+	}
+	if task.ParticipantOnly {
+		return envelope.Request{}, errTaskServiceFollowup
 	}
 	cancelled, err := s.store.ReleaseTask(ctx, a.TaskID, a.actor(), "reassigned to "+a.To)
 	if err != nil {

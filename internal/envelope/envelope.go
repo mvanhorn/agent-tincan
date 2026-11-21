@@ -844,6 +844,8 @@ type Task struct {
 	Quiet bool `json:"quiet,omitempty"`
 	// RoomPostID identifies a room whose membership governs this task's text.
 	RoomPostID int64 `json:"-"`
+	// ParticipantOnly keeps service request text in its original exchange.
+	ParticipantOnly bool `json:"-"`
 	TaskDue
 	DueZone           string     `json:"-"` // client-side display zone from relay capabilities
 	ID                int64      `json:"id"`

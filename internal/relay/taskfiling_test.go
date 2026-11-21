@@ -217,8 +217,12 @@ func TestQuietAnswerIsHiddenAndCountedOnce(t *testing.T) {
 		t.Fatalf("quiet list = %+v, %v", tasks, err)
 	}
 	task, history, err := client.HostTask(ctx, m.scout, req.TaskID)
-	if err != nil || !task.Quiet || task.Status != envelope.TaskReturned || task.Result != "private lookup result" || len(history) == 0 {
+	if err != nil || !task.Quiet || task.Status != envelope.TaskReturned || !task.Withheld || task.Title != "" || task.Detail != "" || task.Result != "" || len(history) != 0 {
 		t.Fatalf("quiet task = %+v, %+v, %v", task, history, err)
+	}
+	original, _, err := client.Task(ctx, m.grok, false, req.TaskID)
+	if err != nil || original.Result != "private lookup result" {
+		t.Fatalf("lookup result for asker = %+v, %v", original, err)
 	}
 	day := m.clk.now().Format(time.DateOnly)
 	if queued, err := m.Store.QueueTaskBriefing(ctx, day, day); err != nil || !queued {
@@ -240,13 +244,16 @@ func TestQuietAnswerIsHiddenAndCountedOnce(t *testing.T) {
 func TestQuietAskEscalates(t *testing.T) {
 	for _, name := range []string{"failed", "declined", "denied", "expired", "stalled clarification"} {
 		t.Run(name, func(t *testing.T) {
-			m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", RequestTTL: 6 * time.Hour})
+			m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", NotesRequestTTL: 6 * time.Hour})
 			m.host(t, "scout")
 			ctx := t.Context()
 			if name == "denied" {
 				m.gate(t, `{"gate":{"muse":{"from":["grokbot"]}},"hold_ttl":"1h"}`)
 			}
-			req, err := m.grok.SendGrouped(ctx, "muse", "Pass chat", envelope.KindAsk, "", "pass-test")
+			if err := m.admin.SetKind(ctx, "muse", "notes"); err != nil {
+				t.Fatal(err)
+			}
+			req, err := m.grok.Send(ctx, "muse", "Notes lookup", envelope.KindAsk, "", false)
 			if err != nil || req.TaskID == 0 || !m.task(t, req.TaskID).Quiet {
 				t.Fatalf("quiet ask = %+v, %v", req, err)
 			}
@@ -288,7 +295,7 @@ func TestQuietAskEscalates(t *testing.T) {
 			if len(got) != 1 || got[0].TaskNoticeID != req.TaskID || got[0].TaskNoticeStatus != want {
 				t.Fatalf("escalated notices = %+v", got)
 			}
-			m.wantNoTaskText(t, "Pass chat", "private reason", "Which chat?")
+			m.wantNoTaskText(t, "Notes lookup", "private reason", "Which chat?")
 			day := m.clk.now().Format(time.DateOnly)
 			if _, err := m.Store.QueueTaskBriefing(ctx, day, day); err != nil {
 				t.Fatal(err)
@@ -374,4 +381,53 @@ func TestRoomAskTasksKeepRoomAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	withheld()
+}
+
+func TestPrivatePassSeedFilesNothing(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "scout")
+	ctx := t.Context()
+	req, err := m.grok.SendGrouped(ctx, "muse", "private packed chat", envelope.KindAsk, "", "pass-test")
+	if err != nil || req.TaskID != 0 {
+		t.Fatalf("pass seed = %+v, %v", req, err)
+	}
+	if _, err := m.scout.Get(ctx, req.ID, 0); !client.IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("unrelated host can read seed: %v", err)
+	}
+	if _, err := m.muse.Reply(ctx, req.ID, "seed failed", envelope.StatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	tasks, _, _, err := client.HostTasks(ctx, m.scout, true, true)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("host tasks = %+v, %v", tasks, err)
+	}
+}
+
+func TestWorkAskWithTwoClaimsUsesOnlyVerifiedParent(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "scout")
+	m.muse.SetSession("same-session")
+	ctx := t.Context()
+	first := m.add(t, envelope.Task{Title: "first", Filer: "grokbot"})
+	second := m.add(t, envelope.Task{Title: "second", Filer: "grokbot"})
+	firstAsk := m.assign(t, first.ID, "grokbot", "muse")
+	claimOne(t, m.muse, firstAsk.ID)
+	secondAsk := m.assign(t, second.ID, "grokbot", "muse")
+	claimOne(t, m.muse, secondAsk.ID)
+	firstEvents, secondEvents := len(m.events(t, first.ID)), len(m.events(t, second.ID))
+	unrelated, err := m.muse.Send(ctx, "instinct", "Separate ask", envelope.KindAsk, "", false)
+	if err != nil || unrelated.TaskID == 0 || unrelated.ParentID != "" {
+		t.Fatalf("unrelated ask = %+v, %v", unrelated, err)
+	}
+	child, err := m.muse.Send(ctx, "instinct", "Follow this task", envelope.KindAsk, firstAsk.ID, false)
+	if err != nil || child.TaskID != 0 || child.ParentID != firstAsk.ID {
+		t.Fatalf("verified child = %+v, %v", child, err)
+	}
+	if history := m.events(t, first.ID); len(history) != firstEvents+1 || history[len(history)-1].Body != "muse asked instinct: Follow this task" {
+		t.Fatalf("first history = %+v", history)
+	}
+	if history := m.events(t, second.ID); len(history) != secondEvents {
+		t.Fatalf("second history = %+v", history)
+	}
 }

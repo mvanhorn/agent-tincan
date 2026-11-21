@@ -25,20 +25,22 @@ const (
 // that policy verified.
 func classifyAsk(req envelope.Request, fromKind, toKind string, openGuest bool) askFiling {
 	if req.Kind != envelope.KindAsk || req.TaskID != 0 || req.From == TaskRelay ||
-		req.FromGuest || openGuest || req.RecoverySource != "" {
+		req.FromGuest || openGuest || req.RecoverySource != "" || strings.HasPrefix(req.Group, envelope.PassGroupPrefix) {
 		return noTask
 	}
 	if req.NoParent || req.FollowOf != "" || req.RoomPostID != 0 ||
-		req.SkipTaskRecovery || strings.HasPrefix(req.Group, envelope.PassGroupPrefix) {
+		req.SkipTaskRecovery || taskServiceKind(fromKind) || taskServiceKind(toKind) {
 		return quietTask
 	}
-	for _, kind := range []string{fromKind, toKind} {
-		switch kind {
-		case onboard.KindNotes, onboard.KindHistory, onboard.KindPass, onboard.KindCouncil:
-			return quietTask
-		}
-	}
 	return workTask
+}
+
+func taskServiceKind(kind string) bool {
+	switch kind {
+	case onboard.KindNotes, onboard.KindHistory, onboard.KindPass, onboard.KindCouncil:
+		return true
+	}
+	return false
 }
 
 func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request, requireHost bool) error {
@@ -70,22 +72,21 @@ func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request
 		return err
 	}
 	req.TaskRoomScope = roomPost
+	private := taskServiceKind(fromKind) || taskServiceKind(toKind) || (req.SkipTaskRecovery && roomPost == 0)
 	now := s.now().UnixMilli()
 	// A scheduled or follow-on fire is independent of what the nominal
 	// sender is working on when the relay sends it.
 	var parentTask, parentRoomPost int64
 	err = sql.ErrNoRows
-	if !req.NoParent && req.FollowOf == "" {
+	if req.ParentID != "" && !req.NoParent && req.FollowOf == "" {
 		err = tx.QueryRowContext(ctx, `SELECT q.task_id, COALESCE(t.room_post_id, 0) FROM requests q JOIN tasks t ON t.id = q.task_id AND t.current_request = q.id
-		WHERE q.to_agent = ?1 AND q.status = 'claimed'
-		  AND (q.id = ?2 OR ?3 = '' OR q.claim_session IN (?3, ''))
-		ORDER BY (q.id = ?2) DESC, q.claimed_at DESC, q.id LIMIT 1`, req.From, req.ParentID, req.FromSession).Scan(&parentTask, &parentRoomPost)
+		WHERE q.id = ? AND q.to_agent = ? AND q.status = 'claimed'`, req.ParentID, req.From).Scan(&parentTask, &parentRoomPost)
 	}
 	if err == nil {
 		summary := fmt.Sprintf("%s asked %s", req.From, req.To)
 		// An unapproved child ask's text must not reach readers of its
 		// parent task. Record that the ask happened with no text.
-		if req.Status != envelope.StatusHeld && (roomPost == 0 || roomPost == parentRoomPost) {
+		if !private && req.Status != envelope.StatusHeld && (roomPost == 0 || roomPost == parentRoomPost) {
 			summary += ": " + title
 		}
 		_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{
@@ -100,7 +101,7 @@ func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request
 	// open task. The explicit-add limit must not refuse an otherwise valid ask.
 	task := envelope.Task{
 		Title: shortAskLine(title), Detail: req.Body, Status: envelope.TaskOpen, Filer: req.From,
-		NamedFor: req.To, Quiet: filing == quietTask, RoomPostID: roomPost,
+		NamedFor: req.To, Quiet: filing == quietTask, RoomPostID: roomPost, ParticipantOnly: private,
 	}
 	id, err := insertTask(ctx, tx, task, now)
 	if err != nil {
