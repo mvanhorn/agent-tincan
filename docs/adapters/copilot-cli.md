@@ -38,19 +38,13 @@ Or put a token in the listener's environment as `COPILOT_GITHUB_TOKEN` (a launch
 
 ## Wake
 
-Copy the wake script and the shared wake library into one folder (they are not in the release downloads):
+Install the wake script, the shared wake library and a login service that keeps the listener running:
 
 ```bash
-mkdir -p ~/bin
-cp examples/copilot-cli/copilot-wake.sh examples/lib/tincan-wake-lib.sh ~/bin/   # from a repo checkout
-chmod +x ~/bin/copilot-wake.sh
+TINCAN_CONFIG="$HOME/.config/tincan/copilot-cli.json" tincan listen install --wake copilot-cli
 ```
 
-Keep a listener running on that machine (launchd, systemd or a terminal):
-
-```bash
-TINCAN_CONFIG="$HOME/.config/tincan/copilot-cli.json" tincan listen --exec ~/bin/copilot-wake.sh
-```
+It prints the start command and never starts the service. It writes no token into the service: log in instead, or add the variable to the service file yourself. A script you edit is kept by install and by `tincan upgrade`. To run it by hand instead, copy `examples/copilot-cli/copilot-wake.sh` and `examples/lib/tincan-wake-lib.sh` into one folder from a repo checkout and run `TINCAN_CONFIG="$HOME/.config/tincan/copilot-cli.json" tincan listen --exec <path to copilot-wake.sh>`.
 
 Set the teammate's wake to `command` in the relay's `wake.json`:
 
