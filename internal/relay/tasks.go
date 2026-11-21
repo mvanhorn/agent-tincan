@@ -9,7 +9,6 @@ import (
 	"log"
 	"maps"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -94,7 +93,7 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	actor := a.actor()
 	body, contributors := taskBody(carried, actor, limit)
 	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
-		TaskID: a.TaskID, TaskActor: actor, TaskResultEvent: carried.ResultEvent, Contributors: contributors, NoParent: a.Repeat})
+		TaskID: a.TaskID, TaskActor: actor, TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat})
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
@@ -222,7 +221,9 @@ func taskBody(c store.TaskCarried, actor string, limit int) (string, []string) {
 			contributors = append(contributors, agent)
 		}
 	}
-	carries(task.Filer)
+	if task.Filer != envelope.TaskRelayFiler {
+		carries(task.Filer)
+	}
 	for _, name := range c.FiledUnder {
 		carries(name)
 	}
@@ -291,10 +292,6 @@ const (
 	maxTaskComment = envelope.MaxRoomPost
 )
 
-// taskSourceRE is what a declared source may look like: a short label such
-// as mail or meeting, the same shape as an agent name.
-var taskSourceRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
-
 var (
 	// errTaskCommentDuringGuestAsk refuses a comment from a caller a guest's
 	// ask is open with. A comment carries no mark and is handed to whoever
@@ -358,7 +355,7 @@ func (in *taskAdd) check(ctx context.Context, s *Server) error {
 		err = fmt.Errorf("task: key is %d bytes, over the %d byte limit", len(in.Key), maxTaskKey)
 	case !utf8.ValidString(in.Title) || !utf8.ValidString(in.Detail) || !utf8.ValidString(in.Key):
 		err = errors.New("task: text is not UTF-8")
-	case in.Source != "" && !taskSourceRE.MatchString(in.Source):
+	case !envelope.ValidSource(in.Source):
 		err = errors.New("task: source is a short label such as mail or meeting: lowercase letters, digits and dashes, at most 32")
 	case in.EverySeconds != 0 && (in.Assignee == "" || in.Assignee == envelope.TaskOwner):
 		err = errors.New("task: a repeating task needs a teammate to go to; name one as its assignee")

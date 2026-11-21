@@ -546,6 +546,9 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	if project := projectOf(ctx); project != "" {
 		in["project"] = project
 	}
+	if source, _ := ctx.Value(askSourceKey{}).(string); source != "" {
+		in["source"] = source
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	if err == nil {
@@ -1243,6 +1246,13 @@ func WithProject(ctx context.Context, project string) context.Context {
 func projectOf(ctx context.Context) string {
 	project, _ := ctx.Value(projectKey{}).(string)
 	return project
+}
+
+type askSourceKey struct{}
+
+// WithAskSource names the outside source of text in asks sent with ctx.
+func WithAskSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, askSourceKey{}, source)
 }
 
 // AdvertiseSocketWake turns SocketWakeFeature on or off for every later

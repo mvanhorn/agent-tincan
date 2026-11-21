@@ -28,8 +28,7 @@ type TaskNotice struct {
 	TaskID int64
 	// Status is the status the change gave the task.
 	Status envelope.TaskStatus
-	// Actor is who made the change: an agent, envelope.TaskOwner or
-	// TaskRelay.
+	// Actor is who made the change: an agent, the owner, or the relay.
 	Actor string
 	// Asker is the sender of the ask the change ended or paused, "" for a
 	// task filed as proposed, which has no ask.

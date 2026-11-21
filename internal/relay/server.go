@@ -29,8 +29,13 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
+// DefaultUnansweredQuestionAfter is how long a plain ask waits for clarification.
+const DefaultUnansweredQuestionAfter = 4 * time.Hour
+
 // Config tunes the relay.
 type Config struct {
+	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task
+
 	RequestTTL      time.Duration // how long an unanswered request lives
 	NotesRequestTTL time.Duration // RequestTTL for requests to a notes-kind agent
 	PollHold        time.Duration // max time a long-poll is held
@@ -84,6 +89,9 @@ type PassRef struct {
 }
 
 func (c *Config) defaults() {
+	if c.UnansweredQuestionAfter <= 0 {
+		c.UnansweredQuestionAfter = DefaultUnansweredQuestionAfter
+	}
 	if c.RequestTTL == 0 {
 		c.RequestTTL = 24 * time.Hour
 	}
@@ -608,16 +616,7 @@ func (s *Server) Sweep(ctx context.Context) {
 		return
 	}
 	for _, t := range trs {
-		event := "requeued"
-		if t.Status == envelope.StatusExpired {
-			event = "expired"
-			if t.Held {
-				event = "hold_expired"
-			}
-		}
-		s.record(ctx, event, t.ID, t.TraceID, "relay", "")
-		s.hub.notify(requestKey(t.ID))
-		s.tellSwept(ctx, t)
+		s.notifySwept(ctx, t)
 		if t.Status == envelope.StatusQueued {
 			s.hub.notify(inboxKey(t.To))
 			// An agent woken by the relay has no poller to see the requeue,
@@ -636,10 +635,30 @@ func (s *Server) Sweep(ctx context.Context) {
 	s.checkWatches(ctx, "")
 	s.expireLeases(ctx)
 	s.fireSchedules(ctx)
+	expiredQuestions, err := s.store.RecoverTasks(ctx, s.cfg.UnansweredQuestionAfter)
+	if err != nil {
+		log.Printf("sweep: recover tasks: %v", err)
+	}
+	for _, t := range expiredQuestions {
+		s.notifySwept(ctx, t)
+	}
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
 	s.drainTaskNotices(ctx)
+}
+
+func (s *Server) notifySwept(ctx context.Context, t store.Transition) {
+	event := "requeued"
+	if t.Status == envelope.StatusExpired {
+		event = "expired"
+		if t.Held {
+			event = "hold_expired"
+		}
+	}
+	s.record(ctx, event, t.ID, t.TraceID, "relay", "")
+	s.hub.notify(requestKey(t.ID))
+	s.tellSwept(ctx, t)
 }
 
 // wakeRequeued wakes req's target for a request it may have looked past: a

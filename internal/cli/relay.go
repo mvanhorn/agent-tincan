@@ -40,6 +40,8 @@ import (
 )
 
 type relayFlags struct {
+	unansweredQuestionAfter time.Duration
+
 	urgentPerHour int
 	listen        string
 	hostname      string
@@ -166,6 +168,7 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.DurationVar(&f.urgentGrace, "urgent-wake-grace", relay.DefaultUrgentWakeGrace, "--wake-grace while an urgent request to the agent is queued, when shorter: how soon a silent webhook or email agent is woken again and the asker is told")
 	fs.DurationVar(&f.urgentLease, "urgent-claim-lease", relay.DefaultUrgentClaimLease, "how long a claim on an urgent request lasts without a reply or progress note before it is requeued, the target woken again and the asker told (other requests keep 30m)")
 	fs.IntVar(&f.ownerNotice, "owner-notice-after", relay.DefaultOwnerNoticeAfter, "how many wakes in a row a webhook or email agent may leave unanswered before the owner is told, once per silent episode, through the approval policy's notify destination")
+	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a plain ask can wait for clarification before the relay files it as a task")
 	fs.DurationVar(&f.notesTTL, "notes-ttl", 30*24*time.Hour, "how long a request to a notes-kind agent waits unanswered before it expires (other kinds keep 24h)")
 	fs.StringVar(&f.dist, "dist", "", "serve tincan release binaries (tincan_<os>_<arch>, checksums.txt, VERSION) from this directory for tincan upgrade")
 	fs.BoolVar(&f.upgradeExit, "upgrade-exit", false, "after tincan relay-upgrade, exit with status 75 for a supervisor to restart the relay instead of re-executing it")
@@ -180,6 +183,9 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 func (f relayFlags) validate() error {
 	if f.urgentPerHour < 1 {
 		return fmt.Errorf("--urgent-per-hour must be at least 1, got %d", f.urgentPerHour)
+	}
+	if f.unansweredQuestionAfter <= 0 {
+		return fmt.Errorf("--unanswered-question-after must be positive, got %s", f.unansweredQuestionAfter)
 	}
 	if f.notesTTL <= 0 {
 		return fmt.Errorf("--notes-ttl must be positive, got %s", f.notesTTL)
@@ -204,7 +210,7 @@ func (f relayFlags) validate() error {
 
 // relayConfig maps the relay flags onto the relay server.
 func (f relayFlags) relayConfig() relay.Config {
-	return relay.Config{Version: Version, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
+	return relay.Config{Version: Version, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
 		ParsePass: parsePassRef}
 }
 

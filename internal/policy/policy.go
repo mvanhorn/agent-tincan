@@ -131,6 +131,10 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	var handled []string
 	if guarded {
 		handled = guard.Contributors
+		req.SkipTaskRecovery = req.SkipTaskRecovery || guard.SkipTaskRecovery || guard.RoomPostID != 0
+		if req.RecoverySource == "" {
+			req.RecoverySource = guard.RecoverySource
+		}
 	}
 	req.Contributors = contributors(req.Contributors, handled)
 	at, err := p.rate(req.From, req.Urgent)

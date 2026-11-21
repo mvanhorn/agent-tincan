@@ -5,9 +5,63 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
+
+func TestUnansweredClarificationExpiryNotifiesAsker(t *testing.T) {
+	const cutoff = 15 * time.Minute
+	h, clk, _ := sweepHarness(t, Config{RequestTTL: time.Hour, UnansweredQuestionAfter: cutoff})
+	req := h.send(grokAddr, "muse", "book dinner")
+	base := "/v1/requests/" + req.ID
+	h.do(museAddr, "POST", base+"/claim", "", http.StatusOK, nil)
+	h.do(museAddr, "POST", base+"/reply", `{"status":"needs_input","body":"which restaurant?"}`, http.StatusOK, nil)
+	requestWait := h.srv.hub.wait(requestKey(req.ID))
+	inboxWait := h.srv.hub.wait(inboxKey(req.From))
+
+	clk.advance(cutoff)
+	h.srv.Sweep(t.Context())
+	for _, waiter := range []struct {
+		name string
+		ch   <-chan struct{}
+	}{{"request", requestWait}, {"inbox", inboxWait}} {
+		select {
+		case <-waiter.ch:
+		default:
+			t.Errorf("%s waiter did not wake", waiter.name)
+		}
+	}
+	const reason = "It was waiting for your answer to muse's question."
+	got := inbox(t, h, grokAddr)
+	if len(got) != 1 || got[0].From != "relay" || got[0].Kind != envelope.KindNotify ||
+		!strings.Contains(got[0].Body, req.ID) || !strings.Contains(got[0].Body, reason) {
+		t.Fatalf("asker inbox = %+v", got)
+	}
+	var result envelope.Result
+	h.do(grokAddr, "GET", base, "", http.StatusOK, &result)
+	if result.Status != envelope.StatusExpired || result.RelayNote == nil || !strings.Contains(result.RelayNote.Note, reason) {
+		t.Fatalf("expired request = %+v", result)
+	}
+
+	h.srv.Sweep(t.Context())
+	if got := inbox(t, h, grokAddr); len(got) != 0 {
+		t.Fatalf("expiry notice repeated: %+v", got)
+	}
+	events, err := h.st.AuditEvents(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiries := 0
+	for _, event := range events {
+		if event.Event == "expired" && event.RequestID == req.ID && event.TraceID == req.TraceID && event.Actor == "relay" {
+			expiries++
+		}
+	}
+	if expiries != 1 {
+		t.Fatalf("expiry audit events for request = %d, want 1", expiries)
+	}
+}
 
 func TestClarificationRoundTrip(t *testing.T) {
 	h := newHarness(t, Config{})
