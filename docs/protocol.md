@@ -371,7 +371,11 @@ take send fields, such as `POST /v1/schedules`, ignore it.
 
 `GET /v1/capabilities` advertises `"idempotency_key": true`. An older relay
 ignores the field and queues every post, and refuses it on a guest's send,
-so a client sends a key only to a relay that advertises it.
+so the tincan client sends a key only to a relay that advertises it,
+reading the flag again every 10 minutes. It puts one random key on each
+send and, when the answer to a send is lost (a timeout, a proxy's 502 or
+504), posts it once more under that key, so the asker gets the request the
+relay already queued instead of a second one.
 
 ## Request groups
 

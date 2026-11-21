@@ -376,6 +376,12 @@ type Relay struct {
 	handbackMu sync.Mutex
 	handbackAt time.Time
 	handbackOK bool
+
+	// keysAt is when send last read the relay's idempotency_key capability,
+	// and keysOK what it said (see takesSendKeys).
+	keysMu sync.Mutex
+	keysAt time.Time
+	keysOK bool
 }
 
 // maxSentIDs bounds sentIDs. Past it the record starts over, and a reply
@@ -556,12 +562,54 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	if about := askAbout(ctx); about != "" {
 		in["about"] = about
 	}
+	// One key for every post of this send, so a post the relay already took
+	// returns that request instead of queueing it again. call itself may post
+	// again at a moved relay's new address after a timeout.
+	keyed := r.takesSendKeys(ctx)
+	if keyed {
+		in["idempotency_key"] = rand.Text()
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
+	if err != nil && keyed && ctx.Err() == nil && unreachable(err) {
+		// The relay may have queued the send before its answer was lost (a
+		// timeout, a proxy's 502 or 504). Under the same key a second post
+		// is safe; one is enough, since call already waited out dial blips.
+		out = sent{}
+		err = r.callOnce(ctx, r.api, "POST", "/v1/send", in, &out)
+	}
 	if err == nil {
 		r.noteSent(out.ID)
 	}
 	return out, err
+}
+
+// sendKeysRecheck is how long send trusts the relay's idempotency_key
+// capability before reading it again, so a client running across a relay
+// upgrade starts using keys.
+const sendKeysRecheck = 10 * time.Minute
+
+// takesSendKeys reports whether the relay advertises idempotency keys on
+// send. A relay that does not, or whose capabilities cannot be read, gets
+// sends without a key, as before: an older relay would queue a retried
+// post twice, and refuses a guest's send with an unknown field. A failed
+// read is kept until the next recheck too, so while the relay is down each
+// send waits out one failed call, not two.
+func (r *Relay) takesSendKeys(ctx context.Context) bool {
+	now := time.Now()
+	r.keysMu.Lock()
+	if !r.keysAt.IsZero() && now.Sub(r.keysAt) < sendKeysRecheck {
+		ok := r.keysOK
+		r.keysMu.Unlock()
+		return ok
+	}
+	r.keysMu.Unlock()
+	caps, err := r.Capabilities(ctx)
+	ok := err == nil && caps.IdempotencyKey
+	r.keysMu.Lock()
+	defer r.keysMu.Unlock()
+	r.keysAt, r.keysOK = now, ok
+	return ok
 }
 
 // asked finishes an ask whose send returned s: without a wait it reports
