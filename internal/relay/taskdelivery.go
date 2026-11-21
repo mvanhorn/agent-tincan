@@ -115,8 +115,12 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		}
 		old.From, old.Kind = client.RelaySender, envelope.KindNotify
 		markTaskNotice(&old)
-		next.Body = fmt.Sprintf("Task #%d: %s did not acknowledge this task notice by attempt %d. %s",
-			taskID, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
+		label := fmt.Sprintf("Task #%d", taskID)
+		if old.NoticeKind == envelope.TaskNoticeBriefing {
+			label = "Task briefing"
+		}
+		next.Body = fmt.Sprintf("%s: %s did not acknowledge this task notice by attempt %d. %s",
+			label, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
 	}
 	var ttl time.Duration
 	if next.To != "" {

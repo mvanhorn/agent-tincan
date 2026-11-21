@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -29,14 +30,15 @@ const NoteTaskReminderFallback = "task-reminder-fallback"
 
 // IsTaskNotice identifies requests tracked by the task receipt path.
 func IsTaskNotice(kind string) bool {
-	return kind == NoteTask || kind == envelope.TaskNoticeReminder
+	return kind == NoteTask || kind == envelope.TaskNoticeReminder || kind == envelope.TaskNoticeBriefing
 }
 
 // TaskNotice is one task change waiting to be told to the task hosts.
 type TaskNotice struct {
-	ID     int64
-	TaskID int64
-	Kind   string
+	ID       int64
+	TaskID   int64
+	Kind     string
+	Briefing *TaskBriefing
 	// Status is the status the change gave the task.
 	Status envelope.TaskStatus
 	// Actor is who made the change: an agent, the owner, or the relay.
@@ -108,6 +110,24 @@ INSERT INTO task_notice_delivery (request_id, attempt)
 			return err
 		}
 	}
+	var hasBriefing bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_notices') WHERE name = 'briefing')`).Scan(&hasBriefing); err != nil {
+		return err
+	}
+	if !hasBriefing {
+		if _, err := tx.Exec(`ALTER TABLE task_notices ADD COLUMN briefing TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS task_briefing_state (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		last_day TEXT NOT NULL DEFAULT '',
+		last_at INTEGER NOT NULL DEFAULT 0,
+		after_event INTEGER NOT NULL DEFAULT 0
+	);
+	INSERT INTO task_briefing_state (id) VALUES (1) ON CONFLICT DO NOTHING;`); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -134,7 +154,7 @@ func taskAskNoticeTx(ctx context.Context, x execer, reqID string, status envelop
 // TaskNotices returns up to limit task changes not yet told to the hosts,
 // oldest first.
 func (s *Store) TaskNotices(ctx context.Context, limit int) ([]TaskNotice, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(task_id, 0), kind, status, actor, asker FROM task_notices ORDER BY id LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(task_id, 0), kind, status, actor, asker, briefing FROM task_notices ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -142,9 +162,16 @@ func (s *Store) TaskNotices(ctx context.Context, limit int) ([]TaskNotice, error
 	var out []TaskNotice
 	for rows.Next() {
 		var n TaskNotice
-		var status string
-		if err := rows.Scan(&n.ID, &n.TaskID, &n.Kind, &status, &n.Actor, &n.Asker); err != nil {
+		var status, briefing string
+		if err := rows.Scan(&n.ID, &n.TaskID, &n.Kind, &status, &n.Actor, &n.Asker, &briefing); err != nil {
 			return nil, err
+		}
+		if n.Kind == envelope.TaskNoticeBriefing {
+			var data TaskBriefing
+			if err := json.Unmarshal([]byte(briefing), &data); err != nil {
+				return nil, err
+			}
+			n.Briefing = &data
 		}
 		n.Status = envelope.TaskStatus(status)
 		out = append(out, n)

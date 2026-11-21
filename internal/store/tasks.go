@@ -528,7 +528,11 @@ func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Reques
 	if req.TaskActor != "" {
 		actor = req.TaskActor
 	}
-	_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: req.TaskID, Actor: actor, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}, s.now().UnixMilli())
+	ev := envelope.TaskEvent{TaskID: req.TaskID, Actor: actor, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}
+	if req.TaskOwnerWords != "" {
+		ev.Actor, ev.Body, ev.ForOwner = req.From, req.TaskOwnerWords, true
+	}
+	_, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
 	return err
 }
 

@@ -277,3 +277,116 @@ func (v taskView) closed(ctx context.Context, st *store.Store) (done, dropped in
 	}
 	return st.ClosedTasks(ctx, v.viewer)
 }
+
+// hostMayActForOwner guards actions the named host takes from a direct chat.
+// Work already open from a guest or a claimed request cannot authorize them.
+func (s *Server) hostMayActForOwner(w http.ResponseWriter, r *http.Request, from string) bool {
+	ctx := r.Context()
+	a, named, err := s.dir.Agent(ctx, from)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return false
+	}
+	if !named || !a.TaskHost {
+		writeErr(w, http.StatusForbidden, errNotTaskHost)
+		return false
+	}
+	if why := s.taskHostRefusal(a); why != "" {
+		writeErr(w, http.StatusForbidden, fmt.Errorf("you are suspended as a task host: %s; nothing was changed", why))
+		return false
+	}
+	if open, err := s.store.OpenGuestAsks(ctx, from); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return false
+	} else if open > 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideDuringGuestAsk)
+		return false
+	}
+	// Any claim in any session, counted, not the one-claim chain a schedule
+	// reads.
+	if claimed, err := s.store.HeldClaims(ctx, from, 1); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return false
+	} else if len(claimed) > 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideWhileClaimed)
+		return false
+	}
+	return true
+}
+
+func (s *Server) hostAssignTask(w http.ResponseWriter, r *http.Request, view taskView, id int64, to, words string) {
+	if to == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("assign needs to, the teammate to give the task to"))
+		return
+	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx := r.Context()
+	task, err := view.task(ctx, s.store, id)
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if task.Status == envelope.TaskProposed {
+		writeErr(w, http.StatusConflict, errors.New("the owner must approve this proposed task before assignment"))
+		return
+	}
+	if task.Withheld {
+		writeTaskErr(w, store.ErrNoTask)
+		return
+	}
+
+	a := taskAssign{TaskID: id, From: view.viewer, To: to, Actor: envelope.TaskOwner, Session: sess, OwnerHost: true, OwnerWords: words}
+	if task.CurrentRequest != "" {
+		_, err = s.reassignTask(ctx, a)
+	} else {
+		_, err = s.assignTask(ctx, a)
+	}
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.nonces.void(taskNonceID(id))
+	s.recordTask(r, "task_assigned", view.viewer, id, map[string]any{"for_owner": true, "to": to, "bytes": len(words)})
+	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
+}
+
+func (s *Server) handleHostAddTask(w http.ResponseWriter, r *http.Request, in taskAdd, from, sess string) {
+	if !s.hostMayActForOwner(w, r, from) {
+		return
+	}
+	if in.Source != "" {
+		writeErr(w, http.StatusBadRequest, errors.New("file work from an outside source as a proposed task without mine"))
+		return
+	}
+	if in.Assignee == "" {
+		in.Assignee = envelope.TaskOwner
+	}
+	ctx := r.Context()
+	if err := in.check(ctx, s); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if in.EverySeconds != 0 {
+		if err := s.checkScheduleCaller(ctx, from, sess); err != nil {
+			writeTaskErr(w, err)
+			return
+		}
+	}
+	if in.Assignee == envelope.TaskOwner {
+		if rp, ok := s.preparer().(RoomPolicy); ok {
+			if err := rp.Charge(from); err != nil {
+				writeErr(w, statusFor(err), err)
+				return
+			}
+		}
+	}
+	out, err := s.addTask(ctx, in, envelope.TaskOwner, from, nil, false, func(id int64) error {
+		_, err := s.assignTask(ctx, taskAssign{TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner, Session: sess, OwnerHost: true})
+		return err
+	})
+	s.writeAddedTask(w, r, in, from, out, err)
+}

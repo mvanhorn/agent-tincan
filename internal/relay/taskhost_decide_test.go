@@ -405,3 +405,43 @@ func TestTaskDueOnlyOwnerFilerOrHostOnWords(t *testing.T) {
 		t.Fatalf("cleared task = %+v", got)
 	}
 }
+
+func TestTaskHostAssignsOnTheOwnersWords(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	ctx := t.Context()
+	task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Send the contract"}).Task
+	// A host acting for the owner does not use up an agent assignment.
+	for range store.MaxAgentAssigns {
+		if err := m.Store.CountTaskAssign(ctx, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	words := "give the contract task to Instinct"
+	if _, err := client.HostAssignTask(ctx, m.muse, task.ID, "instinct", words); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("non-host assign = %v", err)
+	}
+	if _, err := client.HostAssignTask(ctx, m.grok, task.ID, "instinct", ""); !client.IsStatus(err, http.StatusBadRequest) {
+		t.Fatalf("assign with missing owner words = %v", err)
+	}
+	proposed := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Unapproved task", "source": "mail"}).Task
+	if _, err := client.HostAssignTask(ctx, m.grok, proposed.ID, "instinct", "assign it"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("assign of a proposed task = %v", err)
+	}
+	if got := m.task(t, proposed.ID); got.Status != envelope.TaskProposed || got.CurrentRequest != "" {
+		t.Fatalf("proposed task changed: %+v", got)
+	}
+	out, err := client.HostAssignTask(ctx, m.grok, task.ID, "instinct", words)
+	if err != nil || out.Status != envelope.TaskWorking || out.Assignee != "instinct" || out.AgentAssigns != store.MaxAgentAssigns {
+		t.Fatalf("host assignment = %+v, %v", out, err)
+	}
+	ev := m.lastEvent(t, task.ID)
+	if ev.Kind != envelope.TaskEventAssigned || ev.Actor != "grokbot" || !ev.ForOwner || ev.Body != words {
+		t.Fatalf("assignment event = %+v", ev)
+	}
+	in, err := m.instinct.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].TaskID != task.ID || in.Requests[0].From != "grokbot" ||
+		!strings.Contains(in.Requests[0].Body, "the owner assigned to you") || strings.Contains(in.Requests[0].Body, words) {
+		t.Fatalf("owner's assignment = %+v, %v", in, err)
+	}
+}

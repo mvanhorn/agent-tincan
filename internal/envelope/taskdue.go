@@ -7,7 +7,10 @@ import (
 	_ "time/tzdata" // Keep IANA zone support on hosts without a zone database.
 )
 
-const TaskNoticeReminder = "task-reminder"
+const (
+	TaskNoticeReminder = "task-reminder"
+	TaskNoticeBriefing = "task-briefing"
+)
 
 // TaskReminderMessage is the owner-facing text shared by delivery and fallback.
 func TaskReminderMessage(id int64) string {

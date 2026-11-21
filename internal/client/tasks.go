@@ -56,7 +56,8 @@ func taskCapabilities(ctx context.Context, c Rawer) (Capabilities, error) {
 // teammate, again that often, within the bounds of a scheduled ask's repeat.
 type TaskAdd struct {
 	envelope.TaskDue
-	Due          string `json:"-"` // resolved in the relay's task zone before sending
+	Mine         bool   `json:"mine,omitempty"` // file as the owner, for a named task host
+	Due          string `json:"-"`              // resolved in the relay's task zone before sending
 	Title        string `json:"title"`
 	Detail       string `json:"detail,omitempty"`
 	Assignee     string `json:"assignee,omitempty"`
@@ -77,9 +78,7 @@ type TaskResult struct {
 	AssignError string              `json:"assign_error,omitempty"`
 }
 
-// The owner's decisions on a task, for DecideTask. A task host makes
-// TaskDone, TaskReopen and TaskDrop on the owner's word, with
-// HostDecideTask.
+// Task actions available to the owner or a named host acting on their words.
 const (
 	TaskApprove = "approve"
 	TaskDone    = "done"
@@ -87,11 +86,14 @@ const (
 	TaskReset   = "reset"
 	TaskDrop    = "drop"
 	TaskDue     = "due"
+	TaskAssign  = "assign"
 )
 
 // ErrTaskHostDecisionsUnsupported identifies a relay that predates a task
 // host's decisions. Nothing was sent.
 var ErrTaskHostDecisionsUnsupported = errors.New("this relay does not take a task host's decisions; upgrade the relay")
+
+var errTaskHostDelegationUnsupported = errors.New("this relay does not support task host delegation; upgrade the relay")
 
 // tasksPath is the task routes' root: the calling agent's, or with owner
 // the admin routes, which only an admin device may call.
@@ -115,6 +117,9 @@ func AddTask(ctx context.Context, c Rawer, owner bool, a TaskAdd) (TaskResult, e
 	if err != nil {
 		return TaskResult{}, err
 	}
+	if a.Mine && !caps.TaskHostDelegation {
+		return TaskResult{}, errTaskHostDelegationUnsupported
+	}
 	if a.Due != "" {
 		a.TaskDue, err = caps.parseTaskDue(a.Due)
 		if err != nil {
@@ -127,6 +132,22 @@ func AddTask(ctx context.Context, c Rawer, owner bool, a TaskAdd) (TaskResult, e
 	err = c.Raw(ctx, "POST", tasksPath(owner), a, &out)
 	out.Task.DueZone = caps.TaskZone
 	return out, err
+}
+
+// TaskBriefingNow queues the current briefing through the admin route.
+func TaskBriefingNow(ctx context.Context, c Rawer) (bool, error) {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
+		return false, err
+	}
+	if !caps.TaskBriefings {
+		return false, errors.New("this relay does not support task briefings; upgrade the relay")
+	}
+	var out struct {
+		Queued bool `json:"queued"`
+	}
+	err = c.Raw(ctx, http.MethodPost, tasksPath(true)+"/briefing", nil, &out)
+	return out.Queued, err
 }
 
 // TaskCounts is how many done and dropped tasks a listing covers.
@@ -331,15 +352,27 @@ func DecideTask(ctx context.Context, c Rawer, decision string, id int64, note st
 // host while it holds a claimed request or a guest's ask is open with it. A
 // relay that does not advertise task host decisions is not called.
 func HostDecideTask(ctx context.Context, c Rawer, id int64, decision, words string) (envelope.Task, error) {
-	return hostDecideTask(ctx, c, id, decision, words, "")
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: decision, Words: words}, "")
 }
 
 // HostSetTaskDue changes a due date on the owner's words, which the relay records.
 func HostSetTaskDue(ctx context.Context, c Rawer, id int64, when, words string) (envelope.Task, error) {
-	return hostDecideTask(ctx, c, id, TaskDue, words, when)
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskDue, Words: words}, when)
 }
 
-func hostDecideTask(ctx context.Context, c Rawer, id int64, decision, words, when string) (envelope.Task, error) {
+// HostAssignTask assigns a task on the owner's words.
+func HostAssignTask(ctx context.Context, c Rawer, id int64, to, words string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskAssign, Words: words, To: to}, "")
+}
+
+type hostTaskDecision struct {
+	Decision string `json:"decision"`
+	Words    string `json:"owner_words"`
+	To       string `json:"to,omitempty"`
+	envelope.TaskDue
+}
+
+func hostDecideTask(ctx context.Context, c Rawer, id int64, in hostTaskDecision, when string) (envelope.Task, error) {
 	caps, err := taskCapabilities(ctx, c)
 	if err != nil {
 		return envelope.Task{}, err
@@ -347,12 +380,10 @@ func hostDecideTask(ctx context.Context, c Rawer, id int64, decision, words, whe
 	if !caps.TaskHostDecisions {
 		return envelope.Task{}, ErrTaskHostDecisionsUnsupported
 	}
-	in := struct {
-		Decision string `json:"decision"`
-		Words    string `json:"owner_words"`
-		envelope.TaskDue
-	}{Decision: decision, Words: words}
-	if decision == TaskDue {
+	if in.Decision == TaskAssign && !caps.TaskHostDelegation {
+		return envelope.Task{}, errTaskHostDelegationUnsupported
+	}
+	if in.Decision == TaskDue {
 		in.TaskDue, err = caps.parseTaskDue(when)
 		if err != nil {
 			return envelope.Task{}, err
@@ -370,6 +401,9 @@ func FormatHostDecision(t envelope.Task, decision string) string {
 	undo := "reopen it the same way"
 	if decision == TaskDue {
 		return FormatTaskDueChange(t)
+	}
+	if decision == TaskAssign {
+		return fmt.Sprintf("Assigned task #%d to %s for the owner. The owner's words are in its history.", t.ID, t.Assignee) + FormatTaskHeld(t)
 	}
 	if decision == TaskReopen {
 		undo = "mark it done or drop it the same way"

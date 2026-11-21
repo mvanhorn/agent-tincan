@@ -53,6 +53,9 @@ type taskAssign struct {
 	// claims From holds, as a scheduled ask's fire does. Every other
 	// assignment keeps the parent and chain rules of an ask From sends.
 	Repeat bool
+	// OwnerHost starts a fresh chain for an action the owner asked the host to take.
+	OwnerHost  bool
+	OwnerWords string
 }
 
 // actor is who the task's history names for the assignment.
@@ -93,7 +96,7 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 	actor := a.actor()
 	body, contributors := taskBody(carried, actor, limit)
 	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
-		TaskID: a.TaskID, TaskActor: actor, TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat})
+		TaskID: a.TaskID, TaskActor: actor, TaskOwnerWords: a.OwnerWords, TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat || a.OwnerHost})
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
@@ -329,6 +332,7 @@ func taskNonceID(id int64) string { return "task:" + strconv.FormatInt(id, 10) }
 // schedule with the bounds of a scheduled ask's every_seconds.
 type taskAdd struct {
 	envelope.TaskDue
+	Mine         bool   `json:"mine"`
 	Title        string `json:"title"`
 	Detail       string `json:"detail"`
 	Assignee     string `json:"assignee"`
@@ -544,6 +548,10 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if in.Mine {
+		s.handleHostAddTask(w, r, in, from, sess)
+		return
+	}
 	if err := in.check(r.Context(), s); err != nil {
 		writeTaskErr(w, err)
 		return
@@ -574,6 +582,10 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 	out, err := s.addTask(r.Context(), in, from, from, chain, proposed, func(id int64) error {
 		return s.agentAssign(r.Context(), taskAssign{TaskID: id, From: from, To: in.Assignee, Session: sess})
 	})
+	s.writeAddedTask(w, r, in, from, out, err)
+}
+
+func (s *Server) writeAddedTask(w http.ResponseWriter, r *http.Request, in taskAdd, actor string, out taskReply, err error) {
 	if err != nil {
 		writeTaskErr(w, err)
 		return
@@ -582,7 +594,7 @@ func (s *Server) handleAddTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	s.recordTask(r, "task_added", from, out.Task.ID, map[string]any{"status": out.Task.Status, "assignee": out.Task.Assignee, "bytes": len(in.Title) + len(in.Detail)})
+	s.recordTask(r, "task_added", actor, out.Task.ID, map[string]any{"status": out.Task.Status, "assignee": out.Task.Assignee, "bytes": len(in.Title) + len(in.Detail), "for_owner": in.Mine})
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -906,10 +918,11 @@ var (
 // each with the audit event the owner's own route writes for it. Approve and
 // reset are not among them: they stay with admin devices.
 var hostDecisions = map[string]string{
-	decisionDone:   "task_done",
-	decisionReopen: "task_reopened",
-	decisionDrop:   "task_dropped",
-	client.TaskDue: "task_due",
+	decisionDone:      "task_done",
+	decisionReopen:    "task_reopened",
+	decisionDrop:      "task_dropped",
+	client.TaskDue:    "task_due",
+	client.TaskAssign: "task_assigned",
 }
 
 // handleHostDecideTask applies a named host's decision on the owner's
@@ -929,44 +942,19 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Decision   string `json:"decision"`
 		OwnerWords string `json:"owner_words"`
+		To         string `json:"to"`
 		envelope.TaskDue
 	}
 	if !readTaskBody(w, r, &in, false) {
 		return
 	}
+	if !s.hostMayActForOwner(w, r, from) {
+		return
+	}
 	ctx := r.Context()
-	a, named, err := s.dir.Agent(ctx, from)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	if !named || !a.TaskHost {
-		writeErr(w, http.StatusForbidden, errNotTaskHost)
-		return
-	}
-	if why := s.taskHostRefusal(a); why != "" {
-		writeErr(w, http.StatusForbidden, fmt.Errorf("you are suspended as a task host: %s; nothing was changed", why))
-		return
-	}
-	if open, err := s.store.OpenGuestAsks(ctx, from); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	} else if open > 0 {
-		writeErr(w, http.StatusConflict, errTaskDecideDuringGuestAsk)
-		return
-	}
-	// Any claim in any session, counted, not the one-claim chain a schedule
-	// reads.
-	if claimed, err := s.store.HeldClaims(ctx, from, 1); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	} else if len(claimed) > 0 {
-		writeErr(w, http.StatusConflict, errTaskDecideWhileClaimed)
-		return
-	}
 	event, known := hostDecisions[in.Decision]
 	if !known {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen, drop or due; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen, drop, assign or due; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
 		return
 	}
 	if strings.TrimSpace(in.OwnerWords) == "" {
@@ -978,6 +966,10 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := taskView{viewer: from, host: true}
+	if in.Decision == client.TaskAssign {
+		s.hostAssignTask(w, r, view, id, in.To, in.OwnerWords)
+		return
+	}
 	task, err := view.whole(ctx, s.store, id)
 	if err != nil {
 		writeTaskErr(w, err)
@@ -1131,6 +1123,10 @@ func (s *Server) handleAdminAddTask(w http.ResponseWriter, r *http.Request) {
 	}
 	var in taskAdd
 	if !readTaskBody(w, r, &in, false) {
+		return
+	}
+	if in.Mine {
+		writeErr(w, http.StatusBadRequest, errors.New("mine files as the owner from a named task host; this route already files as the owner"))
 		return
 	}
 	if in.Source != "" {

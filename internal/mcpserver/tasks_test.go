@@ -702,3 +702,36 @@ func TestTaskDueTools(t *testing.T) {
 		t.Fatalf("updateTask due = %q", out)
 	}
 }
+
+func TestTaskHostFilesForOwnerWithDueDate(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	host := session(t, m, "grokbot")
+	fields := map[string]any{"mine": true, "title": "Call the dentist", "detail": "Ask about a cleaning", "due": "2030-11-29 3pm"}
+	if out := call(t, host, "add_task", fields); !strings.HasPrefix(out, "ERROR:") {
+		t.Fatalf("owner task filed by a regular agent: %s", out)
+	}
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "grokbot", true); err != nil {
+		t.Fatal(err)
+	}
+	if out := call(t, host, "add_task", fields); !strings.Contains(out, "Due 2030-11-29 15:00 PST.") {
+		t.Fatalf("file for owner with due date = %q", out)
+	}
+	task, _, err := client.Task(ctx, m.Client(t, "admin"), true, 1)
+	if err != nil || task.Title != "Call the dentist" || task.Detail != "Ask about a cleaning" ||
+		task.Filer != envelope.TaskOwner || task.Assignee != envelope.TaskOwner || task.DueDay != "2030-11-29" || task.DueAt == nil {
+		t.Fatalf("owner task = %+v, %v", task, err)
+	}
+	fields["to"] = "muse"
+	if out := call(t, host, "add_task", fields); !strings.Contains(out, "assigned to muse") {
+		t.Fatalf("file and assign for owner = %q", out)
+	}
+	task, _, err = client.Task(ctx, m.Client(t, "admin"), true, 2)
+	if err != nil || task.Filer != envelope.TaskOwner || task.Status != envelope.TaskWorking || task.Assignee != "muse" || task.AgentAssigns != 0 {
+		t.Fatalf("owner task handed off = %+v, %v", task, err)
+	}
+	out := call(t, host, "decide_task", map[string]any{"task_id": 1, "decision": "assign", "to": "muse", "owner_words": "give the dentist task to muse"})
+	if !strings.Contains(out, "Assigned task #1 to muse for the owner.") {
+		t.Fatalf("decide_task assign = %q", out)
+	}
+}

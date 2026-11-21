@@ -71,6 +71,11 @@ func start(t *testing.T, cfg relay.Config, adminLogins []string, wrap func(ident
 		ids = wrap(st)
 	}
 	dir := identity.NewDirectory(ids, identity.WithVirtual(who), identity.Config{Admins: []string{"macbook-pro-44"}, AdminLogins: adminLogins})
+	// Tests opt in to scheduled briefings so a sweep does not depend on
+	// the wall time of the machine running the suite.
+	if cfg.TaskBriefing == "" {
+		cfg.TaskBriefing = "off"
+	}
 	srv := relay.New(dir, st, cfg)
 	srv.SetPreparer(policy.New(st, policy.Config{}))
 	m := &Mesh{Server: srv, Store: st, Dir: dir, Who: who, urls: map[string]string{}, addrs: map[string]string{}, h: srv.Handler()}

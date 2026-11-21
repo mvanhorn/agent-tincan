@@ -59,7 +59,7 @@ func (m *taskMesh) joinHost(t *testing.T, machine, name string) *client.Relay {
 // notices returns every task notice ever queued for agent, oldest first.
 func (m *taskMesh) notices(t *testing.T, agent string) []sentNotice {
 	t.Helper()
-	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind IN ('task', 'task-reminder') ORDER BY rowid`, agent)
+	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind IN ('task', 'task-reminder', 'task-briefing') ORDER BY rowid`, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func read(t *testing.T, c *client.Relay) []envelope.Request {
 	}
 	var out []envelope.Request
 	for _, req := range in.Requests {
-		if req.From == client.RelaySender && strings.Contains(req.Body, taskNoticeEnd) {
+		if req.From == client.RelaySender && (strings.Contains(req.Body, taskNoticeEnd) || req.TaskNoticeKind == envelope.TaskNoticeBriefing) {
 			out = append(out, req)
 		}
 	}

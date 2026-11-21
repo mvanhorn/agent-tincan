@@ -147,6 +147,9 @@ type Request struct {
 	// is not From: the owner, whose assign goes out as one of the owner's
 	// agents. Relay-only, and not stored on the request.
 	TaskActor string `json:"-"`
+	// TaskOwnerWords records a task host's direct authorization to assign.
+	// Only the task history stores it. The assignment body never carries it.
+	TaskOwnerWords string `json:"-"`
 	// TaskResultEvent is, on a task's ask being sent, the id of the task
 	// history entry that stored the result its body carries, 0 for a task
 	// with none. The store takes the task for the ask only while that is
