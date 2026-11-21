@@ -769,8 +769,9 @@ func TestUnreadReminderExpiresInsteadOfSendingLate(t *testing.T) {
 	m.Server.Sweep(ctx)
 	m.Server.Sweep(ctx)
 	m.wantNotices(t, "pilot", 1)
-	if got := read(t, m.scout); len(got) != 0 {
-		t.Fatalf("late reminder sent to fallback = %+v", got)
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 0 {
+		t.Fatalf("late reminder sent to fallback = %+v, %v", in, err)
 	}
 	events := m.events(t, res.Task.ID)
 	if len(events) != 2 || events[1].Kind != envelope.TaskEventReminderDropped {
@@ -806,7 +807,8 @@ func TestTaskReminderFallbackCancelledWhenDueChanges(t *testing.T) {
 	if _, err := client.SetTaskDue(ctx, m.admin, true, res.Task.ID, "clear"); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, m.scout); len(got) != 0 {
-		t.Fatalf("fallback delivered after due cleared = %+v", got)
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 0 {
+		t.Fatalf("fallback delivered after due cleared = %+v, %v", in, err)
 	}
 }
