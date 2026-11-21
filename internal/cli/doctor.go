@@ -54,7 +54,7 @@ the tools can still run it from a shell.
 
 It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, on an admin device any webhook or email agent that
-was woken and has not checked in, this machine's Tailscale (its version against
+was woken and has not checked in and whether task hosts have a fallback, this machine's Tailscale (its version against
 the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
 tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
@@ -166,6 +166,12 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		add(webStatusCheck(ctx, r))
 		add(webLimitCheck(ctx, r, time.Now()))
 	}
+	// An admin device can read the roster without joining as an agent.
+	if !guest && (joined || client.IsNotJoined(err)) {
+		if warn := taskFallbackCheck(ctx, r); warn != nil {
+			add(*warn)
+		}
+	}
 
 	// 2c. This host's Tailscale, which matters joined or not.
 	var joinedRelay *client.Relay
@@ -214,6 +220,20 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		rep.Fix = hostFix(exe)
 	}
 	return rep
+}
+
+// taskFallbackCheck warns on an admin device when a named host has no fallback.
+func taskFallbackCheck(ctx context.Context, r *client.Relay) *check {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	status, err := r.TaskFallback(ctx)
+	if err != nil || status == nil {
+		return nil
+	}
+	if warning := status.Warning(); warning != "" {
+		return &check{"task fallback", "warn", warning, client.TaskFallbackFix}
+	}
+	return nil
 }
 
 // unansweredCheck lists the webhook and email agents whose last wake went

@@ -624,6 +624,8 @@ Members post and read with `tincan room post launch "@claude-code review the pla
 
 ### Tasks
 
+See [Task deadlines, briefings and chat delegation](docs/tasks.md) for setup and private chat examples.
+
 The relay keeps one task list for the whole team: what is wanted, who has it, and what came back. A task stays on the relay machine until you mark it done or drop it, so work that should outlive a conversation has a place to wait. You and every joined agent can add to it; guests cannot.
 
 Each attempt at a task is one ordinary ask. Assigning a task sends the teammate an ask that carries the task's title, what is wanted, the latest earlier result and the comments made since, and the teammate is woken as for any ask. Its reply updates the task: an answer hands the task back as returned with the result stored, a `needs_input` reply shows it as a question, and a failure, decline, expiry, cancel or owner denial puts it back to open with no assignee and the reason in its history. A task has at most one open ask under it.
@@ -660,6 +662,8 @@ Add a deadline with `tincan tasks add "Call the dentist" --due "Friday 3pm"`. Us
 In MCP, use `due` on `add_task` or `update_task` with action `due` and `when`. The owner or filer can change the deadline. A named host takes changes on the owner's direct words through `decide_task` with decision `due` and `when`, or `tincan tasks decide 12 due Friday 3pm --words "make 12 due Friday at 3pm"`.
 
 The relay sends a morning briefing to named task hosts at 07:00 in the relay's task zone by default. It shows due or overdue work, tasks waiting on you, recent completions, one suggested task and unconfirmed news. Set `--task-briefing HH:MM` and `--task-briefing-zone <IANA-zone>` to change the schedule, or `--task-briefing off` to turn off the daily briefing.
+
+Set `notify` in the relay's `approval.json` to a joined agent that can alert you if task news exhausts the host's attempts. The relay logs a warning at startup if hosts have no fallback, and `tincan doctor` reports it on an admin device.
 
 A named task host can assign on your direct words with `decide_task` decision `assign` and `to`, or `tincan tasks decide 12 assign --to muse --words "give 12 to muse"`. It can file from your words using `add_task` with `mine`, an optional `due`, and an optional `to`.
 

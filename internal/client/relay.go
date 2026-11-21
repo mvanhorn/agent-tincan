@@ -211,7 +211,8 @@ const (
 
 // Roster is the relay's agent list with what the relay says about itself.
 type Roster struct {
-	Agents []AgentInfo `json:"agents"`
+	TaskFallback *TaskFallbackStatus `json:"task_fallback,omitempty"`
+	Agents       []AgentInfo         `json:"agents"`
 	// RelayVersion is the tincan build the relay runs, "" from a relay
 	// that predates it.
 	RelayVersion string `json:"relay_version,omitempty"`

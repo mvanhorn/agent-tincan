@@ -1,8 +1,10 @@
 package relay_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
 func TestTaskNoticeReceiptsAreScopedAndAtomic(t *testing.T) {
@@ -192,5 +195,84 @@ func TestTaskNoticeFallsBackWhenHostLosesEligibility(t *testing.T) {
 				t.Fatalf("fallback audit = %v", got)
 			}
 		})
+	}
+}
+
+func TestTaskFallbackStatusIsAdminOnly(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	ctx := t.Context()
+	if got, err := m.grok.TaskFallback(ctx); err != nil || got != nil {
+		t.Fatalf("ordinary agent task fallback = %+v, %v", got, err)
+	}
+	for _, set := range []bool{false, true} {
+		if set {
+			m.gate(t, `{"gate":{},"notify":"instinct"}`)
+		}
+		got, err := m.admin.TaskFallback(ctx)
+		if err != nil || got == nil || got.NotifySet != set || len(got.Hosts) != 1 || got.Hosts[0] != "muse" {
+			t.Fatalf("admin task fallback = %+v, %v", got, err)
+		}
+	}
+}
+
+func TestTaskNoticeFallbackWakesEmailAgent(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	m.gate(t, `{"gate":{},"notify":"instinct"}`)
+	ctx := t.Context()
+	mail := make(chan map[string]string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/inboxes/relay@agentmail.to/messages/send" {
+			t.Errorf("email request = %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		var msg map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mail <- msg
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	waker := wake.New(wake.Config{"instinct": {
+		Method: wake.Email, EmailTo: "instinct@example.com", AgentMailFrom: "relay@agentmail.to",
+		AgentMailKey: "test-key", IncludeRequests: true,
+	}}, m.Store, wake.Options{
+		Debounce: time.Millisecond, WakeGrace: -1, AgentMailAPI: srv.URL, HTTP: srv.Client(),
+		Queued: m.Server.QueuedCount, OpenAsks: m.Server.OpenAsks, RequestTag: m.Server.RequestEmailTag,
+	})
+	m.Server.SetEvents(waker)
+	m.Server.SetWakeSettings(waker)
+	task := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Private outside title", "source": "mail"}).Task
+	for range 3 {
+		got := read(t, m.muse)
+		if len(got) != 1 {
+			t.Fatalf("host attempt = %+v", got)
+		}
+		if _, err := m.muse.Claim(ctx, got[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+		m.Server.Sweep(ctx)
+	}
+	waker.Flush()
+	select {
+	case msg := <-mail:
+		if msg["to"] != "instinct@example.com" || !strings.Contains(msg["text"], "1 request waiting") ||
+			strings.Contains(msg["text"], task.Title) {
+			t.Fatalf("email wake = %+v", msg)
+		}
+	default:
+		t.Fatal("no email wake was sent")
+	}
+	in, err := m.instinct.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 1 || !strings.Contains(in.Requests[0].Body, fmt.Sprintf("Task #%d", task.ID)) ||
+		strings.Contains(in.Requests[0].Body, task.Title) {
+		t.Fatalf("fallback agent inbox = %+v, %v", in, err)
 	}
 }
