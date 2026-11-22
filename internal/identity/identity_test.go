@@ -400,6 +400,31 @@ func TestMachineFacts(t *testing.T) {
 	}
 }
 
+// Peers lists every mapped node by machine name, with live tags and the
+// online marks SetOnline recorded.
+func TestPeersListsNodesByName(t *testing.T) {
+	ctx := context.Background()
+	who := identitytest.New(map[string]identity.Node{
+		"100.0.3.1:1": {ID: "nB", Name: "bravo", User: "u@example.com", Tags: []string{"tag:agent"}},
+		"100.0.3.2:1": {ID: "nA", Name: "alpha", User: "u@example.com"},
+	})
+	who.SetOnline("nA", true)
+	dir := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{})
+	peers, err := dir.Peers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 2 || peers[0].Name != "alpha" || peers[1].Name != "bravo" {
+		t.Fatalf("peers: %+v, want alpha then bravo", peers)
+	}
+	if !peers[0].Online || peers[1].Online {
+		t.Errorf("online: alpha=%v bravo=%v, want true false", peers[0].Online, peers[1].Online)
+	}
+	if len(peers[1].Tags) != 1 || peers[1].Tags[0] != "tag:agent" {
+		t.Errorf("bravo tags: %q, want the agent tag", peers[1].Tags)
+	}
+}
+
 // With --admin-login set, the node's owning login must also match.
 func TestAdminLoginRestrictsOwner(t *testing.T) {
 	dir := adminFixture(t, []string{"mvanhorn@gmail.com"})

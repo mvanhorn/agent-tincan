@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -23,6 +24,21 @@ type Node struct {
 // Resolver answers which tailnet node a connection came from.
 type Resolver interface {
 	WhoIs(ctx context.Context, remoteAddr string) (Node, error)
+}
+
+// Peer is one tailnet node as the tailnet sees it now.
+type Peer struct {
+	Node
+	// Online reports whether the node is connected to the control plane.
+	Online bool
+	// Self marks the relay's own node.
+	Self bool
+}
+
+// PeerLister is an optional Resolver extension that lists every node on
+// the tailnet as the tailnet sees it now, this node first.
+type PeerLister interface {
+	Peers(ctx context.Context) ([]Peer, error)
 }
 
 // LocalResolver asks a tailscaled LocalAPI. The relay uses the tsnet
@@ -81,6 +97,41 @@ func (r *LocalResolver) NodeOnline(ctx context.Context, stableID string) (online
 		}
 	}
 	return false, false, nil
+}
+
+// Peers implements PeerLister from the tailnet peer list, this node
+// first, then the rest by machine name.
+func (r *LocalResolver) Peers(ctx context.Context) ([]Peer, error) {
+	st, err := r.lc.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tailnet status: %w", err)
+	}
+	var out []Peer
+	if st.Self != nil {
+		out = append(out, peerStatus(st, st.Self, true))
+	}
+	for _, p := range st.Peer {
+		out = append(out, peerStatus(st, p, false))
+	}
+	if len(out) > 1 {
+		slices.SortFunc(out[1:], func(a, b Peer) int { return strings.Compare(a.Name, b.Name) })
+	}
+	return out, nil
+}
+
+func peerStatus(st *ipnstate.Status, p *ipnstate.PeerStatus, self bool) Peer {
+	peer := Peer{Online: p.Online, Self: self}
+	if p == nil {
+		return peer
+	}
+	peer.ID, peer.Name = string(p.ID), shortName(p.DNSName)
+	if p.Tags != nil {
+		peer.Tags = p.Tags.AsSlice()
+	}
+	if u, ok := st.User[p.UserID]; ok {
+		peer.User = u.LoginName
+	}
+	return peer
 }
 
 // LookupNode implements NodeLookup from the tailnet peer list.

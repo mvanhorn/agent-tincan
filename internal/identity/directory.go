@@ -796,6 +796,20 @@ func (d *Directory) IsAdmin(ctx context.Context, remoteAddr string) bool {
 // the Tailscale admin panel read it here.
 func (d *Directory) AdminTag() string { return d.cfg.AdminTag }
 
+// Peers lists every tailnet node for the setup console's device list.
+// Only admin callers reach it (see handlePeers).
+func (d *Directory) Peers(ctx context.Context) ([]Peer, error) {
+	who := d.who
+	if v, ok := who.(virtualResolver); ok {
+		who = v.Resolver
+	}
+	pl, ok := who.(PeerLister)
+	if !ok {
+		return nil, errors.New("resolver has no tailnet peer list")
+	}
+	return pl.Peers(ctx)
+}
+
 func (d *Directory) requireAdmin(ctx context.Context, remoteAddr string) error {
 	if remoteAddr == LocalAdmin {
 		return nil

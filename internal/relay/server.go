@@ -548,6 +548,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/admin/wake-config", s.handleWakeSettings)
 	mux.HandleFunc("PUT /v1/admin/wake-config/{agent}", s.handleWakeSettings)
 	mux.HandleFunc("GET /v1/admin/kinds", s.handleKinds)
+	mux.HandleFunc("GET /v1/admin/peers", s.handlePeers)
 	mux.HandleFunc("GET /v1/admin/held", s.handleHeld)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/deny", s.handleDeny)

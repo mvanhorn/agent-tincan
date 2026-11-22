@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/mvanhorn/agent-tincan/internal/identity"
@@ -73,6 +75,24 @@ func (r *Resolver) WhoIs(_ context.Context, addr string) (identity.Node, error) 
 		return identity.Node{}, fmt.Errorf("whois %s: not a tailnet peer", addr)
 	}
 	return n, nil
+}
+
+// Peers implements identity.PeerLister over the mapped nodes, by machine
+// name. A node is online only after SetOnline named its stable id.
+func (r *Resolver) Peers(_ context.Context) ([]identity.Peer, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := map[string]bool{}
+	var out []identity.Peer
+	for _, n := range r.nodes {
+		if seen[n.ID] {
+			continue
+		}
+		seen[n.ID] = true
+		out = append(out, identity.Peer{Node: n, Online: r.online[n.ID]})
+	}
+	slices.SortFunc(out, func(a, b identity.Peer) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
 }
 
 // LookupNode implements identity.NodeLookup: the node with stable id, as

@@ -16,7 +16,7 @@ import (
 // adminSetupRoutes are the page, its files, and the data the setup
 // console reads. /v1/agents is read by joined agents too, so it is
 // covered separately below.
-var adminSetupRoutes = []string{"/admin/", "/admin/app.js", "/admin/style.css", "/v1/admin/urls", "/v1/admin/kinds"}
+var adminSetupRoutes = []string{"/admin/", "/admin/app.js", "/admin/style.css", "/v1/admin/urls", "/v1/admin/kinds", "/v1/admin/peers"}
 
 // An admin device loads the setup console and its data; a joined agent and
 // a stranger get 403 on every route, static files included.
@@ -116,6 +116,51 @@ func TestAdminVerdictOnRoster(t *testing.T) {
 	}
 	if got := byName["muse"]; got.NodeAdmin {
 		t.Error("muse: admin=true, want false")
+	}
+}
+
+// The peer list names every tailnet node with its live tags and online
+// state, for admin eyes only.
+func TestAdminPeersListsTailnet(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Who.Set(m.Addr("grokbot"), identity.Node{ID: "nGROK", Name: "grok-bot", User: testrelay.Login, Tags: []string{"tag:agent"}})
+	m.Who.SetOnline("nGROK", true)
+	admin := hardened(t, m, "admin")
+	code, body, _ := browserCall(t, "GET", admin, "/v1/admin/peers", "127.0.0.1", "", sameSite)
+	if code != http.StatusOK {
+		t.Fatalf("peers: %d %s", code, body)
+	}
+	var out struct {
+		Peers []struct {
+			ID     string   `json:"id"`
+			Name   string   `json:"name"`
+			Tags   []string `json:"tags"`
+			User   string   `json:"user"`
+			Online bool     `json:"online"`
+			Self   bool     `json:"self"`
+		} `json:"peers"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]int{}
+	for i, p := range out.Peers {
+		byName[p.Name] = i
+	}
+	grok, ok := byName["grok-bot"]
+	if !ok {
+		t.Fatalf("peers: %v, want grok-bot", out.Peers)
+	}
+	if !out.Peers[grok].Online || len(out.Peers[grok].Tags) != 1 || out.Peers[grok].Tags[0] != "tag:agent" {
+		t.Errorf("grok-bot: %+v, want online with the agent tag", out.Peers[grok])
+	}
+	if _, ok := byName["macbook-pro-44"]; !ok {
+		t.Errorf("peers: %v, want the admin machine", out.Peers)
+	}
+	for who, base := range map[string]string{"joined agent": hardened(t, m, "grokbot"), "stranger": hardened(t, m, "stranger")} {
+		if code, _, _ := browserCall(t, "GET", base, "/v1/admin/peers", "127.0.0.1", "", sameSite); code != http.StatusForbidden {
+			t.Errorf("%s GET /v1/admin/peers: %d, want 403", who, code)
+		}
 	}
 }
 
