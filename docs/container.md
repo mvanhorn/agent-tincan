@@ -55,6 +55,9 @@ laptop. From there:
 1. **Add an agent**: pick a name and kind, mint an invite, and run the
    printed commands on the agent's machine — install tincan first if
    needed, then `tincan join`. The code expires after 10 minutes.
+   The **Tailnet devices** section lists every machine on the tailnet
+   (admin eyes only) with a per-device invite button that fills the
+   form in, so you can spot a new box and invite it in one motion.
 2. **Configure an agent**: open its entry to set its kind and good-at
    line, save a webhook wake URL for it, check or grant its machine's
    admin access, or remove it. Removal revokes its tokens and cancels
