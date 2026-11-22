@@ -845,3 +845,64 @@ func TestTaskWithReferencedRoomTextIsWithheldFromOtherHosts(t *testing.T) {
 		t.Fatalf("invalid reference should file a normal task: %+v, %v", req, err)
 	}
 }
+
+func TestClarificationAnswerRestartsTaskStallTimer(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", TaskNudgeAfter: time.Minute, TaskStallAfter: 2 * time.Minute})
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check the shipment"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	claimOne(t, m.muse, req.ID)
+	m.clk.advance(2 * time.Minute)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", 1)
+	if _, err := m.muse.Reply(ctx, req.ID, "Which shipment?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(5 * time.Minute)
+	if _, err := m.grok.Answer(ctx, req.ID, "Shipment 25"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.HostRetryTask(ctx, m.scout, task.ID, "instinct", "Check the dispatch desk"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("retry after fresh input: %v", err)
+	}
+	if _, err := client.HostCompleteTask(ctx, m.scout, task.ID, "Dispatched"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("complete after fresh input: %v", err)
+	}
+	m.Server.Sweep(ctx)
+	before := len(m.notices(t, "scout"))
+	m.clk.advance(2*time.Minute - time.Second)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", before)
+	m.clk.advance(time.Second)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", before+1)
+}
+
+func TestFollowupsAttachWhileParentNeedsInput(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check the shipment"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	claimOne(t, m.muse, req.ID)
+	if _, err := m.muse.Reply(ctx, req.ID, "Which shipment?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	for _, follow := range []struct{ about, body string }{
+		{fmt.Sprint(task.ID), "Can you check the dispatch desk?"},
+		{"", "Check whether we have the reference for ask " + req.ID},
+	} {
+		sent, err := m.grok.Send(client.WithAskAbout(ctx, follow.about), "instinct", follow.body, envelope.KindAsk, "", false)
+		if err != nil || sent.TaskID != 0 {
+			t.Fatalf("follow-up created its own task: %+v, %v", sent, err)
+		}
+		if _, err := m.instinct.Reply(ctx, sent.ID, "Shipment 25", envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+		events := m.events(t, task.ID)
+		if last := events[len(events)-1]; last.Kind != envelope.TaskEventComment || !strings.Contains(last.Body, sent.ID) {
+			t.Fatalf("follow-up reply missing from parent: %+v", events)
+		}
+	}
+}

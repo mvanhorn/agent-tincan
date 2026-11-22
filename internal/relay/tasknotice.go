@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -217,15 +218,9 @@ func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, eligible
 		if n.Kind != envelope.TaskNoticeStall && n.Kind != envelope.TaskNoticeAction && n.Retries == 0 && host == n.Asker && (s.wake == nil || s.wake.WakeMethod(host) != "webhook" || n.Status == envelope.TaskProposed) {
 			continue
 		}
-		var hostBody string
-		var err error
-		if n.Briefing != nil {
-			hostBody, err = s.hostBriefingBody(ctx, host, n.Briefing, body)
-		} else {
-			hostBody, err = s.hostNoticeBody(ctx, n, host, body)
-		}
-		if err != nil {
-			return err
+		hostBody := hostNoticePayload(body, body)
+		if n.Briefing == nil {
+			hostBody = s.hostNoticeBody(n, body)
 		}
 		notice := envelope.Request{From: client.RelaySender, To: host, Kind: envelope.KindNotify, Hop: 1, Chain: []string{client.RelaySender}, Body: hostBody}
 		notice, queued, err := s.store.EnqueueTaskNotice(ctx, n, notice, s.requestTTL(ctx, host))
@@ -253,22 +248,8 @@ func (s *Server) hostNoticeTitle(ctx context.Context, id int64, host string) (st
 	return taskNoticeTitle(task.Title), nil
 }
 
-func (s *Server) hostNoticeBody(ctx context.Context, n store.TaskNotice, host, base string) (string, error) {
-	var title string
-	view, err := s.hostTaskView(ctx, host)
-	if err != nil {
-		return "", err
-	}
-	if view.host {
-		title, err = s.hostNoticeTitle(ctx, n.TaskID, host)
-		if err != nil {
-			return "", err
-		}
-	}
+func (s *Server) hostNoticeBody(n store.TaskNotice, base string) string {
 	label := fmt.Sprintf("Task #%d", n.TaskID)
-	if title != "" {
-		label += " " + title
-	}
 	var news string
 	switch n.Kind {
 	case envelope.TaskNoticeReminder:
@@ -294,7 +275,59 @@ func (s *Server) hostNoticeBody(ctx context.Context, n store.TaskNotice, host, b
 			news += " If still blocked, retry with a different approach or take it on yourself."
 		}
 	}
-	return hostNoticePayload(base, label+": "+news), nil
+	return hostNoticePayload(base, label+": "+news)
+}
+
+var briefingTaskReference = regexp.MustCompile(`task #([0-9]+)`)
+
+// renderTaskNotice adds titles only to the response. Stored notices and
+// retries carry metadata, so other request readers never get cached titles.
+func (s *Server) renderTaskNotice(ctx context.Context, req *envelope.Request) {
+	markTaskNotice(req)
+	if !req.TaskNoticeReceipt {
+		return
+	}
+	base, rest, ok := strings.Cut(req.Body, "\n"+client.TaskNoticeMessagePrefix)
+	if !ok {
+		return
+	}
+	message, _, _ := strings.Cut(rest, "\n")
+	var label string
+	if req.TaskNoticeKind == envelope.TaskNoticeBriefing {
+		message = base
+	} else {
+		label = fmt.Sprintf("Task #%d", req.TaskNoticeID)
+		if !strings.HasPrefix(message, label+": ") {
+			// A notice saved by an earlier build may contain a cached title.
+			message = client.TaskNoticeFallbackMessage(*req)
+		}
+	}
+	defer func() { req.Body = hostNoticePayload(base, message) }()
+	view, err := s.hostTaskView(ctx, req.To)
+	if err != nil || !view.host {
+		return
+	}
+	if req.TaskNoticeKind != envelope.TaskNoticeBriefing {
+		if title, err := s.hostNoticeTitle(ctx, req.TaskNoticeID, req.To); err == nil && title != "" {
+			message = strings.Replace(message, label, label+" "+title, 1)
+		}
+		return
+	}
+	var titles []string
+	seen := make(map[int64]bool)
+	for _, ref := range briefingTaskReference.FindAllStringSubmatch(base, -1) {
+		id := taskNoticeID(ref[1])
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if title, err := s.hostNoticeTitle(ctx, id, req.To); err == nil && title != "" {
+			titles = append(titles, fmt.Sprintf("#%d %s", id, title))
+		}
+	}
+	if len(titles) > 0 {
+		message += " Task titles: " + strings.Join(titles, ", ") + "."
+	}
 }
 
 func hostNoticePayload(base, message string) string {

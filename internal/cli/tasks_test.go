@@ -582,3 +582,40 @@ func TestTasksAllShowsQuietAsks(t *testing.T) {
 		}
 	}
 }
+
+func TestTasksDecideRetryAndCompleteFromTheShell(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "muse", true); err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.AddTask(ctx, m.Client(t, "grokbot"), false, client.TaskAdd{Title: "Check the shipment"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	id := fmt.Sprint(task.Task.ID)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"retry", "--to", "instinct"}, "requires --to and --reason"},
+		{[]string{"retry", "--to", "instinct", "--reason", "Try dispatch", "--words", "Do it"}, "without --words"},
+		{[]string{"complete"}, "requires --result"},
+		{[]string{"complete", "--result", " ", "--words", "Done"}, "without --words"},
+	} {
+		_, err := run(t, tasksCmd(), append([]string{"decide", id}, tc.args...)...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+	}
+	tasksRun(t, []string{"decide", id, "retry", "--to", "instinct", "--reason", "Try the dispatch desk"}, "retry 1 of 2")
+	working := taskNow(t, m, task.Task.ID)
+	if _, err := m.Client(t, "instinct").Reply(ctx, working.CurrentRequest, "Verified.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"decide", id, "complete", "--result", "Confirmed at the desk"}, "Closed task #"+id)
+	if got := taskNow(t, m, task.Task.ID); got.Status != envelope.TaskDone || got.Result != "Confirmed at the desk" {
+		t.Fatalf("completion = %+v", got)
+	}
+}

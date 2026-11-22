@@ -623,9 +623,13 @@ func FormatInbox(ctx context.Context, c Claimer, in Inbox) string {
 		if req.Kind == envelope.KindPing {
 			continue
 		}
-		if _, err := c.Claim(ctx, req.ID); err != nil {
+		claimed, err := c.Claim(ctx, req.ID)
+		if err != nil {
 			fmt.Fprintf(&b, "(could not claim %s: %v)\n", req.ID, err)
 			continue
+		}
+		if req.TaskNoticeReceipt && claimed.Body != "" {
+			req.Body = claimed.Body
 		}
 		b.WriteString(FormatRequest(req))
 		if guidance := in.TaskNoticeGuidance(req); guidance != "" {

@@ -194,7 +194,7 @@ func TestTaskNoticeWhenOwnerAssignedTaskReturns(t *testing.T) {
 
 	for _, host := range []string{"pilot", "keeper"} {
 		n := m.wantNotice(t, host, task.ID, "returned", "instinct", "ready for review")
-		if n.Status != envelope.StatusQueued || !strings.Contains(n.Body, "Renew the passport") {
+		if n.Status != envelope.StatusQueued || strings.Contains(n.Body, "Renew the passport") {
 			t.Fatalf("notice for %s is %s, want queued", host, n.Status)
 		}
 		if got := wakes.count(host); got != 1 {
@@ -825,5 +825,49 @@ func TestTaskNoticeTitleIsOneLineAndTruncated(t *testing.T) {
 	if len(got) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(got[0]), want+": muse sent a result.") ||
 		strings.ContainsAny(got[0].Body, "\u202e\x1b") {
 		t.Fatalf("notice title = %+v, want %q", got, want)
+	}
+}
+
+func TestTaskNoticeTitlesRecheckedOnPollAndClaim(t *testing.T) {
+	for _, revokeBeforePoll := range []bool{true, false} {
+		t.Run(fmt.Sprintf("revoke-before-poll=%t", revokeBeforePoll), func(t *testing.T) {
+			m, guest := guestMesh(t, relay.Config{TaskBriefing: "off"})
+			ctx := t.Context()
+			admin, host := m.Client(t, "admin"), m.Client(t, "muse")
+			if _, err := admin.SetTaskHost(ctx, "muse", true); err != nil {
+				t.Fatal(err)
+			}
+			const title = "Quarterly inventory status"
+			grok, worker := m.Client(t, "grokbot"), m.Client(t, "instinct")
+			task := taskDo(t, grok, "POST", "/v1/tasks", map[string]string{"title": title, "assignee": "instinct"}).Task
+			if _, err := worker.Reply(ctx, task.CurrentRequest, "Inventory verified.", envelope.StatusAnswered); err != nil {
+				t.Fatal(err)
+			}
+			if queued, err := client.TaskBriefingNow(ctx, admin); err != nil || !queued {
+				t.Fatalf("briefing queued = %t, %v", queued, err)
+			}
+			revoke := func() { approve(t, m, guestAsk(t, guest, "Check today's hours").ID) }
+			if revokeBeforePoll {
+				revoke()
+			}
+			notices := read(t, host)
+			if len(notices) != 2 {
+				t.Fatalf("expected a status notice and briefing, got %+v", notices)
+			}
+			for _, notice := range notices {
+				if strings.Contains(notice.Body, title) == revokeBeforePoll {
+					t.Fatalf("poll title did not match host access: %+v", notice)
+				}
+			}
+			if !revokeBeforePoll {
+				revoke()
+			}
+			for _, notice := range notices {
+				claimed, err := host.Claim(ctx, notice.ID)
+				if err != nil || strings.Contains(claimed.Body, title) {
+					t.Fatalf("claim revealed a title: %+v, %v", claimed, err)
+				}
+			}
+		})
 	}
 }

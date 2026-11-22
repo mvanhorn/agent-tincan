@@ -1324,7 +1324,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if len(reqs) > 0 || len(reps) > 0 {
 			for i := range reqs {
 				reqs[i].RedactFor(name)
-				markTaskNotice(&reqs[i])
+				s.renderTaskNotice(r.Context(), &reqs[i])
 			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
@@ -1650,6 +1650,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, detail)
+	s.renderTaskNotice(r.Context(), &req)
 	writeJSON(w, http.StatusOK, req)
 }
 

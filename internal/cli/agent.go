@@ -838,9 +838,15 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 	}
 	for _, req := range in.Requests {
 		item := inboxRequestJSON{Request: req, Claimed: true}
-		if _, err := r.Claim(ctx, req.ID); err != nil {
+		if claimed, err := r.Claim(ctx, req.ID); err != nil {
+			if req.TaskNoticeReceipt {
+				item.Body, _, _ = strings.Cut(req.Body, "\n")
+			}
 			item.Claimed, item.ClaimError = false, err.Error()
 		} else {
+			if req.TaskNoticeReceipt && claimed.Body != "" {
+				req.Body, item.Body = claimed.Body, claimed.Body
+			}
 			item.TaskNoticeGuidance = in.TaskNoticeGuidance(req)
 			if item.TaskNoticeGuidance != "" {
 				item.OwnerMessage = client.TaskNoticeOwnerMessage(req)

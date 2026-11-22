@@ -55,37 +55,6 @@ func (s *Server) handleTaskBriefingNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"queued": queued})
 }
 
-func (s *Server) hostBriefingBody(ctx context.Context, host string, b *store.TaskBriefing, base string) (string, error) {
-	view, err := s.hostTaskView(ctx, host)
-	if err != nil {
-		return "", err
-	}
-	var titles []string
-	seen := make(map[int64]bool)
-	if view.host {
-		for _, tasks := range [][]store.BriefingTask{b.Due, b.Waiting, b.Active, b.Done} {
-			for _, task := range tasks {
-				if seen[task.ID] {
-					continue
-				}
-				seen[task.ID] = true
-				title, err := s.hostNoticeTitle(ctx, task.ID, host)
-				if err != nil {
-					return "", err
-				}
-				if title != "" {
-					titles = append(titles, fmt.Sprintf("#%d %s", task.ID, title))
-				}
-			}
-		}
-	}
-	message := base
-	if len(titles) > 0 {
-		message += " Task titles: " + strings.Join(titles, ", ") + "."
-	}
-	return hostNoticePayload(base, message), nil
-}
-
 // taskBriefingMessage renders a snapshot safe for fallback delivery.
 func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 	var msg strings.Builder
