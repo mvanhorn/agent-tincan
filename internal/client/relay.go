@@ -282,11 +282,14 @@ func QueueAge(d time.Duration) string {
 	return fmt.Sprintf("%dm", int(d/time.Minute))
 }
 
-// sentStatus is a fresh send's status: held when the relay is holding it for
-// the owner's approval, queued otherwise.
+// sentStatus is a send's status as its answer gave it. A fresh send names
+// held when the relay is holding it for the owner's approval and otherwise
+// leaves status out, which means queued. A retry under an idempotency key
+// gets the original request in its current state, which may be answered,
+// cancelled or another, so a status the relay gave is kept.
 func sentStatus(req envelope.Request) envelope.Status {
-	if req.Status == envelope.StatusHeld {
-		return envelope.StatusHeld
+	if req.Status != "" {
+		return req.Status
 	}
 	return envelope.StatusQueued
 }

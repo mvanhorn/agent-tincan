@@ -129,6 +129,50 @@ func TestSendRefusedByRelayIsNotRetried(t *testing.T) {
 	}
 }
 
+// TestSendRetryReportsFinishedStatus: when the ask is answered or cancelled
+// between the lost answer and the retry, the retry gets the original request
+// back in that state, and an ask that does not wait reports it as it is, not
+// as queued.
+func TestSendRetryReportsFinishedStatus(t *testing.T) {
+	for want, finish := range map[envelope.Status]func(t *testing.T, m *testrelay.Mesh, id string){
+		envelope.StatusAnswered: func(t *testing.T, m *testrelay.Mesh, id string) {
+			muse := m.Client(t, "muse")
+			if _, err := muse.Poll(context.Background(), 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := muse.Reply(context.Background(), id, "deployed", envelope.StatusAnswered); err != nil {
+				t.Fatal(err)
+			}
+		},
+		envelope.StatusCancelled: func(t *testing.T, m *testrelay.Mesh, id string) {
+			if err := m.Client(t, "grokbot").Cancel(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(string(want), func(t *testing.T) {
+			m := testrelay.New(t, relay.Config{})
+			tr := &losesFirstSendAnswer{agent: "grokbot", lose: func(req *http.Request, resp *http.Response) (*http.Response, error) {
+				defer resp.Body.Close()
+				var first envelope.SendResponse
+				if err := json.NewDecoder(resp.Body).Decode(&first); err != nil || first.ID == "" {
+					t.Fatalf("first send answer: %+v, %v", first, err)
+				}
+				finish(t, m, first.ID)
+				return nil, &url.Error{Op: "Post", URL: req.URL.String(), Err: responseTimeout{}}
+			}}
+			asker := client.NewRelayHTTP(m.URL("grokbot"), &http.Client{Transport: tr})
+			got, err := asker.Ask(context.Background(), "muse", "deploy build 42", "", 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tr.keys) != 2 || got.Status != want {
+				t.Fatalf("after %d posts the ask reports %q, want %q", len(tr.keys), got.Status, want)
+			}
+		})
+	}
+}
+
 // askThroughLostAnswer asks through a transport that loses the first send's
 // answer with lose, and checks that one key was posted twice and one request
 // was queued, whose id the asker got.
