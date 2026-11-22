@@ -12,9 +12,14 @@ const state = {
   kinds: [],
   relayURLs: [],
   relayVersion: "",
+  adminTag: "",
   offline: false,
   loaded: false,
 };
+
+// TAILSCALE_MACHINES is the device list in the Tailscale admin panel,
+// where the owner flips the admin tag on a machine.
+const TAILSCALE_MACHINES = "https://login.tailscale.com/admin/machines";
 
 const $ = (id) => document.getElementById(id);
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -162,9 +167,19 @@ function statusLine(a) {
   const bits = [];
   if (a.status) bits.push(a.status);
   if (a.status_reason) bits.push(a.status_reason);
+  if (a.node_admin) bits.push("admin");
   if (a.wake) bits.push("wake: " + a.wake);
   if (a.kind) bits.push("kind: " + a.kind);
   return bits.join(" · ") || "joined";
+}
+
+// adminVerdict is the machine story the console shows for an agent: its
+// node, tags, and whether it may run admin commands. Agents without a
+// node run in a connected app, not on a tailnet machine, so admin does
+// not apply to them.
+function adminVerdict(a) {
+  if (!a.node_name) return { known: false };
+  return { known: true, admin: !!a.node_admin, machine: a.node_name, owner: a.node_user || "", tags: a.node_tags || [] };
 }
 
 function renderAgents() {
@@ -178,6 +193,13 @@ function renderAgents() {
     if (a.good_at) li.append(el("p", "", a.good_at));
 
     const facts = el("dl", "grid");
+    const v = adminVerdict(a);
+    if (v.known) {
+      facts.append(el("dt", "", "Machine"));
+      facts.append(el("dd", "", v.machine + (v.owner ? " (" + v.owner + ")" : "")));
+      facts.append(el("dt", "", "Admin"));
+      facts.append(el("dd", "", v.admin ? "yes" : "no"));
+    }
     if (a.last_active) {
       facts.append(el("dt", "", "Last active"));
       facts.append(el("dd", "", new Date(a.last_active).toLocaleString()));
@@ -195,6 +217,38 @@ function renderAgents() {
     li.append(configDetails(a));
     list.append(li);
   }
+}
+
+// adminSection explains whether the agent's machine may run admin
+// commands and, when it may not, how to grant it: flip the relay's admin
+// tag on the machine in the Tailscale admin panel. Tag changes apply on
+// the next call, with no relay restart.
+function adminSection(a) {
+  const wrap = el("div", "");
+  const v = adminVerdict(a);
+  if (!v.known) {
+    wrap.append(el("p", "meta", "This agent runs in a connected app, not on a tailnet machine, so admin does not apply to it."));
+    return wrap;
+  }
+  const tags = v.tags.length > 0 ? v.tags.join(", ") : "no tags";
+  wrap.append(el("p", "", "Machine " + v.machine + " (" + tags + ")" + (v.admin ? " can run admin commands." : " cannot run admin commands.")));
+  if (v.admin) return wrap;
+  if (state.adminTag) {
+    const how = el("p", "meta", "To grant it, add the tag ");
+    const tag = el("code", "", state.adminTag);
+    how.append(tag);
+    how.append(" to " + v.machine + " in the ");
+    const link = el("a", "", "Tailscale admin panel");
+    link.href = TAILSCALE_MACHINES;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    how.append(link);
+    how.append(", then re-check here. The tag applies immediately.");
+    wrap.append(how);
+  } else {
+    wrap.append(el("p", "meta", "This relay names no admin tag: restart it with --admin-tag tag:name (or add " + v.machine + " to --admin) to grant admin without touching the relay again."));
+  }
+  return wrap;
 }
 
 // configDetails is the per-agent editor: kind, good-at line, webhook wake
@@ -299,6 +353,9 @@ function configDetails(a) {
     }
   });
 
+  wrap.append(el("h3", "", "Admin access"));
+  wrap.append(adminSection(a));
+
   const removeBtn = el("button", "danger", "Remove " + a.name);
   removeBtn.type = "button";
   const removeErr = el("p", "error", "");
@@ -337,6 +394,7 @@ async function refreshAgents() {
   if (res.status !== 200 || !res.data) throw new Error((res.data && res.data.error) || ("agents (" + res.status + ")"));
   state.agents = res.data.agents || [];
   if (res.data.relay_version) state.relayVersion = res.data.relay_version;
+  state.adminTag = typeof res.data.admin_tag === "string" ? res.data.admin_tag : "";
   renderAgents();
   renderRelay();
 }
@@ -352,6 +410,7 @@ async function refreshAll() {
     if (agents.status !== 200 || !agents.data) throw new Error((agents.data && agents.data.error) || ("agents (" + agents.status + ")"));
     state.agents = agents.data.agents || [];
     if (agents.data.relay_version) state.relayVersion = agents.data.relay_version;
+    state.adminTag = typeof agents.data.admin_tag === "string" ? agents.data.admin_tag : "";
     if (urls.status === 200 && urls.data) state.relayURLs = urls.data.relay_urls || [];
     if (kinds.status === 200 && kinds.data) state.kinds = ["", ...(kinds.data.kinds || [])];
     else state.kinds = [""];

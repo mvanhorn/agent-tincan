@@ -63,3 +63,15 @@ func TestPageReadsAdminRoutes(t *testing.T) {
 		}
 	}
 }
+
+// The roster section shows each agent's machine verdict from the new
+// roster fields, and names the relay's admin tag when one is set.
+func TestPageShowsAdminVerdict(t *testing.T) {
+	w := get(t, Prefix+"app.js")
+	body := w.Body.String()
+	for _, key := range []string{"node_admin", "node_tags", "node_name", "admin_tag"} {
+		if !strings.Contains(body, key) {
+			t.Errorf("page does not show %s", key)
+		}
+	}
+}
