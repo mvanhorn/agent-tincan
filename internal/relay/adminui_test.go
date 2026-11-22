@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
@@ -76,6 +78,44 @@ func TestAdminKindsMatchInvite(t *testing.T) {
 	}
 	if strings.Join(out.Kinds, ",") != strings.Join(onboard.Kinds, ",") {
 		t.Errorf("kinds %q, want onboard.Kinds %q", out.Kinds, onboard.Kinds)
+	}
+}
+
+// The roster carries each agent's live admin verdict: the tagged machine
+// is admin by tag, an agent joined on the admin machine by name, and the
+// rest are not; the relay's admin tag rides alongside the roster.
+func TestAdminVerdictOnRoster(t *testing.T) {
+	const tag = "tag:tincan-admin"
+	m := testrelay.NewWithAdminTag(t, relay.Config{}, tag)
+	m.Who.Set(m.Addr("grokbot"), identity.Node{ID: "nGROK", Name: "grok-bot", User: testrelay.Login, Tags: []string{tag}})
+	m.JoinOnMachineOf(t, "admin", "laptop-agent")
+	admin := hardened(t, m, "admin")
+	code, body, _ := browserCall(t, "GET", admin, "/v1/agents", "127.0.0.1", "", sameSite)
+	if code != http.StatusOK {
+		t.Fatalf("agents: %d %s", code, body)
+	}
+	var out struct {
+		Agents   []client.AgentInfo `json:"agents"`
+		AdminTag string             `json:"admin_tag"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AdminTag != tag {
+		t.Errorf("admin_tag: %q, want %q", out.AdminTag, tag)
+	}
+	byName := map[string]client.AgentInfo{}
+	for _, a := range out.Agents {
+		byName[a.Name] = a
+	}
+	if got := byName["grokbot"]; !got.NodeAdmin || len(got.NodeTags) != 1 || got.NodeTags[0] != tag {
+		t.Errorf("grokbot: admin=%v tags=%q, want admin with the tag", got.NodeAdmin, got.NodeTags)
+	}
+	if got := byName["laptop-agent"]; !got.NodeAdmin || got.NodeName != "macbook-pro-44" {
+		t.Errorf("laptop-agent: admin=%v node=%q, want admin by machine name", got.NodeAdmin, got.NodeName)
+	}
+	if got := byName["muse"]; got.NodeAdmin {
+		t.Error("muse: admin=true, want false")
 	}
 }
 

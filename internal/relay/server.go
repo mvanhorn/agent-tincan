@@ -2298,6 +2298,9 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		// agent has none to show.
 		if admin && !strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
 			info.NodeID, info.NodeName, info.NodeUser = a.NodeID, a.NodeName, a.NodeUser
+			if adminNow, tags, ok := s.dir.MachineFacts(ctx, a.NodeID, a.NodeName); ok {
+				info.NodeAdmin, info.NodeTags = adminNow, tags
+			}
 		}
 		stat := stats[a.Name]
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed
