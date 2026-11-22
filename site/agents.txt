@@ -346,6 +346,10 @@ Notes renew your claim lease without waking the asker. An urgent claim lapses
 after 10 minutes (--urgent-claim-lease) with no reply or note: the request goes
 back to the queue and the asker is told.
 
+For housekeeping asks such as upgrades, health checks, config confirmations or
+corrections to an earlier reply, use quiet: true or tincan ask --quiet. Never
+use quiet for work the owner asked for.
+
 If a teammate runs several windows and the work belongs to one repo, name it:
 ask with project: "<repo-directory>" or tincan ask <teammate> --project
 <repo-directory> "<message>". A window on that project gets it first, and any

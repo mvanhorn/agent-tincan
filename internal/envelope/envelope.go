@@ -181,6 +181,8 @@ type Request struct {
 	// RecoverySource declares outside text for task recovery. It may be
 	// set by a send or inherited from a request this one continues.
 	RecoverySource string `json:"-"`
+	// QuietAsk is the sender's filing preference, read only at enqueue.
+	QuietAsk bool `json:"-"`
 	// SkipTaskRecovery is set by the relay for internal requests.
 	SkipTaskRecovery bool `json:"-"`
 	// RecoveryRepeat names the schedule on enqueue for an ask that repeats.
@@ -578,6 +580,7 @@ type sendInput struct {
 	Source      string       `json:"source"`
 	Group       string       `json:"group"`
 	Urgent      bool         `json:"urgent"`
+	Quiet       bool         `json:"quiet"`
 	To          string       `json:"to"`
 	Body        string       `json:"body"`
 	Kind        Kind         `json:"kind"`
@@ -648,7 +651,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
+	return Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, QuietAsk: in.Quiet, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
 }
 
 // checkThen refuses a follow-on on anything but a single ask without

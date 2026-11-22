@@ -742,3 +742,70 @@ func TestAskReportsFiledTask(t *testing.T) {
 		t.Fatalf("ask JSON = %q, %v", out, err)
 	}
 }
+
+func TestQuietAskCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		host  bool
+		reply envelope.Status
+		want  envelope.TaskStatus
+	}{
+		{"answered", true, envelope.StatusAnswered, envelope.TaskReturned},
+		{"failed", true, envelope.StatusFailed, envelope.TaskOpen},
+		{"no task host", false, envelope.StatusAnswered, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			m := testrelay.New(t, relay.Config{TaskBriefing: "off"})
+			useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+			host, muse := m.Client(t, "instinct"), m.Client(t, "muse")
+			if tc.host {
+				if _, err := m.Client(t, "admin").SetTaskHost(ctx, "instinct", true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := run(t, askCmd(), "muse", "Check your client version", "--quiet", "--wait", "0s"); err != nil {
+				t.Fatal(err)
+			}
+			inbox, err := muse.Poll(ctx, 0)
+			if err != nil || len(inbox.Requests) != 1 {
+				t.Fatalf("recipient inbox = %+v, %v", inbox, err)
+			}
+			req := inbox.Requests[0]
+			if (req.TaskID != 0) != tc.host {
+				t.Fatalf("request = %+v, want task: %v", req, tc.host)
+			}
+			if tc.host {
+				if task := taskNow(t, m, req.TaskID); !task.Quiet {
+					t.Fatalf("task at send = %+v", task)
+				}
+			}
+			if _, err := muse.Reply(ctx, req.ID, "version check result", tc.reply); err != nil {
+				t.Fatal(err)
+			}
+			m.Server.Sweep(ctx)
+			if !tc.host {
+				tasks, err := m.Store.Tasks(ctx, "", 0, 10, true, true)
+				if err != nil || len(tasks) != 0 {
+					t.Fatalf("stored tasks = %+v, %v", tasks, err)
+				}
+				return
+			}
+			failed := tc.reply == envelope.StatusFailed
+			if task := taskNow(t, m, req.TaskID); task.Quiet == failed || task.Status != tc.want {
+				t.Fatalf("task after reply = %+v, want %s (quiet: %v)", task, tc.want, !failed)
+			}
+			tasks, _, _, err := client.HostTasks(ctx, host, false)
+			if err != nil || (len(tasks) != 0) != failed {
+				t.Fatalf("default host list = %+v, %v", tasks, err)
+			}
+			notices, err := host.Poll(ctx, 0)
+			if err != nil || (len(notices.Requests) != 0) != failed {
+				t.Fatalf("host inbox = %+v, %v", notices, err)
+			}
+			if failed && (len(notices.Requests) != 1 || notices.Requests[0].TaskNoticeID != req.TaskID) {
+				t.Fatalf("escalation notice = %+v", notices)
+			}
+		})
+	}
+}

@@ -1521,6 +1521,19 @@ func TestAskReportsFiledTaskOverMCP(t *testing.T) {
 	}
 }
 
+func TestQuietAskOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on", MaxWait: time.Millisecond})
+	cs := session(t, m, "instinct")
+	got := call(t, cs, "ask", map[string]any{"to": "muse", "message": "Check your client version", "quiet": true, "wait_seconds": 1})
+	if !strings.Contains(got, "Filed as task #1") {
+		t.Fatalf("ask = %q", got)
+	}
+	task, _, err := client.Task(t.Context(), m.Client(t, "instinct"), false, 1)
+	if err != nil || !task.Quiet {
+		t.Fatalf("MCP ask task = %+v, %v", task, err)
+	}
+}
+
 func TestListTasksIncludesQuietOnRequest(t *testing.T) {
 	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
 	ctx := t.Context()
