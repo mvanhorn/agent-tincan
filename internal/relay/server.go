@@ -36,6 +36,7 @@ const DefaultUnansweredQuestionAfter = 4 * time.Hour
 type Config struct {
 	TaskNudgeAfter          time.Duration
 	TaskStallAfter          time.Duration
+	TaskReturnedCloseAfter  time.Duration
 	FileAllAsks             string        // auto (or empty), on, or off
 	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task or a quiet task is surfaced
 
@@ -145,6 +146,9 @@ func (c *Config) defaults() {
 	}
 	if c.TaskStallAfter == 0 {
 		c.TaskStallAfter = store.DefaultTaskStallAfter
+	}
+	if c.TaskReturnedCloseAfter <= 0 {
+		c.TaskReturnedCloseAfter = store.DefaultTaskReturnedCloseAfter
 	}
 	if c.TaskBriefing == "" {
 		c.TaskBriefing = DefaultTaskBriefing
@@ -691,6 +695,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	if err := s.store.QueueTaskStalls(ctx, s.cfg.TaskNudgeAfter, s.cfg.TaskStallAfter); err != nil {
 		log.Printf("sweep: task stalls: %v", err)
 	}
+	s.sweepReturnedHostTasks(ctx)
 	s.queueTaskReminders(ctx)
 	s.sweepTaskBriefing(ctx)
 	s.drainTaskNotices(ctx)

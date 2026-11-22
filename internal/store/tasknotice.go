@@ -30,7 +30,13 @@ const NoteTaskReminderFallback = "task-reminder-fallback"
 
 // IsTaskNotice identifies requests tracked by the task receipt path.
 func IsTaskNotice(kind string) bool {
-	return kind == NoteTask || kind == envelope.TaskNoticeReminder || kind == envelope.TaskNoticeBriefing || kind == envelope.TaskNoticeStall || kind == envelope.TaskNoticeAction
+	switch kind {
+	case NoteTask, envelope.TaskNoticeReminder, envelope.TaskNoticeBriefing, envelope.TaskNoticeStall,
+		envelope.TaskNoticeAction, envelope.TaskNoticeReturnedClose:
+		return true
+	default:
+		return false
+	}
 }
 
 // TaskNotice is one task change waiting to be told to the task hosts.
@@ -207,6 +213,16 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 		return envelope.Request{}, false, err
 	}
 	defer tx.Rollback()
+	if n.Kind == envelope.TaskNoticeReturnedClose {
+		var current bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM tasks t `+returnedHostResult+` `+returnedHostActivity+`
+			WHERE t.id = ? AND `+returnedHostTask+`
+			AND t.returned_close_notified = COALESCE(activity.id, returned.id)
+		)`, n.TaskID).Scan(&current); err != nil || !current {
+			return envelope.Request{}, false, err
+		}
+	}
 	// Read the current time in the transaction: a reminder can wait in
 	// the outbox beyond the cutoff, or be cancelled after a drain reads it.
 	if n.Kind == envelope.TaskNoticeReminder {

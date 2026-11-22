@@ -125,7 +125,10 @@ func (s *Store) closeTaskReminderTx(ctx context.Context, tx *sql.Tx, id int64) e
 // cancelTaskReminderTx removes staged work and settles outstanding host
 // attempts so that changing or closing the task cannot generate a retry.
 func (s *Store) cancelTaskReminderTx(ctx context.Context, tx *sql.Tx, id int64) error {
-	kind := envelope.TaskNoticeReminder
+	return s.cancelTaskNoticesTx(ctx, tx, id, envelope.TaskNoticeReminder, NoteTaskReminderFallback)
+}
+
+func (s *Store) cancelTaskNoticesTx(ctx context.Context, tx *sql.Tx, id int64, kind, fallback string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notice_told WHERE notice_id IN (
 		SELECT id FROM task_notices WHERE kind = ? AND task_id = ?)`, kind, id); err != nil {
 		return err
@@ -137,8 +140,8 @@ func (s *Store) cancelTaskReminderTx(ctx context.Context, tx *sql.Tx, id int64) 
 		WHERE r.notice_kind = ? AND r.notice_for = ? AND d.outcome = ''`
 	task := strconv.FormatInt(id, 10)
 	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'cancelled', lease_until = 0, updated_at = ?
-		WHERE (id IN (`+attempts+`) OR (notice_kind = ? AND notice_for = ?))
-		AND status IN ('queued', 'delivered', 'claimed')`, s.now().UnixMilli(), kind, task, NoteTaskReminderFallback, task); err != nil {
+		WHERE (id IN (`+attempts+`) OR (notice_kind = NULLIF(?, '') AND notice_for = ?))
+		AND status IN ('queued', 'delivered', 'claimed')`, s.now().UnixMilli(), kind, task, fallback, task); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE task_notice_delivery SET outcome = 'cancelled' WHERE request_id IN (`+attempts+`)`, kind, task)
