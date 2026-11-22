@@ -970,6 +970,24 @@ func (r tailnetResolver) DialTailnet(ctx context.Context, network, addr string) 
 	return r.dial(ctx, network, addr)
 }
 
+// LookupNode implements identity.NodeLookup when the tsnet resolver does,
+// so the directory sees past this wrapper to the tailnet.
+func (r tailnetResolver) LookupNode(ctx context.Context, stableID string) (identity.Node, bool, error) {
+	if lk, ok := r.relayResolver.(identity.NodeLookup); ok {
+		return lk.LookupNode(ctx, stableID)
+	}
+	return identity.Node{}, false, nil
+}
+
+// Peers implements identity.PeerLister when the tsnet resolver does, so
+// the setup console's device list works in the default tsnet mode.
+func (r tailnetResolver) Peers(ctx context.Context) ([]identity.Peer, error) {
+	if pl, ok := r.relayResolver.(identity.PeerLister); ok {
+		return pl.Peers(ctx)
+	}
+	return nil, errors.New("resolver has no tailnet peer list")
+}
+
 // gatewayListener returns the public listener and base URL for the ChatGPT
 // gateway: a Funnel listener on its own tsnet node by default.
 func gatewayListener(ctx context.Context, f relayFlags) (net.Listener, string, func(), error) {
