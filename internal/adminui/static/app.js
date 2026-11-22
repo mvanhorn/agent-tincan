@@ -13,6 +13,8 @@ const state = {
   relayURLs: [],
   relayVersion: "",
   adminTag: "",
+  peers: [],
+  peersLoaded: false,
   offline: false,
   loaded: false,
 };
@@ -387,6 +389,94 @@ function configDetails(a) {
   return d;
 }
 
+// ---- Tailnet devices ----
+
+// agentByNode maps node ids to the agent running on them, for agents
+// bound to a tailnet machine.
+function agentByNode() {
+  const byNode = new Map();
+  for (const a of state.agents) {
+    if (a.node_id) byNode.set(a.node_id, a.name);
+  }
+  return byNode;
+}
+
+function renderDevices() {
+  const list = $("devices-list");
+  list.replaceChildren();
+  const filter = $("devices-filter").value.trim().toLowerCase();
+  const agents = agentByNode();
+  let shown = 0;
+  for (const p of state.peers) {
+    if (filter && !(p.name || "").toLowerCase().includes(filter)) continue;
+    shown++;
+    const li = el("li", "");
+    const head = el("div", "agent-head");
+    head.append(el("span", "agent-name", p.name));
+    const bits = [];
+    if (p.self) bits.push("this relay");
+    bits.push(p.online ? "online" : "offline");
+    head.append(el("span", "meta", bits.join(" · ")));
+    li.append(head);
+    const facts = el("dl", "grid");
+    if (p.tags && p.tags.length > 0) {
+      facts.append(el("dt", "", "Tags"));
+      facts.append(el("dd", "", p.tags.join(", ")));
+    }
+    if (p.user) {
+      facts.append(el("dt", "", "Owner"));
+      facts.append(el("dd", "", p.user));
+    }
+    if (facts.children.length > 0) li.append(facts);
+    const agent = agents.get(p.id);
+    if (p.self) {
+      li.append(el("p", "meta", "The relay itself runs here; it needs no invite."));
+    } else if (agent) {
+      li.append(el("p", "meta", "Runs " + agent + "."));
+    } else {
+      const btn = el("button", "", "Invite " + p.name);
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        $("add-name").value = p.name;
+        $("add-name").scrollIntoView({ block: "center" });
+        $("add-name").focus();
+      });
+      li.append(btn);
+    }
+    list.append(li);
+  }
+  $("devices-empty").hidden = shown !== 0;
+}
+
+async function loadDevices() {
+  const err = $("devices-error");
+  err.hidden = true;
+  try {
+    const res = await api("GET", "/v1/admin/peers");
+    if (res.status !== 200 || !res.data) throw new Error((res.data && res.data.error) || ("devices (" + res.status + ")"));
+    state.peers = res.data.peers || [];
+    state.peersLoaded = true;
+    renderDevices();
+  } catch (e) {
+    err.textContent = fail("Could not list devices", e);
+    err.hidden = false;
+  }
+}
+
+function toggleDevices() {
+  const wrap = $("devices-wrap");
+  const open = wrap.hidden;
+  wrap.hidden = !open;
+  const btn = $("devices-toggle");
+  btn.textContent = open ? "Hide tailnet devices" : "Show tailnet devices";
+  btn.setAttribute("aria-expanded", String(open));
+  if (open && !state.peersLoaded) loadDevices();
+  if (open) renderDevices();
+}
+
+$("devices-toggle").addEventListener("click", toggleDevices);
+$("devices-filter").addEventListener("input", renderDevices);
+
 // ---- Loading ----
 
 async function refreshAgents() {
@@ -396,6 +486,7 @@ async function refreshAgents() {
   if (res.data.relay_version) state.relayVersion = res.data.relay_version;
   state.adminTag = typeof res.data.admin_tag === "string" ? res.data.admin_tag : "";
   renderAgents();
+  if (state.peersLoaded) renderDevices();
   renderRelay();
 }
 

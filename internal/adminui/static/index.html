@@ -54,6 +54,19 @@
     <p id="agents-empty" class="empty" hidden>No agents have joined yet. Mint an invite above.</p>
     <ol id="agents-list" class="cards"></ol>
   </section>
+
+  <section aria-labelledby="devices-title">
+    <h2 id="devices-title">Tailnet devices</h2>
+    <p class="meta">Every machine on the tailnet, for finding boxes to invite. Loaded on demand, and visible only here.</p>
+    <button id="devices-toggle" type="button" aria-expanded="false" aria-controls="devices-wrap">Show tailnet devices</button>
+    <div id="devices-wrap" hidden>
+      <label for="devices-filter">Filter</label>
+      <input id="devices-filter" class="field" type="text" maxlength="64" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="machine name">
+      <p id="devices-error" class="error" role="alert" hidden></p>
+      <p id="devices-empty" class="empty" hidden>No devices match.</p>
+      <ol id="devices-list" class="cards"></ol>
+    </div>
+  </section>
 </main>
 </body>
 </html>

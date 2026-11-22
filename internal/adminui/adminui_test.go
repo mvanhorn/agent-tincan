@@ -57,9 +57,21 @@ func TestCSP(t *testing.T) {
 func TestPageReadsAdminRoutes(t *testing.T) {
 	w := get(t, Prefix+"app.js")
 	body := w.Body.String()
-	for _, route := range []string{"/v1/agents", "/v1/admin/urls", "/v1/admin/kinds", "/v1/admin/invite", "/v1/admin/remove"} {
+	for _, route := range []string{"/v1/agents", "/v1/admin/urls", "/v1/admin/kinds", "/v1/admin/peers", "/v1/admin/invite", "/v1/admin/remove"} {
 		if !strings.Contains(body, route) {
 			t.Errorf("page does not read %s", route)
+		}
+	}
+}
+
+// The device list loads the tailnet peers on demand, with a filter and
+// per-device invite pre-fill.
+func TestPageListsTailnetDevices(t *testing.T) {
+	w := get(t, Prefix+"app.js")
+	body := w.Body.String()
+	for _, key := range []string{"devices-list", "devices-filter", "devices-toggle", "Invite "} {
+		if !strings.Contains(body, key) {
+			t.Errorf("page does not show %q", key)
 		}
 	}
 }
