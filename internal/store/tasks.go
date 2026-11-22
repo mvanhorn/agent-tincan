@@ -1428,12 +1428,22 @@ func (s *Store) ResetTaskAssigns(ctx context.Context, id int64, actor string) (e
 // AppendTaskEvent adds ev to the history of task ev.TaskID, stamped now. It
 // returns ErrNoTask when there is no such task.
 func (s *Store) AppendTaskEvent(ctx context.Context, ev envelope.TaskEvent) (envelope.TaskEvent, error) {
-	return addTaskEvent(ctx, s.db, ev, s.now().UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	defer tx.Rollback()
+	ev, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
+	if err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	return ev, tx.Commit()
 }
 
 // addTaskEvent writes one history entry, with ev.Chain when it has one. The
-// task check and the insert are one statement.
-func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
+// task check and the insert are one statement. Activity that makes a pending
+// closure notice stale cancels it in the same transaction.
+func addTaskEvent(ctx context.Context, tx *sql.Tx, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
 	var chain sql.NullString
 	if len(ev.Chain) > 0 {
 		b, err := json.Marshal(ev.Chain)
@@ -1450,7 +1460,7 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		dueChange = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change, quiet_answer, returned_by_host)
+	res, err := tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change, quiet_answer, returned_by_host)
 		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULLIF(?9, ''), ?10, ?11,
 			CASE WHEN ?3 = 'status' AND ?5 = 'returned' AND ?9 = '' THEN
 				EXISTS (SELECT 1 FROM agents WHERE name = ?2 AND task_host = 1) END
@@ -1463,6 +1473,9 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		return envelope.TaskEvent{}, ErrNoTask
 	}
 	if ev.ID, err = res.LastInsertId(); err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	if err := invalidateReturnedCloseNotice(ctx, tx, ev, at); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	ev.At = time.UnixMilli(at).UTC()

@@ -53,6 +53,8 @@ The host acts on your direct words. You approve outside-source tasks and reset a
 
 After 15 minutes without new information on a claimed task, the relay nudges the assignee once. After 30 minutes it tells the host to check the task and act. Repeating the same update, even with different timestamps, keeps the claim alive and leaves the follow-through timer running. A substantive update restarts the timer. Set `--task-nudge-after` and `--task-stall-after` on the relay to change the intervals.
 
+When a task host returns a result to another agent, the relay waits an hour for the asker to follow up. A follow-up ask linked to the task or a comment from the asker restarts the timer. Once the window passes, the relay asks an eligible host to review the result and close the task. If no host can act, the relay marks the task done and keeps the result in its history. Set `--task-returned-close-after` on the relay to change the one-hour window.
+
 The host checks the history and confirms the old attempt is safe to replace. It can use `decide_task` with `decision: "retry"`, `to`, and a one-line `reason` describing a different approach. The relay allows two such retries and applies the usual send approvals. If the host does the work directly, it records the verified outcome with `decision: "complete"` and `result`. The shell equivalents are `tincan tasks decide <id> retry --to <agent> --reason "<different approach>"` and `tincan tasks decide <id> complete --result "<verified outcome>"`. It asks you when the next step requires a decision, such as spending or booking, or when the retries have failed. For host setup, see the [Grok Bot adapter](adapters/grokbot.md#keep-your-task-list-in-grok-bot).
 
 ## Configure a fallback

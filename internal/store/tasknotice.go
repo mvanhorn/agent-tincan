@@ -28,6 +28,9 @@ const NoteTask = "task"
 // NoteTaskReminderFallback links the final alert to a reminder for cancellation.
 const NoteTaskReminderFallback = "task-reminder-fallback"
 
+// NoteTaskReturnedCloseFallback links the final alert to the task for cancellation.
+const NoteTaskReturnedCloseFallback = "task-returned-close-fallback"
+
 // IsTaskNotice identifies requests tracked by the task receipt path.
 func IsTaskNotice(kind string) bool {
 	switch kind {
@@ -214,12 +217,7 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 	}
 	defer tx.Rollback()
 	if n.Kind == envelope.TaskNoticeReturnedClose {
-		var current bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
-			SELECT 1 FROM tasks t `+returnedHostResult+` `+returnedHostActivity+`
-			WHERE t.id = ? AND `+returnedHostTask+`
-			AND t.returned_close_notified = COALESCE(activity.id, returned.id)
-		)`, n.TaskID).Scan(&current); err != nil || !current {
+		if current, err := returnedCloseNoticeCurrent(ctx, tx, n.TaskID); err != nil || !current {
 			return envelope.Request{}, false, err
 		}
 	}
@@ -303,4 +301,24 @@ func (s *Store) DeleteTaskNotice(ctx context.Context, id int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func cancelTaskNoticesTx(ctx context.Context, tx *sql.Tx, id, now int64, kind, fallback string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notice_told WHERE notice_id IN (
+		SELECT id FROM task_notices WHERE kind = ? AND task_id = ?)`, kind, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notices WHERE kind = ? AND task_id = ?`, kind, id); err != nil {
+		return err
+	}
+	const attempts = `SELECT r.id FROM requests r JOIN task_notice_delivery d ON r.id = d.request_id
+		WHERE r.notice_kind = ? AND r.notice_for = ? AND d.outcome = ''`
+	task := strconv.FormatInt(id, 10)
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'cancelled', lease_until = 0, updated_at = ?
+		WHERE (id IN (`+attempts+`) OR (notice_kind = ? AND notice_for = ?))
+		AND status IN ('queued', 'delivered', 'claimed')`, now, kind, task, fallback, task); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE task_notice_delivery SET outcome = 'cancelled' WHERE request_id IN (`+attempts+`)`, kind, task)
+	return err
 }

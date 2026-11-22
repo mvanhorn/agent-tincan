@@ -101,9 +101,48 @@ func TestReturnedTaskSweep(t *testing.T) {
 				!strings.Contains(in[0].Body, "decide_task done") {
 				t.Fatalf("closure notice = %+v", in)
 			}
+			if _, err := m.muse.Claim(ctx, in[0].ID); err != nil {
+				t.Fatal(err)
+			}
 			if task, err := client.HostCloseAnsweredTask(ctx, m.muse, id, "The answer confirms the hours."); err != nil || task.Status != envelope.TaskDone {
 				t.Fatalf("host completion = %+v, %v", task, err)
 			}
+			if got := m.wantNotices(t, "muse", 1)[0]; got.Status != envelope.StatusCancelled {
+				t.Fatalf("closure notice after completion = %+v", got)
+			}
+			if err := client.TaskNoticesTold(ctx, m.muse, []string{in[0].ID}); err != nil {
+				t.Fatalf("host could not acknowledge after closing the task: %v", err)
+			}
 		})
+	}
+}
+
+func TestAskerFollowupCancelsQueuedReturnedCloseNotice(t *testing.T) {
+	const window = 10 * time.Minute
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", TaskReturnedCloseAfter: window})
+	m.host(t, "muse")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Title: "Confirm opening hours", Filer: "scout"})
+	m.assign(t, task.ID, "scout", "muse")
+	m.finish(t, m.muse, task.ID, "Open from 9 to 5.", envelope.StatusAnswered)
+
+	m.clk.advance(window)
+	m.Server.Sweep(ctx)
+	if got := m.wantNotices(t, "muse", 1)[0]; got.Status != envelope.StatusQueued {
+		t.Fatalf("closure notice before follow-up = %+v", got)
+	}
+	if _, err := client.CommentTask(ctx, m.scout, false, task.ID, "Please confirm Saturday too."); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.wantNotices(t, "muse", 1)[0]; got.Status != envelope.StatusCancelled {
+		t.Fatalf("closure notice after follow-up = %+v", got)
+	}
+	if got := read(t, m.muse); len(got) != 0 {
+		t.Fatalf("host received stale closure notice: %+v", got)
+	}
+	m.clk.advance(window)
+	m.Server.Sweep(ctx)
+	if got := m.wantNotices(t, "muse", 2)[1]; got.Status != envelope.StatusQueued {
+		t.Fatalf("closure notice after the restarted window = %+v", got)
 	}
 }

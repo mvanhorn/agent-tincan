@@ -31,6 +31,38 @@ const returnedHostTask = `t.status = 'returned' AND t.current_request = '' AND t
 	AND NOT ` + taskNeverApproved + ` AND NOT ` + taskOriginalAskUnapproved + `
 	AND NOT EXISTS (SELECT 1 FROM schedules WHERE task_id = t.id)`
 
+func returnedCloseNoticeCurrent(ctx context.Context, tx *sql.Tx, id int64) (bool, error) {
+	var current bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM tasks t `+returnedHostResult+` `+returnedHostActivity+`
+		WHERE t.id = ? AND `+returnedHostTask+`
+		AND t.returned_close_notified = COALESCE(activity.id, returned.id)
+	)`, id).Scan(&current)
+	return current, err
+}
+
+// invalidateReturnedCloseNotice runs in the same transaction as the new
+// history entry. The asker can restart the clock, and a new status or
+// assignment takes the previous result out of review.
+func invalidateReturnedCloseNotice(ctx context.Context, tx *sql.Tx, ev envelope.TaskEvent, at int64) error {
+	switch ev.Kind {
+	case envelope.TaskEventStatus, envelope.TaskEventAssigned, envelope.TaskEventAsked, envelope.TaskEventComment:
+	default:
+		return nil
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE tasks SET returned_close_notified = 0
+		WHERE id = ? AND returned_close_notified != 0 AND (? IN ('status', 'assigned')
+		OR EXISTS (SELECT 1 FROM requests WHERE id = tasks.result_request AND from_agent = ?))`,
+		ev.TaskID, ev.Kind, ev.Actor)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	return cancelTaskNoticesTx(ctx, tx, ev.TaskID, at, envelope.TaskNoticeReturnedClose, NoteTaskReturnedCloseFallback)
+}
+
 // SweepReturnedHostTasks asks hosts to review each result after a quiet
 // window. With no host available it closes the task, preserving the result
 // and leaving a history entry. The history read and the writes share a
@@ -72,11 +104,6 @@ func (s *Store) SweepReturnedHostTasks(ctx context.Context, after time.Duration,
 		return err
 	}
 	for _, c := range candidates {
-		// Replace any notice issued before the latest follow-up, or settle
-		// the prior notice if the host has become unavailable.
-		if err := s.cancelTaskNoticesTx(ctx, tx, c.task, envelope.TaskNoticeReturnedClose, ""); err != nil {
-			return err
-		}
 		if !hostAvailable {
 			if err := s.closeReturnedHostTaskTx(ctx, tx, c.task, now.UnixMilli()); err != nil {
 				return err
