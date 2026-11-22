@@ -540,7 +540,7 @@ func TestTasksBriefingNowCommand(t *testing.T) {
 	req := in.Requests[0]
 	if req.TaskNoticeKind != envelope.TaskNoticeBriefing || !req.Claimed ||
 		!strings.Contains(req.OwnerMessage, "task #1 (open, due 2000-11-21)") ||
-		!strings.Contains(in.TaskNoticePosting, "last tool call") || strings.Contains(stdout, "Private deadline") {
+		!strings.Contains(in.TaskNoticePosting, "last tool call") || !strings.Contains(stdout, "Private deadline") {
 		t.Fatalf("briefing owner message = %s", stdout)
 	}
 	if err := client.TaskNoticesTold(ctx, m.Client(t, "muse"), []string{req.ID}); err != nil {
@@ -580,5 +580,42 @@ func TestTasksAllShowsQuietAsks(t *testing.T) {
 		if err != nil || strings.Contains(out, "Quiet lookup") != all || strings.Contains(out, "\"quiet\": true") != all {
 			t.Fatalf("tasks %v = %q, %v", args, out, err)
 		}
+	}
+}
+
+func TestTasksDecideRetryAndCompleteFromTheShell(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "muse", true); err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.AddTask(ctx, m.Client(t, "grokbot"), false, client.TaskAdd{Title: "Check the shipment"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	id := fmt.Sprint(task.Task.ID)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"retry", "--to", "instinct"}, "requires --to and --reason"},
+		{[]string{"retry", "--to", "instinct", "--reason", "Try dispatch", "--words", "Do it"}, "without --words"},
+		{[]string{"complete"}, "requires --result"},
+		{[]string{"complete", "--result", " ", "--words", "Done"}, "without --words"},
+	} {
+		_, err := run(t, tasksCmd(), append([]string{"decide", id}, tc.args...)...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+	}
+	tasksRun(t, []string{"decide", id, "retry", "--to", "instinct", "--reason", "Try the dispatch desk"}, "retry 1 of 2")
+	working := taskNow(t, m, task.Task.ID)
+	if _, err := m.Client(t, "instinct").Reply(ctx, working.CurrentRequest, "Verified.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"decide", id, "complete", "--result", "Confirmed at the desk"}, "Closed task #"+id)
+	if got := taskNow(t, m, task.Task.ID); got.Status != envelope.TaskDone || got.Result != "Confirmed at the desk" {
+		t.Fatalf("completion = %+v", got)
 	}
 }

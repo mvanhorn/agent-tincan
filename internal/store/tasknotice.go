@@ -30,7 +30,7 @@ const NoteTaskReminderFallback = "task-reminder-fallback"
 
 // IsTaskNotice identifies requests tracked by the task receipt path.
 func IsTaskNotice(kind string) bool {
-	return kind == NoteTask || kind == envelope.TaskNoticeReminder || kind == envelope.TaskNoticeBriefing
+	return kind == NoteTask || kind == envelope.TaskNoticeReminder || kind == envelope.TaskNoticeBriefing || kind == envelope.TaskNoticeStall || kind == envelope.TaskNoticeAction
 }
 
 // TaskNotice is one task change waiting to be told to the task hosts.
@@ -45,7 +45,8 @@ type TaskNotice struct {
 	Actor string
 	// Asker is the sender of the ask the change ended or paused, "" for a
 	// task filed as proposed, which has no ask.
-	Asker string
+	Asker   string
+	Retries int
 }
 
 // migrateTaskNotices creates the task_notices outbox and task_notice_told,
@@ -157,17 +158,18 @@ func taskNoticeTx(ctx context.Context, x execer, id int64, status envelope.TaskS
 // statement, which writes nothing for a request that is no attempt at a
 // task.
 func taskAskNoticeTx(ctx context.Context, x execer, reqID string, status envelope.TaskStatus, actor string, at int64) error {
-	_, err := x.ExecContext(ctx, `INSERT INTO task_notices (task_id, status, actor, asker, created_at)
-		SELECT t.id, ?1, CASE WHEN t.quiet = 2 AND r.status = 'declined' AND ?2 = ?5 THEN ?6 ELSE ?2 END,
-			r.from_agent, ?3 FROM requests r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?4 AND t.quiet != 1`,
-		string(status), actor, at, reqID, envelope.TaskOwner, TaskRelay)
+	_, err := x.ExecContext(ctx, `INSERT INTO task_notices (task_id, status, actor, asker, created_at, kind)
+		SELECT t.id, ?1, ?2, r.from_agent, ?3, CASE WHEN ?1 = 'open' AND r.task_filed_on_send = 1 THEN ?5 ELSE ?6 END
+		FROM requests r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?4 AND t.quiet != 1
+		AND NOT (?1 = 'open' AND r.task_filed_on_send = 1 AND r.status = 'cancelled')`,
+		string(status), actor, at, reqID, envelope.TaskNoticeAction, NoteTask)
 	return err
 }
 
 // TaskNotices returns up to limit task changes not yet told to the hosts,
 // oldest first.
 func (s *Store) TaskNotices(ctx context.Context, limit int) ([]TaskNotice, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(task_id, 0), kind, status, actor, asker, briefing FROM task_notices ORDER BY id LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, COALESCE(task_id, 0), kind, status, actor, asker, briefing, COALESCE((SELECT host_retries FROM tasks WHERE id = task_id), 0) FROM task_notices ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +178,7 @@ func (s *Store) TaskNotices(ctx context.Context, limit int) ([]TaskNotice, error
 	for rows.Next() {
 		var n TaskNotice
 		var status, briefing string
-		if err := rows.Scan(&n.ID, &n.TaskID, &n.Kind, &status, &n.Actor, &n.Asker, &briefing); err != nil {
+		if err := rows.Scan(&n.ID, &n.TaskID, &n.Kind, &status, &n.Actor, &n.Asker, &briefing, &n.Retries); err != nil {
 			return nil, err
 		}
 		if n.Kind == envelope.TaskNoticeBriefing {
@@ -254,6 +256,9 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 		return envelope.Request{}, false, err
 	}
 	req.TaskNoticeStatus = n.Status
+	if n.Kind == NoteTaskNudge {
+		return req, true, tx.Commit()
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_notice_delivery (request_id, attempt, reported_status, notice_id) VALUES (?, 1, ?, ?)`,
 		req.ID, n.Status, n.ID); err != nil {
 		return envelope.Request{}, false, err

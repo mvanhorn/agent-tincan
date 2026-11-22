@@ -44,25 +44,26 @@ type relayFlags struct {
 	unansweredQuestionAfter time.Duration
 	fileAllAsks             string
 
-	urgentPerHour int
-	listen        string
-	hostname      string
-	stateDir      string
-	port          int
-	admins        []string
-	adminLogins   []string
-	noRebind      bool
-	replyGrace    time.Duration
-	notesTTL      time.Duration
-	wakeGrace     time.Duration
-	urgentGrace   time.Duration
-	urgentLease   time.Duration
-	ownerNotice   int
-	taskNoticeAck time.Duration
-	taskZone      string
-	dist          string
-	upgradeExit   bool
-	releaseURL    string
+	urgentPerHour                  int
+	listen                         string
+	hostname                       string
+	stateDir                       string
+	port                           int
+	admins                         []string
+	adminLogins                    []string
+	noRebind                       bool
+	replyGrace                     time.Duration
+	notesTTL                       time.Duration
+	wakeGrace                      time.Duration
+	urgentGrace                    time.Duration
+	urgentLease                    time.Duration
+	ownerNotice                    int
+	taskNoticeAck                  time.Duration
+	taskNudgeAfter, taskStallAfter time.Duration
+	taskZone                       string
+	dist                           string
+	upgradeExit                    bool
+	releaseURL                     string
 
 	taskBriefing     string
 	taskBriefingZone string
@@ -216,6 +217,8 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.StringVar(&f.taskZone, "task-zone", envelope.DefaultTaskZone, "IANA time zone for task due dates")
 	fs.StringVar(&f.taskBriefing, "task-briefing", relay.DefaultTaskBriefing, "daily task briefing time (HH:MM), or off")
 	fs.StringVar(&f.taskBriefingZone, "task-briefing-zone", "", "IANA time zone for the daily task briefing (defaults to --task-zone)")
+	fs.DurationVar(&f.taskNudgeAfter, "task-nudge-after", store.DefaultTaskNudgeAfter, "how long without new progress before nudging a task assignee")
+	fs.DurationVar(&f.taskStallAfter, "task-stall-after", store.DefaultTaskStallAfter, "how long without new progress before a task host is asked to act")
 	fs.DurationVar(&f.taskNoticeAck, "task-notice-ack-timeout", relay.DefaultTaskNoticeAckTimeout, "how long after a task notice is claimed to wait for the host's acknowledgment before retrying")
 	fs.StringVar(&f.fileAllAsks, "file-all-asks", "auto", "file teammate asks as tasks: auto (when a task host is named), on, or off")
 	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a clarification waits before an unfinished ask is filed or a quiet task is surfaced")
@@ -266,6 +269,9 @@ func (f relayFlags) validate() error {
 			return errors.New("--task-briefing must be a time in HH:MM format or off")
 		}
 	}
+	if f.taskNudgeAfter <= 0 || f.taskStallAfter <= f.taskNudgeAfter {
+		return errors.New("--task-nudge-after must be positive and shorter than --task-stall-after")
+	}
 	if f.taskNoticeAck <= 0 {
 		return errors.New("--task-notice-ack-timeout must be positive")
 	}
@@ -286,7 +292,7 @@ func (f relayFlags) relayConfig() relay.Config {
 		briefingZone, _ = envelope.TaskLocation(f.taskBriefingZone)
 	}
 	return relay.Config{Version: Version, TaskZone: zone, TaskBriefing: f.taskBriefing, TaskBriefingZone: briefingZone, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
-		TaskNoticeAckTimeout: f.taskNoticeAck, FileAllAsks: f.fileAllAsks, ParsePass: parsePassRef}
+		TaskNoticeAckTimeout: f.taskNoticeAck, TaskNudgeAfter: f.taskNudgeAfter, TaskStallAfter: f.taskStallAfter, FileAllAsks: f.fileAllAsks, ParsePass: parsePassRef}
 }
 
 // parsePassRef reads a pass request for the relay's held listing and

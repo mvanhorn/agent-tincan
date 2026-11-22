@@ -10,6 +10,8 @@ import (
 const (
 	TaskNoticeReminder = "task-reminder"
 	TaskNoticeBriefing = "task-briefing"
+	TaskNoticeStall    = "task-stall"
+	TaskNoticeAction   = "task-action"
 )
 
 // TaskReminderMessage is the owner-facing text shared by delivery and fallback.

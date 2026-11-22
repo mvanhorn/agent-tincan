@@ -167,7 +167,9 @@ type Request struct {
 	// with none. The store takes the task for the ask only while that is
 	// still the task's latest result. Relay-only, and not stored on the
 	// request.
-	TaskResultEvent int64 `json:"-"`
+	TaskResultEvent int64      `json:"-"`
+	TaskRetry       *TaskRetry `json:"-"`
+	TaskCancelled   []string   `json:"-"`
 	// Contributors names the agents, beside the sender and the chain, whose
 	// text the body carries: on a task's ask, the agent that filed the task
 	// and the authors of the result and comments sent along, and on any
@@ -183,6 +185,10 @@ type Request struct {
 	RecoverySource string `json:"-"`
 	// QuietAsk is the sender's filing preference, read only at enqueue.
 	QuietAsk bool `json:"-"`
+	// About names a task or ask for filing purposes only.
+	About       string `json:"-"`
+	AboutTaskID int64  `json:"-"`
+	AboutHost   bool   `json:"-"`
 	// SkipTaskRecovery is set by the relay for internal requests.
 	SkipTaskRecovery bool `json:"-"`
 	// RecoveryRepeat names the schedule on enqueue for an ask that repeats.
@@ -411,6 +417,10 @@ type Reply struct {
 	// Superseded lists the relay's queued notices about the request that
 	// this reply closed without delivery. Relay-only.
 	Superseded []string `json:"-"`
+	// CancelledFollowups are the live follow-ups closed along with a task.
+	CancelledFollowups []string `json:"-"`
+	// Provisional marks a held acknowledgment the real answer may replace.
+	Provisional bool `json:"-"`
 }
 
 // Progress is the latest note from the agent handling a request.
@@ -581,6 +591,7 @@ type sendInput struct {
 	Group       string       `json:"group"`
 	Urgent      bool         `json:"urgent"`
 	Quiet       bool         `json:"quiet"`
+	About       string       `json:"about"`
 	To          string       `json:"to"`
 	Body        string       `json:"body"`
 	Kind        Kind         `json:"kind"`
@@ -633,6 +644,10 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	default:
 		return Request{}, fmt.Errorf("send: unknown kind %q", in.Kind)
 	}
+	in.About = strings.TrimSpace(in.About)
+	if in.About != "" && (in.Kind != KindAsk || len(in.About) > 20) {
+		return Request{}, errors.New("send: about must name a task number or request ID on an ask")
+	}
 	if !ValidSource(in.Source) || in.Source != "" && in.Kind != KindAsk {
 		return Request{}, errors.New("send: source is a short lowercase label on an ask, such as mail or meeting")
 	}
@@ -651,7 +666,7 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, QuietAsk: in.Quiet, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
+	return Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, QuietAsk: in.Quiet, About: in.About, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
 }
 
 // checkThen refuses a follow-on on anything but a single ask without
@@ -837,6 +852,13 @@ const (
 	TaskDropped TaskStatus = "dropped"
 )
 
+// TaskRetry is a host's authorized attempt to continue unfinished work.
+type TaskRetry struct {
+	Current       string
+	Reason        string
+	StalledBefore time.Time
+}
+
 // Task is one item on the team's shared list. Filer and Assignee are agent
 // names or TaskOwner; an unassigned task has no Assignee. Each attempt at a
 // task is one ask: CurrentRequest is the ask open under it now, and
@@ -868,6 +890,7 @@ type Task struct {
 	CurrentRequest    string     `json:"current_request,omitempty"`
 	AskStatus         Status     `json:"ask_status,omitempty"`
 	AgentAssigns      int        `json:"agent_assigns,omitempty"`
+	HostRetries       int        `json:"host_retries,omitempty"`
 	Source            string     `json:"source,omitempty"`
 	SuggestedAssignee string     `json:"suggested_assignee,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`

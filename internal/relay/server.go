@@ -34,6 +34,8 @@ const DefaultUnansweredQuestionAfter = 4 * time.Hour
 
 // Config tunes the relay.
 type Config struct {
+	TaskNudgeAfter          time.Duration
+	TaskStallAfter          time.Duration
 	FileAllAsks             string        // auto (or empty), on, or off
 	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task or a quiet task is surfaced
 
@@ -137,6 +139,12 @@ func (c *Config) defaults() {
 	}
 	if c.TaskZone == nil {
 		c.TaskZone, _ = envelope.TaskLocation("")
+	}
+	if c.TaskNudgeAfter == 0 {
+		c.TaskNudgeAfter = store.DefaultTaskNudgeAfter
+	}
+	if c.TaskStallAfter == 0 {
+		c.TaskStallAfter = store.DefaultTaskStallAfter
 	}
 	if c.TaskBriefing == "" {
 		c.TaskBriefing = DefaultTaskBriefing
@@ -670,9 +678,19 @@ func (s *Server) Sweep(ctx context.Context) {
 	if err := s.store.EscalateQuietQuestions(ctx, s.cfg.UnansweredQuestionAfter); err != nil {
 		log.Printf("sweep: quiet task questions: %v", err)
 	}
+	if closed, err := s.store.CloseReturnedQuietTasks(ctx); err != nil {
+		log.Printf("sweep: close returned quiet tasks: %v", err)
+	} else {
+		for _, id := range closed {
+			s.hub.notify(requestKey(id))
+		}
+	}
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
+	if err := s.store.QueueTaskStalls(ctx, s.cfg.TaskNudgeAfter, s.cfg.TaskStallAfter); err != nil {
+		log.Printf("sweep: task stalls: %v", err)
+	}
 	s.queueTaskReminders(ctx)
 	s.sweepTaskBriefing(ctx)
 	s.drainTaskNotices(ctx)
@@ -1035,10 +1053,20 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 	prepared := req
 	ttl := s.requestTTL(ctx, req.To)
 	var err error
-	if s.cfg.FileAllAsks == "off" {
+	if req.Kind == envelope.KindAsk && req.TaskID == 0 && (req.About != "" || store.HasTaskFollowupReference(req.Body)) {
+		view, viewErr := s.hostTaskView(ctx, req.From)
+		if viewErr != nil {
+			if rf, ok := prep.(Refunder); ok {
+				rf.Refund(prepared)
+			}
+			return envelope.Request{}, &StatusError{Code: http.StatusInternalServerError, Err: viewErr}
+		}
+		req.AboutHost = view.host
+	}
+	if s.cfg.FileAllAsks == "off" && req.About == "" {
 		req, err = s.store.Enqueue(ctx, req, ttl)
 	} else {
-		req, err = s.store.EnqueueFilingTasks(ctx, req, ttl, s.cfg.FileAllAsks != "on")
+		req, err = s.store.EnqueueFilingTasks(ctx, req, ttl, s.cfg.FileAllAsks != "on" && req.About == "")
 	}
 	if err != nil {
 		if rf, ok := prep.(Refunder); ok {
@@ -1047,8 +1075,12 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 		if errors.Is(err, store.ErrGroupFull) {
 			return envelope.Request{}, &StatusError{Code: http.StatusBadRequest, Err: err}
 		}
+		if errors.Is(err, store.ErrTaskRetries) || errors.Is(err, store.ErrTaskAssignLimit) {
+			return envelope.Request{}, &StatusError{Code: http.StatusConflict, Err: err}
+		}
 		return envelope.Request{}, &StatusError{Code: attachmentStatus(err, http.StatusInternalServerError), Err: err}
 	}
+	s.taskAsksCancelled(ctx, req.TaskID, req.TaskCancelled, "task_retried")
 	s.recordPassSent(ctx, req)
 	if req.Status == envelope.StatusHeld {
 		s.record(ctx, "held", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
@@ -1292,7 +1324,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if len(reqs) > 0 || len(reps) > 0 {
 			for i := range reqs {
 				reqs[i].RedactFor(name)
-				markTaskNotice(&reqs[i])
+				s.renderTaskNotice(r.Context(), &reqs[i])
 			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
@@ -1618,6 +1650,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, detail)
+	s.renderTaskNotice(r.Context(), &req)
 	writeJSON(w, http.StatusOK, req)
 }
 
@@ -1788,6 +1821,11 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	}
 	s.record(ctx, event, id, "", agent, store.DetailJSON(detail))
 	s.recordSuperseded(ctx, id, "replied", rep.Superseded)
+	if len(rep.CancelledFollowups) != 0 {
+		if ask, _, err := s.store.Request(ctx, id); err == nil {
+			s.taskAsksCancelled(ctx, ask.TaskID, rep.CancelledFollowups, "task_done")
+		}
+	}
 	// A reply to a task's ask returned the task, asked a question or
 	// released it.
 	s.drainTaskNotices(ctx)

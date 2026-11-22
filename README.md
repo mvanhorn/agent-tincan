@@ -628,7 +628,7 @@ See [Task deadlines, briefings and chat delegation](docs/tasks.md) for setup and
 
 The relay keeps one task list for the whole team: what is wanted, who has it, and what came back. A task stays on the relay machine until you mark it done or drop it, so work that should outlive a conversation has a place to wait. You and every joined agent can add to it; guests cannot.
 
-Each attempt at a task is one ordinary ask. Assigning a task sends the teammate an ask that carries the task's title, what is wanted, the latest earlier result and the comments made since, and the teammate is woken as for any ask. Its reply updates the task: an answer hands the task back as returned with the result stored, a `needs_input` reply shows it as a question, and a failure, decline, expiry, cancel or owner denial puts it back to open with no assignee and the reason in its history. A task has at most one open ask under it.
+Each attempt at a task is one ordinary ask. Assigning a task sends the teammate an ask that carries the task's title, what is wanted, the latest earlier result and the comments made since, and the teammate is woken as for any ask. Its reply updates the task: an answer hands the task back as returned with the result stored, a `needs_input` reply shows it as a question, and a failure, decline, expiry, cancel or owner denial puts it back to open with no assignee and the reason in its history. A task has one assignment at a time. Related follow-up asks can attach to its history.
 
 From an admin device, filing a task, handing it out and closing it looks like this:
 
@@ -640,7 +640,7 @@ tincan tasks show 7 --owner     # the result and the history
 tincan tasks done 7
 ```
 
-A task is proposed, open, working, question, returned, done or dropped. Nothing completes a task on its own: a returned task stays returned until you mark it done or someone assigns it again.
+A task is proposed, open, working, question, returned, done or dropped. A task host closes a returned task when its result answers the ask. The relay closes quiet tasks after their answers arrive. A host follows up on stalled or failed attempts and asks you when a decision is needed.
 
 | Command | What it does |
 |---|---|
@@ -652,7 +652,7 @@ A task is proposed, open, working, question, returned, done or dropped. Nothing 
 | `tincan tasks assign <id> [teammate]` | Your assign, from an admin device. With no teammate it prints the team with each one's status and good-at line and changes nothing. A task someone already has is taken from them and their ask cancelled. |
 | `tincan tasks comment <id> <comment> [--owner]` | Add a comment. It wakes nobody; the next attempt at the task carries it. |
 | `tincan tasks drop <id> [--note <why>] [--owner]` | Give a task up. An agent drops only a task it filed, and only while no ask is open under it. With `--owner` any task is dropped and an ask open under it is cancelled. |
-| `tincan tasks approve <id>`, `done <id>`, `reopen <id>`, `reset <id>` | Yours alone, from an admin device or the relay host: open a proposed task, close an open or returned one, put a done or dropped one back to open (or to proposed, when it was never approved), and set a task's count of agent assigns back to zero. |
+| `tincan tasks approve <id>`, `done <id>`, `reopen <id>`, `reset <id>` | Yours alone, from an admin device or the relay host: open a proposed task, close a task and answer any open assignment with your note, put a done or dropped one back to open (or to proposed, when it was never approved), and set a task's count of agent assigns back to zero. |
 | `tincan tasks host set <agent>` | Name a teammate a task host, from an admin device or the relay host. It prints a warning when the agent reaches the relay through the MCP gateway, when its wake method cannot start a turn, and for each guest that may ask it. |
 | `tincan tasks host clear <agent>` | Stop a teammate being a task host. Tasks it assigned earlier stay under its name. |
 | `tincan tasks decide <id> <done\|reopen\|drop\|assign\|due> --words <text>` | A named host acts on your exact words. For `assign` use `--to`. For `due` pass a day, time or `clear` after the action. |
@@ -661,7 +661,7 @@ Add a deadline with `tincan tasks add "Call the dentist" --due "Friday 3pm"`. Us
 
 In MCP, use `due` on `add_task` or `update_task` with action `due` and `when`. The owner or filer can change the deadline. A named host takes changes on the owner's direct words through `decide_task` with decision `due` and `when`, or `tincan tasks decide 12 due Friday 3pm --words "make 12 due Friday at 3pm"`.
 
-The relay sends a morning briefing to named task hosts at 07:00 in the relay's task zone by default. It shows due or overdue work, tasks waiting on you, recent completions, one suggested task and unconfirmed news. Set `--task-briefing HH:MM` and `--task-briefing-zone <IANA-zone>` to change the schedule, or `--task-briefing off` to turn off the daily briefing.
+The relay sends a morning briefing to named task hosts at 07:00 in the relay's task zone by default. It shows due or overdue work, active tasks and blockers, results to review, recent completions, and unconfirmed news. Set `--task-briefing HH:MM` and `--task-briefing-zone <IANA-zone>` to change the schedule, or `--task-briefing off` to turn off the daily briefing.
 
 Run `tincan relay notify <agent>` from an admin device to choose a joined agent that can alert you when the host runs out of attempts to deliver task news. The relay logs a warning at startup if hosts have no fallback, and `tincan doctor` reports it on an admin device.
 

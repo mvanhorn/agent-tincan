@@ -1555,3 +1555,24 @@ func TestListTasksIncludesQuietOnRequest(t *testing.T) {
 		t.Fatalf("quiet task = %q", got)
 	}
 }
+
+func TestAskAboutOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on", MaxWait: time.Millisecond})
+	ctx := t.Context()
+	agent := m.Client(t, "instinct")
+	original, err := agent.Send(ctx, "muse", "Check today's hours", envelope.KindAsk, "", false)
+	if err != nil || original.TaskID == 0 {
+		t.Fatalf("parent = %+v, %v", original, err)
+	}
+	cs := session(t, m, "instinct")
+	out := call(t, cs, "ask", map[string]any{
+		"to": "muse", "message": "Any update?", "about": original.ID, "wait_seconds": 1,
+	})
+	if strings.Contains(out, "ERROR:") {
+		t.Fatalf("ask = %q", out)
+	}
+	tasks, _, _, err := client.HostTasks(ctx, agent, false)
+	if err != nil || len(tasks) != 1 || tasks[0].ID != original.TaskID {
+		t.Fatalf("tasks = %+v, %v", tasks, err)
+	}
+}

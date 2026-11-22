@@ -1,6 +1,7 @@
 package relay_test
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -57,10 +58,15 @@ func TestWorkAskFilesAndFollowsReply(t *testing.T) {
 				t.Fatalf("asker result = %+v, %v", res, err)
 			}
 			notice := read(t, m.scout)
-			if len(notice) != 1 || notice[0].TaskNoticeID != task.ID || notice[0].TaskNoticeStatus != tc.want {
+			if tc.want == envelope.TaskOpen {
+				if len(notice) != 1 || notice[0].TaskNoticeKind != envelope.TaskNoticeAction || strings.Contains(notice[0].Body, "unassigned") {
+					t.Fatalf("auto-filed failure did not give the host an action: %+v", notice)
+				}
+			} else if len(notice) != 1 || notice[0].TaskNoticeID != task.ID || notice[0].TaskNoticeStatus != tc.want ||
+				!strings.Contains(client.TaskNoticeOwnerMessage(notice[0]), "Check the line") {
 				t.Fatalf("host inbox = %+v", notice)
 			}
-			m.wantNoTaskText(t, "Check the line", "private request detail", reply)
+			m.wantNoTaskText(t, "private request detail", reply)
 		})
 	}
 }
@@ -212,12 +218,12 @@ func TestQuietAnswerIsHiddenAndCountedOnce(t *testing.T) {
 	if tasks, _, _, err := client.HostTasks(ctx, m.scout, false); err != nil || len(tasks) != 0 {
 		t.Fatalf("default list = %+v, %v", tasks, err)
 	}
-	if tasks, _, _, err := client.HostTasks(ctx, m.scout, false, true); err != nil || len(tasks) != 1 ||
+	if tasks, _, _, err := client.HostTasks(ctx, m.scout, true, true); err != nil || len(tasks) != 1 ||
 		tasks[0].ID != req.TaskID || !tasks[0].Quiet {
 		t.Fatalf("quiet list = %+v, %v", tasks, err)
 	}
 	task, history, err := client.HostTask(ctx, m.scout, req.TaskID)
-	if err != nil || !task.Quiet || task.Status != envelope.TaskReturned || !task.Withheld || task.Title != "" || task.Detail != "" || task.Result != "" || len(history) != 0 {
+	if err != nil || !task.Quiet || task.Status != envelope.TaskDone || !task.Withheld || task.Title != "" || task.Detail != "" || task.Result != "" || len(history) != 0 {
 		t.Fatalf("quiet task = %+v, %+v, %v", task, history, err)
 	}
 	original, _, err := client.Task(ctx, m.grok, false, req.TaskID)
@@ -231,7 +237,7 @@ func TestQuietAnswerIsHiddenAndCountedOnce(t *testing.T) {
 	m.Server.Sweep(ctx)
 	got := read(t, m.scout)
 	if len(got) != 1 || got[0].TaskNoticeKind != envelope.TaskNoticeBriefing ||
-		got[0].Body != "Morning briefing. Small asks answered since last briefing: 1." {
+		client.TaskNoticeOwnerMessage(got[0]) != "Morning briefing. Small asks answered since last briefing: 1." {
 		t.Fatalf("briefing = %+v", got)
 	}
 	m.clk.advance(24 * time.Hour)
@@ -292,7 +298,11 @@ func TestQuietAskEscalates(t *testing.T) {
 				t.Fatalf("escalated list = %+v, %v", tasks, err)
 			}
 			got := read(t, m.scout)
-			if len(got) != 1 || got[0].TaskNoticeID != req.TaskID || got[0].TaskNoticeStatus != want {
+			if want == envelope.TaskOpen {
+				if name == "denied" && len(got) != 0 || name != "denied" && (len(got) != 1 || got[0].TaskNoticeKind != envelope.TaskNoticeAction) {
+					t.Fatalf("escalated notices = %+v", got)
+				}
+			} else if len(got) != 1 || got[0].TaskNoticeID != req.TaskID || got[0].TaskNoticeStatus != want {
 				t.Fatalf("escalated notices = %+v", got)
 			}
 			m.wantNoTaskText(t, "Notes lookup", "private reason", "Which chat?")
@@ -509,4 +519,390 @@ func TestRoomTaskScopeSurvivesAmbiguousClaims(t *testing.T) {
 		t.Fatalf("original recipient cannot read multi-room task = %+v, %v", got, err)
 	}
 
+}
+
+func TestReferencedAskReturnsAsTaskComment(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	parent, err := m.grok.Send(ctx, "muse", "Call about opening hours", envelope.KindAsk, "", false)
+	if err != nil || parent.TaskID == 0 {
+		t.Fatalf("parent = %+v, %v", parent, err)
+	}
+	claimOne(t, m.muse, parent.ID)
+	follow, err := m.grok.Send(ctx, "muse", "Check the status of ask "+parent.ID+".", envelope.KindAsk, "", false)
+	if err != nil || follow.TaskID != 0 {
+		t.Fatalf("follow-up = %+v, %v", follow, err)
+	}
+	if _, err := m.muse.Reply(ctx, follow.ID, "Still waiting on the call.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", 0)
+	got := m.task(t, parent.TaskID)
+	if got.Status != envelope.TaskWorking || got.CurrentRequest != parent.ID || got.Result != "" {
+		t.Fatalf("parent after follow-up = %+v", got)
+	}
+	history := m.events(t, parent.TaskID)
+	if last := history[len(history)-1]; last.Kind != envelope.TaskEventComment || !strings.Contains(last.Body, "Still waiting on the call.") {
+		t.Fatalf("follow-up answer missing from history: %+v", history)
+	}
+	if _, err := m.muse.Reply(ctx, parent.ID, "Open Tuesday.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.task(t, parent.TaskID); got.Status != envelope.TaskReturned || got.Result != "Open Tuesday." {
+		t.Fatalf("returned parent = %+v", got)
+	}
+	m.wantNotices(t, "scout", 1)
+}
+
+func TestCancelUntouchedAutoFiledAskDropsTaskQuietly(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("comment=%t", active), func(t *testing.T) {
+			m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+			m.host(t, "scout")
+			ctx := t.Context()
+			req, err := m.grok.Send(ctx, "muse", "Work to cancel", envelope.KindAsk, "", false)
+			if err != nil || req.TaskID == 0 {
+				t.Fatalf("send = %+v, %v", req, err)
+			}
+			want := envelope.TaskDropped
+			if active {
+				want = envelope.TaskOpen
+				if _, err := m.Store.AppendTaskEvent(ctx, envelope.TaskEvent{TaskID: req.TaskID, Actor: "grokbot", Kind: envelope.TaskEventComment, Body: "Keep this"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := m.grok.Cancel(ctx, req.ID); err != nil {
+				t.Fatal(err)
+			}
+			task := m.task(t, req.TaskID)
+			history := m.events(t, req.TaskID)
+			if task.Status != want || task.Assignee != "" || task.CurrentRequest != "" || history[len(history)-1].Status != want {
+				t.Fatalf("cancelled task = %+v, history = %+v", task, history)
+			}
+			m.Server.Sweep(ctx)
+			m.wantNotices(t, "scout", 0)
+		})
+	}
+}
+
+func TestWorkingTaskStallsOnlyAfterRepeatedProgress(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	req, err := m.grok.Send(ctx, "muse", "Check opening hours", envelope.KindAsk, "", false)
+	if err != nil || req.TaskID == 0 {
+		t.Fatalf("send = %+v, %v", req, err)
+	}
+	claimOne(t, m.muse, req.ID)
+	for i := range 17 {
+		note := "Waiting for the first call"
+		if i >= 5 {
+			note = "First call failed. Waiting for the second call"
+		}
+		note += " as of " + m.clk.now().Format("2006-01-02T15:04:05Z07:00")
+		if err := m.muse.Progress(ctx, req.ID, note); err != nil {
+			t.Fatal(err)
+		}
+		m.Server.Sweep(ctx)
+		if i < 11 {
+			m.wantNotices(t, "scout", 0)
+		}
+		var nudges int
+		if err := m.Store.DB().QueryRow("SELECT COUNT(*) FROM requests WHERE notice_kind = 'task-nudge' AND to_agent = 'muse'").Scan(&nudges); err != nil {
+			t.Fatal(err)
+		}
+		wantNudges := 0
+		if i >= 3 {
+			wantNudges = 1
+		}
+		if i >= 8 {
+			wantNudges = 2
+		}
+		if nudges != wantNudges {
+			t.Fatalf("after %d minutes, got %d nudges, want %d", i*5, nudges, wantNudges)
+		}
+		m.clk.advance(5 * time.Minute)
+	}
+	res, err := m.grok.Get(ctx, req.ID, 0)
+	if err != nil || res.Status != envelope.StatusClaimed || res.RelayNote != nil {
+		t.Fatalf("request after progress: %+v, %v", res, err)
+	}
+	if task := m.task(t, req.TaskID); task.Status != envelope.TaskWorking || task.CurrentRequest != req.ID {
+		t.Fatalf("working task = %+v", task)
+	}
+	m.wantNotices(t, "scout", 1)
+	in := read(t, m.scout)
+	if len(in) != 1 || in[0].TaskNoticeKind != envelope.TaskNoticeStall ||
+		!strings.Contains(client.TaskNoticeOwnerMessage(in[0]), "Check opening hours: muse has reported no new progress for 30 min.") {
+		t.Fatalf("stall inbox = %+v", in)
+	}
+	m.wantNoTaskText(t, "First call failed", "Waiting for the second call")
+	if _, err := client.HostRetryTask(ctx, m.scout, req.TaskID, "instinct", "Use the published phone line"); err != nil {
+		t.Fatalf("host could not act on the stall: %v", err)
+	}
+	if old, err := m.grok.Get(ctx, req.ID, 0); err != nil || old.Status != envelope.StatusCancelled {
+		t.Fatalf("stalled attempt after retry = %+v, %v", old, err)
+	}
+}
+
+func TestTaskReferencesDoNotAttachBareNumbersOrRestrictedText(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	parent, err := m.grok.Send(ctx, "muse", "Check the delivery", envelope.KindAsk, "", false)
+	if err != nil || parent.TaskID == 0 {
+		t.Fatalf("parent = %+v, %v", parent, err)
+	}
+	claimOne(t, m.muse, parent.ID)
+	bare, err := m.muse.Send(ctx, "instinct", fmt.Sprintf("Review PR #%d", parent.TaskID), envelope.KindAsk, "", false)
+	if err != nil || bare.TaskID == 0 || bare.TaskID == parent.TaskID {
+		t.Fatalf("bare issue number was treated as a task: %+v, %v", bare, err)
+	}
+	follow, err := m.grok.Send(ctx, "muse", fmt.Sprintf("Check task #%d again", parent.TaskID), envelope.KindAsk, "", false)
+	if err != nil || follow.TaskID != 0 {
+		t.Fatalf("explicit task label did not attach: %+v, %v", follow, err)
+	}
+
+	linked, err := m.scout.Send(client.WithAskAbout(ctx, parent.ID), "muse", "Can you confirm the latest status?", envelope.KindAsk, "", false)
+	if err != nil || linked.TaskID != 0 {
+		t.Fatalf("eligible host could not attach to a task in its view: %+v, %v", linked, err)
+	}
+
+	before := len(m.events(t, parent.TaskID))
+	outside := client.WithAskSource(client.WithAskAbout(ctx, parent.ID), "mail")
+	const private = "Outside message text"
+	if _, err := m.grok.Send(outside, "muse", private, envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	if after := m.events(t, parent.TaskID); len(after) != before {
+		t.Fatalf("outside ask changed parent history: %+v", after)
+	}
+	tasks, err := m.Store.Tasks(ctx, "", 0, 10, false)
+	if err != nil || len(tasks) != 3 {
+		t.Fatalf("tasks = %+v, %v", tasks, err)
+	}
+	task, history, err := client.HostTask(ctx, m.scout, tasks[2].ID)
+	if err != nil || !task.Withheld || task.Status != envelope.TaskProposed || task.Title != "" || len(history) != 0 {
+		t.Fatalf("outside follow-up was not withheld: %+v, %+v, %v", task, history, err)
+	}
+	m.wantNoTaskText(t, private)
+}
+
+func TestWorkingTaskWithoutProgressNudgesHostAtConfiguredThresholds(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", TaskNudgeAfter: 4 * time.Minute, TaskStallAfter: 9 * time.Minute})
+	m.host(t, "scout")
+	m.host(t, "muse")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check the supplier"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	if _, err := client.HostRetryTask(ctx, m.scout, task.ID, "instinct", "Try the dispatch desk"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("retry before stall: %v", err)
+	}
+	m.clk.advance(4*time.Minute - time.Second)
+	m.Server.Sweep(ctx)
+	if got := read(t, m.scout); len(got) != 0 {
+		t.Fatalf("early host notice: %+v", got)
+	}
+	var count int
+	if err := m.Store.DB().QueryRow("SELECT COUNT(*) FROM requests WHERE notice_kind = 'task-nudge'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("early nudge count = %d, %v", count, err)
+	}
+	m.clk.advance(time.Second)
+	m.Server.Sweep(ctx)
+	var nudge string
+	if err := m.Store.DB().QueryRow("SELECT body FROM requests WHERE notice_kind = 'task-nudge' AND to_agent = 'muse'").Scan(&nudge); err != nil || !strings.Contains(nudge, "for 4 min") {
+		t.Fatalf("assignee nudge = %q, %v", nudge, err)
+	}
+	m.clk.advance(5 * time.Minute)
+	m.Server.Sweep(ctx)
+	in := read(t, m.scout)
+	if len(in) != 1 || in[0].TaskNoticeKind != envelope.TaskNoticeStall || !strings.Contains(in[0].Body, "for 9 min") {
+		t.Fatalf("host action = %+v", in)
+	}
+	assigneeNotice := read(t, m.muse)
+	if len(assigneeNotice) != 1 || assigneeNotice[0].TaskNoticeKind != envelope.TaskNoticeStall {
+		t.Fatalf("host assignee did not receive a stall notice: %+v", assigneeNotice)
+	}
+	for _, delivery := range []struct {
+		host *client.Relay
+		id   string
+	}{{m.scout, in[0].ID}, {m.muse, assigneeNotice[0].ID}} {
+		if _, err := delivery.host.Claim(ctx, delivery.id); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.TaskNoticesTold(ctx, delivery.host, []string{delivery.id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.muse.Claim(ctx, req.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.muse.Progress(ctx, req.ID, "Supplier picked up and is checking stock."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.HostCompleteTask(ctx, m.scout, task.ID, "Supplier has the parts in stock."); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("fresh progress did not invalidate the stall: %v", err)
+	}
+	m.clk.advance(9 * time.Minute)
+	m.Server.Sweep(ctx)
+	if got := read(t, m.scout); len(got) != 1 || got[0].TaskNoticeKind != envelope.TaskNoticeStall {
+		t.Fatalf("second stall notice = %+v", got)
+	}
+	m.wantNotices(t, "scout", 2)
+
+	closed, err := client.HostCompleteTask(ctx, m.scout, task.ID, "Supplier has the parts in stock.")
+	if err != nil || closed.Status != envelope.TaskDone || closed.Result != "Supplier has the parts in stock." {
+		t.Fatalf("host completion = %+v, %v", closed, err)
+	}
+	answered, err := m.grok.Get(ctx, req.ID, 0)
+	if err != nil || answered.Status != envelope.StatusAnswered || answered.Reply == nil || answered.Reply.From != "scout" || answered.Reply.Body != closed.Result {
+		t.Fatalf("host-authored answer = %+v, %v", answered, err)
+	}
+	if err := m.Store.DB().QueryRow("SELECT COUNT(*) FROM requests WHERE notice_kind = 'task-nudge' AND status != 'cancelled'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("nudge survived closure: %d, %v", count, err)
+	}
+	if reopened, err := client.DecideTask(ctx, m.admin, client.TaskReopen, task.ID, "More info needed"); err != nil || reopened.Status != envelope.TaskOpen {
+		t.Fatalf("owner could not reopen host completion: %+v, %v", reopened, err)
+	}
+}
+
+func TestSweepClosesPreviouslyReturnedQuietAnswer(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	req, err := m.grok.Send(client.WithQuietAsk(ctx, true), "muse", "Confirm the version", envelope.KindAsk, "", false)
+	if err != nil || req.TaskID == 0 {
+		t.Fatalf("quiet ask = %+v, %v", req, err)
+	}
+	if _, err := m.muse.Reply(ctx, req.ID, "Version confirmed.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Store.DB().Exec("UPDATE tasks SET status = 'returned' WHERE id = ?", req.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	got := m.task(t, req.TaskID)
+	if got.Status != envelope.TaskDone || got.Result != "Version confirmed." {
+		t.Fatalf("legacy quiet result = %+v", got)
+	}
+	m.wantNotices(t, "scout", 0)
+}
+
+func TestRoomTaskNoticeHasNoTitleEvenForMemberHost(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", UnansweredQuestionAfter: time.Minute})
+	m.host(t, "scout")
+	ctx := t.Context()
+	if _, err := client.CreateRoom(ctx, m.admin, "topic"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"grokbot", "muse", "scout"} {
+		if _, err := client.AddRoomMember(ctx, m.admin, "topic", name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const topic = "Private room topic"
+	post, err := client.PostToRoom(ctx, m.grok, "topic", "@muse "+topic)
+	if err != nil || len(post.Post.Mentions) != 1 {
+		t.Fatalf("room mention = %+v, %v", post, err)
+	}
+	req := claimOne(t, m.muse, post.Post.Mentions[0].RequestID)
+	if _, err := m.muse.Reply(ctx, req.ID, "Private room question", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(time.Minute)
+	m.Server.Sweep(ctx)
+	want := read(t, m.scout)
+	if len(want) != 1 || want[0].TaskNoticeID != req.TaskID {
+		t.Fatalf("room notice = %+v", want)
+	}
+	m.wantNoTaskText(t, topic, "Private room question")
+}
+
+func TestTaskWithReferencedRoomTextIsWithheldFromOtherHosts(t *testing.T) {
+	m := roomMesh(t)
+	ctx := t.Context()
+	admin, poster, muse, host := m.Client(t, "admin"), m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "instinct")
+	if _, err := admin.SetTaskHost(ctx, "instinct", true); err != nil {
+		t.Fatal(err)
+	}
+	post, err := client.PostToRoom(ctx, poster, "launch", "@muse Confirm a private room detail")
+	if err != nil || len(post.Post.Mentions) != 1 {
+		t.Fatalf("room mention = %+v, %v", post, err)
+	}
+	original := claimOne(t, muse, post.Post.Mentions[0].RequestID)
+	req, err := poster.Send(ctx, "muse", "Private room detail from ask "+original.ID, envelope.KindAsk, "", false)
+	if err != nil || req.TaskID == 0 || req.TaskID == original.TaskID {
+		t.Fatalf("room follow-up was not filed separately: %+v, %v", req, err)
+	}
+	task, history, err := client.HostTask(ctx, host, req.TaskID)
+	if err != nil || !task.Withheld || task.Title != "" || task.Detail != "" || len(history) != 0 {
+		t.Fatalf("host saw private room context: %+v, %+v, %v", task, history, err)
+	}
+	if req, err := poster.Send(client.WithAskAbout(ctx, "task"), "muse", "Separate work", envelope.KindAsk, "", false); err != nil || req.TaskID == 0 {
+		t.Fatalf("invalid reference should file a normal task: %+v, %v", req, err)
+	}
+}
+
+func TestClarificationAnswerRestartsTaskStallTimer(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off", TaskNudgeAfter: time.Minute, TaskStallAfter: 2 * time.Minute})
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check the shipment"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	claimOne(t, m.muse, req.ID)
+	m.clk.advance(2 * time.Minute)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", 1)
+	if _, err := m.muse.Reply(ctx, req.ID, "Which shipment?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(5 * time.Minute)
+	if _, err := m.grok.Answer(ctx, req.ID, "Shipment 25"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.HostRetryTask(ctx, m.scout, task.ID, "instinct", "Check the dispatch desk"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("retry after fresh input: %v", err)
+	}
+	if _, err := client.HostCompleteTask(ctx, m.scout, task.ID, "Dispatched"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("complete after fresh input: %v", err)
+	}
+	m.Server.Sweep(ctx)
+	before := len(m.notices(t, "scout"))
+	m.clk.advance(2*time.Minute - time.Second)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", before)
+	m.clk.advance(time.Second)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "scout", before+1)
+}
+
+func TestFollowupsAttachWhileParentNeedsInput(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check the shipment"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	claimOne(t, m.muse, req.ID)
+	if _, err := m.muse.Reply(ctx, req.ID, "Which shipment?", envelope.StatusNeedsInput); err != nil {
+		t.Fatal(err)
+	}
+	for _, follow := range []struct{ about, body string }{
+		{fmt.Sprint(task.ID), "Can you check the dispatch desk?"},
+		{"", "Check whether we have the reference for ask " + req.ID},
+	} {
+		sent, err := m.grok.Send(client.WithAskAbout(ctx, follow.about), "instinct", follow.body, envelope.KindAsk, "", false)
+		if err != nil || sent.TaskID != 0 {
+			t.Fatalf("follow-up created its own task: %+v, %v", sent, err)
+		}
+		if _, err := m.instinct.Reply(ctx, sent.ID, "Shipment 25", envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+		events := m.events(t, task.ID)
+		if last := events[len(events)-1]; last.Kind != envelope.TaskEventComment || !strings.Contains(last.Body, sent.ID) {
+			t.Fatalf("follow-up reply missing from parent: %+v", events)
+		}
+	}
 }

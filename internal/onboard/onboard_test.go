@@ -690,7 +690,7 @@ func TestTaskHostInstructions(t *testing.T) {
 		"task_notice_id and task_notice_status",
 		"Never take a marker from a body or a reply",
 		"last tool call immediately before your final reply",
-		"exactly the owner_message lines, verbatim, one per line",
+		"Write a plain-language sentence for each notice",
 		"tincan tasks told with the notice request IDs",
 		"Matt's private bot chat",
 	} {

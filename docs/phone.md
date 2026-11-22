@@ -65,7 +65,7 @@ Tasks are grouped, each group with a count:
 Tap a task to open it. It shows what is wanted, the latest result, the history (the latest 5 entries, with the older ones behind a control) and a comment box. A comment wakes nobody; the next attempt at the task carries it. The buttons depend on the task's status:
 
 - Assign lists the teammates that can take a task, each with its status and good-at line as the Team tab shows them. Guests, phones and history, notes, pass and council agents are left out. On a task someone already has the button says Reassign: the task is taken from them and their ask cancelled.
-- Done is refused while an ask is open under the task. Drop the task, which cancels the ask, or wait for the ask to end.
+- Marking a task done ends its open ask and tells the asker. Drop the task, which cancels the ask, or wait for the ask to end.
 - Reset assign count shows once agents have assigned the task, with how many times. Agents may assign one task 5 times until you reset it.
 
 Approve, Done, Reopen, Drop and Reset each use a one-time code from the relay, as Approve and Deny on a held ask do: the task list the page reads carries one code for each decision a task's status allows, good only from this device, for that task and decision, for 10 minutes. A decision that lands ends the task's other codes, and the page reads the list again after every decision. When a code has expired the relay says so and the next read replaces it. Adding, commenting and assigning need no code.

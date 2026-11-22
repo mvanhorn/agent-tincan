@@ -61,6 +61,7 @@ type taskAssign struct {
 	OwnerHost     bool
 	OwnerWords    string
 	FilingCharged bool
+	Retry         *envelope.TaskRetry
 }
 
 // actor is who the task's history names for the assignment.
@@ -105,10 +106,14 @@ func (s *Server) assignTask(ctx context.Context, a taskAssign) (envelope.Request
 		return envelope.Request{}, err
 	}
 	actor := a.actor()
-	body, contributors := taskBody(carried, actor, limit)
-	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: body, FromSession: a.Session,
+	prefix := ""
+	if a.Retry != nil {
+		prefix = "Try this approach on the next attempt: " + a.Retry.Reason + "\n\n"
+	}
+	body, contributors := taskBody(carried, actor, limit-len(prefix))
+	req, err := s.submit(ctx, envelope.Request{From: a.From, To: a.To, Kind: envelope.KindAsk, Body: prefix + body, FromSession: a.Session,
 		TaskID: a.TaskID, TaskActor: actor, TaskOwnerWords: a.OwnerWords, TaskFilingCharged: a.FilingCharged,
-		TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat || a.OwnerHost})
+		TaskResultEvent: carried.ResultEvent, Contributors: contributors, RecoverySource: carried.Task.Source, NoParent: a.Repeat || a.OwnerHost, TaskRetry: a.Retry})
 	if err != nil {
 		return envelope.Request{}, taskStatusError(err)
 	}
@@ -198,7 +203,7 @@ func taskStatusError(err error) error {
 		return err
 	case errors.Is(err, store.ErrNoTask):
 		return &StatusError{Code: http.StatusNotFound, Err: err}
-	case errors.Is(err, store.ErrTaskState), errors.Is(err, store.ErrTaskAskOpen), errors.Is(err, store.ErrTaskLimit), errors.Is(err, store.ErrTaskAssignLimit):
+	case errors.Is(err, store.ErrTaskState), errors.Is(err, store.ErrTaskLimit), errors.Is(err, store.ErrTaskAssignLimit):
 		return &StatusError{Code: http.StatusConflict, Err: err}
 	}
 	return err
@@ -921,7 +926,7 @@ func (s *Server) handleDropTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, errTaskNotFiler)
 		return
 	}
-	task, err = s.store.SetTaskStatus(r.Context(), id, envelope.TaskDropped, from, in.Note, envelope.TaskProposed, envelope.TaskOpen, envelope.TaskReturned)
+	task, cancelled, err := s.store.DropInactiveTask(r.Context(), id, from, in.Note, false)
 	if errors.Is(err, store.ErrTaskState) {
 		if now, terr := s.store.Task(r.Context(), id, ""); terr == nil && now.CurrentRequest != "" {
 			err = &StatusError{Code: http.StatusConflict, Err: errTaskDropAskOpen}
@@ -931,6 +936,7 @@ func (s *Server) handleDropTask(w http.ResponseWriter, r *http.Request) {
 		writeTaskErr(w, err)
 		return
 	}
+	s.taskAsksCancelled(r.Context(), id, cancelled, "task_dropped")
 	s.recordTask(r, "task_dropped", from, id, nil)
 	if task.RoomPostID != 0 {
 		s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
@@ -961,11 +967,13 @@ var (
 // each with the audit event the owner's own route writes for it. Approve and
 // reset are not among them: they stay with admin devices.
 var hostDecisions = map[string]string{
-	decisionDone:      "task_done",
-	decisionReopen:    "task_reopened",
-	decisionDrop:      "task_dropped",
-	client.TaskDue:    "task_due",
-	client.TaskAssign: "task_assigned",
+	decisionDone:        "task_done",
+	decisionReopen:      "task_reopened",
+	decisionDrop:        "task_dropped",
+	client.TaskDue:      "task_due",
+	client.TaskAssign:   "task_assigned",
+	client.TaskRetry:    "task_retried",
+	client.TaskComplete: "task_done",
 }
 
 // handleHostDecideTask applies a named host's decision on the owner's
@@ -985,6 +993,8 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Decision   string `json:"decision"`
 		OwnerWords string `json:"owner_words"`
+		Reason     string `json:"reason"`
+		Result     string `json:"result"`
 		To         string `json:"to"`
 		envelope.TaskDue
 	}
@@ -997,18 +1007,38 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	event, known := hostDecisions[in.Decision]
 	if !known {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen, drop, assign or due; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("unknown decision %q: a task host decides done, reopen, drop, assign, retry, complete or due; approving a task and resetting its assign count are the owner's alone, on an admin device", in.Decision))
 		return
 	}
-	if strings.TrimSpace(in.OwnerWords) == "" {
+	in.Reason = strings.TrimSpace(in.Reason)
+	answered := in.Decision == decisionDone && in.OwnerWords == "" && in.Reason != ""
+	retry := in.Decision == client.TaskRetry && in.OwnerWords == "" && in.Reason != ""
+	complete := in.Decision == client.TaskComplete && in.OwnerWords == "" && strings.TrimSpace(in.Result) != ""
+	if !answered && !retry && !complete && strings.TrimSpace(in.OwnerWords) == "" {
 		writeErr(w, http.StatusBadRequest, errTaskDecideWords)
+		return
+	}
+	if in.Reason != "" && (!answered && !retry || strings.ContainsAny(in.Reason, "\r\n") || len(in.Reason) > maxTaskTitle) {
+		writeErr(w, http.StatusBadRequest, errors.New("reason must be one short line for closing an answered task or retrying without owner_words"))
+		return
+	}
+	if in.Result != "" && !complete {
+		writeErr(w, http.StatusBadRequest, errors.New("result is only for complete without owner_words"))
+		return
+	}
+	if err := checkTaskText(in.Result, false); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if err := checkTaskText(in.Reason, false); err != nil {
+		writeTaskErr(w, err)
 		return
 	}
 	if err := checkTaskText(in.OwnerWords, false); err != nil {
 		writeTaskErr(w, err)
 		return
 	}
-	view := taskView{viewer: from, host: true}
+	view := taskView{viewer: from, host: true, roomAccess: s.mayReadRooms}
 	if in.Decision == client.TaskAssign {
 		s.hostAssignTask(w, r, view, id, in.To, in.OwnerWords)
 		return
@@ -1029,6 +1059,25 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch in.Decision {
+	case client.TaskComplete:
+		if !complete || task.RoomPostID != 0 || task.ParticipantOnly {
+			writeErr(w, http.StatusConflict, errors.New("complete requires a verified result on a task without private request scope"))
+			return
+		}
+		var reply envelope.Reply
+		_, reply, err = s.store.CompleteTaskWithHostResult(ctx, id, from, in.Result, task.CurrentRequest, s.cfg.Now().Add(-s.cfg.TaskStallAfter))
+		if err == nil {
+			s.announceTaskCompletion(ctx, id, reply)
+		}
+	case client.TaskRetry:
+		if !retry || in.To == "" || in.To == from {
+			writeErr(w, http.StatusBadRequest, errors.New("retry needs a teammate and a one-line reason for the new approach"))
+			return
+		}
+		_, err = s.assignTask(ctx, taskAssign{
+			TaskID: id, From: from, To: in.To, OwnerHost: true, FilingCharged: true,
+			Retry: &envelope.TaskRetry{Current: task.CurrentRequest, Reason: in.Reason, StalledBefore: s.cfg.Now().Add(-s.cfg.TaskStallAfter)},
+		})
 	case client.TaskDue:
 		if err := in.Validate(s.cfg.TaskZone); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -1036,16 +1085,23 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err = s.store.SetTaskDue(ctx, id, in.TaskDue, from, in.OwnerWords, true)
 	case decisionDone:
-		_, err = s.store.MarkTaskDoneForOwner(ctx, id, from, in.OwnerWords)
-		if errors.Is(err, store.ErrTaskAskOpen) {
-			if now, terr := s.store.Task(ctx, id, ""); terr == nil && now.CurrentRequest != "" {
-				err = &StatusError{Code: http.StatusConflict, Err: fmt.Errorf("%w (request %s)", store.ErrTaskAskOpen, now.CurrentRequest)}
-			}
+		var reply envelope.Reply
+		if answered {
+			_, reply, err = s.store.MarkAnsweredTaskDone(ctx, id, from, in.Reason)
+		} else {
+			_, reply, err = s.store.MarkTaskDoneForOwner(ctx, id, from, in.OwnerWords)
+		}
+		if err == nil {
+			s.announceTaskCompletion(ctx, id, reply)
 		}
 	case decisionReopen:
 		_, err = s.store.ReopenTaskForOwner(ctx, id, from, in.OwnerWords)
 	case decisionDrop:
-		_, err = s.store.DropTaskForOwner(ctx, id, from, in.OwnerWords)
+		var cancelled []string
+		_, cancelled, err = s.store.DropInactiveTask(ctx, id, from, in.OwnerWords, true)
+		if err == nil {
+			s.taskAsksCancelled(ctx, id, cancelled, "task_dropped")
+		}
 		if errors.Is(err, store.ErrTaskState) {
 			if now, terr := s.store.Task(ctx, id, ""); terr == nil && now.CurrentRequest != "" {
 				err = &StatusError{Code: http.StatusConflict, Err: errTaskHostDropAskOpen}
@@ -1060,7 +1116,7 @@ func (s *Server) handleHostDecideTask(w http.ResponseWriter, r *http.Request) {
 	if in.Decision != client.TaskDue {
 		s.nonces.void(taskNonceID(id))
 	}
-	s.recordTask(r, event, from, id, map[string]any{"for_owner": true, "bytes": len(in.OwnerWords)})
+	s.recordTask(r, event, from, id, map[string]any{"for_owner": !answered && !retry && !complete, "bytes": len(in.OwnerWords) + len(in.Reason) + len(in.Result)})
 	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
 }
 
@@ -1135,7 +1191,7 @@ func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 			continue
 		case envelope.TaskProposed:
 			row.ApproveNonce = issue(decisionApprove)
-		case envelope.TaskOpen, envelope.TaskReturned:
+		case envelope.TaskOpen, envelope.TaskReturned, envelope.TaskWorking, envelope.TaskQuestion:
 			row.DoneNonce = issue(decisionDone)
 		}
 		row.DropNonce = issue(decisionDrop)
@@ -1317,12 +1373,35 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDoneTask closes an open or returned task. One with an ask open
-// under it is refused.
+// handleDoneTask closes a task and answers any open ask under it.
 func (s *Server) handleDoneTask(w http.ResponseWriter, r *http.Request) {
 	s.decideTask(w, r, decisionDone, "task_done", func(id int64, note string) (envelope.Task, error) {
-		return s.store.MarkTaskDone(r.Context(), id, envelope.TaskOwner, note)
+		ctx := r.Context()
+		task, reply, err := s.store.MarkTaskDone(ctx, id, envelope.TaskOwner, note)
+		if err == nil {
+			s.announceTaskCompletion(ctx, id, reply)
+		}
+		return task, err
 	})
+}
+
+// announceTaskCompletion wakes both the requester and anyone waiting on the
+// open request. Only the owner authored this answer.
+func (s *Server) announceTaskCompletion(ctx context.Context, task int64, rep envelope.Reply) {
+	ctx = context.WithoutCancel(ctx)
+	s.taskAsksCancelled(ctx, task, rep.CancelledFollowups, "task_done")
+	if rep.RequestID == "" {
+		return
+	}
+	s.hub.notify(requestKey(rep.RequestID))
+	s.recordSuperseded(ctx, rep.RequestID, "owner completed task", rep.Superseded)
+	if req, _, err := s.store.Request(ctx, rep.RequestID); err == nil {
+		s.hub.notify(inboxKey(req.From))
+		if rp, ok := s.events.(Replier); ok {
+			rp.Replied(ctx, req)
+		}
+		s.checkWatches(ctx, req.To)
+	}
 }
 
 // handleReopenTask puts a done or dropped task back to open. A task that

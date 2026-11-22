@@ -178,6 +178,10 @@ func (s *Store) answer(ctx context.Context, id, agent, body string, guest bool, 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM replies WHERE request_id = ?`, id); err != nil {
 		return envelope.Request{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE task_progress_state
+		SET normalized = '', changed_at = ?, notified = 0, notified_at = 0 WHERE request_id = ?`, now, id); err != nil {
+		return envelope.Request{}, err
+	}
 	if err := s.followTaskTx(ctx, tx, id, `status = ?`, []any{string(envelope.TaskWorking)},
 		envelope.TaskEvent{Actor: agent, Kind: envelope.TaskEventStatus, Body: "answered the question", Status: envelope.TaskWorking}); err != nil {
 		return envelope.Request{}, err

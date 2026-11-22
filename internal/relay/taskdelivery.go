@@ -95,11 +95,11 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		reason = "host ineligible or notice cancelled"
 	} else if d.Attempt < taskNoticeAttempts {
 		// Eligibility may have changed since the sweep collected its batch.
-		host, found, err := s.dir.Agent(ctx, old.To)
+		view, err := s.hostTaskView(ctx, old.To)
 		if err != nil {
 			return err
 		}
-		if found && host.TaskHost && s.taskHostRefusal(host) == "" {
+		if view.host {
 			next.To, next.NoticeKind, next.NoticeFor, next.Body = old.To, old.NoticeKind, old.NoticeFor, old.Body
 			next.TaskNoticeStatus = old.TaskNoticeStatus
 		} else {
@@ -120,7 +120,7 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 			label = "Task briefing"
 		}
 		next.Body = fmt.Sprintf("%s: %s did not acknowledge this task notice by attempt %d. %s",
-			label, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
+			label, old.To, d.Attempt, client.TaskNoticeFallbackMessage(old))
 	}
 	var ttl time.Duration
 	if next.To != "" {

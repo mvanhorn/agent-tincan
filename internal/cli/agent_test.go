@@ -750,7 +750,7 @@ func TestQuietAskCLI(t *testing.T) {
 		reply envelope.Status
 		want  envelope.TaskStatus
 	}{
-		{"answered", true, envelope.StatusAnswered, envelope.TaskReturned},
+		{"answered", true, envelope.StatusAnswered, envelope.TaskDone},
 		{"failed", true, envelope.StatusFailed, envelope.TaskOpen},
 		{"no task host", false, envelope.StatusAnswered, ""},
 	} {
@@ -800,12 +800,10 @@ func TestQuietAskCLI(t *testing.T) {
 				t.Fatalf("default host list = %+v, %v", tasks, err)
 			}
 			notices, err := host.Poll(ctx, 0)
-			if err != nil || (len(notices.Requests) != 0) != failed {
+			if err != nil || failed && (len(notices.Requests) != 1 || notices.Requests[0].TaskNoticeKind != envelope.TaskNoticeAction) || !failed && len(notices.Requests) != 0 {
 				t.Fatalf("host inbox = %+v, %v", notices, err)
 			}
-			if failed && (len(notices.Requests) != 1 || notices.Requests[0].TaskNoticeID != req.TaskID) {
-				t.Fatalf("escalation notice = %+v", notices)
-			}
+
 		})
 	}
 }

@@ -80,13 +80,15 @@ type TaskResult struct {
 
 // Task actions available to the owner or a named host acting on their words.
 const (
-	TaskApprove = "approve"
-	TaskDone    = "done"
-	TaskReopen  = "reopen"
-	TaskReset   = "reset"
-	TaskDrop    = "drop"
-	TaskDue     = "due"
-	TaskAssign  = "assign"
+	TaskApprove  = "approve"
+	TaskDone     = "done"
+	TaskReopen   = "reopen"
+	TaskReset    = "reset"
+	TaskDrop     = "drop"
+	TaskDue      = "due"
+	TaskAssign   = "assign"
+	TaskRetry    = "retry"
+	TaskComplete = "complete"
 )
 
 // ErrTaskHostDecisionsUnsupported identifies a relay that predates a task
@@ -368,9 +370,30 @@ func HostAssignTask(ctx context.Context, c Rawer, id int64, to, words string) (e
 	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskAssign, Words: words, To: to}, "")
 }
 
+// HostCloseAnsweredTask closes a returned task whose result is complete.
+func HostCloseAnsweredTask(ctx context.Context, c Rawer, id int64, reason string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskDone, Reason: reason}, "")
+}
+
+// HostRetryTask retries an unfinished task using the approach in reason.
+func HostRetryTask(ctx context.Context, c Rawer, id int64, to, reason string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskRetry, To: to, Reason: reason}, "")
+}
+
+// HostCompleteTask records the verified result of work performed by the host.
+func HostCompleteTask(ctx context.Context, c Rawer, id int64, result string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskComplete, Result: result}, "")
+}
+
+func FormatAnsweredTaskClosure(t envelope.Task) string {
+	return fmt.Sprintf("Closed task #%d as answered. Tell the owner the result in one plain sentence and include the task number.", t.ID)
+}
+
 type hostTaskDecision struct {
 	Decision string `json:"decision"`
 	Words    string `json:"owner_words"`
+	Reason   string `json:"reason,omitempty"`
+	Result   string `json:"result,omitempty"`
 	To       string `json:"to,omitempty"`
 	envelope.TaskDue
 }
@@ -616,6 +639,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 	}
 	if t.Key != "" {
 		fmt.Fprintf(&b, "Key: %s\n", ScheduleText(t.Key))
+	}
+	if t.HostRetries > 0 {
+		fmt.Fprintf(&b, "Host retries used: %d of 2\n", t.HostRetries)
 	}
 	if t.AgentAssigns > 0 {
 		fmt.Fprintf(&b, "Agent assigns: %d\n", t.AgentAssigns)
