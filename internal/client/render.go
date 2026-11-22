@@ -552,6 +552,8 @@ func TaskNoticeFallbackMessage(req envelope.Request) string {
 		return fmt.Sprintf("Task #%d needs follow-through after an attempt ended without a result.", req.TaskNoticeID)
 	case envelope.TaskNoticeStall:
 		return fmt.Sprintf("Task #%d is still working and has had no new progress.", req.TaskNoticeID)
+	case envelope.TaskNoticeReturnedClose:
+		return fmt.Sprintf("Task #%d is returned and the asker has not followed up.", req.TaskNoticeID)
 	}
 	var news string
 	switch req.TaskNoticeStatus {

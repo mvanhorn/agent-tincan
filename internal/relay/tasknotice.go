@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
@@ -36,6 +38,9 @@ const taskNoticeTail = " Check the current task before acting. No relay reply ne
 // change that is no news. It is built from the task's id, its status and
 // agent names alone.
 func (s *Server) taskNoticeBody(n store.TaskNotice) string {
+	if n.Kind == envelope.TaskNoticeReturnedClose {
+		return fmt.Sprintf("Task #%d is returned and the asker has not followed up.", n.TaskID) + taskNoticeTail
+	}
 	if n.Kind == envelope.TaskNoticeAction {
 		return fmt.Sprintf("Task #%d needs follow-through: the attempt ended without a result. Check its history and choose another way to finish it.", n.TaskID) + taskNoticeTail
 	}
@@ -106,7 +111,8 @@ func markTaskNotice(req *envelope.Request) {
 		return
 	}
 	req.TaskNoticeID = id
-	if req.NoticeKind == envelope.TaskNoticeReminder || req.NoticeKind == envelope.TaskNoticeStall || req.NoticeKind == envelope.TaskNoticeAction {
+	switch req.NoticeKind {
+	case envelope.TaskNoticeReminder, envelope.TaskNoticeStall, envelope.TaskNoticeAction, envelope.TaskNoticeReturnedClose:
 		req.TaskNoticeKind = req.NoticeKind
 		req.TaskNoticeReceipt = true
 		return
@@ -131,6 +137,43 @@ func markTaskNotice(req *envelope.Request) {
 		req.TaskNoticeStatus = envelope.TaskProposed
 	}
 	req.TaskNoticeReceipt = req.TaskNoticeStatus != ""
+}
+
+func (s *Server) sweepReturnedHostTasks(ctx context.Context) {
+	roster, err := s.dir.Agents(ctx)
+	if err != nil {
+		log.Printf("sweep: returned host tasks: roster: %v", err)
+		return
+	}
+	hosts, err := s.taskHostsAvailableToClose(ctx, s.eligibleTaskHosts(roster))
+	if err == nil {
+		err = s.store.SweepReturnedHostTasks(ctx, s.cfg.TaskReturnedCloseAfter, len(hosts) != 0)
+	}
+	if err != nil {
+		log.Printf("sweep: returned host tasks: %v", err)
+	}
+}
+
+// taskHostsAvailableToClose checks the same open work that blocks decide.
+func (s *Server) taskHostsAvailableToClose(ctx context.Context, eligible []string) ([]string, error) {
+	var hosts []string
+	for _, host := range eligible {
+		open, err := s.store.OpenGuestAsks(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if open != 0 {
+			continue
+		}
+		claims, err := s.store.HeldClaims(ctx, host, 1)
+		if err != nil {
+			return nil, err
+		}
+		if len(claims) == 0 {
+			hosts = append(hosts, host)
+		}
+	}
+	return hosts, nil
 }
 
 func (s *Server) queueTaskReminders(ctx context.Context) {
@@ -173,11 +216,24 @@ func (s *Server) drainTaskNotices(ctx context.Context) {
 		return
 	}
 	eligible := s.eligibleTaskHosts(roster)
+	available := sync.OnceValues(func() ([]string, error) {
+		return s.taskHostsAvailableToClose(ctx, eligible)
+	})
 	for _, n := range rows {
 		if n.Kind == envelope.TaskNoticeBriefing && len(eligible) == 0 {
 			continue
 		}
-		if err := s.tellTaskHosts(ctx, n, eligible); err != nil {
+		hosts := eligible
+		if n.Kind == envelope.TaskNoticeReturnedClose {
+			hosts, err = available()
+			if err != nil {
+				log.Printf("task notices: available hosts: %v", err)
+			}
+			if len(hosts) == 0 {
+				continue
+			}
+		}
+		if err := s.tellTaskHosts(ctx, n, hosts); err != nil {
 			log.Printf("task notices: task %d: %v (a later drain tries again)", n.TaskID, err)
 			continue
 		}
@@ -209,13 +265,21 @@ func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, eligible
 	if body == "" || n.Actor == envelope.TaskOwner {
 		return nil
 	}
+	if n.Kind == envelope.TaskNoticeReturnedClose {
+		// Give the host that answered the work first chance to close it.
+		if slices.Contains(eligible, n.Actor) {
+			eligible = []string{n.Actor}
+		} else if len(eligible) > 0 {
+			eligible = eligible[:1]
+		}
+	}
 	for _, host := range eligible {
-		if n.Kind != envelope.TaskNoticeStall && host == n.Actor {
+		if n.Kind != envelope.TaskNoticeStall && n.Kind != envelope.TaskNoticeReturnedClose && host == n.Actor {
 			continue
 		}
 		// The asker gets the ordinary reply. A webhook host's routine
 		// can run in another session and needs the metadata notice too.
-		if n.Kind != envelope.TaskNoticeStall && n.Kind != envelope.TaskNoticeAction && n.Retries == 0 && host == n.Asker && (s.wake == nil || s.wake.WakeMethod(host) != "webhook" || n.Status == envelope.TaskProposed) {
+		if n.Kind != envelope.TaskNoticeStall && n.Kind != envelope.TaskNoticeAction && n.Kind != envelope.TaskNoticeReturnedClose && n.Retries == 0 && host == n.Asker && (s.wake == nil || s.wake.WakeMethod(host) != "webhook" || n.Status == envelope.TaskProposed) {
 			continue
 		}
 		hostBody := hostNoticePayload(body, body)
@@ -252,6 +316,8 @@ func (s *Server) hostNoticeBody(n store.TaskNotice, base string) string {
 	label := fmt.Sprintf("Task #%d", n.TaskID)
 	var news string
 	switch n.Kind {
+	case envelope.TaskNoticeReturnedClose:
+		return hostNoticePayload(base, label+": The asker has not followed up. Check the result and recent history. If the result answers the ask and there is no new follow-up, close the task with decide_task done and a one-line reason.")
 	case envelope.TaskNoticeReminder:
 		news = "its reminder is due."
 	case envelope.TaskNoticeStall:
