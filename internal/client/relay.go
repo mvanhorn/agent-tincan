@@ -571,10 +571,10 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
-	if err != nil && keyed && ctx.Err() == nil && unreachable(err) {
-		// The relay may have queued the send before its answer was lost (a
-		// timeout, a proxy's 502 or 504). Under the same key a second post
-		// is safe; one is enough, since call already waited out dial blips.
+	if keyed && ctx.Err() == nil && sendAnswerLost(err) {
+		// The relay may have queued the send before its answer was lost.
+		// Under the same key a second post is safe; one is enough, since
+		// call already waited out dial blips.
 		out = sent{}
 		err = r.callOnce(ctx, r.api, "POST", "/v1/send", in, &out)
 	}
@@ -582,6 +582,26 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 		r.noteSent(out.ID)
 	}
 	return out, err
+}
+
+// sendAnswerLost reports whether err leaves it unknown whether the relay
+// queued a send: nothing answered at its address (unreachable: a timeout,
+// a proxy's 502 or 504), or the connection failed after the send may have
+// reached the relay, before or while its answer came back: the connection
+// closed (io.EOF), the answer was cut short (io.ErrUnexpectedEOF), or a
+// read or write on the open connection failed, as a reset does on every
+// platform. An answer from the relay itself, such as a 4xx, is known and
+// not lost. Only a keyed send acts on this, since posting again under the
+// same key returns the request the relay already took.
+func sendAnswerLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	if unreachable(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	op, ok := errors.AsType[*net.OpError](err)
+	return ok && (op.Op == "read" || op.Op == "write")
 }
 
 // sendKeysRecheck is how long send trusts the relay's idempotency_key

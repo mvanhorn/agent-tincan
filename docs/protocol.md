@@ -374,8 +374,10 @@ ignores the field and queues every post, and refuses it on a guest's send,
 so the tincan client sends a key only to a relay that advertises it,
 reading the flag again every 10 minutes. It puts one random key on each
 send and, when the answer to a send is lost (a timeout, a proxy's 502 or
-504), posts it once more under that key, so the asker gets the request the
-relay already queued instead of a second one.
+504, or a connection that closes or resets before the whole answer
+arrives), posts it once more under that key, so the asker gets the request
+the relay already queued instead of a second one. An answer the relay gave,
+such as a 4xx, is not posted again.
 
 ## Request groups
 
