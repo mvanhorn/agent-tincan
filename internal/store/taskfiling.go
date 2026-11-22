@@ -93,7 +93,15 @@ func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request
 	if err != nil {
 		return err
 	}
-	private = private || sensitive
+	referencedPrivate, err := hasPrivateTaskReference(ctx, tx, *req)
+	if err != nil {
+		return err
+	}
+	private = private || sensitive || referencedPrivate
+	if private {
+		req.SkipTaskRecovery = true
+		filing = quietTask
+	}
 	// Follow-ups with their own text restrictions must keep their own task.
 	// Scheduled and follow-on sends are independent of a sender's claim.
 	if !private && roomPost == 0 && req.Status != envelope.StatusHeld && !req.NoParent && req.FollowOf == "" {
@@ -140,16 +148,58 @@ func HasTaskFollowupReference(body string) bool {
 
 var taskReference = regexp.MustCompile(`(?i)\b[0-9a-f]{20}\b|\btask[ \t]+#[1-9][0-9]{0,18}\b`)
 
+func parseTaskReference(ref string) (int64, string) {
+	ref = strings.ToLower(ref)
+	if parts := strings.Fields(ref); len(parts) == 2 && parts[0] == "task" {
+		ref = parts[1]
+	}
+	if len(ref) == 20 && !strings.HasPrefix(ref, "#") {
+		return 0, ref
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(ref, "#"), 10, 64)
+	if err != nil {
+		return 0, ""
+	}
+	return id, ""
+}
+
+// An agent can refer to restricted work it saw earlier, even without a
+// current claim. The fresh task must keep that context out of the host view.
+func hasPrivateTaskReference(ctx context.Context, tx *sql.Tx, req envelope.Request) (bool, error) {
+	refs := taskReference.FindAllString(req.Body, -1)
+	if req.About != "" {
+		refs = append(refs, req.About)
+	}
+	seen := make(map[string]bool)
+	for _, ref := range refs {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		task, request := parseTaskReference(ref)
+		var private bool
+		err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM requests r WHERE r.id = ?3
+			AND (r.from_agent = ?1 OR r.to_agent = ?1 AND (r.was_held = 0 OR r.approved = 1))
+			AND (r.room_post_id IS NOT NULL OR r.task_room_scope != 0 OR r.recovery_source != ''
+				OR substr(r.group_id, 1, length(?5)) = ?5 OR (r.skip_task_recovery = 1 AND NOT EXISTS (
+					SELECT 1 FROM task_followups f WHERE f.request_id = r.id)))
+			UNION ALL
+			SELECT 1`+taskFrom+` WHERE t.id = ?2
+			AND (t.room_post_id IS NOT NULL OR t.participant_only = 1 OR t.source IS NOT NULL OR `+taskOriginalAskUnapproved+`)
+			AND (`+taskVisible+` OR q.from_agent = ?1 OR (?4 AND `+taskHostVisible+`))
+		)`, req.From, task, request, req.AboutHost, envelope.PassGroupPrefix).Scan(&private)
+		if err != nil || private {
+			return private, err
+		}
+	}
+	return false, nil
+}
+
 func (s *Store) findTaskFollowup(ctx context.Context, tx *sql.Tx, req envelope.Request) (int64, error) {
 	lookup := func(ref string) (int64, error) {
-		ref = strings.ToLower(ref)
-		if strings.HasPrefix(ref, "task") {
-			ref = strings.TrimPrefix(strings.Fields(ref)[1], "#")
-		}
-		var byID, parent int64
-		if len(ref) != 20 || strings.HasPrefix(ref, "#") {
-			byID, _ = strconv.ParseInt(strings.TrimPrefix(ref, "#"), 10, 64)
-		}
+		byID, byRequest := parseTaskReference(ref)
+		var parent int64
 		err := tx.QueryRowContext(ctx, `SELECT t.id`+taskFrom+`
 			WHERE t.status IN ('open', 'working') AND (t.id = ?2 OR
 				(q.id = ?3 AND q.status IN ('queued', 'delivered', 'claimed') AND q.expires_at > ?4))
@@ -157,7 +207,7 @@ func (s *Store) findTaskFollowup(ctx context.Context, tx *sql.Tx, req envelope.R
 			AND (`+taskVisible+` OR q.from_agent = ?1 OR (?5 AND `+taskHostVisible+`
 				AND EXISTS (SELECT 1 FROM agents WHERE name = ?1 AND task_host = 1)))
 			AND NOT `+taskHostWithheld,
-			req.From, byID, ref, s.now().UnixMilli(), req.AboutHost).Scan(&parent)
+			req.From, byID, byRequest, s.now().UnixMilli(), req.AboutHost).Scan(&parent)
 		if errors.Is(err, sql.ErrNoRows) {
 			err = nil
 		}

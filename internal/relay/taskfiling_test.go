@@ -820,3 +820,28 @@ func TestRoomTaskNoticeHasNoTitleEvenForMemberHost(t *testing.T) {
 	}
 	m.wantNoTaskText(t, topic, "Private room question")
 }
+
+func TestTaskWithReferencedRoomTextIsWithheldFromOtherHosts(t *testing.T) {
+	m := roomMesh(t)
+	ctx := t.Context()
+	admin, poster, muse, host := m.Client(t, "admin"), m.Client(t, "grokbot"), m.Client(t, "muse"), m.Client(t, "instinct")
+	if _, err := admin.SetTaskHost(ctx, "instinct", true); err != nil {
+		t.Fatal(err)
+	}
+	post, err := client.PostToRoom(ctx, poster, "launch", "@muse Confirm a private room detail")
+	if err != nil || len(post.Post.Mentions) != 1 {
+		t.Fatalf("room mention = %+v, %v", post, err)
+	}
+	original := claimOne(t, muse, post.Post.Mentions[0].RequestID)
+	req, err := poster.Send(ctx, "muse", "Private room detail from ask "+original.ID, envelope.KindAsk, "", false)
+	if err != nil || req.TaskID == 0 || req.TaskID == original.TaskID {
+		t.Fatalf("room follow-up was not filed separately: %+v, %v", req, err)
+	}
+	task, history, err := client.HostTask(ctx, host, req.TaskID)
+	if err != nil || !task.Withheld || task.Title != "" || task.Detail != "" || len(history) != 0 {
+		t.Fatalf("host saw private room context: %+v, %+v, %v", task, history, err)
+	}
+	if req, err := poster.Send(client.WithAskAbout(ctx, "task"), "muse", "Separate work", envelope.KindAsk, "", false); err != nil || req.TaskID == 0 {
+		t.Fatalf("invalid reference should file a normal task: %+v, %v", req, err)
+	}
+}
