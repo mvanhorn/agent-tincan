@@ -1251,11 +1251,11 @@ func TestWebDiedAfterSendInKnownConversationReadsTheAnswer(t *testing.T) {
 	}
 }
 
-// A send the site refused before its button was clicked is handed back
-// and requeued to this agent (no other web chat agent can take it). Once
-// the limit ends, the redelivery is sent: nothing was typed the first
-// time.
-func TestWebHandedBackRequestIsSentOnRedelivery(t *testing.T) {
+// requeueRig is a web rig whose relay, store and agent share a fake clock
+// that starts at the real time, with no other web chat agent to move an
+// ask to: a handback requeues it to chatgpt-web.
+func requeueRig(t *testing.T) (*webRig, *fakeClock) {
+	t.Helper()
 	clk := &fakeClock{t: time.Now()}
 	rig := newWebRigWith(t, relay.Config{Now: clk.Now}, true)
 	rig.mesh.Store.SetClock(clk.Now)
@@ -1264,6 +1264,15 @@ func TestWebHandedBackRequestIsSentOnRedelivery(t *testing.T) {
 	if ok, err := rig.mesh.Store.SetAgentKind(t.Context(), "chatgpt-web", "chatgpt-web"); !ok || err != nil {
 		t.Fatal(ok, err)
 	}
+	return rig, clk
+}
+
+// A send the site refused before its button was clicked is handed back
+// and requeued to this agent (no other web chat agent can take it). Once
+// the limit ends, the redelivery is sent: nothing was typed the first
+// time.
+func TestWebHandedBackRequestIsSentOnRedelivery(t *testing.T) {
+	rig, clk := requeueRig(t)
 	rig.browser.sendErr, rig.browser.sendRetryAfter = "rate_limited", 900
 	c, id := rig.sendAsk(t, "codex", "summarize this paper")
 	if res, err := c.Get(t.Context(), id, 0); err != nil || res.Reply != nil || res.Status != envelope.StatusQueued || res.Request.To != "chatgpt-web" {
@@ -1281,6 +1290,67 @@ func TestWebHandedBackRequestIsSentOnRedelivery(t *testing.T) {
 	}
 	if got := rig.browser.sent(); len(got) != 2 {
 		t.Fatalf("sends = %+v, want the refused one and the redelivered one", got)
+	}
+}
+
+// A refused send whose intent cannot be dropped from the journal is not
+// handed back, since its redelivery would find the intent and refuse to
+// send. It fails instead, saying nothing was sent and why.
+func TestWebRefusedSendIsNotHandedBackWhenItsIntentStays(t *testing.T) {
+	rig, clk := requeueRig(t)
+	fb := rig.browser
+	dir := filepath.Dir(rig.agent.JournalPath)
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	rig.agent.Native = &Client{Channel: channelFunc(func(ctx context.Context, req NativeRequest, recv func(NativeResponse) (bool, error)) error {
+		if req.Op == OpChatGPTSend {
+			// The intent is on disk by now; nothing more can be written.
+			if err := os.Chmod(dir, 0o500); err != nil {
+				return err
+			}
+		}
+		return fb.Exchange(ctx, req, recv)
+	}), Cooldown: &SiteCooldown{Now: clk.Now}}
+	fb.sendErr, fb.sendRetryAfter = "rate_limited", 900
+	c, id := rig.sendAsk(t, "codex", "summarize this paper")
+	res, err := c.Get(t.Context(), id, 0)
+	if err != nil || res.Status != envelope.StatusFailed || res.Request.To != "chatgpt-web" || res.Reply == nil {
+		t.Fatalf("asker sees %+v %v", res, err)
+	}
+	if !strings.Contains(res.Reply.Body, "Nothing was sent") || !strings.Contains(res.Reply.Body, "out of messages") {
+		t.Fatalf("reply %q", res.Reply.Body)
+	}
+}
+
+// The strict write a text send makes before typing drops expired text
+// entries, as the ordinary journal write does, so sends that keep failing
+// do not grow the journal. An unresolved image intent has no retention and
+// stays.
+func TestWebIntentWritePrunesExpiredTextEntries(t *testing.T) {
+	rig := newWebRig(t)
+	if err := os.MkdirAll(filepath.Dir(rig.agent.JournalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-rig.agent.journalRetention() - time.Minute).UTC().Format(time.RFC3339Nano)
+	seed := fmt.Sprintf(`{"requests":{"req-old-intent":{"conversation_id":"","recorded":%q,"state":"intent"},"req-old-sent":{"conversation_id":"conv-9","recorded":%q,"state":"sent"},"req-image":{"conversation_id":"","recorded":%q,"state":"image_intent","input":true}}}`, old, old, old)
+	if err := os.WriteFile(rig.agent.JournalPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Signed out: the send fails before typing, and nothing after the
+	// intent write touches the journal.
+	rig.browser.sendErr = "not_logged_in"
+	res := rig.ask(t, "grokbot", "hello")
+	if res.Status != envelope.StatusFailed {
+		t.Fatalf("%s %q", res.Status, res.Reply.Body)
+	}
+	b, err := os.ReadFile(rig.agent.JournalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "req-old-intent") || strings.Contains(string(b), "req-old-sent") {
+		t.Fatalf("expired text entries kept: %s", b)
+	}
+	if !strings.Contains(string(b), "req-image") || !strings.Contains(string(b), res.Request.ID) {
+		t.Fatalf("journal lost the image intent or the new intent: %s", b)
 	}
 }
 

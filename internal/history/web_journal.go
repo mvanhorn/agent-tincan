@@ -78,6 +78,13 @@ func (w *WebAgent) loadJournal() webJournal {
 	if j.Requests == nil {
 		j.Requests = map[string]webSend{}
 	}
+	w.prune(j)
+	return j
+}
+
+// prune drops entries past the retention and ones whose ids are
+// malformed. An unresolved image send has no retention and is kept.
+func (w *WebAgent) prune(j webJournal) {
 	cutoff := time.Now().Add(-w.journalRetention())
 	for id, e := range j.Requests {
 		if e.State == webSendIntent || (e.Input && e.State != webSendAnswered) {
@@ -89,7 +96,6 @@ func (w *WebAgent) loadJournal() webJournal {
 			delete(j.Requests, id)
 		}
 	}
-	return j
 }
 
 // journal records (or updates) reqID's entry and prunes old ones. Callers
@@ -171,7 +177,11 @@ func (w *WebAgent) unjournal(reqID string) error {
 }
 
 // writeJournalStrict replaces the journal with j and syncs it to disk.
+// It prunes j first, as journal does: every text send writes its intent
+// here, and while sends keep failing before they are confirmed, nothing
+// else would drop their expired intents.
 func (w *WebAgent) writeJournalStrict(j webJournal) error {
+	w.prune(j)
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err

@@ -604,10 +604,14 @@ func (w *WebAgent) Handle(ctx context.Context, req envelope.Request) {
 		var ue *UnavailableError
 		if limited && !images && errors.As(err, &ue) && !ue.Clicked {
 			// Nothing was typed in. A handback can requeue the request to
-			// this agent, and that delivery must be free to send it.
+			// this agent, and that delivery must be free to send it, so it
+			// is handed back only once its intent is gone: a redelivery
+			// that still found the intent would refuse it as maybe sent.
 			if w.JournalPath != "" {
 				if err := w.unjournal(req.ID); err != nil {
-					w.logf("request %s from %s: journal: %v", req.ID, req.From, err)
+					w.logf("request %s from %s: journal: %v; not handing back", req.ID, req.From, err)
+					w.reply(ctx, req, w.limitReply(until), envelope.StatusFailed, nil)
+					return
 				}
 			}
 			if !w.handBack(ctx, req, until) {
