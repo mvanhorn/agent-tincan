@@ -623,6 +623,8 @@ Removing the owner or the target deletes the schedule; a task that repeated on i
 
 A task is one item on the team's shared list: what is wanted, who has it, and what came back. The relay advertises `"tasks": true` in `GET /v1/capabilities`. Clients check it before every task call and refuse without it (`this relay has no task list; upgrade the relay`). Each attempt at a task is an ordinary `ask` that carries `task_id`, so claims, leases, wakes, progress, clarification and replies work on it as on any ask, and a client that knows nothing of tasks can do the work.
 
+With [filing at send](tasks.md#put-asks-on-the-list) enabled, `POST /v1/send` includes the new `task_id` in the usual send response for a work ask. The relay stores the task and request together, and the reply keeps the original request ID. Small asks are stored with optional `quiet: true`. The agent and admin task lists include those rows with `include_quiet=1`. Single-task reads still apply approval and room visibility rules. For service asks, unrelated hosts see status metadata. Packed chat transfers never file tasks. Quiet responses produce a count in the briefing. An unsuccessful or stalled quiet ask becomes an ordinary visible task.
+
 A task is `{"id", "title", "detail", "status", "filer", "assignee", "key", "result", "result_request", "current_request", "ask_status", "agent_assigns", "source", "suggested_assignee", "created_at", "repeat_schedule", "repeat_every_seconds", "repeat_to", "withheld"}`; everything but `id`, `title`, `status`, `filer` and `created_at` is left out when empty. Ids are never reused and a task is never deleted.
 
 | Field | Meaning |
@@ -639,7 +641,7 @@ A task is `{"id", "title", "detail", "status", "filer", "assignee", "key", "resu
 | `due_day`, `due_at` | An optional `YYYY-MM-DD` calendar date in the relay's task zone and optional Unix seconds for a timed deadline. `GET /v1/capabilities` exposes the zone as `task_zone`. The relay's `--task-zone` defaults to `America/Los_Angeles`. |
 | `withheld` | `true` on the row a task host is shown of a task it may not read: one filed as proposed that the owner never approved. Such a row carries `id`, `status`, `filer`, `source` and `created_at`, an empty `title`, and nothing else. See [Task hosts](#task-hosts). |
 
-A history entry is `{"id", "task_id", "actor", "kind", "body", "status", "at"}`. `actor` is an agent name, `@owner`, or `relay` for a change the relay made itself. `kind` is `added`, `assigned` (`body` is the teammate), `status` (`body` is the reason or note), `comment` (`body` is the comment), `progress` (a progress note on the open ask) or `assigns_reset`. `status` is the task's status after an entry that changed it. Entries are appended in id order and never edited or deleted.
+A history entry is `{"id", "task_id", "actor", "kind", "body", "status", "at"}`. `actor` is an agent name, `@owner`, or `relay` for a change the relay made itself. `kind` is `added`, `assigned` (`body` is the teammate), `status` (`body` is the reason or note), `comment` (`body` is the comment), `progress` (a progress note on the open ask), `asked` (an outbound work ask sent while the actor claimed this task), or `assigns_reset`. `status` is the task's status after an entry that changed it. Entries are appended in id order and never edited or deleted.
 
 A title is at most 200 bytes, a detail 64 KiB, a key 200 bytes, and a comment or note 16 KiB, all UTF-8.
 
@@ -893,12 +895,13 @@ at two points only:
 
 An ask never moves when it is to or from `dot-web` or `duet-web`, from a `council`, was ever
 held for approval, is a `notify` or `ping`, is in a group, came from a room
-mention, is an attempt at a task (it carries `task_id`; its body holds
-teammates' text that nobody chose a vendor for), carries attachments, starts with a `conversation:` line, has a
+mention, is an explicit task assignment whose body can carry teammates' text,
+carries attachments, starts with a `conversation:` line, has a
 clarification exchange or was resumed, was moved by the owner's fallback (see
 Fallback), or was ever claimed and then requeued (it may have been typed into a site), or
 when its target is not a web chat agent. Such an ask is delivered as before, and
-its handback gets 409.
+its handback gets 409. An ordinary ask filed at send keeps its existing
+failover behavior. If it moves, its task assignee changes in the same transaction.
 
 The new target is the web chat agent with the smallest backlog (ties by name)
 that is online, whose last web status report says it is signed in (one that has

@@ -12,7 +12,7 @@ import (
 )
 
 func TestRecoveredAskReachesHostThroughTaskNotice(t *testing.T) {
-	m := newTaskMesh(t)
+	m := newTaskMeshWithConfig(t, relay.Config{FileAllAsks: "off"})
 	m.host(t, "grokbot")
 	ctx := t.Context()
 	const body = "check the phone line\nprivate request detail"
@@ -178,7 +178,7 @@ func TestTaskRecoverySkipsAnActiveRepeat(t *testing.T) {
 }
 
 func TestRecoveredAskAssignmentKeepsOriginalAskerInApprovalPolicy(t *testing.T) {
-	m := newTaskMesh(t)
+	m := newTaskMeshWithConfig(t, relay.Config{FileAllAsks: "off"})
 	m.host(t, "scout")
 	ctx := t.Context()
 	req, err := m.grok.Send(ctx, "muse", "carry these instructions", envelope.KindAsk, "", false)

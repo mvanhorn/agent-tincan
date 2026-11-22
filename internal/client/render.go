@@ -504,7 +504,7 @@ type Claimer interface {
 
 // TaskHostInboxGuidance is shown when the relay confirms the caller can
 // use the host view.
-const TaskHostInboxGuidance = "You are the owner's task host. In the owner's private chat, use list_tasks (or tincan tasks --host) for \"what came back?\" and show the current returned tasks. Read their results with get_task (or tincan tasks show <id> --host). For \"did X get done?\", find the task and check its history, including any open task filed by the relay. A missing task gives no evidence of completion. Follow an explicitly named tracker."
+const TaskHostInboxGuidance = "You are the owner's task host. In the owner's private chat, use list_tasks (or tincan tasks --host) for \"what came back?\" and show the current returned tasks. Read their results with get_task (or tincan tasks show <id> --host). For \"did X get done?\", include quiet tasks with list_tasks include_quiet or tincan tasks --host --all and check the matching task's history. Follow up only when a quiet ask failed or remains unanswered. A missing task gives no evidence of completion. Follow an explicitly named tracker."
 
 // TaskNoticePostingInstructions applies only to owner_message lines from
 // successfully claimed notices.
@@ -658,12 +658,27 @@ func formatParent(p *envelope.Parent) string {
 	return b.String()
 }
 
+// FormatAskResult renders a send's result and reports the task it filed.
+func FormatAskResult(r Result) string {
+	id := r.Request.TaskID
+	r.Request.TaskID = 0 // A clarification already names the task in inbox output.
+	return FormatResult(r) + FormatFiledTask(id)
+}
+
+// FormatFiledTask reports the task created for an ask when it was sent.
+func FormatFiledTask(id int64) string {
+	if id == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Filed as task #%d.\n", id)
+}
+
 // FormatGroup labels every result and supplies the shared follow-up id.
 func FormatGroup(g GroupResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Group %s (%s). Check with get_reply or tincan get %s.\n", g.Group, g.Outcome, g.Group)
 	for _, r := range g.Results {
-		fmt.Fprintf(&b, "%s (%s), request %s:\n%s", r.Request.To, r.Status, r.Request.ID, FormatResult(r.Result))
+		fmt.Fprintf(&b, "%s (%s), request %s:\n%s", r.Request.To, r.Status, r.Request.ID, FormatAskResult(r.Result))
 		if r.Error != "" {
 			fmt.Fprintf(&b, "Poll error: %s\n", r.Error)
 		}

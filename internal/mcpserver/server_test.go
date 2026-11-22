@@ -1504,3 +1504,41 @@ func TestGetReplyKeepsControlRunes(t *testing.T) {
 		t.Fatalf("get_reply = %q", got)
 	}
 }
+
+func TestAskReportsFiledTaskOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on", MaxWait: time.Millisecond})
+	cs := session(t, m, "instinct")
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "ask",
+		Arguments: map[string]any{"to": "muse", "message": "check the line", "wait_seconds": 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, ok := res.StructuredContent.(map[string]any)
+	if res.IsError || !ok || data["task_id"] != float64(1) {
+		t.Fatalf("ask = %+v, structured = %#v", res, res.StructuredContent)
+	}
+}
+
+func TestListTasksIncludesQuietOnRequest(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
+	ctx := t.Context()
+	if err := m.Client(t, "admin").SetKind(ctx, "muse", "notes"); err != nil {
+		t.Fatal(err)
+	}
+	req, err := m.Client(t, "instinct").Send(ctx, "muse", "Small lookup", envelope.KindAsk, "", false)
+	if err != nil || req.TaskID == 0 {
+		t.Fatalf("quiet ask = %+v, %v", req, err)
+	}
+	cs := session(t, m, "instinct")
+	if got := call(t, cs, "list_tasks", nil); strings.Contains(got, "Small lookup") {
+		t.Fatalf("default list = %q", got)
+	}
+	if got := call(t, cs, "list_tasks", map[string]any{"include_quiet": true}); !strings.Contains(got, "Small lookup") || !strings.Contains(got, ", quiet") {
+		t.Fatalf("quiet list = %q", got)
+	}
+	if got := call(t, cs, "get_task", map[string]any{"task_id": req.TaskID}); !strings.Contains(got, "Quiet task.") {
+		t.Fatalf("quiet task = %q", got)
+	}
+}

@@ -561,3 +561,24 @@ func TestTasksDecideAssignCommand(t *testing.T) {
 		t.Fatalf("host assigned task = %+v", got)
 	}
 }
+
+func TestTasksAllShowsQuietAsks(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if err := m.Client(t, "admin").SetKind(t.Context(), "muse", "notes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "Quiet lookup", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, all := range []bool{false, true} {
+		args := []string{"--json"}
+		if all {
+			args = append(args, "--all")
+		}
+		out, err := run(t, tasksCmd(), args...)
+		if err != nil || strings.Contains(out, "Quiet lookup") != all || strings.Contains(out, "\"quiet\": true") != all {
+			t.Fatalf("tasks %v = %q, %v", args, out, err)
+		}
+	}
+}

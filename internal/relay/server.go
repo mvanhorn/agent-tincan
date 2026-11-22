@@ -34,7 +34,8 @@ const DefaultUnansweredQuestionAfter = 4 * time.Hour
 
 // Config tunes the relay.
 type Config struct {
-	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task
+	FileAllAsks             string        // auto (or empty), on, or off
+	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task or a quiet task is surfaced
 
 	RequestTTL      time.Duration // how long an unanswered request lives
 	NotesRequestTTL time.Duration // RequestTTL for requests to a notes-kind agent
@@ -666,6 +667,9 @@ func (s *Server) Sweep(ctx context.Context) {
 	for _, t := range expiredQuestions {
 		s.notifySwept(ctx, t)
 	}
+	if err := s.store.EscalateQuietQuestions(ctx, s.cfg.UnansweredQuestionAfter); err != nil {
+		log.Printf("sweep: quiet task questions: %v", err)
+	}
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
@@ -1029,7 +1033,13 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 		return envelope.Request{}, err
 	}
 	prepared := req
-	req, err := s.store.Enqueue(ctx, req, s.requestTTL(ctx, req.To))
+	ttl := s.requestTTL(ctx, req.To)
+	var err error
+	if s.cfg.FileAllAsks == "off" {
+		req, err = s.store.Enqueue(ctx, req, ttl)
+	} else {
+		req, err = s.store.EnqueueFilingTasks(ctx, req, ttl, s.cfg.FileAllAsks != "on")
+	}
 	if err != nil {
 		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
@@ -3004,7 +3014,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 	s.nonces.void(req.ID)
 	s.record(r.Context(), "denied", req.ID, req.TraceID, s.remote(r), s.deviceDetail(r))
-	// The owner's denial is told to no host; the drain clears its row.
+	// Only a newly surfaced quiet ask has status news after the owner's denial.
 	s.drainTaskNotices(r.Context())
 	s.hub.notify(requestKey(req.ID))
 	s.hub.notify(inboxKey(req.From))

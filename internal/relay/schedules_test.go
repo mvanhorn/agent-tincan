@@ -53,9 +53,14 @@ type scheduleMesh struct {
 }
 
 func newScheduleMesh(t *testing.T) *scheduleMesh {
+	return newScheduleMeshWithConfig(t, relay.Config{})
+}
+
+func newScheduleMeshWithConfig(t *testing.T, cfg relay.Config) *scheduleMesh {
 	t.Helper()
 	clk := &scheduleClock{t: time.Now()}
-	m := testrelay.New(t, relay.Config{Now: clk.now})
+	cfg.Now = clk.now
+	m := testrelay.New(t, cfg)
 	m.Store.SetClock(clk.now)
 	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: clk.now}))
 	return &scheduleMesh{Mesh: m, clk: clk, grok: m.Client(t, "grokbot"), muse: m.Client(t, "muse"), admin: m.Client(t, "admin")}

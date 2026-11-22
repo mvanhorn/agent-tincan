@@ -615,8 +615,9 @@ instead, as a new request with every send check applied at that time.
 			}
 			if res.Status == envelope.StatusHeld {
 				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+				cmd.Print(client.FormatFiledTask(res.Request.TaskID))
 			} else {
-				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatResult(res)))
+				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatAskResult(res)))
 			}
 			if thenTo != "" {
 				cmd.Println(client.ThenNote(thenTo, res.Status))
@@ -736,6 +737,7 @@ const (
 // resultJSON is what ask and get --json print.
 type resultJSON struct {
 	Outcome string        `json:"outcome"`
+	TaskID  int64         `json:"task_id,omitempty"`
 	Result  client.Result `json:"result"`
 }
 
@@ -763,7 +765,7 @@ func outcome(res client.Result) (string, int) {
 // happened without parsing.
 func printResultJSON(w io.Writer, res client.Result) error {
 	name, code := outcome(res)
-	if err := writeJSON(w, resultJSON{Outcome: name, Result: res}); err != nil {
+	if err := writeJSON(w, resultJSON{Outcome: name, TaskID: res.Request.TaskID, Result: res}); err != nil {
 		return err
 	}
 	if code != 0 {

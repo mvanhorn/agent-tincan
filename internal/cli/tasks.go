@@ -89,7 +89,7 @@ func taskArg(arg string) (int64, error) {
 // with decide.
 func tasksCmd() *cobra.Command {
 	var side taskSide
-	var closed, asJSON, host bool
+	var closed, asJSON, host, includeQuiet bool
 	cmd := &cobra.Command{
 		Use:   "tasks",
 		Short: "The team's shared task list: what is wanted, who has it, and what came back",
@@ -97,7 +97,7 @@ func tasksCmd() *cobra.Command {
 
 With no subcommand it lists the tasks this agent may read, grouped by
 status, or with --owner every task. Done and dropped tasks are counted;
---closed lists them too. A task host the owner named passes --host to read
+--closed lists them too. --all shows quiet asks. A task host the owner named passes --host to read
 the whole list from its shell, as its list_tasks tool does.
 
 add, show, comment, due and drop act as this machine's agent, or with --owner as
@@ -121,7 +121,7 @@ stay with admin devices.`,
 				if owner {
 					return errTaskHostOwner
 				}
-				list, counts, view, err := client.HostTasks(cmd.Context(), r, closed)
+				list, counts, view, err := client.HostTasks(cmd.Context(), r, closed, includeQuiet)
 				if err != nil {
 					return err
 				}
@@ -131,7 +131,7 @@ stay with admin devices.`,
 				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatHostTasks(list, counts, view)))
 				return nil
 			}
-			list, counts, err := client.Tasks(cmd.Context(), r, owner, closed)
+			list, counts, err := client.Tasks(cmd.Context(), r, owner, closed, includeQuiet)
 			if err != nil {
 				return err
 			}
@@ -144,6 +144,7 @@ stay with admin devices.`,
 	}
 	side.flags(cmd, "list every task, as the owner")
 	cmd.Flags().BoolVar(&closed, "closed", false, "list done and dropped tasks too")
+	cmd.Flags().BoolVar(&includeQuiet, "all", false, "include quiet tasks")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	cmd.Flags().BoolVar(&host, "host", false, "read the whole list, as a task host the owner named")
 	cmd.AddCommand(taskAddCmd(), taskShowCmd(), taskAssignCmd(), taskCommentCmd(), taskDropCmd(), taskDueCmd(),

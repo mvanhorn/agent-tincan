@@ -722,3 +722,23 @@ func TestAskWithoutThenStillJoinsWords(t *testing.T) {
 		t.Fatalf("inbox %+v %v", inbox, err)
 	}
 }
+
+func TestAskReportsFiledTask(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	out, err := run(t, askCmd(), "muse", "check the line", "--wait", "0s")
+	if err != nil || !strings.Contains(out, "\nFiled as task #1.\n") {
+		t.Fatalf("ask = %q, %v", out, err)
+	}
+	cmd := askCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	out, err = run(t, cmd, "muse", "check the other line", "--wait", "0s", "--json")
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("ask JSON = %q, %v", out, err)
+	}
+	var got resultJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil || got.TaskID != 2 || got.Result.Request.TaskID != got.TaskID {
+		t.Fatalf("ask JSON = %q, %v", out, err)
+	}
+}

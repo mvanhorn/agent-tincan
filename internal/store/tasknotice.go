@@ -158,8 +158,9 @@ func taskNoticeTx(ctx context.Context, x execer, id int64, status envelope.TaskS
 // task.
 func taskAskNoticeTx(ctx context.Context, x execer, reqID string, status envelope.TaskStatus, actor string, at int64) error {
 	_, err := x.ExecContext(ctx, `INSERT INTO task_notices (task_id, status, actor, asker, created_at)
-		SELECT task_id, ?, ?, from_agent, ? FROM requests WHERE id = ? AND task_id IS NOT NULL`,
-		string(status), actor, at, reqID)
+		SELECT t.id, ?1, CASE WHEN t.quiet = 2 AND r.status = 'declined' AND ?2 = ?5 THEN ?6 ELSE ?2 END,
+			r.from_agent, ?3 FROM requests r JOIN tasks t ON t.id = r.task_id WHERE r.id = ?4 AND t.quiet != 1`,
+		string(status), actor, at, reqID, envelope.TaskOwner, TaskRelay)
 	return err
 }
 
