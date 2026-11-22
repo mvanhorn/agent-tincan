@@ -51,6 +51,7 @@ type relayFlags struct {
 	port                           int
 	admins                         []string
 	adminLogins                    []string
+	adminTag                       string
 	noRebind                       bool
 	replyGrace                     time.Duration
 	notesTTL                       time.Duration
@@ -98,8 +99,9 @@ hand, or macOS lists it under the signing certificate's name.
 
 Admin commands (invite, remove, relay notify) are accepted from the local admin socket in
 the state dir and from machines named in --admin that carry no Tailscale tags
-(and, with --admin-login, are owned by a listed login). Tag agent machines
-(e.g. tag:agent) so they can never be admins.
+(and, with --admin-login, are owned by a listed login), or from any machine
+carrying --admin-tag. Tag agent machines (e.g. tag:agent) so a name alone
+can never make them admins.
 
 Admin devices can also open the phone page at /phone/ (see docs/phone.md).
 When the tailnet issues the relay an HTTPS certificate, the relay serves it
@@ -208,6 +210,7 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.IntVar(&f.port, "port", 80, "port to serve the agent API on")
 	fs.StringSliceVar(&f.admins, "admin", nil, "machine names allowed to run admin commands (e.g. macbook-pro-44,iphone182)")
 	fs.StringSliceVar(&f.adminLogins, "admin-login", nil, "if set, admin machines must also be owned by one of these Tailscale logins")
+	fs.StringVar(&f.adminTag, "admin-tag", "", "Tailscale tag granting admin commands without a relay restart (e.g. tag:tincan-admin)")
 	fs.BoolVar(&f.noRebind, "no-auto-rebind", false, "do not re-admit rebuilt machines automatically; they need a new invite")
 	fs.IntVar(&f.urgentPerHour, "urgent-per-hour", 5, "maximum urgent requests per sender per hour")
 	fs.DurationVar(&f.replyGrace, "reply-grace", wake.DefaultReplyGrace, "how long a reply may go unread before a webhook or email agent is woken to read it")
@@ -286,6 +289,9 @@ func (f relayFlags) validate() error {
 	if f.releaseURL != "" && !strings.HasPrefix(f.releaseURL, "https://") {
 		return fmt.Errorf("--release-url must be an https URL, got %q", f.releaseURL)
 	}
+	if f.adminTag != "" && !strings.HasPrefix(f.adminTag, "tag:") {
+		return fmt.Errorf("--admin-tag must look like tag:name, got %q", f.adminTag)
+	}
 	return nil
 }
 
@@ -310,7 +316,7 @@ func parsePassRef(body string) (relay.PassRef, error) {
 
 // directoryConfig maps the relay flags onto the identity directory.
 func (f relayFlags) directoryConfig() identity.Config {
-	return identity.Config{Admins: f.admins, AdminLogins: f.adminLogins, NoAutoRebind: f.noRebind}
+	return identity.Config{Admins: f.admins, AdminLogins: f.adminLogins, AdminTag: f.adminTag, NoAutoRebind: f.noRebind}
 }
 
 // wakerOptions maps relay flags and the live server onto the waker.

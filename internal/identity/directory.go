@@ -213,6 +213,12 @@ type Config struct {
 	// login to be listed. Every node on a single-user tailnet shares one login,
 	// so this narrows admin rights but cannot replace the machine list.
 	AdminLogins []string
+	// AdminTag, when set (e.g. tag:tincan-admin), grants admin commands to
+	// every node carrying that Tailscale tag, without naming each machine
+	// and without restarting the relay: tag changes apply on the next call.
+	// A tagged node still needs a listed login when AdminLogins is set, and
+	// a node carrying a guest is still never admin (see adminCaller).
+	AdminTag string
 	// NoAutoRebind turns off re-admitting rebuilt machines (see ResolveAgent).
 	NoAutoRebind bool
 	// InvitePepper is the relay-local secret used to digest invite codes
@@ -870,7 +876,15 @@ func (d *Directory) IsAdminNode(ctx context.Context, id, name string) (bool, err
 // adminNode reports why n is not an admin device, nil when it is.
 func (d *Directory) adminNode(n Node) error {
 	// Admin = named in --admin, untagged (tagged nodes are services, never
-	// people), and, when --admin-login is set, owned by a listed login.
+	// people), and, when --admin-login is set, owned by a listed login —
+	// or carrying the admin tag, which the owner flips in the Tailscale
+	// admin panel instead of the relay's flags.
+	if d.cfg.AdminTag != "" && slices.Contains(n.Tags, d.cfg.AdminTag) {
+		if len(d.cfg.AdminLogins) > 0 && !slices.Contains(d.cfg.AdminLogins, n.User) {
+			return fmt.Errorf("%s is owned by %q: %w", n.Name, n.User, ErrNotAdmin)
+		}
+		return nil
+	}
 	if !slices.Contains(d.cfg.Admins, n.Name) {
 		return fmt.Errorf("%s: %w", n.Name, ErrNotAdmin)
 	}
@@ -881,6 +895,30 @@ func (d *Directory) adminNode(n Node) error {
 		return fmt.Errorf("%s is owned by %q: %w", n.Name, n.User, ErrNotAdmin)
 	}
 	return nil
+}
+
+// MachineFacts reports the live Tailscale facts the setup console shows
+// for an agent's machine: whether it may run admin commands now, and its
+// current tags. It uses the same check as a live admin call, so the
+// verdict matches enforcement. Nodes the tailnet does not report, and
+// resolvers without node lookup, report nothing: ok is false.
+func (d *Directory) MachineFacts(ctx context.Context, id, name string) (admin bool, tags []string, ok bool) {
+	if id == LocalAdmin {
+		return true, nil, true
+	}
+	who := d.who
+	if v, ok := who.(virtualResolver); ok {
+		who = v.Resolver
+	}
+	lk, ok := who.(NodeLookup)
+	if !ok {
+		return false, nil, false
+	}
+	n, found, err := lk.LookupNode(ctx, id)
+	if err != nil || !found {
+		return false, nil, false
+	}
+	return d.adminCaller(ctx, n) == nil, n.Tags, true
 }
 
 // codeAlphabet drops 0, 1, I, and O so codes read cleanly aloud.
