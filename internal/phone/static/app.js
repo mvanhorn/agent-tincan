@@ -1129,7 +1129,7 @@ function taskCard(entry) {
   c.approve = button("approve", "Approve", () => decideTask(entry, "approve"));
   c.approve.setAttribute("aria-label", "Approve " + title);
   c.actions.append(c.drop, c.reopen, c.reset, c.assign, c.done, c.approve);
-  c.openNote = el("p", "meta", "Done is refused while an ask is open under the task. Drop it, which cancels the ask, or wait for the ask to end.");
+  c.openNote = el("p", "meta", "Marking this task done ends the open ask and tells the asker.");
   c.resetNote = el("p", "meta");
   c.joinNote = el("p", "meta", "Assigning sends an ask as this phone's agent, and this phone has not joined the team.");
   c.join = button("", "Join this phone", openJoin);
@@ -1312,7 +1312,7 @@ function updateTaskCard(entry) {
   c.commentSend.disabled = off || entry.busy;
 
   c.approve.hidden = task.status !== "proposed";
-  c.done.hidden = task.status !== "open" && task.status !== "returned";
+  c.done.hidden = closed || task.status === "proposed";
   c.reopen.hidden = !closed;
   c.drop.hidden = closed;
   c.reset.hidden = closed || !task.agent_assigns;

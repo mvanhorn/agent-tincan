@@ -72,7 +72,7 @@ func (s *Store) CloseHeldAcks(ctx context.Context, mayMirror func(id, agent stri
 	for _, h := range due {
 		// Ask before the transaction: mayMirror reads the store, and a
 		// one-connection database would wait on the open transaction.
-		rep := envelope.Reply{Status: envelope.StatusAnswered, Body: h.ack, NoMirror: !mayMirror(h.id, h.agent)}
+		rep := envelope.Reply{Status: envelope.StatusAnswered, Body: h.ack, Provisional: true, NoMirror: !mayMirror(h.id, h.agent)}
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return out, err

@@ -1,6 +1,7 @@
 package relay_test
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -172,9 +173,13 @@ func TestTaskHostDropsAndReopens(t *testing.T) {
 	if got := m.task(t, working.ID); got.Status != envelope.TaskWorking || got.CurrentRequest != working.CurrentRequest {
 		t.Fatalf("task after the refused drop = %+v", got)
 	}
-	// Done is refused as it is for the owner, naming the open ask.
-	if _, err := hostDecide(t, m.muse, working.ID, "done", "the flights are booked"); !refusedWith(err, http.StatusConflict, working.CurrentRequest) || !strings.Contains(err.Error(), "an ask is still open") {
-		t.Fatalf("host's done on a working task: %v", err)
+	words := "the flights are booked"
+	if got, err := hostDecide(t, m.muse, working.ID, "done", words); err != nil || got.Task.Status != envelope.TaskDone || got.Task.Result != words {
+		t.Fatalf("host's done on a working task: %+v, %v", got, err)
+	}
+	res, err := m.grok.Get(t.Context(), working.CurrentRequest, 0)
+	if err != nil || res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != words {
+		t.Fatalf("ask after owner's decision = %+v, %v", res, err)
 	}
 }
 
@@ -219,7 +224,7 @@ func TestTaskHostCannotApproveOrReset(t *testing.T) {
 	proposed := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Pay the invoice", "source": "mail"}).Task.ID
 	open := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Tidy the drive"}).Task.ID
 	for _, id := range []int64{proposed, open} {
-		for _, d := range []string{"approve", "reset", "", "complete", "DONE"} {
+		for _, d := range []string{"approve", "reset", "", "finish", "DONE"} {
 			if _, err := hostDecide(t, m.muse, id, d, "approve it"); !refusedWith(err, http.StatusBadRequest, "unknown decision") {
 				t.Errorf("decision %q on task %d: %v", d, id, err)
 			}
@@ -480,5 +485,83 @@ func TestTaskHostAddAndAssignShareOneRateSlot(t *testing.T) {
 	}
 	if _, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Another task", Mine: true}); !client.IsStatus(err, http.StatusTooManyRequests) {
 		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+}
+
+func TestTaskHostCanCloseAnsweredTaskAndOwnerCanReopen(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Confirm opening hours"})
+	closeAsAnswered := func() (envelope.Task, error) {
+		return client.HostCloseAnsweredTask(ctx, m.muse, task.ID, "The reply confirms both days' hours.")
+	}
+	if _, err := closeAsAnswered(); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("host closed open task without owner words: %v", err)
+	}
+	req := m.assign(t, task.ID, "grokbot", "instinct")
+	claimOne(t, m.instinct, req.ID)
+	if _, err := closeAsAnswered(); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("host closed working task without owner words: %v", err)
+	}
+	if _, err := m.instinct.Reply(ctx, req.ID, "Open both days, 4:30 to 10.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := closeAsAnswered()
+	if err != nil || closed.Status != envelope.TaskDone || closed.Result != "Open both days, 4:30 to 10." {
+		t.Fatalf("host completion = %+v, %v", closed, err)
+	}
+	if ev := m.lastEvent(t, task.ID); ev.Actor != "muse" || ev.ForOwner || ev.Body != "closed it: answered. The reply confirms both days' hours." {
+		t.Fatalf("host history = %+v", ev)
+	}
+	reopened, err := client.DecideTask(ctx, m.admin, client.TaskReopen, task.ID, "review it again")
+	if err != nil || reopened.Status != envelope.TaskReturned || reopened.Result != closed.Result {
+		t.Fatalf("owner reopen = %+v, %v", reopened, err)
+	}
+}
+
+func TestTaskHostRetriesTwiceThenEscalates(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check a delivery"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	const failed = "No answer at the original number."
+	if _, err := m.muse.Reply(ctx, req.ID, failed, envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if first := read(t, m.scout); len(first) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(first[0]), "retry with a different approach") {
+		t.Fatalf("first failure notice = %+v", first)
+	}
+	for i, target := range []struct {
+		name   string
+		client *client.Relay
+	}{{"instinct", m.instinct}, {"muse", m.muse}} {
+		reason := fmt.Sprintf("Check the dispatch desk by channel %d", i+1)
+		got, err := client.HostRetryTask(ctx, m.scout, task.ID, target.name, reason)
+		if err != nil || got.Status != envelope.TaskWorking || got.HostRetries != i+1 {
+			t.Fatalf("retry %d = %+v, %v", i+1, got, err)
+		}
+		attempt := claimOne(t, target.client, got.CurrentRequest)
+		if !strings.Contains(attempt.Body, reason) || !strings.Contains(attempt.Body, failed) {
+			t.Fatalf("attempt lacked approach or prior result: %q", attempt.Body)
+		}
+		if _, err := target.client.Reply(ctx, attempt.ID, failed, envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+		news := read(t, m.scout)
+		want := "retry with a different approach"
+		if i == 1 {
+			want = "tell the owner what you tried"
+		}
+		if len(news) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(news[0]), want) {
+			t.Fatalf("retry %d notice = %+v", i+1, news)
+		}
+	}
+	if _, err := client.HostRetryTask(ctx, m.scout, task.ID, "instinct", "Try one more channel"); !refusedWith(err, http.StatusConflict, "two automatic retries have already been sent") {
+		t.Fatalf("third retry did not direct escalation: %v", err)
+	}
+	if got := m.task(t, task.ID); got.Status != envelope.TaskReturned || got.HostRetries != 2 || got.AgentAssigns != 2 || got.Result != failed || got.CurrentRequest != "" {
+		t.Fatalf("task after two retries = %+v", got)
 	}
 }

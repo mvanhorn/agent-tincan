@@ -55,7 +55,38 @@ func (s *Server) handleTaskBriefingNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"queued": queued})
 }
 
-// taskBriefingMessage renders a snapshot built solely from task metadata.
+func (s *Server) hostBriefingBody(ctx context.Context, host string, b *store.TaskBriefing, base string) (string, error) {
+	view, err := s.hostTaskView(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	var titles []string
+	seen := make(map[int64]bool)
+	if view.host {
+		for _, tasks := range [][]store.BriefingTask{b.Due, b.Waiting, b.Active, b.Done} {
+			for _, task := range tasks {
+				if seen[task.ID] {
+					continue
+				}
+				seen[task.ID] = true
+				title, err := s.hostNoticeTitle(ctx, task.ID, host)
+				if err != nil {
+					return "", err
+				}
+				if title != "" {
+					titles = append(titles, fmt.Sprintf("#%d %s", task.ID, title))
+				}
+			}
+		}
+	}
+	message := base
+	if len(titles) > 0 {
+		message += " Task titles: " + strings.Join(titles, ", ") + "."
+	}
+	return hostNoticePayload(base, message), nil
+}
+
+// taskBriefingMessage renders a snapshot safe for fallback delivery.
 func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 	var msg strings.Builder
 	msg.WriteString("Morning briefing.")
@@ -75,12 +106,25 @@ func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 			if t.Assignee != "" {
 				fmt.Fprintf(&msg, ", with %s", envelope.TaskWho(t.Assignee))
 			}
+			if t.Blocker != "" && label != "Due today or overdue" {
+				fmt.Fprintf(&msg, ", %s", t.Blocker)
+			}
 			msg.WriteByte(')')
 		}
 		msg.WriteByte('.')
 	}
 	writeTasks("Due today or overdue", b.Due)
-	writeTasks("Waiting on you", b.Waiting)
+	var returned, waiting []store.BriefingTask
+	for _, task := range b.Waiting {
+		if task.Status == envelope.TaskReturned {
+			returned = append(returned, task)
+		} else {
+			waiting = append(waiting, task)
+		}
+	}
+	writeTasks("Returned for review", returned)
+	writeTasks("Waiting on input or assignment", waiting)
+	writeTasks("Open work to follow up", b.Active)
 	writeTasks("Done since the last briefing", b.Done)
 	if b.SmallAsksAnswered > 0 {
 		fmt.Fprintf(&msg, " Small asks answered since last briefing: %d.", b.SmallAsksAnswered)

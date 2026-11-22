@@ -540,7 +540,7 @@ func TestTasksBriefingNowCommand(t *testing.T) {
 	req := in.Requests[0]
 	if req.TaskNoticeKind != envelope.TaskNoticeBriefing || !req.Claimed ||
 		!strings.Contains(req.OwnerMessage, "task #1 (open, due 2000-11-21)") ||
-		!strings.Contains(in.TaskNoticePosting, "last tool call") || strings.Contains(stdout, "Private deadline") {
+		!strings.Contains(in.TaskNoticePosting, "last tool call") || !strings.Contains(stdout, "Private deadline") {
 		t.Fatalf("briefing owner message = %s", stdout)
 	}
 	if err := client.TaskNoticesTold(ctx, m.Client(t, "muse"), []string{req.ID}); err != nil {

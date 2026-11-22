@@ -511,7 +511,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 
 func askCmd() *cobra.Command {
 	var wait time.Duration
-	var parent, project, at, every, thenTo, source string
+	var parent, project, at, every, thenTo, source, about string
 	var notify, asJSON, urgent, quiet bool
 	var attach []string
 	cmd := &cobra.Command{
@@ -542,7 +542,7 @@ instead, as a new request with every send check applied at that time.
 			}
 			defer printHeld(cmd, r)
 			ctx := client.WithAskSource(client.WithProject(cmd.Context(), project), source)
-			ctx = client.WithQuietAsk(ctx, quiet)
+			ctx = client.WithAskAbout(client.WithQuietAsk(ctx, quiet), about)
 			body := strings.Join(args[1:], " ")
 			if thenTo != "" {
 				// The message and the follow-on are one argument each.
@@ -555,8 +555,8 @@ instead, as a new request with every send check applied at that time.
 			// Changed, not the values: an empty --at "$WHEN" asked for a
 			// schedule and must never turn into a send now.
 			if cmd.Flags().Changed("at") || cmd.Flags().Changed("every") {
-				if len(targets) > 1 || notify || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
-					return errors.New("a scheduled ask goes to one teammate, with no --notify, --parent, --attach, --project or --then")
+				if len(targets) > 1 || notify || about != "" || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
+					return errors.New("a scheduled ask goes to one teammate, with no --notify, --about, --parent, --attach, --project or --then")
 				}
 				return scheduleAsk(cmd, r, client.ScheduledAsk{To: targets[0], Body: body, Urgent: urgent}, at, every, asJSON)
 			}
@@ -628,6 +628,7 @@ instead, as a new request with every send check applied at that time.
 	}
 	cmd.Flags().StringVar(&thenTo, "then", "", `once answered, have the relay ask this agent too: ask muse "..." --then hermes "file the receipt"`)
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
+	cmd.Flags().StringVar(&about, "about", "", "existing open task number or request ID this ask follows up on")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "file a quiet task for housekeeping asks, never for work the owner requested")

@@ -1036,6 +1036,11 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, ErrNotRoomMember
 		}
 	}
+	if req.TaskRetry != nil {
+		if err := s.prepareTaskRetryTx(ctx, tx, &req); err != nil {
+			return envelope.Request{}, err
+		}
+	}
 	if req.TaskID != 0 {
 		if err := s.claimTaskTx(ctx, tx, req); err != nil {
 			return envelope.Request{}, err
@@ -1066,6 +1071,12 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat, req.TaskFiledOnSend, req.TaskRoomScope)
 	if err != nil {
 		return envelope.Request{}, err
+	}
+	if req.AboutTaskID != 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_followups (request_id, task_id) VALUES (?, ?)`,
+			req.ID, req.AboutTaskID); err != nil {
+			return envelope.Request{}, err
+		}
 	}
 	if err := s.followOnTx(ctx, tx, req); err != nil {
 		return envelope.Request{}, err
@@ -1498,7 +1509,7 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return err
 	}
 	if task.Valid {
-		if err := taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
+		if err := s.taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -1586,6 +1597,12 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if err := s.taskRepliedTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
+	if rep.Status == envelope.StatusAnswered && !rep.Provisional {
+		rep.CancelledFollowups, err = s.closeQuietTaskAfterReplyTx(ctx, tx, id)
+		if err != nil {
+			return envelope.Reply{}, err
+		}
+	}
 	if !rep.Replaced { // the ack already set any follow-on off
 		if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
 			return envelope.Reply{}, err
@@ -1628,6 +1645,9 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 		if note, err = s.RelayNote(ctx, id); err != nil {
 			return Result{}, err
 		}
+	}
+	if req.From != agent && req.WasHeld && !req.Approved && rep != nil && rep.From == envelope.TaskOwner {
+		rep = nil
 	}
 	req.RedactFor(agent)
 	res := Result{Request: req, Status: status, Reply: rep, Progress: req.Progress, Exchanges: req.Exchanges, RelayNote: note}
@@ -1697,7 +1717,7 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	if err := s.taskReleasedTx(ctx, tx, id, agent, "cancelled the ask"); err != nil {
+	if err := s.taskCancelledTx(ctx, tx, id, agent); err != nil {
 		return nil, err
 	}
 	return closed, tx.Commit()

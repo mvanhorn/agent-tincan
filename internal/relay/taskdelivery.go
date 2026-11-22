@@ -120,7 +120,7 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 			label = "Task briefing"
 		}
 		next.Body = fmt.Sprintf("%s: %s did not acknowledge this task notice by attempt %d. %s",
-			label, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
+			label, old.To, d.Attempt, client.TaskNoticeFallbackMessage(old))
 	}
 	var ttl time.Duration
 	if next.To != "" {
