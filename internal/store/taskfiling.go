@@ -131,6 +131,13 @@ func (s *Store) fileAskTx(ctx context.Context, tx *sql.Tx, req *envelope.Request
 }
 
 // A task number needs a task label so issue and change numbers stay separate.
+var bareNumber = regexp.MustCompile(`#[0-9]+`)
+
+// HasTaskFollowupReference reports whether body names a task or request.
+func HasTaskFollowupReference(body string) bool {
+	return taskReference.MatchString(body)
+}
+
 var taskReference = regexp.MustCompile(`(?i)\b[0-9a-f]{20}\b|\btask[ \t]+#[1-9][0-9]{0,18}\b`)
 
 func (s *Store) findTaskFollowup(ctx context.Context, tx *sql.Tx, req envelope.Request) (int64, error) {
@@ -147,8 +154,10 @@ func (s *Store) findTaskFollowup(ctx context.Context, tx *sql.Tx, req envelope.R
 			WHERE t.status IN ('open', 'working') AND (t.id = ?2 OR
 				(q.id = ?3 AND q.status IN ('queued', 'delivered', 'claimed') AND q.expires_at > ?4))
 			AND t.room_post_id IS NULL AND t.participant_only = 0
-			AND (`+taskVisible+` OR q.from_agent = ?1) AND NOT `+taskHostWithheld,
-			req.From, byID, ref, s.now().UnixMilli()).Scan(&parent)
+			AND (`+taskVisible+` OR q.from_agent = ?1 OR (?5 AND `+taskHostVisible+`
+				AND EXISTS (SELECT 1 FROM agents WHERE name = ?1 AND task_host = 1)))
+			AND NOT `+taskHostWithheld,
+			req.From, byID, ref, s.now().UnixMilli(), req.AboutHost).Scan(&parent)
 		if errors.Is(err, sql.ErrNoRows) {
 			err = nil
 		}
@@ -159,7 +168,7 @@ func (s *Store) findTaskFollowup(ctx context.Context, tx *sql.Tx, req envelope.R
 	}
 	refs := taskReference.FindAllString(req.Body, -1)
 	if len(refs) == 0 {
-		if req.ParentID == "" {
+		if req.ParentID == "" || bareNumber.MatchString(req.Body) {
 			return 0, nil
 		}
 		return lookup(req.ParentID)

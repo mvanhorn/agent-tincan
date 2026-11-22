@@ -1053,6 +1053,16 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 	prepared := req
 	ttl := s.requestTTL(ctx, req.To)
 	var err error
+	if req.Kind == envelope.KindAsk && req.TaskID == 0 && (req.About != "" || store.HasTaskFollowupReference(req.Body)) {
+		view, viewErr := s.hostTaskView(ctx, req.From)
+		if viewErr != nil {
+			if rf, ok := prep.(Refunder); ok {
+				rf.Refund(prepared)
+			}
+			return envelope.Request{}, &StatusError{Code: http.StatusInternalServerError, Err: viewErr}
+		}
+		req.AboutHost = view.host
+	}
 	if s.cfg.FileAllAsks == "off" && req.About == "" {
 		req, err = s.store.Enqueue(ctx, req, ttl)
 	} else {

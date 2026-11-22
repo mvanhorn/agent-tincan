@@ -188,6 +188,7 @@ type Request struct {
 	// About names a task or ask for filing purposes only.
 	About       string `json:"-"`
 	AboutTaskID int64  `json:"-"`
+	AboutHost   bool   `json:"-"`
 	// SkipTaskRecovery is set by the relay for internal requests.
 	SkipTaskRecovery bool `json:"-"`
 	// RecoveryRepeat names the schedule on enqueue for an ask that repeats.

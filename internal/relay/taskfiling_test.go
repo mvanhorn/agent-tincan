@@ -655,13 +655,19 @@ func TestTaskReferencesDoNotAttachBareNumbersOrRestrictedText(t *testing.T) {
 	if err != nil || parent.TaskID == 0 {
 		t.Fatalf("parent = %+v, %v", parent, err)
 	}
-	bare, err := m.grok.Send(ctx, "muse", fmt.Sprintf("Review PR #%d", parent.TaskID), envelope.KindAsk, "", false)
+	claimOne(t, m.muse, parent.ID)
+	bare, err := m.muse.Send(ctx, "instinct", fmt.Sprintf("Review PR #%d", parent.TaskID), envelope.KindAsk, "", false)
 	if err != nil || bare.TaskID == 0 || bare.TaskID == parent.TaskID {
 		t.Fatalf("bare issue number was treated as a task: %+v, %v", bare, err)
 	}
 	follow, err := m.grok.Send(ctx, "muse", fmt.Sprintf("Check task #%d again", parent.TaskID), envelope.KindAsk, "", false)
 	if err != nil || follow.TaskID != 0 {
 		t.Fatalf("explicit task label did not attach: %+v, %v", follow, err)
+	}
+
+	linked, err := m.scout.Send(client.WithAskAbout(ctx, parent.ID), "muse", "Can you confirm the latest status?", envelope.KindAsk, "", false)
+	if err != nil || linked.TaskID != 0 {
+		t.Fatalf("eligible host could not attach to a task in its view: %+v, %v", linked, err)
 	}
 
 	before := len(m.events(t, parent.TaskID))

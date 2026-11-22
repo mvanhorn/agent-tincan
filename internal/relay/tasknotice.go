@@ -217,7 +217,7 @@ func (s *Server) tellTaskHosts(ctx context.Context, n store.TaskNotice, eligible
 		if n.Kind != envelope.TaskNoticeStall && n.Kind != envelope.TaskNoticeAction && n.Retries == 0 && host == n.Asker && (s.wake == nil || s.wake.WakeMethod(host) != "webhook" || n.Status == envelope.TaskProposed) {
 			continue
 		}
-		hostBody := body
+		var hostBody string
 		var err error
 		if n.Briefing != nil {
 			hostBody, err = s.hostBriefingBody(ctx, host, n.Briefing, body)
