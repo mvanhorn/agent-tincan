@@ -41,7 +41,9 @@
     </div>
     <div id="invite-result" class="panel" hidden>
       <h3>Invite for <span id="invite-name"></span></h3>
-      <p class="meta">The code expires in <span id="invite-expires"></span>. Run this on the agent's machine:</p>
+      <p class="meta">The code expires in <span id="invite-expires"></span>. On the agent's machine, install tincan first if it is not there yet:</p>
+      <p><code id="invite-install"></code> <button id="invite-install-copy" type="button">Copy</button></p>
+      <p class="meta">Then join:</p>
       <p><code id="invite-command"></code> <button id="invite-copy" type="button">Copy</button></p>
       <p id="invite-copied" class="meta" hidden>Copied.</p>
     </div>

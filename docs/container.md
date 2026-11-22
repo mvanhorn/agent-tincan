@@ -51,8 +51,8 @@ existing admin routes — the same checks as `tincan invite` from your
 laptop. From there:
 
 1. **Add an agent**: pick a name and kind, mint an invite, and run the
-   printed `tincan join` command on the agent's machine. The code
-   expires after 10 minutes.
+   printed commands on the agent's machine — install tincan first if
+   needed, then `tincan join`. The code expires after 10 minutes.
 2. **Configure an agent**: open its entry to set its kind and good-at
    line, save a webhook wake URL for it, or remove it. Removal
    revokes its tokens and cancels its queued requests, so it is

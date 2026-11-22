@@ -120,6 +120,7 @@ async function invite() {
     const relay = state.relayURLs.length > 0 ? state.relayURLs[0] : "http://tincan-relay";
     $("invite-name").textContent = res.data.name;
     $("invite-expires").textContent = res.data.expires_in || "10m";
+    $("invite-install").textContent = INSTALL_CMD;
     $("invite-command").textContent = "tincan join " + res.data.code + " --relay " + relay;
     $("invite-result").hidden = false;
     $("invite-copied").hidden = true;
@@ -133,14 +134,18 @@ async function invite() {
   }
 }
 
-async function copyInvite() {
-  const text = $("invite-command").textContent;
+// INSTALL_CMD is how a fresh machine gets tincan, as the quickstart
+// documents. The agent's machine may not have it yet.
+const INSTALL_CMD = "curl -fsSL https://agenttincan.com/install.sh | sh";
+
+async function copyId(id) {
+  const text = $(id).textContent;
   try {
     await navigator.clipboard.writeText(text);
   } catch (_) {
     // Clipboard needs a secure context; fall back to selecting the text.
     const range = document.createRange();
-    range.selectNodeContents($("invite-command"));
+    range.selectNodeContents($(id));
     const sel = getSelection();
     if (sel) {
       sel.removeAllRanges();
@@ -367,5 +372,6 @@ async function refreshAll() {
 }
 
 $("add-button").addEventListener("click", invite);
-$("invite-copy").addEventListener("click", copyInvite);
+$("invite-install-copy").addEventListener("click", () => copyId("invite-install"));
+$("invite-copy").addEventListener("click", () => copyId("invite-command"));
 refreshAll();
