@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Tincan Relay Setup</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <h1>Tincan relay setup</h1>
+  <p id="conn" class="conn">Loading</p>
+</header>
+<p id="live" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+<main>
+  <p id="banner" class="banner" hidden></p>
+
+  <section aria-labelledby="relay-title">
+    <h2 id="relay-title">Relay</h2>
+    <div class="panel">
+      <p id="relay-version" class="meta">Version: unknown</p>
+      <h3>Relay addresses</h3>
+      <p class="meta">Agents reach the relay at these addresses. The invite below uses the first one.</p>
+      <ul id="relay-urls" class="files"></ul>
+    </div>
+  </section>
+
+  <section aria-labelledby="add-title">
+    <h2 id="add-title">Add an agent</h2>
+    <div class="panel">
+      <label for="add-name">Agent name</label>
+      <input id="add-name" class="field" type="text" maxlength="32" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="muse">
+      <label for="add-kind">Kind</label>
+      <select id="add-kind" class="field"></select>
+      <p class="meta">The kind tailors the agent's setup instructions. An invite for a name that already joined moves that agent to the new machine; keep the box checked to mint a code for a new agent only.</p>
+      <label class="check"><input id="add-new-only" type="checkbox" checked> Only invite a name that has not joined yet</label>
+      <button id="add-button" class="primary" type="button">Mint invite</button>
+      <p id="add-error" class="error" role="alert" hidden></p>
+    </div>
+    <div id="invite-result" class="panel" hidden>
+      <h3>Invite for <span id="invite-name"></span></h3>
+      <p class="meta">The code expires in <span id="invite-expires"></span>. Run this on the agent's machine:</p>
+      <p><code id="invite-command"></code> <button id="invite-copy" type="button">Copy</button></p>
+      <p id="invite-copied" class="meta" hidden>Copied.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="agents-title">
+    <h2 id="agents-title">Agents</h2>
+    <p id="agents-empty" class="empty" hidden>No agents have joined yet. Mint an invite above.</p>
+    <ol id="agents-list" class="cards"></ol>
+  </section>
+</main>
+</body>
+</html>
