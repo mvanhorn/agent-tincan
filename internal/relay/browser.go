@@ -8,8 +8,20 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/mvanhorn/agent-tincan/internal/adminui"
 	"github.com/mvanhorn/agent-tincan/internal/phone"
 )
+
+// directOpen reports whether path is a page a browser may open directly,
+// from outside the relay's own pages. Both user-facing pages qualify; the
+// bare prefix without its trailing slash is let through too, so the mux
+// can redirect it to the page.
+func directOpen(path string) bool {
+	if path == phone.Prefix || path == strings.TrimSuffix(phone.Prefix, "/") {
+		return true
+	}
+	return path == adminui.Prefix || path == strings.TrimSuffix(adminui.Prefix, "/")
+}
 
 // Refusals from HardenForBrowsers. They name no header value, so a refused
 // page learns nothing it did not send.
@@ -80,11 +92,11 @@ func sameOrigin(r *http.Request) bool {
 	switch site := r.Header.Get("Sec-Fetch-Site"); site {
 	case "", "same-origin":
 	case "none":
-		// The phone page is the one page a browser may open from outside
-		// the relay's own pages: a typed address, a bookmark or a
-		// home-screen icon. /phone itself is let through too, so the mux
-		// can redirect it to /phone/.
-		if r.Method != http.MethodGet || (r.URL.Path != phone.Prefix && r.URL.Path != strings.TrimSuffix(phone.Prefix, "/")) {
+		// The phone page and the setup console are the pages a browser
+		// may open from outside the relay's own pages: a typed address,
+		// a bookmark or a home-screen icon. The bare prefixes are let
+		// through too, so the mux can redirect them to the pages.
+		if r.Method != http.MethodGet || !directOpen(r.URL.Path) {
 			return false
 		}
 	default:

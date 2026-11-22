@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/adminui"
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
@@ -546,6 +547,7 @@ func (s *Server) adminRoutes(mux interface {
 }) {
 	mux.HandleFunc("GET /v1/admin/wake-config", s.handleWakeSettings)
 	mux.HandleFunc("PUT /v1/admin/wake-config/{agent}", s.handleWakeSettings)
+	mux.HandleFunc("GET /v1/admin/kinds", s.handleKinds)
 	mux.HandleFunc("GET /v1/admin/held", s.handleHeld)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/deny", s.handleDeny)
@@ -574,6 +576,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET "+phone.Prefix, s.handlePhone)
+	mux.HandleFunc("GET "+adminui.Prefix, s.handleAdminUI)
 	mux.HandleFunc("GET /v1/admin/push/key", s.handlePushKey)
 	mux.HandleFunc("PUT /v1/admin/push/subscription", s.handlePushSubscribe)
 	mux.HandleFunc("DELETE /v1/admin/push/subscription", s.handlePushUnsubscribe)
