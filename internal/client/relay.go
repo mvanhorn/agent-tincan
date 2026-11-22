@@ -550,6 +550,9 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	if source, _ := ctx.Value(askSourceKey{}).(string); source != "" {
 		in["source"] = source
 	}
+	if in["kind"] == envelope.KindAsk && quietAskOf(ctx) {
+		in["quiet"] = true
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	if err == nil {
@@ -1256,6 +1259,19 @@ func WithAskSource(ctx context.Context, source string) context.Context {
 	return context.WithValue(ctx, askSourceKey{}, source)
 }
 
+type quietAskKey struct{}
+
+// WithQuietAsk sets the quiet send field on asks sent with ctx. It affects
+// task filing only. Older relays ignore the field.
+func WithQuietAsk(ctx context.Context, quiet bool) context.Context {
+	return context.WithValue(ctx, quietAskKey{}, quiet)
+}
+
+func quietAskOf(ctx context.Context) bool {
+	quiet, _ := ctx.Value(quietAskKey{}).(bool)
+	return quiet
+}
+
 // AdvertiseSocketWake turns SocketWakeFeature on or off for every later
 // call. It is safe to call while the client is in use.
 func (r *Relay) AdvertiseSocketWake(on bool) { r.socketWake.Store(on) }
@@ -1520,7 +1536,8 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 			in := struct {
 				envelope.Request
 				Source string `json:"source,omitempty"`
-			}{req, source}
+				Quiet  bool   `json:"quiet,omitempty"`
+			}{req, source, kind == envelope.KindAsk && quietAskOf(ctx)}
 			err = r.call(ctx, r.api, "POST", "/v1/send", in, &sent)
 			if err == nil {
 				req = sent.Request

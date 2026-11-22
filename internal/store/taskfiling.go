@@ -28,7 +28,7 @@ func classifyAsk(req envelope.Request, fromKind, toKind string, openGuest bool) 
 		req.FromGuest || openGuest || req.RecoverySource != "" || strings.HasPrefix(req.Group, envelope.PassGroupPrefix) {
 		return noTask
 	}
-	if req.NoParent || req.FollowOf != "" || req.RoomPostID != 0 ||
+	if req.QuietAsk || req.NoParent || req.FollowOf != "" || req.RoomPostID != 0 ||
 		req.SkipTaskRecovery || taskServiceKind(fromKind) || taskServiceKind(toKind) {
 		return quietTask
 	}

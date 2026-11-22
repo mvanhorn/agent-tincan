@@ -22,6 +22,7 @@ Status: ready. Release v0.5.0 is on the relay and every agent. agenttincan.com i
 1. Make the repo public (GitHub settings). The history scan found no secrets (gitleaks: only a test value and the extension's public manifest key).
 2. Right after: fresh install from the one-liner, `curl -fsSL https://agenttincan.com/install.sh | sh`, which downloads from GitHub releases and so only works once the repo is public.
 3. When the store listing passes review: click Publish, install it from the store, remove the unpacked extension, then run `tincan history install --extension-id goldflchpojcjmifnljlfkgoahjgeajn`. Only in that order: the native host allows one extension id.
+4. If a teammate needs a manual upgrade reminder, use `tincan ask <agent> "Run tincan upgrade, restart your Tincan processes, and confirm the installed version." --quiet`.
 
 ## Known limits (disclose, not blockers)
 

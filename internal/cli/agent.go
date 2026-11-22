@@ -512,7 +512,7 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 func askCmd() *cobra.Command {
 	var wait time.Duration
 	var parent, project, at, every, thenTo, source string
-	var notify, asJSON, urgent bool
+	var notify, asJSON, urgent, quiet bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent[,agent...]> <message...>",
@@ -542,6 +542,7 @@ instead, as a new request with every send check applied at that time.
 			}
 			defer printHeld(cmd, r)
 			ctx := client.WithAskSource(client.WithProject(cmd.Context(), project), source)
+			ctx = client.WithQuietAsk(ctx, quiet)
 			body := strings.Join(args[1:], " ")
 			if thenTo != "" {
 				// The message and the follow-on are one argument each.
@@ -629,6 +630,7 @@ instead, as a new request with every send check applied at that time.
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "file a quiet task for housekeeping asks, never for work the owner requested")
 	cmd.Flags().StringVar(&project, "project", "", "the project of the session this is for, usually its repo directory name: that session gets it first, any session after about 10 minutes")
 	cmd.Flags().StringVar(&source, "source", "", "outside source of an ask's text, such as mail or meeting; if auto-filed, it waits for owner approval")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")

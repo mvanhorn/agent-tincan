@@ -12,6 +12,8 @@ Notes, history, pass and council asks, room mentions, follow-on hops, and schedu
 
 A quiet task appears on the ordinary list and sends status news if its ask fails, is declined, expires, or spends four hours waiting for clarification. An escalated question stays open for the asker to answer. The briefing counts quiet answers since the last scheduled briefing and keeps their task details out.
 
+Use `tincan ask <agent> "<message>" --quiet` or set `quiet: true` on the MCP `ask` tool to file a housekeeping ask as quiet. Examples include upgrades, health checks, config confirmations and corrections to an earlier reply. Never use quiet for work the owner asked for. Quiet asks follow the usual approval and task access rules. Older relays ignore the option.
+
 On the relay, `--file-all-asks auto` is the default and follows whether a task host is named. Use `--file-all-asks on` to file even without a host, or `--file-all-asks off` to disable filing at send. The existing recovery of eligible unfinished asks continues in every mode.
 
 ## Set a deadline

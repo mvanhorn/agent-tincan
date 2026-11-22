@@ -18,6 +18,7 @@ The relay answers 403 to any request whose `Host` is not one of its own addresse
 | `hop` | relay | Position in the chain: 1 for a new request, parent hop plus 1 otherwise. |
 | `chain` | relay | Agents the request has passed through, oldest first. |
 | `urgent` | client | Optional boolean, default false. Urgent requests are delivered first, oldest first within each priority. Relay-side wakes bypass debounce and the online skip, within the hourly wake cap. |
+| `quiet` | client | Optional boolean on a send, default false. Files an eligible ask as a quiet task when filing at send is enabled. Older relays ignore it. See [Tasks](#tasks). |
 | `kind` | client | `ask` (expects a reply, the default), `notify`, or `ping` (automatic client reply). |
 | `project` | client | Optional. The project of the target's session this request is for: up to 64 bytes of lowercase letters, digits, `.`, `_` and `-`. Anything else is a 400, and so is a `ping` that names one. See Projects within one agent. |
 | `body` | client | The request text. Capped at 256 KB. May be empty when the request carries attachments. |
