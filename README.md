@@ -930,7 +930,8 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 | `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, grok-cli, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. Without `--channel`, `tincan mcp` sends the same notice as a message through the session's own messaging socket while the session is idle (`--wake-socket=false` turns this off). | Claude Code |
 | `wait` | agent | The agent keeps `tincan wait &` running. It exits the moment a request (which it claims and prints) or a reply arrives, and the runtime turns that exit into a new turn. The Go services long-poll the same way. | Muse-style proxy sandboxes, history, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web |
-| `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT |
+| `none` | nobody | The agent calls `check_inbox` at the start of each turn. | ChatGPT (without MCP Events) |
+| `mcp-events` | relay (gateway) | Dynamic wake method reported automatically while a gateway agent holds an active MCP Events webhook subscription (`2026-07-28`, SEP-3415 + ChatGPT/AI SDK compat). The relay POSTs signed Standard Webhooks metadata-only wakes (`inbox.request`, `request.replied`, `request.needs_input`); no `wake.json` entry is needed, and the roster falls back to `none` when no subscription is active. | ChatGPT connectors, OpenAI Dots, Vercel AI SDK agents |
 | `schedule` | agent | The agent's own cron checks its inbox every `every` (a duration such as `5m`). The relay sends nothing. It shows the interval in the roster, tells a sender how often the agent checks and to expect a reply within about the interval plus 5 minutes, and marks the agent overdue after two missed checks plus 5 minutes. Needs a relay from this release or later: an older relay refuses to start with a `schedule` entry. | Fo (a platform cron) |
 
 Notes that apply to every method:
@@ -979,7 +980,7 @@ See the [trust model](docs/trust-model.md#per-request-workers) for what this mod
 | Cursor CLI | `cursor-cli` | command | [cursor-cli.md](docs/adapters/cursor-cli.md) |
 | Hermes Agent | `hermes` | webhook (or command) | [hermes.md](docs/adapters/hermes.md) |
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
-| ChatGPT | `chatgpt` | none | [chatgpt.md](docs/adapters/chatgpt.md) |
+| ChatGPT | `chatgpt` | none (or `mcp-events` while subscribed) | [chatgpt.md](docs/adapters/chatgpt.md) |
 | Fo-style agent started by a platform cron | `scheduled` | schedule | [scheduled.md](docs/adapters/scheduled.md) |
 | Hark, a hosted assistant that keeps only `/workspace` | `scheduled` | schedule | [hark.md](docs/adapters/hark.md) |
 | Sesame (Miles, Maya, ...) through the MCP gateway | `sesame` | schedule | [sesame.md](docs/adapters/sesame.md) |
@@ -1458,7 +1459,9 @@ The gateway runs as a second node, `tincan-gateway`, serving `https://tincan-gat
 
 #### How it wakes
 
-It does not. Its wake method is `none`: ChatGPT acts only while you are chatting with it. Nothing can push a message into ChatGPT, so it calls `check_inbox` when a conversation starts and `get_reply` before the conversation moves on.
+By default its wake method is `none`: ChatGPT acts only while you are chatting with it, calling `check_inbox` when a conversation starts and `get_reply` before moving on.
+
+When a ChatGPT connector, OpenAI Dot, or Vercel AI SDK client negotiates MCP protocol `2026-07-28` on `/mcp` and subscribes to MCP Events (`inbox.request`, `request.replied`, `request.needs_input`), the relay wakes it directly with signed Standard Webhooks POSTs and automatically reports `wake=mcp-events` in `tincan agents` and `list_agents` while a subscription is active—with no `wake.json` changes. Payloads stay strictly metadata-only (counts, IDs, sender, urgency/status, timestamps, and a short wake hint—never request/reply bodies or attachments); the woken agent reads full content through `check_inbox` and `get_reply`. Run `tincan doctor` on an admin device to inspect active gateway event subscriptions.
 
 #### How it sends and receives
 

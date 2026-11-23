@@ -172,6 +172,8 @@ func listenHint(to string, t *envelope.Target) string {
 		return to + " is listening now and will start a turn when it picks this up.\n"
 	case "none":
 		return to + " checks only when its owner next prompts it.\n"
+	case "mcp-events":
+		return to + " is subscribed to MCP Events and will be woken by webhook.\n"
 	}
 	return ""
 }
