@@ -405,3 +405,114 @@ func TestEventHubResumesPendingDeliveriesAcrossRestart(t *testing.T) {
 		t.Fatalf("resumed webhook-id = %q, want evt_persisted_1", evs[0].Headers.Get("webhook-id"))
 	}
 }
+
+func newTestHub(t *testing.T, opts EventHubOptions) *EventHub {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	hub, err := NewEventHub(st.DB(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(hub.Stop)
+	return hub
+}
+
+func TestEventHubParallelDeliveryAcrossSubscriptions(t *testing.T) {
+	hub := newTestHub(t, EventHubOptions{PollInterval: 10 * time.Millisecond})
+
+	slowStarted := make(chan struct{}, 1)
+	releaseSlow := make(chan struct{})
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slowStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseSlow:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slowSrv.Close()
+	defer close(releaseSlow)
+
+	fastDone := make(chan struct{}, 1)
+	fastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case fastDone <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fastSrv.Close()
+
+	AllowUnsafeCallbacksForTest(hub, &http.Client{Timeout: 2 * time.Second})
+	secret, _ := GenerateSigningSecret()
+	ctx := context.Background()
+	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
+		ID: "sub_slow", Agent: "slowbot", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: slowSrv.URL, SigningSecret: secret,
+	}, time.Hour)
+	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
+		ID: "sub_fast", Agent: "fastbot", ClientID: "c2", EventName: EventInboxRequest, CallbackURL: fastSrv.URL, SigningSecret: secret,
+	}, time.Hour)
+
+	hub.Queued(ctx, envelope.Request{ID: "req_slow", From: "codex", To: "slowbot"})
+	hub.Queued(ctx, envelope.Request{ID: "req_fast", From: "codex", To: "fastbot"})
+
+	// fastbot must receive its wake while slowbot is still blocked.
+	select {
+	case <-fastDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("fastbot wake was blocked by slowbot's slow callback")
+	}
+	select {
+	case <-slowStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("slowbot never received its delivery attempt")
+	}
+}
+
+func TestEventHubStandaloneGapRecoveryNotice(t *testing.T) {
+	hub := newTestHub(t, EventHubOptions{
+		PollInterval:           15 * time.Millisecond,
+		RetryBackoff:           []time.Duration{20 * time.Millisecond},
+		MaxConsecutiveFailures: 10,
+	})
+
+	var attempts atomic.Int32
+	srv, got, mu := startWebhookRecorder(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		if attempts.Add(1) <= 2 {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	AllowUnsafeCallbacksForTest(hub, srv.Client())
+	secret, _ := GenerateSigningSecret()
+	ctx := context.Background()
+	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
+		ID: "sub_gap_only", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
+	}, time.Hour)
+
+	// Send one event; both attempts fail so the final delivery is dropped and has_gap=1.
+	// Callback then recovers with NO new event enqueued; a standalone gap notice must be sent.
+	hub.Queued(ctx, envelope.Request{ID: "req_drop_last", From: "codex", To: "chatgpt"})
+	evs := waitForCount(t, got, mu, 3)
+	if evs[2].Payload["type"] != "gap" || evs[2].Payload["truncated"] != true {
+		t.Fatalf("expected standalone recovery gap notice, got %+v", evs[2].Payload)
+	}
+	// has_gap must clear after the recovery notice succeeds.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		sub, ok, _ := hub.store.Subscription(ctx, "sub_gap_only")
+		if ok && !sub.HasGap {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("has_gap was not cleared after standalone recovery gap notice")
+}

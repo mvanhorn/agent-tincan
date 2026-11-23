@@ -80,11 +80,16 @@ type EventHub struct {
 	rateMu    sync.Mutex
 	sentTimes map[string][]time.Time
 
-	wakeCh   chan struct{}
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	stopOnce sync.Once
+	inflightMu   sync.Mutex
+	inflightSubs map[string]struct{}
+	sem          chan struct{}
+
+	wakeCh     chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	deliveryWG sync.WaitGroup
+	stopOnce   sync.Once
 }
 
 // NewEventHub opens the gateway events tables in db and starts the background
@@ -143,6 +148,8 @@ func NewEventHub(db *sql.DB, opts EventHubOptions) (*EventHub, error) {
 		verifyClient:           SafeWebhookClient(verifyTimeout),
 		deliverClient:          SafeWebhookClient(deliverTimeout),
 		sentTimes:              map[string][]time.Time{},
+		inflightSubs:           map[string]struct{}{},
+		sem:                    make(chan struct{}, maxParallelDeliveries),
 		wakeCh:                 make(chan struct{}, 1),
 		ctx:                    ctx,
 		cancel:                 cancel,
@@ -157,6 +164,7 @@ func (h *EventHub) Stop() {
 	h.stopOnce.Do(func() {
 		h.cancel()
 		h.wg.Wait()
+		h.deliveryWG.Wait()
 	})
 }
 
@@ -415,19 +423,128 @@ func (h *EventHub) run() {
 	}
 }
 
+const maxParallelDeliveries = 8
+
+func (h *EventHub) tryStartSub(subID string) bool {
+	h.inflightMu.Lock()
+	if _, busy := h.inflightSubs[subID]; busy {
+		h.inflightMu.Unlock()
+		return false
+	}
+	select {
+	case h.sem <- struct{}{}:
+		h.inflightSubs[subID] = struct{}{}
+		h.inflightMu.Unlock()
+		return true
+	default:
+		h.inflightMu.Unlock()
+		return false
+	}
+}
+
+func (h *EventHub) finishSub(subID string) {
+	<-h.sem
+	h.inflightMu.Lock()
+	delete(h.inflightSubs, subID)
+	h.inflightMu.Unlock()
+	if h.ctx.Err() == nil {
+		h.signalWorker()
+	}
+}
+
 func (h *EventHub) processDue(ctx context.Context) {
-	due, err := h.store.DueDeliveries(ctx, 32)
+	due, err := h.store.DueDeliveries(ctx, 64)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("gateway events: load due deliveries: %v", err)
 		}
 		return
 	}
+
+	// Group by subscription to preserve FIFO delivery order per subscription
+	// while dispatching independent subscriptions concurrently (bounded by h.sem)
+	// without blocking the scheduler loop on slow callbacks.
+	bySub := make(map[string][]EventDelivery)
+	var subOrder []string
 	for _, d := range due {
+		if _, ok := bySub[d.SubscriptionID]; !ok {
+			subOrder = append(subOrder, d.SubscriptionID)
+		}
+		bySub[d.SubscriptionID] = append(bySub[d.SubscriptionID], d)
+	}
+
+	gapSubs, gerr := h.store.DueGapSubscriptions(ctx, h.backoffFor(0), 16)
+	if gerr != nil && ctx.Err() == nil {
+		log.Printf("gateway events: load due gap notices: %v", gerr)
+	}
+
+	for _, subID := range subOrder {
 		if ctx.Err() != nil {
 			return
 		}
-		h.deliverOne(ctx, d)
+		if !h.tryStartSub(subID) {
+			continue
+		}
+		batch := bySub[subID]
+		h.deliveryWG.Add(1)
+		go func(id string, items []EventDelivery) {
+			defer h.deliveryWG.Done()
+			defer h.finishSub(id)
+			for _, d := range items {
+				if ctx.Err() != nil {
+					return
+				}
+				h.deliverOne(ctx, d)
+			}
+		}(subID, batch)
+	}
+	for _, sub := range gapSubs {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, hasDue := bySub[sub.ID]; hasDue {
+			continue
+		}
+		if !h.tryStartSub(sub.ID) {
+			continue
+		}
+		h.deliveryWG.Add(1)
+		go func(s EventSubscription) {
+			defer h.deliveryWG.Done()
+			defer h.finishSub(s.ID)
+			h.deliverStandaloneGap(ctx, s)
+		}(sub)
+	}
+}
+
+func (h *EventHub) deliverStandaloneGap(ctx context.Context, sub EventSubscription) {
+	now := h.now().UTC()
+	if !sub.ExpiresAt.After(now) {
+		return
+	}
+	if allowed, _ := h.reserveRateSlot(sub.Agent, now); !allowed {
+		return
+	}
+	status, err := h.sendGapNotice(ctx, sub)
+	if err == nil {
+		if cerr := h.store.ClearHasGap(ctx, sub.ID); cerr != nil {
+			log.Printf("gateway events: clear gap sub=%s: %v", sub.ID, cerr)
+		}
+		return
+	}
+	if status == http.StatusGone {
+		h.terminateSubscription(ctx, sub.ID, "endpoint_gone")
+		return
+	}
+	consecutive, rerr := h.store.RecordGapFailure(ctx, sub.ID, err.Error())
+	if rerr != nil {
+		log.Printf("gateway events: record gap failure sub=%s: %v", sub.ID, rerr)
+		return
+	}
+	log.Printf("gateway events: recovery gap notice failed agent=%s sub=%s callback=%s err=%v",
+		sub.Agent, sub.ID, SanitizeCallbackURL(sub.CallbackURL), err)
+	if consecutive >= h.maxConsecutiveFailures {
+		h.terminateSubscription(ctx, sub.ID, "delivery_failed")
 	}
 }
 

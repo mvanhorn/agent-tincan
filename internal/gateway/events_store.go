@@ -688,6 +688,40 @@ func (s *EventStore) RecordGapFailure(ctx context.Context, subscriptionID, errMs
 	return consecutive, err
 }
 
+// DueGapSubscriptions returns active, unexpired subscriptions with has_gap = 1
+// that have no queued event deliveries waiting (e.g. after the final pending
+// event was dropped) and whose last attempt is at least minAge old.
+func (s *EventStore) DueGapSubscriptions(ctx context.Context, minAge time.Duration, limit int) ([]EventSubscription, error) {
+	if limit <= 0 {
+		limit = 16
+	}
+	now := s.now().UTC()
+	nowMs := now.UnixMilli()
+	cutoffMs := now.Add(-minAge).UnixMilli()
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, agent, client_id, event_name, filters_json, callback_url, signing_secret, expires_at, consecutive_failures, has_gap, last_error, created_at, updated_at
+		 FROM gw_event_subscriptions s
+		 WHERE s.has_gap = 1 AND s.expires_at > ? AND s.updated_at <= ?
+		   AND NOT EXISTS (SELECT 1 FROM gw_event_deliveries d WHERE d.subscription_id = s.id)
+		 ORDER BY s.updated_at ASC
+		 LIMIT ?`,
+		nowMs, cutoffMs, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EventSubscription
+	for rows.Next() {
+		sub, err := scanSubscription(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}
+
 func truncateErr(s string) string {
 	const maxLen = 200
 	if len(s) <= maxLen {
