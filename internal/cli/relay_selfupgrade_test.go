@@ -135,6 +135,17 @@ func TestSelfUpgradeWarning(t *testing.T) {
 	}
 	os.Chmod(bin, 0o755)
 
+	// A read-only dist folder only stops downloads: a release staged there
+	// by hand still installs, so the warning does not say upgrades fail.
+	if err := os.Chmod(dist, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dist, 0o755) })
+	if got := selfUpgradeWarning(exe, dist); !strings.Contains(got, "--from-github") || !strings.Contains(got, "staged there by hand still installs") || strings.Contains(got, "will fail") {
+		t.Fatalf("read-only dist folder: warning %q", got)
+	}
+	os.Chmod(dist, 0o755)
+
 	// Whoever can write a parent can swap the whole dist folder.
 	parent := t.TempDir()
 	nested := filepath.Join(parent, "dist")

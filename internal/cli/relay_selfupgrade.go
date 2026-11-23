@@ -50,20 +50,18 @@ func selfUpgradeOffer() string {
 
 // selfUpgradeWarning says why tincan relay-upgrade would fail on this relay:
 // its user cannot replace its binary, or cannot write the dist folder that
-// --from-github downloads into. Empty when it can.
+// --from-github downloads into. A read-only dist folder only stops
+// downloads: a release staged there by hand still installs, so that case
+// gets its own, narrower warning. Empty when nothing is wrong.
 func selfUpgradeWarning(exe, dist string) string {
-	var problems []string
+	var msgs []string
 	if err := writable(exe); err != nil {
-		problems = append(problems, err.Error())
+		msgs = append(msgs, "warning: tincan relay-upgrade will fail on this relay until this is fixed: "+err.Error())
 	}
 	if dist != "" {
 		if err := dirWritable(dist); err != nil {
-			problems = append(problems, fmt.Sprintf("the dist folder %s is not writable by the relay user (%v)", dist, err))
+			msgs = append(msgs, fmt.Sprintf("warning: the dist folder %s is not writable by the relay user (%v), so tincan relay-upgrade --from-github and --latest cannot download into it; a release staged there by hand still installs", dist, err))
 		}
-	}
-	var msgs []string
-	if len(problems) > 0 {
-		msgs = append(msgs, "warning: tincan relay-upgrade will fail on this relay until this is fixed: "+strings.Join(problems, "; "))
 	}
 	var open []string
 	for _, p := range []string{dist, filepath.Dir(exe)} {
