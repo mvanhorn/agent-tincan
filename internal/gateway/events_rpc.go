@@ -550,6 +550,7 @@ func (g *Gateway) handleEventsUnsubscribe(w http.ResponseWriter, r *http.Request
 		writeEventsRPC(w, id, nil, &eventsRPCError{Code: rpcEventSubscriptionNotFound, Message: ErrSubscriptionNotFound.Error()})
 		return
 	}
+	g.events.clearGapDefer(p.subID())
 	log.Printf("gateway events: unsubscribed agent=%s sub=%s", agent, p.subID())
 	writeEventsRPC(w, id, map[string]any{
 		"subscriptionId": p.subID(),

@@ -584,6 +584,14 @@ func TestEventHubRateLimitedStandaloneGapDoesNotSpin(t *testing.T) {
 	for time.Now().Before(deadline) {
 		sub, ok, _ := hub.store.Subscription(ctx, "sub_rate_gap")
 		if ok && !sub.HasGap {
+			hub.deferGap("sub_deleted", base.Add(30*time.Minute))
+			hub.pruneGapDefers(base.Add(time.Hour))
+			hub.inflightMu.Lock()
+			_, leaked := hub.gapRetryAfter["sub_deleted"]
+			hub.inflightMu.Unlock()
+			if leaked {
+				t.Fatal("pruneGapDefers did not remove expired gapRetryAfter entry")
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

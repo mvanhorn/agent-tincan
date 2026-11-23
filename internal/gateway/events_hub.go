@@ -384,6 +384,7 @@ func (h *EventHub) TerminateAgent(ctx context.Context, agent, reason string) {
 	}
 	now := h.now().UTC()
 	for _, sub := range subs {
+		h.clearGapDefer(sub.ID)
 		if !sub.ExpiresAt.After(now) {
 			continue
 		}
@@ -424,6 +425,7 @@ func (h *EventHub) run() {
 			} else if n > 0 {
 				log.Printf("gateway events: swept %d expired subscriptions", n)
 			}
+			h.pruneGapDefers(h.now().UTC())
 		}
 	}
 }
@@ -476,6 +478,16 @@ func (h *EventHub) deferGap(subID string, retryAt time.Time) {
 func (h *EventHub) clearGapDefer(subID string) {
 	h.inflightMu.Lock()
 	delete(h.gapRetryAfter, subID)
+	h.inflightMu.Unlock()
+}
+
+func (h *EventHub) pruneGapDefers(now time.Time) {
+	h.inflightMu.Lock()
+	for id, retryAt := range h.gapRetryAfter {
+		if !retryAt.After(now) {
+			delete(h.gapRetryAfter, id)
+		}
+	}
 	h.inflightMu.Unlock()
 }
 
