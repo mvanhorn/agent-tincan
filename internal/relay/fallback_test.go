@@ -264,6 +264,39 @@ func TestFallbackSkipsAskerGroupAndHeld(t *testing.T) {
 	}
 }
 
+// A follow-on goes only where it was sent: its body carries a teammate's
+// reply to the target the asker named, so the fallback never takes it.
+func TestFallbackSkipsFollowOn(t *testing.T) {
+	h, clk, _, _ := fallbackHarness(t)
+	ctx := context.Background()
+	var sent envelope.SendResponse
+	h.do(instinctAddr, "POST", "/v1/send", `{"to":"grokbot","body":"find it","then":{"to":"muse","body":"file it"}}`, http.StatusCreated, &sent)
+	h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/claim", "", http.StatusOK, nil)
+	h.do(grokAddr, "POST", "/v1/requests/"+sent.ID+"/reply", `{"body":"found"}`, http.StatusOK, nil)
+	ids, err := h.st.QueuedIDs(ctx, "muse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var follow string
+	for _, id := range ids {
+		if req, _, err := h.st.Request(ctx, id); err == nil && req.FollowOf == sent.ID {
+			follow = id
+		}
+	}
+	if follow == "" {
+		t.Fatalf("no follow-on queued to muse: %v", ids)
+	}
+	clk.advance(2 * DefaultWakeGrace)
+	pollAll(t, h, strangerAddr)
+	h.srv.Sweep(ctx)
+	if res := getAs(h, instinctAddr, follow); res.Request.To != "muse" || len(res.Request.MovedFrom) != 0 {
+		t.Fatalf("follow-on moved: %+v", res.Request)
+	}
+	if n := auditMatches(t, h.st, "reroute_skipped", "it is a follow-on"); n != 1 {
+		t.Fatalf("reroute_skipped rows = %d", n)
+	}
+}
+
 // Only an admin sets a fallback, and only to another joined teammate that
 // can take asks. The roster shows it to teammates.
 func TestFallbackConfig(t *testing.T) {

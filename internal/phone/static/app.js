@@ -252,6 +252,17 @@ function heldCard(entry) {
     li.append(el("p", "meta", "chain: " + item.chain.join(" > ")));
   }
   li.append(el("p", "body", item.body));
+  if (item.contributors && item.contributors.length) {
+    li.append(el("p", "meta", "also carries text from: " + item.contributors.join(", ")));
+  }
+  const exchanges = item.exchanges || [];
+  const last = exchanges[exchanges.length - 1];
+  if (last && last.answer) {
+    li.append(el("p", "meta", item.to + " asked:"));
+    li.append(el("p", "body", last.question));
+    li.append(el("p", "meta", item.from + " answered:"));
+    li.append(el("p", "body", last.answer));
+  }
   if (item.then) {
     li.append(el("p", "meta", "Then, once answered, asks " + item.then.to + ":"));
     li.append(el("p", "body", item.then.body));
@@ -1118,7 +1129,7 @@ function taskCard(entry) {
   c.approve = button("approve", "Approve", () => decideTask(entry, "approve"));
   c.approve.setAttribute("aria-label", "Approve " + title);
   c.actions.append(c.drop, c.reopen, c.reset, c.assign, c.done, c.approve);
-  c.openNote = el("p", "meta", "Done is refused while an ask is open under the task. Drop it, which cancels the ask, or wait for the ask to end.");
+  c.openNote = el("p", "meta", "Marking this task done ends the open ask and tells the asker.");
   c.resetNote = el("p", "meta");
   c.joinNote = el("p", "meta", "Assigning sends an ask as this phone's agent, and this phone has not joined the team.");
   c.join = button("", "Join this phone", openJoin);
@@ -1301,7 +1312,7 @@ function updateTaskCard(entry) {
   c.commentSend.disabled = off || entry.busy;
 
   c.approve.hidden = task.status !== "proposed";
-  c.done.hidden = task.status !== "open" && task.status !== "returned";
+  c.done.hidden = closed || task.status === "proposed";
   c.reopen.hidden = !closed;
   c.drop.hidden = closed;
   c.reset.hidden = closed || !task.agent_assigns;
@@ -1897,7 +1908,7 @@ async function refresh() {
 
 // heldText is what a held card shows the owner before they decide.
 function heldText(item) {
-  return JSON.stringify([item.body, item.then && item.then.body]);
+  return JSON.stringify([item.body, item.then && item.then.body, item.exchanges || [], item.contributors || []]);
 }
 
 function mergeHeld(items) {

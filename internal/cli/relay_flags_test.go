@@ -164,3 +164,40 @@ func TestEmailReplyInboxes(t *testing.T) {
 		t.Fatal("an agent without include_requests is polled")
 	}
 }
+
+func TestRelayUnansweredQuestionAfterFlag(t *testing.T) {
+	cmd := relayCmd()
+	if d, err := cmd.Flags().GetDuration("unanswered-question-after"); err != nil || d != 4*time.Hour {
+		t.Fatalf("default --unanswered-question-after = %v, %v", d, err)
+	}
+	if got := (relayFlags{unansweredQuestionAfter: 30 * time.Minute}).relayConfig().UnansweredQuestionAfter; got != 30*time.Minute {
+		t.Fatalf("relay config unanswered question threshold = %v", got)
+	}
+	if err := cmd.Flags().Parse([]string{"--unanswered-question-after", "0s"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--unanswered-question-after") {
+		t.Fatalf("zero --unanswered-question-after: %v", err)
+	}
+}
+
+func TestRelayFileAllAsksFlag(t *testing.T) {
+	cmd := relayCmd()
+	if got, err := cmd.Flags().GetString("file-all-asks"); err != nil || got != "auto" {
+		t.Fatalf("default --file-all-asks = %q, %v", got, err)
+	}
+	for _, mode := range []string{"auto", "on", "off"} {
+		if got := (relayFlags{fileAllAsks: mode}).relayConfig().FileAllAsks; got != mode {
+			t.Fatalf("file mode = %q, want %q", got, mode)
+		}
+	}
+	for _, mode := range []string{"", "invalid"} {
+		cmd := relayCmd()
+		if err := cmd.Flags().Parse([]string{"--file-all-asks=" + mode}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--file-all-asks") {
+			t.Fatalf("--file-all-asks=%q: %v", mode, err)
+		}
+	}
+}

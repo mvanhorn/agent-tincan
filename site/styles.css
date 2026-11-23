@@ -732,6 +732,8 @@ pre code { font-size: 0.875em; white-space: pre; background: none; border: 0; pa
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
   gap: 40px 40px;
 }
+.steps + .why-grid { margin-top: 64px; }
+.why-grid + p { margin-top: 32px; color: var(--ink-soft); max-width: 44em; }
 .why-card {
   padding: 20px 0 0;
   border-top: 1px solid var(--ink);

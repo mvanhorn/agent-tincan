@@ -417,3 +417,34 @@ func TestFormatHostDecision(t *testing.T) {
 		t.Errorf("history = %q", out)
 	}
 }
+
+func TestParseTaskDueInOwnerZone(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	now := time.Date(2026, 11, 21, 2, 0, 0, 0, time.UTC) // Friday evening in Pacific time.
+	tests := []struct {
+		phrase, day string
+		at          string
+	}{
+		{"friday", "2026-11-20", ""},
+		{"friday 3pm", "2026-11-27", "2026-11-27T23:00:00Z"},
+		{"tomorrow", "2026-11-21", ""},
+		{"in 2h", "2026-11-20", "2026-11-21T04:00:00Z"},
+		{"2026-11-21T01:30:00Z", "2026-11-20", "2026-11-21T01:30:00Z"},
+		{"clear", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.phrase, func(t *testing.T) {
+			due, err := ParseTaskDue(tc.phrase, "America/Los_Angeles", now)
+			if err != nil || due.DueDay != tc.day {
+				t.Fatalf("due = %+v, %v", due, err)
+			}
+			got := ""
+			if due.DueAt != nil {
+				got = time.Unix(*due.DueAt, 0).UTC().Format(time.RFC3339)
+			}
+			if got != tc.at {
+				t.Fatalf("due time = %q, want %q", got, tc.at)
+			}
+		})
+	}
+}

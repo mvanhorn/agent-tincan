@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -346,5 +347,52 @@ func TestInboxJSONEmpty(t *testing.T) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(stdout), &raw); err != nil || string(raw["requests"]) != "[]" || string(raw["replies"]) != "[]" {
 		t.Fatalf("empty inbox = %s, %v", stdout, err)
+	}
+}
+
+func TestInboxJSONReportsTaskNewsToHost(t *testing.T) {
+	skipOnWindows(t, "inbox and tasks use a local client config")
+	m := testrelay.New(t, relay.Config{})
+	host := m.Client(t, "grokbot")
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if _, err := m.Client(t, "admin").SetTaskHost(t.Context(), "grokbot", true); err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.AddTask(t.Context(), m.Client(t, "muse"), false, client.TaskAdd{Title: "Private meeting text", Source: "meeting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := runSplit(t, inboxCmd(), "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got inboxJSON
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil || !got.TaskHost || !strings.Contains(got.TaskHostGuidance, "what came back?") || len(got.Requests) != 1 {
+		t.Fatalf("host inbox = %s, %v", stdout, err)
+	}
+	if req := got.Requests[0]; !req.Claimed || req.From != client.RelaySender || req.Kind != envelope.KindNotify || req.TaskNoticeID != task.Task.ID || req.TaskNoticeStatus != envelope.TaskProposed ||
+		req.OwnerMessage != fmt.Sprintf("Task #%d: review and approve this task if you want it to proceed.", task.Task.ID) ||
+		!strings.Contains(got.TaskNoticePosting, "last tool call immediately before your final reply") ||
+		!strings.Contains(got.TaskNoticePosting, "write a plain-language sentence") ||
+		!strings.Contains(got.TaskNoticePosting, "Skip the acknowledgment if you neither acted nor will post an update") ||
+		!strings.Contains(req.TaskNoticeGuidance, "get_task") || strings.Contains(stdout, "Private meeting text") {
+		t.Fatalf("host notice = %s", stdout)
+	}
+	if _, _, err := runSplit(t, tasksCmd(), "told", got.Requests[0].ID); err != nil {
+		t.Fatalf("acknowledge the claimed notice: %v", err)
+	}
+
+	// A notice that expires before its claim must not get posting guidance.
+	if _, err := m.Store.DB().Exec("UPDATE requests SET expires_at = 0 WHERE id = ?", got.Requests[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	var expired bytes.Buffer
+	in := client.Inbox{TaskHost: true, Requests: []envelope.Request{got.Requests[0].Request}}
+	if err := printInboxJSON(t.Context(), host, in, &expired, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(expired.Bytes(), &got); err != nil || len(got.Requests) != 1 || got.Requests[0].Claimed ||
+		strings.Contains(expired.String(), "task_notice_guidance") || strings.Contains(expired.String(), "owner_message") || strings.Contains(expired.String(), "task_notice_posting") {
+		t.Fatalf("expired notice = %s, %v", expired.String(), err)
 	}
 }

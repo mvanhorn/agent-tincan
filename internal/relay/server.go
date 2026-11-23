@@ -29,8 +29,17 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
+// DefaultUnansweredQuestionAfter is how long a plain ask waits for clarification.
+const DefaultUnansweredQuestionAfter = 4 * time.Hour
+
 // Config tunes the relay.
 type Config struct {
+	TaskNudgeAfter          time.Duration
+	TaskStallAfter          time.Duration
+	TaskReturnedCloseAfter  time.Duration
+	FileAllAsks             string        // auto (or empty), on, or off
+	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task or a quiet task is surfaced
+
 	RequestTTL      time.Duration // how long an unanswered request lives
 	NotesRequestTTL time.Duration // RequestTTL for requests to a notes-kind agent
 	PollHold        time.Duration // max time a long-poll is held
@@ -60,6 +69,12 @@ type Config struct {
 	// through the approval policy's notify destination; default
 	// DefaultOwnerNoticeAfter.
 	OwnerNoticeAfter int
+	// TaskNoticeAckTimeout is how long a host has after claiming task news
+	// to confirm private delivery. The default is DefaultTaskNoticeAckTimeout.
+	TaskNoticeAckTimeout time.Duration
+	TaskZone             *time.Location // the owner's due-date calendar
+	TaskBriefing         string         // HH:MM or off
+	TaskBriefingZone     *time.Location
 	// EmailPollEvery is how often the relay polls an opted-in agent's
 	// AgentMail inbox for replies to its request emails while the agent's
 	// window is open; default DefaultEmailPollEvery.
@@ -84,6 +99,9 @@ type PassRef struct {
 }
 
 func (c *Config) defaults() {
+	if c.UnansweredQuestionAfter <= 0 {
+		c.UnansweredQuestionAfter = DefaultUnansweredQuestionAfter
+	}
 	if c.RequestTTL == 0 {
 		c.RequestTTL = 24 * time.Hour
 	}
@@ -119,6 +137,27 @@ func (c *Config) defaults() {
 	}
 	if c.OwnerNoticeAfter == 0 {
 		c.OwnerNoticeAfter = DefaultOwnerNoticeAfter
+	}
+	if c.TaskZone == nil {
+		c.TaskZone, _ = envelope.TaskLocation("")
+	}
+	if c.TaskNudgeAfter == 0 {
+		c.TaskNudgeAfter = store.DefaultTaskNudgeAfter
+	}
+	if c.TaskStallAfter == 0 {
+		c.TaskStallAfter = store.DefaultTaskStallAfter
+	}
+	if c.TaskReturnedCloseAfter <= 0 {
+		c.TaskReturnedCloseAfter = store.DefaultTaskReturnedCloseAfter
+	}
+	if c.TaskBriefing == "" {
+		c.TaskBriefing = DefaultTaskBriefing
+	}
+	if c.TaskBriefingZone == nil {
+		c.TaskBriefingZone = c.TaskZone
+	}
+	if c.TaskNoticeAckTimeout <= 0 {
+		c.TaskNoticeAckTimeout = DefaultTaskNoticeAckTimeout
 	}
 	if c.EmailPollEvery == 0 {
 		c.EmailPollEvery = DefaultEmailPollEvery
@@ -171,11 +210,19 @@ type Replier interface {
 	Replied(ctx context.Context, req envelope.Request)
 }
 
+// Clarifier is an optional Events extension told when a teammate asks a
+// clarification question (status needs_input) on an asker's request.
+// req.From is the asker.
+type Clarifier interface {
+	NeedsInput(ctx context.Context, req envelope.Request)
+}
+
 // Server is the relay.
 type Server struct {
-	wakeSettings WakeSettings
-	cfg          Config
-	dir          *identity.Directory
+	wakeSettings  WakeSettings
+	gatewayEvents func(context.Context) (any, error)
+	cfg           Config
+	dir           *identity.Directory
 	// lookupAgent is how requestTTL reads the recipient's kind; it is
 	// dir.Agent, replaced in tests to simulate a failed lookup.
 	lookupAgent func(ctx context.Context, name string) (identity.Agent, bool, error)
@@ -453,10 +500,12 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST /v1/rooms/{room}/posts", s.handleRoomPost)
 	mux.HandleFunc("POST /v1/tasks", s.handleAddTask)
 	mux.HandleFunc("GET /v1/tasks", s.handleTasks)
+	mux.HandleFunc("POST /v1/tasks/told", s.handleTaskNoticesTold)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/assign", s.handleAssignTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/comment", s.handleCommentTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/drop", s.handleDropTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/due", s.handleTaskDue)
 	mux.HandleFunc("POST /v1/tasks/{id}/decide", s.handleHostDecideTask)
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
@@ -486,6 +535,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("PUT /v1/agents/{name}/fallback", s.handleSetFallback)
 	mux.HandleFunc("PUT /v1/agents/{name}/task-host", s.handleSetTaskHost)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
+	mux.HandleFunc("GET /v1/admin/gateway/events", s.handleGatewayEvents)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
@@ -493,6 +543,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/admin/audit/verify", s.handleVerify)
 	mux.HandleFunc("GET /v1/admin/wakes/{agent}", s.handleWakes)
 	mux.HandleFunc("POST /v1/admin/relay/upgrade", s.handleSelfUpgrade)
+	mux.HandleFunc("PUT /v1/admin/relay/notify", s.handleSetNotifyDestination)
 	mux.HandleFunc("GET /v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /v1/leases", s.handleLeases)
 	mux.HandleFunc("DELETE /v1/leases", s.handleLeaseRelease)
@@ -510,6 +561,8 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/admin/tasks", s.handleAdminTasks)
 	mux.HandleFunc("POST /v1/admin/tasks", s.handleAdminAddTask)
 	mux.HandleFunc("GET /v1/admin/tasks/{id}", s.handleAdminTask)
+	mux.HandleFunc("POST /v1/admin/tasks/briefing", s.handleTaskBriefingNow)
+	mux.HandleFunc("POST /v1/admin/tasks/{id}/due", s.handleAdminTaskDue)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/assign", s.handleAdminAssignTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/comment", s.handleAdminCommentTask)
 	mux.HandleFunc("POST /v1/admin/tasks/{id}/approve", s.handleApproveTask)
@@ -558,6 +611,7 @@ func (s *Server) Stop() { s.stopOnce.Do(func() { close(s.stopping) }) }
 // request emails (SetEmailInboxes), polls their inboxes for replies at
 // start and every EmailPollEvery, until ctx ends.
 func (s *Server) Run(ctx context.Context) {
+	s.warnTaskFallback(ctx)
 	t := time.NewTicker(s.cfg.SweepEvery)
 	defer t.Stop()
 	at := time.NewTicker(s.cfg.Attachments.SweepEvery)
@@ -608,16 +662,7 @@ func (s *Server) Sweep(ctx context.Context) {
 		return
 	}
 	for _, t := range trs {
-		event := "requeued"
-		if t.Status == envelope.StatusExpired {
-			event = "expired"
-			if t.Held {
-				event = "hold_expired"
-			}
-		}
-		s.record(ctx, event, t.ID, t.TraceID, "relay", "")
-		s.hub.notify(requestKey(t.ID))
-		s.tellSwept(ctx, t)
+		s.notifySwept(ctx, t)
 		if t.Status == envelope.StatusQueued {
 			s.hub.notify(inboxKey(t.To))
 			// An agent woken by the relay has no poller to see the requeue,
@@ -636,10 +681,47 @@ func (s *Server) Sweep(ctx context.Context) {
 	s.checkWatches(ctx, "")
 	s.expireLeases(ctx)
 	s.fireSchedules(ctx)
+	expiredQuestions, err := s.store.RecoverTasks(ctx, s.cfg.UnansweredQuestionAfter)
+	if err != nil {
+		log.Printf("sweep: recover tasks: %v", err)
+	}
+	for _, t := range expiredQuestions {
+		s.notifySwept(ctx, t)
+	}
+	if err := s.store.EscalateQuietQuestions(ctx, s.cfg.UnansweredQuestionAfter); err != nil {
+		log.Printf("sweep: quiet task questions: %v", err)
+	}
+	if closed, err := s.store.CloseReturnedQuietTasks(ctx); err != nil {
+		log.Printf("sweep: close returned quiet tasks: %v", err)
+	} else {
+		for _, id := range closed {
+			s.hub.notify(requestKey(id))
+		}
+	}
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
+	if err := s.store.QueueTaskStalls(ctx, s.cfg.TaskNudgeAfter, s.cfg.TaskStallAfter); err != nil {
+		log.Printf("sweep: task stalls: %v", err)
+	}
+	s.sweepReturnedHostTasks(ctx)
+	s.queueTaskReminders(ctx)
+	s.sweepTaskBriefing(ctx)
 	s.drainTaskNotices(ctx)
+	s.retryTaskNotices(ctx)
+}
+
+func (s *Server) notifySwept(ctx context.Context, t store.Transition) {
+	event := "requeued"
+	if t.Status == envelope.StatusExpired {
+		event = "expired"
+		if t.Held {
+			event = "hold_expired"
+		}
+	}
+	s.record(ctx, event, t.ID, t.TraceID, "relay", "")
+	s.hub.notify(requestKey(t.ID))
+	s.tellSwept(ctx, t)
 }
 
 // wakeRequeued wakes req's target for a request it may have looked past: a
@@ -983,7 +1065,23 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 		return envelope.Request{}, err
 	}
 	prepared := req
-	req, err := s.store.Enqueue(ctx, req, s.requestTTL(ctx, req.To))
+	ttl := s.requestTTL(ctx, req.To)
+	var err error
+	if req.Kind == envelope.KindAsk && req.TaskID == 0 && (req.About != "" || store.HasTaskFollowupReference(req.Body)) {
+		view, viewErr := s.hostTaskView(ctx, req.From)
+		if viewErr != nil {
+			if rf, ok := prep.(Refunder); ok {
+				rf.Refund(prepared)
+			}
+			return envelope.Request{}, &StatusError{Code: http.StatusInternalServerError, Err: viewErr}
+		}
+		req.AboutHost = view.host
+	}
+	if s.cfg.FileAllAsks == "off" && req.About == "" {
+		req, err = s.store.Enqueue(ctx, req, ttl)
+	} else {
+		req, err = s.store.EnqueueFilingTasks(ctx, req, ttl, s.cfg.FileAllAsks != "on" && req.About == "")
+	}
 	if err != nil {
 		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
@@ -991,8 +1089,12 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 		if errors.Is(err, store.ErrGroupFull) {
 			return envelope.Request{}, &StatusError{Code: http.StatusBadRequest, Err: err}
 		}
+		if errors.Is(err, store.ErrTaskRetries) || errors.Is(err, store.ErrTaskAssignLimit) {
+			return envelope.Request{}, &StatusError{Code: http.StatusConflict, Err: err}
+		}
 		return envelope.Request{}, &StatusError{Code: attachmentStatus(err, http.StatusInternalServerError), Err: err}
 	}
+	s.taskAsksCancelled(ctx, req.TaskID, req.TaskCancelled, "task_retried")
 	s.recordPassSent(ctx, req)
 	if req.Status == envelope.StatusHeld {
 		s.record(ctx, "held", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
@@ -1236,21 +1338,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if len(reqs) > 0 || len(reps) > 0 {
 			for i := range reqs {
 				reqs[i].RedactFor(name)
+				s.renderTaskNotice(r.Context(), &reqs[i])
 			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
 			}
-			out := map[string]any{"requests": emptyIfNil(reqs)}
-			if len(reps) > 0 {
-				out["replies"] = reps
-			}
-			if more > 0 {
-				out["replies_remaining"] = more
-			}
-			if v := s.upgradeFor(r); v != "" {
-				out["upgrade_available"] = v
-			}
-			writeJSON(w, http.StatusOK, out)
+			s.writeInbox(w, r, name, client.Inbox{Requests: reqs, Replies: reps, RepliesRemaining: more})
 			return
 		}
 		select {
@@ -1262,15 +1355,29 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.touch(r.Context(), name, s.wokenDuringPoll(name))
-		if v := s.upgradeFor(r); v != "" {
-			out := map[string]any{"upgrade_available": v}
-			out["requests"] = []envelope.Request{}
-			writeJSON(w, http.StatusOK, out)
-		} else {
-			w.WriteHeader(http.StatusNoContent)
-		}
+		s.writeInbox(w, r, name, client.Inbox{})
 		return
 	}
+}
+
+// writeInbox reports the caller's current host view only to clients asking
+// for it. An unavailable role lookup must not interrupt inbox delivery.
+func (s *Server) writeInbox(w http.ResponseWriter, r *http.Request, name string, out client.Inbox) {
+	if r.URL.Query().Get("task_host") == "1" {
+		view, err := s.hostTaskView(r.Context(), name)
+		if err != nil {
+			log.Printf("inbox task host view: %v", err)
+		} else {
+			out.TaskHost = view.host
+		}
+	}
+	out.UpgradeAvailable = s.upgradeFor(r)
+	if out.Empty() && !out.TaskHost && out.UpgradeAvailable == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	out.Requests = emptyIfNil(out.Requests)
+	writeJSON(w, http.StatusOK, out)
 }
 
 // MaxPeekPending caps how many queued requests one peek names, with a
@@ -1550,7 +1657,14 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.notify(requestKey(req.ID))
-	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, "")
+	detail := ""
+	if store.IsTaskNotice(req.NoticeKind) {
+		if claimSession, err := s.store.TaskNoticeClaimSession(r.Context(), req.ID); err == nil && claimSession != "" {
+			detail = store.DetailJSON(map[string]any{"session": claimSession})
+		}
+	}
+	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, detail)
+	s.renderTaskNotice(r.Context(), &req)
 	writeJSON(w, http.StatusOK, req)
 }
 
@@ -1721,15 +1835,28 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	}
 	s.record(ctx, event, id, "", agent, store.DetailJSON(detail))
 	s.recordSuperseded(ctx, id, "replied", rep.Superseded)
+	if len(rep.CancelledFollowups) != 0 {
+		if ask, _, err := s.store.Request(ctx, id); err == nil {
+			s.taskAsksCancelled(ctx, ask.TaskID, rep.CancelledFollowups, "task_done")
+		}
+	}
 	// A reply to a task's ask returned the task, asked a question or
 	// released it.
 	s.drainTaskNotices(ctx)
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
-	if req, _, err := s.store.Request(ctx, id); err == nil {
+	if req, status, err := s.store.Request(ctx, id); err == nil {
+		req.Status = status
 		s.hub.notify(inboxKey(req.From))
-		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
-			rp.Replied(ctx, req)
+		if req.Kind != envelope.KindPing {
+			if rep.Status == envelope.StatusNeedsInput {
+				if cl, ok := s.events.(Clarifier); ok {
+					cl.NeedsInput(ctx, req)
+				}
+			}
+			if rp, ok := s.events.(Replier); ok {
+				rp.Replied(ctx, req)
+			}
 		}
 		if req.RoomPostID != 0 {
 			s.auditMirror(ctx, rep)
@@ -1789,6 +1916,12 @@ func (s *Server) getAs(ctx context.Context, id, reader string) (envelope.Result,
 	res, err := s.store.Get(ctx, id, reader)
 	if err != nil {
 		return res, err
+	}
+	// A target that reads its ask by id has read it as a poll would hand it.
+	if res.Request.To == reader && res.Request.Kind == envelope.KindAsk && res.Status != envelope.StatusHeld {
+		if err := s.store.MarkRead(ctx, id, reader); err != nil {
+			return res, err
+		}
 	}
 	one := []envelope.Result{res}
 	err = s.redactRooms(ctx, one, reader)
@@ -1942,6 +2075,15 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		out[i].Self = out[i].Name == self
 	}
 	res := map[string]any{"agents": out}
+	if admin {
+		fallback := client.TaskFallbackStatus{Hosts: []string{}, NotifySet: s.notifyDestination() != ""}
+		for _, agent := range out {
+			if agent.TaskHost {
+				fallback.Hosts = append(fallback.Hosts, agent.Name)
+			}
+		}
+		res["task_fallback"] = fallback
+	}
 	if s.cfg.Version != "" {
 		res["relay_version"] = s.cfg.Version
 	}
@@ -2377,6 +2519,37 @@ func (s *Server) UnseenReplyIDs(agent string) ([]string, error) {
 	return s.store.UnseenReplyIDs(ctx, agent)
 }
 
+// IsReplyUnseen reports whether requestID still has an unread reply for agent.
+// On a store read error it returns true so a wake is not silently dropped.
+func (s *Server) IsReplyUnseen(agent, requestID string) bool {
+	ids, err := s.UnseenReplyIDs(agent)
+	if err != nil {
+		return true
+	}
+	return slices.Contains(ids, requestID)
+}
+
+// SetGatewayEvents installs the sanitized MCP Events subscription lister served
+// at GET /v1/admin/gateway/events when --chatgpt-gateway is enabled.
+func (s *Server) SetGatewayEvents(fn func(context.Context) (any, error)) { s.gatewayEvents = fn }
+
+func (s *Server) handleGatewayEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return
+	}
+	if s.gatewayEvents == nil {
+		writeErr(w, http.StatusNotFound, errors.New("the MCP gateway is not enabled on this relay (start the relay with --chatgpt-gateway)"))
+		return
+	}
+	subs, err := s.gatewayEvents(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": subs})
+}
+
 // LastPoll is agent's last inbox poll, including peek: the later of this
 // process's memory and the poll persisted for a restart. The waker uses it
 // as proof of life for request follow-up. The store is read only when this
@@ -2693,6 +2866,11 @@ func (s *Server) heldCut(ctx context.Context, reqs []envelope.Request) map[strin
 		if req.Then != nil {
 			texts = append(texts, req.Then.Body)
 		}
+		// A request held again on its asker's answer is released by approving
+		// that answer, so every question and answer is read whole too.
+		for _, ex := range req.Exchanges {
+			texts = append(texts, ex.Question, ex.Answer)
+		}
 		if len(texts) == 0 {
 			continue
 		}
@@ -2736,8 +2914,11 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 	// ones: over plain http a browser's same-origin GET carries no Origin and
 	// no Sec-Fetch-*, so the listing cannot tell the page from the CLI. The
 	// local admin socket has no device and gets none; old clients ignore them.
+	// contributors names the agents beside the sender and chain whose text
+	// the request may carry, so the owner sees why a rule held it.
 	type heldRequest struct {
 		envelope.Request
+		Contributors   []string  `json:"contributors,omitempty"`
 		ToKind         string    `json:"to_kind,omitempty"`
 		Pass           *PassRef  `json:"pass,omitempty"`
 		PassError      string    `json:"pass_error,omitempty"`
@@ -2768,7 +2949,13 @@ func (s *Server) handleHeld(w http.ResponseWriter, r *http.Request) {
 		if cut[req.ID] && req.Then != nil {
 			req.Then.Body = cutHeldText(req.Then.Body)
 		}
-		out[i] = heldRequest{Request: req}
+		if cut[req.ID] {
+			for j := range req.Exchanges {
+				req.Exchanges[j].Question = cutHeldText(req.Exchanges[j].Question)
+				req.Exchanges[j].Answer = cutHeldText(req.Exchanges[j].Answer)
+			}
+		}
+		out[i] = heldRequest{Request: req, Contributors: req.Contributors}
 		if node != "" {
 			out[i].ApproveNonce, out[i].NonceExpiresAt = s.nonces.issue(nonceKey{id: req.ID, decision: decisionApprove, node: node}, now)
 			out[i].DenyNonce, _ = s.nonces.issue(nonceKey{id: req.ID, decision: decisionDeny, node: node}, now)
@@ -2918,7 +3105,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 	s.nonces.void(req.ID)
 	s.record(r.Context(), "denied", req.ID, req.TraceID, s.remote(r), s.deviceDetail(r))
-	// The owner's denial is told to no host; the drain clears its row.
+	// Only a newly surfaced quiet ask has status news after the owner's denial.
 	s.drainTaskNotices(r.Context())
 	s.hub.notify(requestKey(req.ID))
 	s.hub.notify(inboxKey(req.From))

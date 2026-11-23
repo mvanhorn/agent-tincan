@@ -130,21 +130,36 @@ func (p *Policy) Prepare(ctx context.Context, req *envelope.Request) error {
 	// parent when there is one, and the session guard's claim otherwise.
 	var handled []string
 	if guarded {
+		req.TaskContextParentID = guard.ID
+		req.TaskRoomScope = guard.RoomPostID
+		if req.TaskRoomScope == 0 {
+			req.TaskRoomScope = guard.TaskRoomScope
+		}
 		handled = guard.Contributors
+		req.SkipTaskRecovery = req.SkipTaskRecovery || guard.SkipTaskRecovery || guard.RoomPostID != 0
+		if req.RecoverySource == "" {
+			req.RecoverySource = guard.RecoverySource
+		}
 	}
 	req.Contributors = contributors(req.Contributors, handled)
-	at, err := p.rate(req.From, req.Urgent)
-	if err != nil {
-		return err
+	if !req.TaskFilingCharged || req.TaskID == 0 || req.Urgent {
+		at, err := p.rate(req.From, req.Urgent)
+		if err != nil {
+			return err
+		}
+		// Stamp the request with the slot it took, so Refund gives back this
+		// send's slot and not a concurrent one's. Enqueue sets the real time.
+		req.CreatedAt = at
 	}
-	// Stamp the request with the slot it took, so Refund gives back this
-	// send's slot and not a concurrent one's. Enqueue sets the real time.
-	req.CreatedAt = at
 	// A ping does no work and carries no body, so the gate never holds it.
 	if req.Kind == envelope.KindPing {
 		return nil
 	}
 	if err := p.markGuest(ctx, req, sender, parent, ok); err != nil {
+		p.Refund(*req)
+		return err
+	}
+	if err := p.addOpenAskNames(ctx, req, sender); err != nil {
 		p.Refund(*req)
 		return err
 	}
@@ -222,6 +237,69 @@ func (p *Policy) markGuest(ctx context.Context, req *envelope.Request, sender id
 	case req.FromGuest:
 		req.Body = p.markedBody(ctx, *req)
 	}
+	return nil
+}
+
+// CheckAnswer applies the owner's holds to a teammate's answer to req's
+// question (relay.AnswerChecker). Answers never pass through Prepare, so
+// without this an asker could put text from an agent the owner gates into a
+// request that was never held, or one the owner approved before the answer
+// existed. The names the asker's open asks carry join req's contributors,
+// for this check and for whatever the target sends while handling it, and
+// req is held when approval.json or the target's kind would hold it as a
+// new ask: Status is set to held, with the hold's TTL and notify. The
+// owner approved the request it was, not the answer.
+func (p *Policy) CheckAnswer(ctx context.Context, req *envelope.Request) error {
+	names, err := p.st.OpenAskNames(ctx, req.From)
+	if err != nil {
+		return reject(http.StatusServiceUnavailable, err)
+	}
+	names = slices.DeleteFunc(names, func(n string) bool { return n == req.From || n == req.To || slices.Contains(req.Chain, n) })
+	req.Contributors = contributors(req.Contributors, names)
+	req.Status = ""
+	held, err := p.cfg.Approval.Held(req)
+	if held {
+		req.Status = envelope.StatusHeld
+		return nil
+	}
+	if err != nil {
+		return reject(http.StatusServiceUnavailable, err)
+	}
+	// A council's own asks keep the hold they skipped: an answer to one
+	// continues the council question the owner approved.
+	var parent envelope.Request
+	hasParent := false
+	if req.ParentID != "" && req.FollowOf == "" {
+		if parent, _, err = p.st.Request(ctx, req.ParentID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return reject(http.StatusServiceUnavailable, err)
+		}
+		hasParent = err == nil
+	}
+	p.holdByKind(ctx, req, parent, hasParent)
+	return nil
+}
+
+// addOpenAskNames adds to req's contributors every name the sender's open
+// asks carry (store.OpenAskNames), so the owner's approval rules hold an ask
+// whatever claim, if any, it continues: a second claim the relay cannot pick
+// a parent from, or a parent named to step away from an ask, no longer drops
+// the agent whose text the sender read. They are contributors, not chain, so
+// the loop and hop checks still read only the real chain. A relay fire reads
+// no claims (its text was fixed when it was scheduled, and a schedule cannot
+// be made while a claim is open), a guest's are its notices, and a follow-on
+// carries what the first request's answerer read through its parent.
+func (p *Policy) addOpenAskNames(ctx context.Context, req *envelope.Request, sender identity.Agent) error {
+	if req.NoParent || req.FollowOf != "" || sender.Guest.Set() {
+		return nil
+	}
+	names, err := p.st.OpenAskNames(ctx, req.From)
+	if err != nil {
+		return reject(http.StatusServiceUnavailable, err)
+	}
+	// The chain and the sender are read by the rules already, and the
+	// target's own text coming back to it needs no approval.
+	names = slices.DeleteFunc(names, func(n string) bool { return n == req.From || n == req.To || slices.Contains(req.Chain, n) })
+	req.Contributors = contributors(req.Contributors, names)
 	return nil
 }
 
@@ -414,3 +492,8 @@ func reject(code int, err error) error { return &relay.StatusError{Code: code, E
 
 // NotifyDestination exposes the configured operator destination.
 func (p *Policy) NotifyDestination() string { return p.cfg.Approval.NotifyDestination() }
+
+// SetNotifyDestination persists the operator destination. An empty name clears it.
+func (p *Policy) SetNotifyDestination(name string) error {
+	return p.cfg.Approval.setNotifyDestination(name)
+}

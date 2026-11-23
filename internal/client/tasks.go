@@ -4,12 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
+
+// MaxTaskNoticeReceipts bounds one batch of task notice acknowledgments.
+const MaxTaskNoticeReceipts = 100
+
+// TaskNoticesTold records a commitment to post the claimed task notices.
+func TaskNoticesTold(ctx context.Context, c Rawer, ids []string) error {
+	return c.Raw(ctx, http.MethodPost, "/v1/tasks/told", struct {
+		NoticeIDs []string `json:"notice_ids"`
+	}{NoticeIDs: ids}, nil)
+}
 
 // ErrTasksUnsupported identifies a relay that predates the shared task
 // list. Nothing was sent.
@@ -44,6 +55,9 @@ func taskCapabilities(ctx context.Context, c Rawer) (Capabilities, error) {
 // EverySeconds makes the task repeat: the relay assigns it to Assignee, a
 // teammate, again that often, within the bounds of a scheduled ask's repeat.
 type TaskAdd struct {
+	envelope.TaskDue
+	Mine         bool   `json:"mine,omitempty"` // file as the owner, for a named task host
+	Due          string `json:"-"`              // resolved in the relay's task zone before sending
 	Title        string `json:"title"`
 	Detail       string `json:"detail,omitempty"`
 	Assignee     string `json:"assignee,omitempty"`
@@ -64,20 +78,24 @@ type TaskResult struct {
 	AssignError string              `json:"assign_error,omitempty"`
 }
 
-// The owner's decisions on a task, for DecideTask. A task host makes
-// TaskDone, TaskReopen and TaskDrop on the owner's word, with
-// HostDecideTask.
+// Task actions available to the owner or a named host acting on their words.
 const (
-	TaskApprove = "approve"
-	TaskDone    = "done"
-	TaskReopen  = "reopen"
-	TaskReset   = "reset"
-	TaskDrop    = "drop"
+	TaskApprove  = "approve"
+	TaskDone     = "done"
+	TaskReopen   = "reopen"
+	TaskReset    = "reset"
+	TaskDrop     = "drop"
+	TaskDue      = "due"
+	TaskAssign   = "assign"
+	TaskRetry    = "retry"
+	TaskComplete = "complete"
 )
 
 // ErrTaskHostDecisionsUnsupported identifies a relay that predates a task
 // host's decisions. Nothing was sent.
 var ErrTaskHostDecisionsUnsupported = errors.New("this relay does not take a task host's decisions; upgrade the relay")
+
+var errTaskHostDelegationUnsupported = errors.New("this relay does not support task host delegation; upgrade the relay")
 
 // tasksPath is the task routes' root: the calling agent's, or with owner
 // the admin routes, which only an admin device may call.
@@ -97,12 +115,41 @@ func taskPath(owner bool, id int64, action string) string {
 // devices only). The owner's task that names a teammate is sent as the
 // agent c names, so c must name one.
 func AddTask(ctx context.Context, c Rawer, owner bool, a TaskAdd) (TaskResult, error) {
-	if err := requireTasks(ctx, c); err != nil {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
 		return TaskResult{}, err
 	}
+	if a.Mine && !caps.TaskHostDelegation {
+		return TaskResult{}, errTaskHostDelegationUnsupported
+	}
+	if a.Due != "" {
+		a.TaskDue, err = caps.parseTaskDue(a.Due)
+		if err != nil {
+			return TaskResult{}, err
+		}
+	} else if caps.TaskZone == "" && (a.DueDay != "" || a.DueAt != nil) {
+		return TaskResult{}, errTaskDueUnsupported
+	}
 	var out TaskResult
-	err := c.Raw(ctx, "POST", tasksPath(owner), a, &out)
+	err = c.Raw(ctx, "POST", tasksPath(owner), a, &out)
+	out.Task.DueZone = caps.TaskZone
 	return out, err
+}
+
+// TaskBriefingNow queues the current briefing through the admin route.
+func TaskBriefingNow(ctx context.Context, c Rawer) (bool, error) {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
+		return false, err
+	}
+	if !caps.TaskBriefings {
+		return false, errors.New("this relay does not support task briefings; upgrade the relay")
+	}
+	var out struct {
+		Queued bool `json:"queued"`
+	}
+	err = c.Raw(ctx, http.MethodPost, tasksPath(true)+"/briefing", nil, &out)
+	return out.Queued, err
 }
 
 // TaskCounts is how many done and dropped tasks a listing covers.
@@ -112,14 +159,15 @@ type TaskCounts struct {
 }
 
 // Tasks lists the tasks this agent may read, or with owner every task
-// (admin devices only), oldest first. Done and dropped tasks are listed
+// (admin devices only), with overdue and due-today items first. Done and dropped tasks are listed
 // only with closed; either way the counts say how many of each there are.
 // Each detail and result is cut to its start; Task reads one whole.
-func Tasks(ctx context.Context, c Rawer, owner, closed bool) ([]envelope.Task, TaskCounts, error) {
-	if err := requireTasks(ctx, c); err != nil {
+func Tasks(ctx context.Context, c Rawer, owner, closed bool, includeQuiet ...bool) ([]envelope.Task, TaskCounts, error) {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
 		return nil, TaskCounts{}, err
 	}
-	list, counts, _, err := readTasks(ctx, c, tasksPath(owner)+"?", closed)
+	list, counts, _, err := readTasks(ctx, c, tasksPath(owner)+"?", closed, caps.TaskZone, includeQuiet)
 	return list, counts, err
 }
 
@@ -141,7 +189,7 @@ const hostParam = "host=1&"
 // serves it only to a task host the owner named, and the returned view says
 // whether it did; any other agent gets what Tasks returns. A relay that
 // does not advertise task hosts is not asked.
-func HostTasks(ctx context.Context, c Rawer, closed bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
+func HostTasks(ctx context.Context, c Rawer, closed bool, includeQuiet ...bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
 	caps, err := taskCapabilities(ctx, c)
 	if err != nil {
 		return nil, TaskCounts{}, TaskHostView{}, err
@@ -150,19 +198,22 @@ func HostTasks(ctx context.Context, c Rawer, closed bool) ([]envelope.Task, Task
 	if caps.TaskHosts {
 		path += hostParam
 	}
-	return readTasks(ctx, c, path, closed)
+	return readTasks(ctx, c, path, closed, caps.TaskZone, includeQuiet)
 }
 
 // readTasks reads every page of the listing at path, which ends with the
 // parameters before after. The host view is reported served only when every
 // page was.
-func readTasks(ctx context.Context, c Rawer, path string, closed bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
+func readTasks(ctx context.Context, c Rawer, path string, closed bool, zone string, includeQuiet []bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
 	var list []envelope.Task
 	var counts TaskCounts
 	var after int64
 	view := TaskHostView{Served: true}
 	if closed {
 		path = strings.Replace(path, "?", "?closed=1&", 1)
+	}
+	if len(includeQuiet) != 0 && includeQuiet[0] {
+		path += "include_quiet=1&"
 	}
 	for {
 		var out struct {
@@ -203,16 +254,23 @@ func readTasks(ctx context.Context, c Rawer, path string, closed bool) ([]envelo
 			}
 		}
 	}
+	for i := range list {
+		if list[i].DueDay != "" {
+			list[i].DueZone = zone
+		}
+	}
+	orderTasksByDue(list, time.Now())
 	return list, counts, view, nil
 }
 
 // Task reads task id whole with its history, oldest first: one this agent
 // may read, or with owner any (admin devices only).
 func Task(ctx context.Context, c Rawer, owner bool, id int64) (envelope.Task, []envelope.TaskEvent, error) {
-	if err := requireTasks(ctx, c); err != nil {
+	caps, err := taskCapabilities(ctx, c)
+	if err != nil {
 		return envelope.Task{}, nil, err
 	}
-	return readTask(ctx, c, taskPath(owner, id, "")+"?")
+	return readTask(ctx, c, taskPath(owner, id, "")+"?", caps.TaskZone)
 }
 
 // HostTask is Task for an agent, asking for the task host view as HostTasks
@@ -227,12 +285,12 @@ func HostTask(ctx context.Context, c Rawer, id int64) (envelope.Task, []envelope
 	if caps.TaskHosts {
 		path += hostParam
 	}
-	return readTask(ctx, c, path)
+	return readTask(ctx, c, path, caps.TaskZone)
 }
 
 // readTask reads the task at path, which ends with the parameters before
 // after, and every page of its history.
-func readTask(ctx context.Context, c Rawer, path string) (envelope.Task, []envelope.TaskEvent, error) {
+func readTask(ctx context.Context, c Rawer, path, zone string) (envelope.Task, []envelope.TaskEvent, error) {
 	var task envelope.Task
 	var events []envelope.TaskEvent
 	var after int64
@@ -247,6 +305,7 @@ func readTask(ctx context.Context, c Rawer, path string) (envelope.Task, []envel
 		}
 		task, events = out.Task, append(events, out.Events...)
 		if out.NextAfter == 0 {
+			task.DueZone = zone
 			return task, events, nil
 		}
 		if out.NextAfter <= after {
@@ -298,6 +357,48 @@ func DecideTask(ctx context.Context, c Rawer, decision string, id int64, note st
 // host while it holds a claimed request or a guest's ask is open with it. A
 // relay that does not advertise task host decisions is not called.
 func HostDecideTask(ctx context.Context, c Rawer, id int64, decision, words string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: decision, Words: words}, "")
+}
+
+// HostSetTaskDue changes a due date on the owner's words, which the relay records.
+func HostSetTaskDue(ctx context.Context, c Rawer, id int64, when, words string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskDue, Words: words}, when)
+}
+
+// HostAssignTask assigns a task on the owner's words.
+func HostAssignTask(ctx context.Context, c Rawer, id int64, to, words string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskAssign, Words: words, To: to}, "")
+}
+
+// HostCloseAnsweredTask closes a returned task whose result is complete.
+func HostCloseAnsweredTask(ctx context.Context, c Rawer, id int64, reason string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskDone, Reason: reason}, "")
+}
+
+// HostRetryTask retries an unfinished task using the approach in reason.
+func HostRetryTask(ctx context.Context, c Rawer, id int64, to, reason string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskRetry, To: to, Reason: reason}, "")
+}
+
+// HostCompleteTask records the verified result of work performed by the host.
+func HostCompleteTask(ctx context.Context, c Rawer, id int64, result string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskComplete, Result: result}, "")
+}
+
+func FormatAnsweredTaskClosure(t envelope.Task) string {
+	return fmt.Sprintf("Closed task #%d as answered. Tell the owner the result in one plain sentence and include the task number.", t.ID)
+}
+
+type hostTaskDecision struct {
+	Decision string `json:"decision"`
+	Words    string `json:"owner_words"`
+	Reason   string `json:"reason,omitempty"`
+	Result   string `json:"result,omitempty"`
+	To       string `json:"to,omitempty"`
+	envelope.TaskDue
+}
+
+func hostDecideTask(ctx context.Context, c Rawer, id int64, in hostTaskDecision, when string) (envelope.Task, error) {
 	caps, err := taskCapabilities(ctx, c)
 	if err != nil {
 		return envelope.Task{}, err
@@ -305,8 +406,18 @@ func HostDecideTask(ctx context.Context, c Rawer, id int64, decision, words stri
 	if !caps.TaskHostDecisions {
 		return envelope.Task{}, ErrTaskHostDecisionsUnsupported
 	}
+	if in.Decision == TaskAssign && !caps.TaskHostDelegation {
+		return envelope.Task{}, errTaskHostDelegationUnsupported
+	}
+	if in.Decision == TaskDue {
+		in.TaskDue, err = caps.parseTaskDue(when)
+		if err != nil {
+			return envelope.Task{}, err
+		}
+	}
 	var out TaskResult
-	err = c.Raw(ctx, "POST", taskPath(false, id, "/decide"), map[string]string{"decision": decision, "owner_words": words}, &out)
+	err = c.Raw(ctx, "POST", taskPath(false, id, "/decide"), in, &out)
+	out.Task.DueZone = caps.TaskZone
 	return out.Task, err
 }
 
@@ -314,6 +425,12 @@ func HostDecideTask(ctx context.Context, c Rawer, id int64, decision, words stri
 // task stands now and how to undo it, for the host to tell the owner.
 func FormatHostDecision(t envelope.Task, decision string) string {
 	undo := "reopen it the same way"
+	if decision == TaskDue {
+		return FormatTaskDueChange(t)
+	}
+	if decision == TaskAssign {
+		return fmt.Sprintf("Assigned task #%d to %s for the owner. The owner's words are in its history.", t.ID, t.Assignee) + FormatTaskHeld(t)
+	}
 	if decision == TaskReopen {
 		undo = "mark it done or drop it the same way"
 	}
@@ -352,10 +469,27 @@ func FormatTasks(list []envelope.Task, counts TaskCounts) string {
 	if len(list) == 0 && counts == (TaskCounts{}) {
 		return "No tasks.\n"
 	}
+	now := time.Now()
+	// Put time-sensitive tasks above the usual status groups.
 	var b strings.Builder
+	var priority [2][]string
+	remaining := make([]envelope.Task, 0, len(list))
+	for _, t := range list {
+		if rank := taskDueRank(t, now); rank < len(priority) {
+			priority[rank] = append(priority[rank], fmt.Sprintf("  %s [%s]\n", taskLine(t), t.Status))
+		} else {
+			remaining = append(remaining, t)
+		}
+	}
+	for i, label := range []string{"Overdue", "Due today"} {
+		if len(priority[i]) > 0 {
+			fmt.Fprintf(&b, "%s (%d)\n", label, len(priority[i]))
+			b.WriteString(strings.Join(priority[i], ""))
+		}
+	}
 	for _, g := range taskGroups {
 		var lines []string
-		for _, t := range list {
+		for _, t := range remaining {
 			if t.Status == g.status {
 				lines = append(lines, "  "+taskLine(t)+"\n")
 			}
@@ -384,7 +518,7 @@ func FormatHostTasks(list []envelope.Task, counts TaskCounts, view TaskHostView)
 	head := ""
 	switch {
 	case view.Served:
-		head = "You are the owner's task host: this is every task on the list, with what waits on the owner first.\n"
+		head = "You are the owner's task host: this view shows overdue and due-today tasks first, then work waiting on the owner.\n"
 	case view.Refused != "":
 		head = "This is your ordinary view, not the task host view: " + ScheduleText(view.Refused) + ".\n"
 	}
@@ -398,6 +532,9 @@ const taskWithheld = "text withheld until the owner approves it"
 // that say why it has none.
 func taskTitle(t envelope.Task) string {
 	if t.Withheld {
+		if t.Source == "" {
+			return "task text withheld"
+		}
 		return taskWithheld
 	}
 	return ScheduleText(t.Title)
@@ -418,11 +555,17 @@ func taskLine(t envelope.Task) string {
 	if t.AskStatus != "" {
 		fmt.Fprintf(&b, ", ask %s", t.AskStatus)
 	}
+	if t.Quiet {
+		b.WriteString(", quiet")
+	}
 	if t.Source != "" {
 		fmt.Fprintf(&b, ", source %s", t.Source)
 	}
 	if t.RepeatEverySeconds != 0 {
 		fmt.Fprintf(&b, ", repeats %s", everyText(t.RepeatEverySeconds))
+	}
+	if due := FormatTaskDue(t); due != "" {
+		fmt.Fprintf(&b, ", due %s", due)
 	}
 	b.WriteString(")")
 	return b.String()
@@ -472,6 +615,16 @@ func FormatTaskRepeat(t envelope.Task) string {
 func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task #%d: %s\nStatus: %s\nFiled by: %s at %s\n", t.ID, taskTitle(t), t.Status, envelope.TaskWho(t.Filer), clockTime(t.CreatedAt, now))
+	if t.Quiet {
+		b.WriteString("Quiet task.\n")
+	}
+	if due := FormatTaskDue(t); due != "" {
+		label := "Due"
+		if taskDueRank(t, now) == 0 {
+			label = "Overdue"
+		}
+		fmt.Fprintf(&b, "%s: %s\n", label, due)
+	}
 	if t.Assignee != "" {
 		fmt.Fprintf(&b, "Assignee: %s\n", envelope.TaskWho(t.Assignee))
 	}
@@ -486,6 +639,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 	}
 	if t.Key != "" {
 		fmt.Fprintf(&b, "Key: %s\n", ScheduleText(t.Key))
+	}
+	if t.HostRetries > 0 {
+		fmt.Fprintf(&b, "Host retries used: %d of 2\n", t.HostRetries)
 	}
 	if t.AgentAssigns > 0 {
 		fmt.Fprintf(&b, "Agent assigns: %d\n", t.AgentAssigns)
@@ -506,6 +662,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 		fmt.Fprintf(&b, "%s %s %s", clockTime(ev.At, now), envelope.TaskWho(ev.Actor), ev.Kind)
 		if ev.Status != "" {
 			fmt.Fprintf(&b, " (%s)", ev.Status)
+		}
+		if ev.DueChange != nil {
+			fmt.Fprintf(&b, " changed from %s to %s", formatTaskDueValue(ev.DueChange.Before, t.DueZone), formatTaskDueValue(ev.DueChange.After, t.DueZone))
 		}
 		if ev.ForOwner {
 			b.WriteString(" for the owner, who said")

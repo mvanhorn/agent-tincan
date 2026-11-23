@@ -76,7 +76,11 @@ func TestCombinedRequestLifecycle(t *testing.T) {
 	if err != nil || res.Status != envelope.StatusNeedsInput || res.Reply == nil || res.Reply.Body != "Which restaurant?" {
 		t.Fatalf("needs_input = %+v, %v", res, err)
 	}
-	if _, err := asker.Answer(ctx, req.ID, "Nopa"); err != nil {
+	// The owner approved the ask, not the answer: it waits for the owner again.
+	if answered, err := asker.Answer(ctx, req.ID, "Nopa"); err != nil || answered.Status != envelope.StatusHeld {
+		t.Fatalf("answer = %+v, %v; want held again", answered, err)
+	}
+	if err := admin.Raw(ctx, "POST", "/v1/admin/requests/"+req.ID+"/approve", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	again := claim()

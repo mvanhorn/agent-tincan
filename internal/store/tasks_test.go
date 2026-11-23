@@ -54,7 +54,7 @@ func TestTasksMigrateOnExistingDatabase(t *testing.T) {
 	ctx := context.Background()
 	req := ask(t, s, "codex", "muse", "hi")
 	// A database from before tasks: drop what this version added.
-	if _, err := s.DB().Exec(`DROP TABLE task_claimants; DROP TABLE task_events; DROP TABLE tasks;
+	if _, err := s.DB().Exec(dropTaskRecoverySchema + `DROP TABLE task_claimants; DROP TABLE task_events; DROP TABLE tasks;
 		DROP INDEX requests_task; ALTER TABLE requests DROP COLUMN task_id; ALTER TABLE requests DROP COLUMN contributors;`); err != nil {
 		t.Fatal(err)
 	}
@@ -658,41 +658,36 @@ func TestTaskResultPointsAtAttachments(t *testing.T) {
 	}
 }
 
-// Done is refused while an ask is open under the task, working or waiting
-// on a question, and allowed once the task is returned.
-func TestMarkTaskDoneRefusedWhileAskOpen(t *testing.T) {
-	s, _ := open(t, ":memory:")
-	ctx := context.Background()
-	task, req := taskUnderAsk(t, s, false)
-	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskAskOpen) {
-		t.Fatalf("done while working: %v", err)
-	}
-	claimAsk(t, s, req.ID, "muse")
-	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which branch?"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskAskOpen) {
-		t.Fatalf("done while a question is open: %v", err)
-	}
-	if got, err := s.Task(ctx, task.ID, ""); err != nil || got.Status != envelope.TaskQuestion || got.CurrentRequest != req.ID {
-		t.Fatalf("task after refused done = %+v, %v", got, err)
-	}
-	if _, err := s.Answer(ctx, req.ID, "codex", "main"); err != nil {
-		t.Fatal(err)
-	}
-	claimAsk(t, s, req.ID, "muse")
-	if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "shipped"}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, "good")
-	if err != nil || got.Status != envelope.TaskDone || got.Result != "shipped" {
-		t.Fatalf("done after return = %+v, %v", got, err)
-	}
-	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskState) {
-		t.Fatalf("done twice: %v", err)
-	}
-	if _, err := s.MarkTaskDone(ctx, task.ID+9, envelope.TaskOwner, ""); !errors.Is(err, ErrNoTask) {
-		t.Fatalf("done on no task: %v", err)
+func TestMarkTaskDoneAnswersOpenAsk(t *testing.T) {
+	for _, state := range []string{"queued", "claimed", "question"} {
+		t.Run(state, func(t *testing.T) {
+			s, _ := open(t, ":memory:")
+			ctx := t.Context()
+			task, req := taskUnderAsk(t, s, false)
+			if state != "queued" {
+				claimAsk(t, s, req.ID, "muse")
+			}
+			if state == "question" {
+				if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusNeedsInput, Body: "which branch?"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, rep, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, "Shipped from main")
+			if err != nil || got.Status != envelope.TaskDone || got.CurrentRequest != "" || got.Result != "Shipped from main" ||
+				rep.RequestID != req.ID || rep.From != envelope.TaskOwner {
+				t.Fatalf("completion = %+v, %+v, %v", got, rep, err)
+			}
+			result, err := s.Get(ctx, req.ID, "codex")
+			if err != nil || result.Status != envelope.StatusAnswered || result.Reply == nil || result.Reply.Body != got.Result {
+				t.Fatalf("ask = %+v, %v", result, err)
+			}
+			if _, err := s.Reply(ctx, req.ID, "muse", envelope.Reply{Status: envelope.StatusAnswered, Body: "a late answer"}); err == nil {
+				t.Fatal("late answer accepted")
+			}
+			if _, _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); !errors.Is(err, ErrTaskState) {
+				t.Fatalf("done twice: %v", err)
+			}
+		})
 	}
 }
 
@@ -1172,7 +1167,7 @@ func TestHostTasksWithholdNeverApprovedText(t *testing.T) {
 	}
 	mine := addTask(t, s, envelope.Task{Filer: "muse", Title: "muse's from mail", Source: "mail", Status: envelope.TaskProposed})
 	done := addTask(t, s, envelope.Task{Filer: envelope.TaskOwner, Title: "owner's, done"})
-	if _, err := s.MarkTaskDone(ctx, done.ID, envelope.TaskOwner, ""); err != nil {
+	if _, _, err := s.MarkTaskDone(ctx, done.ID, envelope.TaskOwner, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1274,7 +1269,7 @@ func TestTaskHostDecisionsRecordPriorAndReopenToIt(t *testing.T) {
 	claimAsk(t, s, req.ID, "muse")
 	reply(t, s, req, envelope.StatusAnswered, "the answer")
 
-	done, err := s.MarkTaskDoneForOwner(ctx, task.ID, "grokbot", "ship it is done")
+	done, _, err := s.MarkTaskDoneForOwner(ctx, task.ID, "grokbot", "ship it is done")
 	if err != nil || done.Status != envelope.TaskDone {
 		t.Fatalf("host's done = %+v, %v", done, err)
 	}
@@ -1299,7 +1294,7 @@ func TestTaskHostDecisionsRecordPriorAndReopenToIt(t *testing.T) {
 	}
 
 	open := addTask(t, s, envelope.Task{Filer: "codex", Title: "water the plants"})
-	if _, err := s.DropTaskForOwner(ctx, open.ID, "grokbot", "drop the plants"); err != nil {
+	if _, _, err := s.DropInactiveTask(ctx, open.ID, "grokbot", "drop the plants", true); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.ReopenTaskForOwner(ctx, open.ID, "grokbot", "keep the plants"); err != nil || got.Status != envelope.TaskOpen {
@@ -1308,12 +1303,12 @@ func TestTaskHostDecisionsRecordPriorAndReopenToIt(t *testing.T) {
 	if ev := lastTaskEvent(t, s, open.ID); !ev.ForOwner || ev.Actor != "grokbot" || ev.Body != "keep the plants" {
 		t.Fatalf("host's reopen entry = %+v", ev)
 	}
-	if _, err := s.DropTaskForOwner(ctx, task.ID, "grokbot", "drop it"); !errors.Is(err, ErrTaskState) {
+	if _, _, err := s.DropInactiveTask(ctx, task.ID, "grokbot", "drop it", true); !errors.Is(err, ErrTaskState) {
 		t.Fatalf("host's drop of a working task: %v", err)
 	}
 
 	proposed := addTask(t, s, envelope.Task{Filer: "grokbot", Title: "from the mail", Status: envelope.TaskProposed, Source: "mail"})
-	if _, err := s.DropTaskForOwner(ctx, proposed.ID, "grokbot", "drop the mail one"); err != nil {
+	if _, _, err := s.DropInactiveTask(ctx, proposed.ID, "grokbot", "drop the mail one", true); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.ReopenTaskForOwner(ctx, proposed.ID, "grokbot", "bring it back"); err != nil || got.Status != envelope.TaskProposed {
@@ -1322,7 +1317,35 @@ func TestTaskHostDecisionsRecordPriorAndReopenToIt(t *testing.T) {
 	if _, err := s.ReopenTaskForOwner(ctx, 999, "grokbot", "x"); !errors.Is(err, ErrNoTask) {
 		t.Fatalf("reopen of a missing task: %v", err)
 	}
-	if _, err := s.MarkTaskDoneForOwner(ctx, 999, "grokbot", "x"); !errors.Is(err, ErrNoTask) {
+	if _, _, err := s.MarkTaskDoneForOwner(ctx, 999, "grokbot", "x"); !errors.Is(err, ErrNoTask) {
 		t.Fatalf("done of a missing task: %v", err)
+	}
+}
+
+func TestTaskDueMigrationPreservesExistingTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.db")
+	s, _ := open(t, path)
+	task := addTask(t, s, envelope.Task{Title: "Existing task", Filer: "muse"})
+	if _, err := s.DB().Exec(`DROP INDEX tasks_reminder_due`); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"due_day", "due_at", "reminded_at", "reminder_dropped_at"} {
+		if _, err := s.DB().Exec("ALTER TABLE tasks DROP COLUMN " + col); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+
+	s, _ = open(t, path)
+	got, err := s.Task(t.Context(), task.ID, "")
+	if err != nil || got.Title != task.Title || got.DueDay != "" || got.DueAt != nil {
+		t.Fatalf("migrated task = %+v, %v", got, err)
+	}
+	if _, err := s.SetTaskDue(t.Context(), task.ID, envelope.TaskDue{DueDay: "2026-11-27"}, "muse", "", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Task(t.Context(), task.ID, "")
+	if err != nil || got.DueDay != "2026-11-27" || got.DueAt != nil {
+		t.Fatalf("day-only task = %+v, %v", got, err)
 	}
 }

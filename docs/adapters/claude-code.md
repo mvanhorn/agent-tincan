@@ -67,7 +67,7 @@ A channel notice reaches only an idle session started with channels, and socket 
 ```json
 {
   "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}],
+    "SessionStart": [{"hooks": [{"type": "command", "command": "tincan hook claude-code --tasks", "timeout": 5}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "tincan hook claude-code", "timeout": 5}]}]
   }
 }
@@ -79,7 +79,9 @@ A channel notice reaches only an idle session started with channels, and socket 
 Agent Tincan: 2 teammate requests waiting (oldest 12m). Call check_inbox before anything else.
 ```
 
-With nothing waiting it prints nothing. It gives up after 3 seconds, and on any error (no config, relay unreachable) it writes to stderr only and exits 0, so it never blocks or fails a prompt. Pings are left out; the MCP server answers those. The hook names no session, so it also counts replies meant for another window of the same agent, and that window's `check_inbox` is the one that gets them.
+The inbox check is quiet when nothing waits, logs errors to stderr and leaves pings to the MCP server. The hook names no session, so it also counts replies meant for another window of the same agent. That window's `check_inbox` is the one that gets them.
+
+The optional `--tasks` flag adds a read-only summary of visible questions and returned, open and working tasks. It shows counts and up to five IDs per status with no task text. It uses the ordinary agent view, which can include shared open tasks, and excludes proposed, held and closed work. For an existing install, add `--tasks` to the SessionStart command only. Both reads share the same three-second deadline and report independently. If the task list is unavailable, the hook still peeks at the inbox and gives a task recovery hint. To read a full task, use `get_task` or `tincan tasks show <id>`.
 
 When an ask to a channel agent sits untaken past the relay's wake grace, the relay tells the asker that nothing is working on it yet, and the roster shows `status=stuck (N queued, untaken 25m)` even while a session reports busy.
 
