@@ -223,6 +223,10 @@ type ServiceDef struct {
 	// notes service sets it: macOS may attribute a privacy grant to the
 	// app, which would let every wrapped service share notes' folder access.
 	NoLauncher bool
+	// Mode is the service file's permission bits, 0644 when zero. A
+	// definition that holds the owner's secrets (a token kept on reinstall)
+	// passes 0600, and the file is written with it from the start.
+	Mode os.FileMode
 }
 
 // InstallServiceDef writes d the way InstallService writes the history
@@ -255,6 +259,7 @@ func InstallServiceDef(o ServiceOptions, d ServiceDef) (ServiceResult, error) {
 		vars:        append([]string{"__TINCAN_BINARY__", o.Binary, "__HOME__", o.Home, "__PATH__", path}, d.Vars...),
 		args:        d.Args,
 		unsupported: d.Unsupported,
+		mode:        d.Mode,
 	})
 }
 
@@ -268,6 +273,7 @@ type serviceDef struct {
 	vars             []string
 	args             []string
 	unsupported      string
+	mode             os.FileMode
 }
 
 // installServiceDef writes d for o.GOOS: the launchd agent in
@@ -299,7 +305,7 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 		if err := os.MkdirAll(filepath.Join(o.Home, "Library", "Logs"), 0o755); err != nil {
 			return ServiceResult{}, err
 		}
-		if err := writeService(dst, body); err != nil {
+		if err := writeService(dst, body, d.mode); err != nil {
 			return ServiceResult{}, err
 		}
 		return ServiceResult{Path: dst, Next: fmt.Sprintf("launchctl bootstrap gui/%d %s", o.UID, dst)}, nil
@@ -319,7 +325,7 @@ func installServiceDef(o ServiceOptions, d serviceDef) (ServiceResult, error) {
 			words.WriteString(` "` + strings.ReplaceAll(systemdEscape(a), "$", "$$") + `"`)
 		}
 		body = strings.Replace(body, "__ARGS__", words.String(), 1)
-		if err := writeService(dst, body); err != nil {
+		if err := writeService(dst, body, d.mode); err != nil {
 			return ServiceResult{}, err
 		}
 		return ServiceResult{Path: dst, Next: "systemctl --user daemon-reload && systemctl --user enable --now " + d.unit}, nil
@@ -388,11 +394,16 @@ func wrapLaunchd(body, launcher string) (string, error) {
 	return strings.TrimSuffix(body, end) + assoc + end, nil
 }
 
-func writeService(dst, body string) error {
+// writeService writes body to dst with mode, 0644 when zero. The file is
+// published by rename, so it never exists with other bits than mode.
+func writeService(dst, body string, mode os.FileMode) error {
+	if mode == 0 {
+		mode = 0o644
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	return writeFileAtomic(dst, []byte(body), 0o644)
+	return writeFileAtomic(dst, []byte(body), mode)
 }
 
 // systemdEscape makes s safe inside a double-quoted systemd value (the

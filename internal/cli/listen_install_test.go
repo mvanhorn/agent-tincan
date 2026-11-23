@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/mvanhorn/agent-tincan/examples"
+	"github.com/mvanhorn/agent-tincan/internal/history"
 )
 
 func codexWake(t *testing.T) examples.WakeScript {
@@ -768,5 +769,143 @@ func TestListenInstallKeepsOwnerEnv(t *testing.T) {
 				t.Errorf("mode = %v, want the owner's 0600", fi.Mode().Perm())
 			}
 		})
+	}
+}
+
+// Reinstalling over a 0600 definition that holds the owner's token asks
+// the service writer for 0600, so the file is never written with wider
+// bits and chmodded after, and the published file is 0600.
+func TestListenInstallWritesKeptTokenOwnerOnly(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			cfg := filepath.Join(t.TempDir(), "codex.json")
+			o, _ := installForTest(t, goos, cfg, codexWake(t))
+			f := listenServiceFile(o.Home, goos, "codex")
+			b, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var edited string
+			if goos == "darwin" {
+				edited = strings.Replace(string(b), "    <key>TINCAN_CONFIG</key>", "    <key>COPILOT_GITHUB_TOKEN</key>\n    <string>ghp_x</string>\n    <key>TINCAN_CONFIG</key>", 1)
+			} else {
+				edited = strings.Replace(string(b), "Restart=always", "Environment=\"COPILOT_GITHUB_TOKEN=ghp_x\"\nRestart=always", 1)
+			}
+			if edited == string(b) {
+				t.Fatal("test could not add the variable")
+			}
+			if err := os.WriteFile(f, []byte(edited), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(f, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var modes []os.FileMode
+			orig := installServiceDef
+			t.Cleanup(func() { installServiceDef = orig })
+			installServiceDef = func(so history.ServiceOptions, d history.ServiceDef) (history.ServiceResult, error) {
+				modes = append(modes, d.Mode)
+				return orig(so, d)
+			}
+			o.Out = &bytes.Buffer{}
+			if err := installListener(o, codexWake(t)); err != nil {
+				t.Fatal(err)
+			}
+			if len(modes) != 1 || modes[0] != 0o600 {
+				t.Fatalf("service writer asked for modes %v, want [0600]", modes)
+			}
+			fi, err := os.Stat(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != 0o600 {
+				t.Fatalf("published mode = %v, want 0600", fi.Mode().Perm())
+			}
+			if b, _ := os.ReadFile(f); serviceEnv(b, goos, "COPILOT_GITHUB_TOKEN") != "ghp_x" {
+				t.Fatalf("token not kept:\n%s", b)
+			}
+		})
+	}
+}
+
+// A header with spaces around its dot, padding inside its brackets or a
+// quoted name is still the agent-tincan entry, as are its sub-tables, so
+// the approval mode is set in place and no second table is added.
+func TestSetCodexApprovalSpacedHeader(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	for _, tc := range []struct{ name, header, sub string }{
+		{"spaced dot", "[mcp_servers . agent-tincan]", "[mcp_servers . agent-tincan . env]"},
+		{"padded brackets", "[ mcp_servers.agent-tincan ]", "[ mcp_servers.agent-tincan.env ]"},
+		{"quoted name", `[mcp_servers."agent-tincan"]`, `[mcp_servers."agent-tincan".env]`},
+		{"literal quoted, tabs", "[\tmcp_servers\t.\t'agent-tincan'\t]", "[mcp_servers.'agent-tincan' . env]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			in := tc.header + "\ncommand = \"tincan\"\ndefault_tools_approval_mode = \"prompt\"\n" + tc.sub + "\nTINCAN_CONFIG = \"" + cfg + "\"\n\n[profiles.fast]\nmodel = \"o4\"\n"
+			if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, notice, err := setCodexApproval(path, "/opt/tincan", cfg, "/def.json")
+			if err != nil || notice != "" || !changed {
+				t.Fatalf("changed=%v notice=%q err=%v", changed, notice, err)
+			}
+			b, _ := os.ReadFile(path)
+			want := strings.Replace(in, `default_tools_approval_mode = "prompt"`, `default_tools_approval_mode = "approve"`, 1)
+			if string(b) != want {
+				t.Fatalf("not edited in place:\n%s\nwant:\n%s", b, want)
+			}
+			if es := tomlServers(string(b)); len(es) != 1 || es[0].Name != "agent-tincan" {
+				t.Errorf("tomlServers = %+v", es)
+			}
+		})
+	}
+}
+
+// When the entry may be defined in a form the reader cannot take, setting
+// the approval mode fails and leaves the file alone instead of adding a
+// second agent-tincan table.
+func TestSetCodexApprovalRefusesUnreadEntry(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	for _, in := range []string{
+		"[[mcp_servers.agent-tincan]]\ncommand = \"tincan\"\n",
+		"[mcp_servers.\"agent-tincan\\q\"]\ncommand = \"tincan\"\n",
+		"[mcp_servers]\nagent-tincan = { command = \"tincan\" }\n",
+		"mcp_servers.agent-tincan.command = \"tincan\"\n",
+	} {
+		t.Run(strings.SplitN(in, "\n", 2)[0], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, notice, err := setCodexApproval(path, "/opt/tincan", cfg, "/def.json")
+			if err == nil || changed || notice != "" {
+				t.Fatalf("changed=%v notice=%q err=%v, want an error", changed, notice, err)
+			}
+			if b, _ := os.ReadFile(path); string(b) != in {
+				t.Fatalf("file changed:\n%s", b)
+			}
+		})
+	}
+}
+
+func TestTomlTableHeader(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"[mcp_servers.agent-tincan]", []string{"mcp_servers", "agent-tincan"}},
+		{` [ mcp_servers . "agent.tincan" ] # c`, []string{"mcp_servers", "agent.tincan"}},
+		{"[a.'b c'.d]", []string{"a", "b c", "d"}},
+		{"[[a.b]]", nil},
+		{"[a..b]", nil},
+		{"[a b]", nil},
+		{"[]", nil},
+		{"[a.b", nil},
+		{"x = [1]", nil},
+	} {
+		got, ok := tomlTableHeader(tc.in)
+		if ok != (tc.want != nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("tomlTableHeader(%q) = %q, %v; want %q", tc.in, got, ok, tc.want)
+		}
 	}
 }

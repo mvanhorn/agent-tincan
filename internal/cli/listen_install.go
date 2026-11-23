@@ -109,11 +109,17 @@ func listenDir(configPath string) string {
 // listenService is what a listener's service runs: the agent, its wake
 // script and config, the tincan binary, and for Codex the CODEX_HOME the
 // install edited, so a woken Codex reads that same config.
+// installServiceDef is history.InstallServiceDef, replaced in tests.
+var installServiceDef = history.InstallServiceDef
+
 type listenService struct {
 	Agent, Script, Config, Binary, CodexHome string
 	// Keep is the environment the owner added to an earlier service
 	// definition, written again after tincan's own.
 	Keep []envVar
+	// Mode is the service file's permission bits, history's default when
+	// zero.
+	Mode fs.FileMode
 }
 
 // envVar is one environment variable a service definition sets.
@@ -147,6 +153,7 @@ func (s listenService) def() history.ServiceDef {
 		Launchd: strings.Replace(listenLaunchdTemplate, "__EXTRA_ENV__", launchdEnv, 1),
 		Systemd: strings.Replace(listenSystemdTemplate, "__EXTRA_ENV__", systemdEnv, 1),
 		Vars:    vars,
+		Mode:    s.Mode,
 		// tincan listen runs the command through sh -c, so the path is
 		// quoted to stay one word.
 		Args:        []string{"--exec", shellQuote(s.Script)},
@@ -332,19 +339,22 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 	}
 
 	svc := listenService{Agent: o.Agent, Script: filepath.Join(dir, w.File), Config: o.ConfigPath, Binary: o.Binary, Keep: keep}
+	// A definition the owner made readable only by themselves stays that
+	// way, and one that keeps the owner's environment (it may hold a token)
+	// is 0600. The mode goes to the writer, so the file is never readable by
+	// others, not even before a later chmod.
+	switch {
+	case priorMode != 0 && priorMode&0o077 == 0:
+		svc.Mode = priorMode
+	case len(keep) > 0:
+		svc.Mode = 0o600
+	}
 	if isCodex {
 		svc.CodexHome = o.CodexHome
 	}
-	res, err := history.InstallServiceDef(history.ServiceOptions{GOOS: o.GOOS, Home: o.Home, Binary: o.Binary, UID: o.UID, Launcher: o.Launcher, ToolDirs: toolDirs}, svc.def())
+	res, err := installServiceDef(history.ServiceOptions{GOOS: o.GOOS, Home: o.Home, Binary: o.Binary, UID: o.UID, Launcher: o.Launcher, ToolDirs: toolDirs}, svc.def())
 	if err != nil {
 		return err
-	}
-	// A definition the owner made readable only by themselves (it may hold
-	// a token) stays that way.
-	if priorMode != 0 && priorMode&0o077 == 0 {
-		if err := os.Chmod(res.Path, priorMode); err != nil {
-			return err
-		}
 	}
 	fmt.Fprintf(out, "listener service definition: %s (not started)\n", res.Path)
 	if len(keep) > 0 {

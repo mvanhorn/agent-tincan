@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -414,5 +415,52 @@ func TestInstallServiceDefNoArgs(t *testing.T) {
 	b, _ := os.ReadFile(res.Path)
 	if want := "<plist>\n  <array>\n    <string>/opt/tincan</string>\n  </array>\n</plist>\n"; string(b) != want {
 		t.Fatalf("plist = %q", b)
+	}
+}
+
+// A service file given Mode 0600 is written 0600 from the start: its
+// temporary file already has those bits when its bytes are in it, and the
+// published file keeps them. One with no Mode is still 0644.
+func TestInstallServiceDefModeFromTheStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX file modes")
+	}
+	const launchd = "<plist>\n  <array>\n    <string>__TINCAN_BINARY__</string>\n    __ARGS__\n  </array>\n</plist>\n"
+	const systemd = "[Service]\nExecStart=\"__TINCAN_BINARY__\"__ARGS__\n"
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		want os.FileMode
+	}{{"owner only", 0o600, 0o600}, {"default", 0, 0o644}} {
+		for _, goos := range []string{"darwin", "linux"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				var seen []os.FileMode
+				t.Cleanup(func() { atomicWriteHook = nil })
+				atomicWriteHook = func(tmp *os.File) {
+					fi, err := tmp.Stat()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					seen = append(seen, fi.Mode().Perm())
+				}
+				t.Setenv("PATH", t.TempDir())
+				res, err := InstallServiceDef(ServiceOptions{GOOS: goos, Home: t.TempDir(), Binary: "/opt/tincan", UID: 501},
+					ServiceDef{Label: "com.agenttincan.x", Unit: "x.service", Launchd: launchd, Systemd: systemd, NoLauncher: true, Mode: tc.mode})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(seen) != 1 || seen[0] != tc.want {
+					t.Fatalf("temporary file modes = %v, want [%v]", seen, tc.want)
+				}
+				fi, err := os.Stat(res.Path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fi.Mode().Perm() != tc.want {
+					t.Fatalf("published mode = %v, want %v", fi.Mode().Perm(), tc.want)
+				}
+			})
+		}
 	}
 }

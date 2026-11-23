@@ -22,7 +22,11 @@ var (
 	// key; m[1] is the value after the =.
 	tomlApprovalKey = regexp.MustCompile(`^\s*(?:default_tools_approval_mode|"default_tools_approval_mode"|'default_tools_approval_mode')\s*=(.*)$`)
 	// TINCAN_CONFIG as a bare or quoted key, with a basic or literal string.
-	tomlEnvConfig = regexp.MustCompile(`(?:^|[\s{,])(?:TINCAN_CONFIG|"TINCAN_CONFIG"|'TINCAN_CONFIG')\s*=\s*(?:("(?:[^"\\]|\\.)*")|'([^']*)')`)
+	// agent-tincan as a key under [mcp_servers], and mcp_servers.agent-tincan
+	// as a top-level dotted key.
+	tomlEntryKey    = regexp.MustCompile(`^(?:agent-tincan|"agent-tincan"|'agent-tincan')\s*[.=]`)
+	tomlTopEntryKey = regexp.MustCompile(`^(?:mcp_servers|"mcp_servers"|'mcp_servers')\s*\.\s*(?:agent-tincan|"agent-tincan"|'agent-tincan')\s*[.=]`)
+	tomlEnvConfig   = regexp.MustCompile(`(?:^|[\s{,])(?:TINCAN_CONFIG|"TINCAN_CONFIG"|'TINCAN_CONFIG')\s*=\s*(?:("(?:[^"\\]|\\.)*")|'([^']*)')`)
 )
 
 // codexEntry is the agent-tincan table of a Codex config.toml: its line
@@ -58,6 +62,112 @@ func tomlStripComment(line string) string {
 	return line
 }
 
+// tomlTableHeader reads a [table] header line into its keys: whitespace
+// inside the brackets and around each dot is dropped and a quoted key is
+// unquoted, so [ mcp_servers . "agent-tincan" ] reads as mcp_servers,
+// agent-tincan. A trailing comment is allowed. ok is false for anything
+// else, an [[array]] header included.
+func tomlTableHeader(line string) (keys []string, ok bool) {
+	line = strings.TrimSpace(tomlStripComment(line))
+	if !strings.HasPrefix(line, "[") || strings.HasPrefix(line, "[[") || !strings.HasSuffix(line, "]") {
+		return nil, false
+	}
+	in := line[1 : len(line)-1]
+	i := 0
+	skip := func() {
+		for i < len(in) && (in[i] == ' ' || in[i] == '\t') {
+			i++
+		}
+	}
+	for {
+		skip()
+		if i >= len(in) {
+			return nil, false
+		}
+		switch in[i] {
+		case '"':
+			j := i + 1
+			for j < len(in) && in[j] != '"' {
+				if in[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			if j >= len(in) {
+				return nil, false
+			}
+			k, err := strconv.Unquote(in[i : j+1])
+			if err != nil {
+				return nil, false
+			}
+			keys, i = append(keys, k), j+1
+		case '\'':
+			j := strings.IndexByte(in[i+1:], '\'')
+			if j < 0 {
+				return nil, false
+			}
+			keys, i = append(keys, in[i+1:i+1+j]), i+j+2
+		default:
+			j := i
+			for j < len(in) && isTomlBareKeyByte(in[j]) {
+				j++
+			}
+			if j == i {
+				return nil, false
+			}
+			keys, i = append(keys, in[i:j]), j
+		}
+		skip()
+		if i == len(in) {
+			return keys, true
+		}
+		if in[i] != '.' {
+			return nil, false
+		}
+		i++
+	}
+}
+
+func isTomlBareKeyByte(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+}
+
+// isCodexEntryKey reports whether table keys start with
+// mcp_servers.agent-tincan.
+func isCodexEntryKey(keys []string) bool {
+	return len(keys) >= 2 && keys[0] == "mcp_servers" && keys[1] == "agent-tincan"
+}
+
+// tomlCodexEntryUnread is a line of s that may define the agent-tincan
+// entry in a form tomlTableHeader cannot read, or "" when there is none:
+// a header naming agent-tincan that does not parse, or the entry set with
+// keys under [mcp_servers] or at the top level. Adding a new
+// [mcp_servers.agent-tincan] table next to it could define it twice.
+func tomlCodexEntryUnread(s string) string {
+	var table []string
+	for raw := range strings.SplitSeq(s, "\n") {
+		line := strings.TrimSpace(tomlStripComment(raw))
+		if strings.HasPrefix(line, "[") {
+			keys, ok := tomlTableHeader(line)
+			if !ok {
+				table = nil
+				if strings.Contains(line, "agent-tincan") {
+					return strings.TrimSpace(raw)
+				}
+				continue
+			}
+			table = keys
+			continue
+		}
+		switch {
+		case len(table) == 1 && table[0] == "mcp_servers" && tomlEntryKey.MatchString(line),
+			table == nil && tomlTopEntryKey.MatchString(line):
+			return strings.TrimSpace(raw)
+		}
+	}
+	return ""
+}
+
 func findCodexEntry(lines []string) (codexEntry, bool) {
 	e := codexEntry{start: -1}
 	seen := false
@@ -65,13 +175,13 @@ func findCodexEntry(lines []string) (codexEntry, bool) {
 		line := tomlStripComment(raw)
 		trimmed := strings.TrimSpace(line)
 		if e.start < 0 {
-			if m := tomlSection.FindStringSubmatch(trimmed); m != nil && m[1]+m[2] == "agent-tincan" {
+			if keys, ok := tomlTableHeader(trimmed); ok && len(keys) == 2 && isCodexEntryKey(keys) {
 				e.start, e.end, e.mainEnd = i, len(lines), len(lines)
 			}
 			continue
 		}
 		if tomlAnyTable.MatchString(line) {
-			if !strings.HasPrefix(trimmed, "[mcp_servers.agent-tincan.") && !strings.HasPrefix(trimmed, `[mcp_servers."agent-tincan".`) {
+			if keys, ok := tomlTableHeader(trimmed); !ok || len(keys) < 3 || !isCodexEntryKey(keys) {
 				e.end = i
 				if e.mainEnd > i {
 					e.mainEnd = i
@@ -188,6 +298,9 @@ func setCodexApproval(path, binary, cfg, def string) (changed bool, notice strin
 	lines := strings.Split(s, "\n")
 	e, ok := findCodexEntry(lines)
 	if !ok {
+		if line := tomlCodexEntryUnread(s); line != "" {
+			return false, "", fmt.Errorf("%s may already define the agent-tincan entry at %q, in a form tincan cannot edit, so it was left alone. Write that table as [mcp_servers.agent-tincan] and run this again", path, line)
+		}
 		for _, other := range tomlServers(s) {
 			return false, fmt.Sprintf("%s has a tincan entry named %s, not agent-tincan, so it was left alone. Add default_tools_approval_mode = \"approve\" to that table, or rename it agent-tincan and run this again.", path, other.Name), nil
 		}
