@@ -378,12 +378,17 @@ func TestPerRequestWorkerOutlivingItsLeaseIsNotStartedTwice(t *testing.T) {
 	w.started(id)
 	session := w.read(id + ".session")
 
-	requeued := false
+	// Sweep wakes the listener as it requeues the lapsed claim, so the
+	// request is often claimed again before a poll could see it queued.
+	// claim_lapsed is set by that requeue and never cleared, so it shows
+	// the lapse however fast the claim came back.
 	eventually(t, "the claim to lapse and come back", func() bool {
 		w.m.Server.Sweep(t.Context())
-		st := w.status(id)
-		requeued = requeued || st == envelope.StatusQueued
-		return requeued && st == envelope.StatusClaimed
+		lapsed, err := w.m.Store.ClaimLapsed(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lapsed && w.status(id) == envelope.StatusClaimed
 	})
 	// A second process would start from a later peek, so outlast a few.
 	for end := time.Now().Add(3 * listenWorkerReclaimEvery); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
