@@ -631,8 +631,28 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		srv.SetEmailInboxes(inboxes)
 		log.Printf("polling AgentMail for email replies from %d agents with include_requests on", len(inboxes))
 	}
-	srv.SetEvents(waker)
-	srv.SetWakeNamer(waker)
+	stopGWEvents := func() {}
+	var gwEvents *gateway.EventHub
+	if f.gateway {
+		gwEvents, err = gateway.NewEventHub(st.DB(), gateway.EventHubOptions{
+			QueuedCount:   srv.QueuedCount,
+			IsReplyUnseen: srv.IsReplyUnseen,
+			ReplyGrace:    f.replyGrace,
+		})
+		if err != nil {
+			return fmt.Errorf("gateway events: %w", err)
+		}
+		stopGWEvents = gwEvents.Stop
+		defer stopGWEvents()
+		srv.SetEvents(relay.MultiEvents{waker, gwEvents})
+		srv.SetWakeNamer(relay.WithMCPEventsWake(waker, gwEvents.HasActiveSubscription))
+		srv.SetGatewayEvents(func(ctx context.Context) (any, error) {
+			return gwEvents.Summary(ctx)
+		})
+	} else {
+		srv.SetEvents(waker)
+		srv.SetWakeNamer(waker)
+	}
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {
 		log.Printf("reschedule reply wakes: %v", err) // replies stay unseen for the agent's next check
 	}
@@ -692,9 +712,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 			return err
 		}
 		a2aFile := filepath.Join(f.stateDir, "a2a.json")
-		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Base: base, A2AFile: a2aFile})
+		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Events: gwEvents, Base: base, A2AFile: a2aFile})
 		pub := gateway.New(base, oauth, srv.Handler(), Version)
 		pub.SetA2AFile(a2aFile)
+		pub.SetEvents(gwEvents)
 		gw := client.Configure(&http.Server{Handler: pub.Handler()}, client.RelayAPI)
 		go func() { errc <- gw.Serve(gln) }()
 		servers = append(servers, gw)
@@ -732,6 +753,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		// poll in flight, Retry-After waits included.
 		{"stopping sweeps and email reply polls", func() { stopRun(); <-ran }},
 		{"stopping wakes", waker.Stop},
+		{"stopping gateway events", stopGWEvents},
 		{"stopping push alerts", srv.WaitPush},
 		{"closing the gateway", closeGW},
 		{"closing the tailnet listener", closeNet},

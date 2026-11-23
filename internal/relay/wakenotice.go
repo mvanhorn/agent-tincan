@@ -88,7 +88,7 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 // cannot tell whether such an agent is looking at its queue, so an ask it
 // leaves untaken is the asker's to hear about.
 func agentSideWake(method string) bool {
-	return !relayWoken(method) && method != wake.Schedule
+	return !relayWoken(method) && method != wake.Schedule && method != WakeMCPEvents
 }
 
 // tellUntaken is the sweep's check on agents that wake themselves. Each

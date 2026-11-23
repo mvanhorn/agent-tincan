@@ -171,6 +171,9 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		if warn := taskFallbackCheck(ctx, r); warn != nil {
 			add(*warn)
 		}
+		if gw := gatewayEventsCheck(ctx, r); gw != nil {
+			add(*gw)
+		}
 	}
 
 	// 2c. This host's Tailscale, which matters joined or not.
@@ -234,6 +237,52 @@ func taskFallbackCheck(ctx context.Context, r *client.Relay) *check {
 		return &check{"task fallback", "warn", warning, client.TaskFallbackFix}
 	}
 	return nil
+}
+
+// gatewayEventsCheck reports active gateway MCP Events subscriptions on an admin
+// device when the relay runs with --chatgpt-gateway. It never shows signing
+// secrets or callback query strings.
+func gatewayEventsCheck(ctx context.Context, r *client.Relay) *check {
+	const name = "gateway mcp events"
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var out struct {
+		Subscriptions []struct {
+			ID                  string    `json:"id"`
+			Agent               string    `json:"agent"`
+			EventName           string    `json:"event_name"`
+			Callback            string    `json:"callback"`
+			ExpiresAt           time.Time `json:"expires_at"`
+			ConsecutiveFailures int       `json:"consecutive_failures"`
+			HasGap              bool      `json:"has_gap"`
+			LastError           string    `json:"last_error"`
+		} `json:"subscriptions"`
+	}
+	if err := r.Raw(ctx, "GET", "/v1/admin/gateway/events", nil, &out); err != nil {
+		return nil
+	}
+	if len(out.Subscriptions) == 0 {
+		return &check{name, "ok", "gateway enabled; no active MCP Events subscriptions", ""}
+	}
+	var parts []string
+	var failing []string
+	for _, s := range out.Subscriptions {
+		desc := fmt.Sprintf("%s %s -> %s (expires %s)", s.Agent, s.EventName, s.Callback, s.ExpiresAt.UTC().Format(time.RFC3339))
+		if s.ConsecutiveFailures > 0 || s.HasGap {
+			if s.LastError != "" {
+				desc += fmt.Sprintf(" [failures=%d: %s]", s.ConsecutiveFailures, s.LastError)
+			} else if s.HasGap {
+				desc += " [gap pending]"
+			}
+			failing = append(failing, desc)
+		}
+		parts = append(parts, desc)
+	}
+	if len(failing) > 0 {
+		return &check{name, "warn", fmt.Sprintf("%d active subscription(s) with delivery issues: %s", len(out.Subscriptions), strings.Join(parts, "; ")),
+			"Check that each callback endpoint is reachable over public HTTPS and accepting Standard Webhooks POSTs."}
+	}
+	return &check{name, "ok", fmt.Sprintf("%d active subscription(s): %s", len(out.Subscriptions), strings.Join(parts, "; ")), ""}
 }
 
 // unansweredCheck lists the webhook and email agents whose last wake went
