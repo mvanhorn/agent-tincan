@@ -249,7 +249,8 @@ model = "o4"   # keep me
 			if tc.wantNotice != "" && !strings.Contains(notice, tc.wantNotice) {
 				t.Errorf("notice %q lacks %q", notice, tc.wantNotice)
 			}
-			if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+			// Windows reports every writable file as 0666.
+			if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 				t.Errorf("mode = %v", fi.Mode().Perm())
 			}
 			if tc.changed {
@@ -645,6 +646,9 @@ func TestListenInstallFailsWhenCodexConfigUnwritable(t *testing.T) {
 	if strings.Contains(out.String(), "start it with") {
 		t.Fatalf("printed a start command:\n%s", out.String())
 	}
+	if _, err := os.Stat(listenServiceFile(o.Home, "linux", "codex")); err == nil {
+		t.Error("a failed install left a listener service behind")
+	}
 }
 
 // tincan upgrade runs the hidden tincan listen refresh.
@@ -674,5 +678,95 @@ func TestListenRefreshCommand(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "updated "+script) {
 		t.Fatalf("output:\n%s", out.String())
+	}
+}
+
+// A quoted approval key, basic or literal, is the same key: it is
+// rewritten in place, never joined by a second bare one.
+func TestSetCodexApprovalQuotedKey(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	for _, key := range []string{`"default_tools_approval_mode"`, `'default_tools_approval_mode'`} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			in := "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\n" + key + " = \"prompt\"\nenv = { TINCAN_CONFIG = \"" + cfg + "\" }\n"
+			if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, notice, err := setCodexApproval(path, "/opt/tincan", cfg, "/home/o/.config/tincan/client.json")
+			if err != nil || notice != "" || !changed {
+				t.Fatalf("changed=%v notice=%q err=%v", changed, notice, err)
+			}
+			b, _ := os.ReadFile(path)
+			if n := strings.Count(string(b), "default_tools_approval_mode"); n != 1 {
+				t.Fatalf("%d approval keys:\n%s", n, b)
+			}
+			if !strings.Contains(string(b), `default_tools_approval_mode = "approve"`) || strings.Contains(string(b), "prompt") {
+				t.Fatalf("not rewritten to approve:\n%s", b)
+			}
+			if e, _ := findCodexEntry(strings.Split(string(b), "\n")); !e.approve {
+				t.Errorf("edited entry does not read as approve:\n%s", b)
+			}
+		})
+	}
+}
+
+// Reinstalling keeps the environment the owner added to the service, on
+// both service managers, and names it without printing its value.
+func TestListenInstallKeepsOwnerEnv(t *testing.T) {
+	const secret = "ghp_s3cret&<value>"
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			cfg := filepath.Join(t.TempDir(), "codex.json")
+			o, _ := installForTest(t, goos, cfg, codexWake(t))
+			f := listenServiceFile(o.Home, goos, "codex")
+			b, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var edited string
+			if goos == "darwin" {
+				edited = strings.Replace(string(b), "    <key>TINCAN_CONFIG</key>", "    <key>COPILOT_GITHUB_TOKEN</key>\n    <string>"+html.EscapeString(secret)+"</string>\n    <key>TINCAN_CONFIG</key>", 1)
+			} else {
+				edited = strings.Replace(string(b), "Restart=always", "Environment=\"COPILOT_GITHUB_TOKEN="+secret+"\"\nEnvironment=TINCAN_WAKE_TIMEOUT=900\nRestart=always", 1)
+			}
+			if edited == string(b) {
+				t.Fatal("test could not add the variable")
+			}
+			if err := os.WriteFile(f, []byte(edited), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(f, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			o.Out = &out
+			if err := installListener(o, codexWake(t)); err != nil {
+				t.Fatal(err)
+			}
+			b, _ = os.ReadFile(f)
+			if got := serviceEnv(b, goos, "COPILOT_GITHUB_TOKEN"); got != secret {
+				t.Fatalf("COPILOT_GITHUB_TOKEN = %q after reinstall:\n%s", got, b)
+			}
+			if serviceEnv(b, goos, "TINCAN_CONFIG") != cfg {
+				t.Errorf("TINCAN_CONFIG lost:\n%s", b)
+			}
+			if n := strings.Count(string(b), "TINCAN_CONFIG"); n != 1 {
+				t.Errorf("TINCAN_CONFIG written %d times:\n%s", n, b)
+			}
+			if !strings.Contains(out.String(), "COPILOT_GITHUB_TOKEN") {
+				t.Errorf("output does not name the kept variable:\n%s", out.String())
+			}
+			if strings.Contains(out.String(), "s3cret") {
+				t.Errorf("output prints the value:\n%s", out.String())
+			}
+			if goos == "linux" {
+				if !strings.Contains(string(b), `Environment="TINCAN_WAKE_TIMEOUT=900"`) || !strings.Contains(out.String(), "TINCAN_WAKE_TIMEOUT") {
+					t.Errorf("unquoted assignment not kept:\n%s\n%s", b, out.String())
+				}
+			}
+			if fi, _ := os.Stat(f); fi.Mode().Perm() != 0o600 {
+				t.Errorf("mode = %v, want the owner's 0600", fi.Mode().Perm())
+			}
+		})
 	}
 }

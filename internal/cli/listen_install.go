@@ -111,7 +111,19 @@ func listenDir(configPath string) string {
 // install edited, so a woken Codex reads that same config.
 type listenService struct {
 	Agent, Script, Config, Binary, CodexHome string
+	// Keep is the environment the owner added to an earlier service
+	// definition, written again after tincan's own.
+	Keep []envVar
 }
+
+// envVar is one environment variable a service definition sets.
+type envVar struct{ Key, Value string }
+
+// listenOwnedEnv is the environment tincan itself writes into a listener's
+// service; every other variable there is the owner's.
+var listenOwnedEnv = []string{"PATH", "TINCAN_CONFIG", "TINCAN_BIN", "CODEX_HOME"}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (s listenService) def() history.ServiceDef {
 	launchdEnv, systemdEnv := "", ""
@@ -120,6 +132,14 @@ func (s listenService) def() history.ServiceDef {
 		launchdEnv = "\n    <key>CODEX_HOME</key>\n    <string>__CODEX_HOME__</string>"
 		systemdEnv = "\nEnvironment=\"CODEX_HOME=__CODEX_HOME__\""
 		vars = append(vars, "__CODEX_HOME__", s.CodexHome)
+	}
+	for i, v := range s.Keep {
+		// The values go in through placeholders so they are escaped for
+		// the plist or unit like tincan's own.
+		k, val := fmt.Sprintf("__KEEP_KEY_%d__", i), fmt.Sprintf("__KEEP_VALUE_%d__", i)
+		launchdEnv += "\n    <key>" + k + "</key>\n    <string>" + val + "</string>"
+		systemdEnv += "\nEnvironment=\"" + k + "=" + val + "\""
+		vars = append(vars, k, v.Key, val, v.Value)
 	}
 	return history.ServiceDef{
 		Label:   listenLabel(s.Agent),
@@ -285,7 +305,33 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 		return err
 	}
 
-	svc := listenService{Agent: o.Agent, Script: filepath.Join(dir, w.File), Config: o.ConfigPath, Binary: o.Binary}
+	// Everything that can fail runs before the service is written, so a
+	// failed install never leaves a service that starts at login.
+	if isCodex {
+		changed, notice, err := setCodexApproval(o.codexConfig(), o.Binary, o.ConfigPath, o.DefaultConfig)
+		switch {
+		case err != nil:
+			return fmt.Errorf("could not update %s (%w), so a woken Codex could not call the tincan tools. Fix that and run this again, or add default_tools_approval_mode = \"approve\" to its [mcp_servers.agent-tincan] table yourself. The listener service was not written", o.codexConfig(), err)
+		case notice != "":
+			return errors.New(notice + " The listener service was not written.")
+		case changed:
+			fmt.Fprintf(out, "set default_tools_approval_mode = \"approve\" on the agent-tincan entry in %s\n", o.codexConfig())
+		}
+	}
+
+	svcFile := listenServiceFile(o.Home, o.GOOS, o.Agent)
+	var priorMode fs.FileMode
+	var keep []envVar
+	if b, err := os.ReadFile(svcFile); err == nil {
+		keep = ownerEnv(serviceEnvVars(b, o.GOOS))
+		if fi, err := os.Stat(svcFile); err == nil {
+			priorMode = fi.Mode().Perm()
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read the existing listener service: %w", err)
+	}
+
+	svc := listenService{Agent: o.Agent, Script: filepath.Join(dir, w.File), Config: o.ConfigPath, Binary: o.Binary, Keep: keep}
 	if isCodex {
 		svc.CodexHome = o.CodexHome
 	}
@@ -293,18 +339,20 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "listener service definition: %s (not started)\n", res.Path)
-
-	if isCodex {
-		changed, notice, err := setCodexApproval(o.codexConfig(), o.Binary, o.ConfigPath, o.DefaultConfig)
-		switch {
-		case err != nil:
-			return fmt.Errorf("could not update %s (%w), so a woken Codex could not call the tincan tools. Fix that and run this again, or add default_tools_approval_mode = \"approve\" to its [mcp_servers.agent-tincan] table yourself", o.codexConfig(), err)
-		case notice != "":
-			return errors.New(notice)
-		case changed:
-			fmt.Fprintf(out, "set default_tools_approval_mode = \"approve\" on the agent-tincan entry in %s\n", o.codexConfig())
+	// A definition the owner made readable only by themselves (it may hold
+	// a token) stays that way.
+	if priorMode != 0 && priorMode&0o077 == 0 {
+		if err := os.Chmod(res.Path, priorMode); err != nil {
+			return err
 		}
+	}
+	fmt.Fprintf(out, "listener service definition: %s (not started)\n", res.Path)
+	if len(keep) > 0 {
+		names := make([]string, len(keep))
+		for i, v := range keep {
+			names[i] = v.Key
+		}
+		fmt.Fprintf(out, "kept the environment you added to it: %s\n", strings.Join(names, ", "))
 	}
 
 	fmt.Fprintf(out, "\nOn the relay host, add %q: {\"method\": \"command\"} to wake.json in the relay's state directory (keep it chmod 600), then restart the relay, so teammates see that %s is woken by command.\n", o.Agent, o.Agent)
@@ -352,6 +400,90 @@ func serviceEnv(b []byte, goos, key string) string {
 		return strings.NewReplacer(`%%`, `%`, `\"`, `"`, `\\`, `\`).Replace(string(m[1]))
 	}
 	return ""
+}
+
+var (
+	launchdEnvDict = regexp.MustCompile(`(?s)<key>EnvironmentVariables</key>\s*<dict>(.*?)</dict>`)
+	launchdEnvPair = regexp.MustCompile(`<key>([^<]*)</key>\s*(?:<string>([^<]*)</string>|<string\s*/>)`)
+	systemdEnvLine = regexp.MustCompile(`(?m)^\s*Environment=(.*)$`)
+)
+
+// serviceEnvVars is every environment variable a listener's plist or unit
+// sets, unescaped, in file order.
+func serviceEnvVars(b []byte, goos string) []envVar {
+	var vars []envVar
+	if goos == "darwin" {
+		d := launchdEnvDict.FindSubmatch(b)
+		if d == nil {
+			return nil
+		}
+		for _, m := range launchdEnvPair.FindAllSubmatch(d[1], -1) {
+			vars = append(vars, envVar{html.UnescapeString(string(m[1])), html.UnescapeString(string(m[2]))})
+		}
+		return vars
+	}
+	for _, m := range systemdEnvLine.FindAllSubmatch(b, -1) {
+		for _, word := range systemdWords(string(m[1])) {
+			if k, v, ok := strings.Cut(word, "="); ok {
+				vars = append(vars, envVar{k, strings.ReplaceAll(v, "%%", "%")})
+			}
+		}
+	}
+	return vars
+}
+
+// systemdWords splits a systemd Environment= value into its assignments:
+// words split at spaces, with double or single quotes and backslash
+// escapes.
+func systemdWords(s string) []string {
+	var words []string
+	var cur strings.Builder
+	var quote byte
+	in := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && quote != '\'' && i+1 < len(s):
+			i++
+			cur.WriteByte(s[i])
+			in = true
+		case quote != 0 && c == quote:
+			quote = 0
+		case quote == 0 && (c == '"' || c == '\''):
+			quote, in = c, true
+		case quote == 0 && (c == ' ' || c == '\t'):
+			if in {
+				words = append(words, cur.String())
+				cur.Reset()
+				in = false
+			}
+		default:
+			cur.WriteByte(c)
+			in = true
+		}
+	}
+	if in {
+		words = append(words, cur.String())
+	}
+	return words
+}
+
+// ownerEnv is the part of a listener's environment the owner added: every
+// variable tincan does not write itself, its last value winning as it does
+// for launchd and systemd.
+func ownerEnv(vars []envVar) []envVar {
+	var keep []envVar
+	for _, v := range vars {
+		if slices.Contains(listenOwnedEnv, v.Key) || !envName.MatchString(v.Key) || strings.ContainsAny(v.Value, "\n\r\x00") {
+			continue
+		}
+		if i := slices.IndexFunc(keep, func(k envVar) bool { return k.Key == v.Key }); i >= 0 {
+			keep[i].Value = v.Value
+			continue
+		}
+		keep = append(keep, v)
+	}
+	return keep
 }
 
 // refreshWakeScripts brings every installed listener's scripts up to this

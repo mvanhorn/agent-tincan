@@ -17,20 +17,23 @@ import (
 // line, so the owner's comments and order stay; the repo has no TOML library.
 
 var (
-	tomlAnyTable    = regexp.MustCompile(`^\s*\[`)
-	tomlApprovalKey = regexp.MustCompile(`^\s*default_tools_approval_mode\s*=`)
+	tomlAnyTable = regexp.MustCompile(`^\s*\[`)
+	// default_tools_approval_mode as a bare, basic-quoted or literal-quoted
+	// key; m[1] is the value after the =.
+	tomlApprovalKey = regexp.MustCompile(`^\s*(?:default_tools_approval_mode|"default_tools_approval_mode"|'default_tools_approval_mode')\s*=(.*)$`)
 	// TINCAN_CONFIG as a bare or quoted key, with a basic or literal string.
 	tomlEnvConfig = regexp.MustCompile(`(?:^|[\s{,])(?:TINCAN_CONFIG|"TINCAN_CONFIG"|'TINCAN_CONFIG')\s*=\s*(?:("(?:[^"\\]|\\.)*")|'([^']*)')`)
 )
 
 // codexEntry is the agent-tincan table of a Codex config.toml: its line
 // range (header to before the next table that is not its own sub-table),
-// whether it sets the approval mode to approve, and the TINCAN_CONFIG it
-// pins ("" when none, meaning the default config). unclear is set when
-// TINCAN_CONFIG appears in a form this reader cannot take, or more than
-// once with different values.
+// whether its own table (not a sub-table) sets the approval mode to
+// approve, and the TINCAN_CONFIG it pins ("" when none, meaning the
+// default config). unclear is set when TINCAN_CONFIG appears in a form
+// this reader cannot take, or more than once with different values.
 type codexEntry struct {
 	start, end      int
+	mainEnd         int // where the entry's own table ends: its first sub-table, else end
 	approve, hasKey bool
 	config          string
 	unclear         bool
@@ -63,17 +66,26 @@ func findCodexEntry(lines []string) (codexEntry, bool) {
 		trimmed := strings.TrimSpace(line)
 		if e.start < 0 {
 			if m := tomlSection.FindStringSubmatch(trimmed); m != nil && m[1]+m[2] == "agent-tincan" {
-				e.start, e.end = i, len(lines)
+				e.start, e.end, e.mainEnd = i, len(lines), len(lines)
 			}
 			continue
 		}
-		if tomlAnyTable.MatchString(line) && !strings.HasPrefix(trimmed, "[mcp_servers.agent-tincan.") && !strings.HasPrefix(trimmed, `[mcp_servers."agent-tincan".`) {
-			e.end = i
-			break
+		if tomlAnyTable.MatchString(line) {
+			if !strings.HasPrefix(trimmed, "[mcp_servers.agent-tincan.") && !strings.HasPrefix(trimmed, `[mcp_servers."agent-tincan".`) {
+				e.end = i
+				if e.mainEnd > i {
+					e.mainEnd = i
+				}
+				break
+			}
+			if e.mainEnd > i {
+				e.mainEnd = i
+			}
 		}
-		if tomlApprovalKey.MatchString(line) {
+		if m := tomlApprovalKey.FindStringSubmatch(line); m != nil && i < e.mainEnd {
 			e.hasKey = true
-			e.approve = strings.Contains(strings.ReplaceAll(line, " ", ""), `="approve"`)
+			v := strings.TrimSpace(m[1])
+			e.approve = v == `"approve"` || v == `'approve'`
 		}
 		if !strings.Contains(line, "TINCAN_CONFIG") {
 			continue
@@ -201,15 +213,34 @@ func setCodexApproval(path, binary, cfg, def string) (changed bool, notice strin
 	}
 	const keyLine = `default_tools_approval_mode = "approve"`
 	if e.hasKey {
-		for i := e.start + 1; i < e.end; i++ {
-			if tomlApprovalKey.MatchString(lines[i]) {
+		for i := e.start + 1; i < e.mainEnd; i++ {
+			if tomlApprovalKey.MatchString(tomlStripComment(lines[i])) {
 				lines[i] = keyLine
 			}
 		}
 	} else {
 		lines = append(lines[:e.start+1], append([]string{keyLine}, lines[e.start+1:]...)...)
 	}
+	if n := codexApprovalKeys(lines); n != 1 {
+		return false, "", fmt.Errorf("the edited agent-tincan entry would set default_tools_approval_mode %d times, so %s was left alone", n, path)
+	}
 	return true, "", writeFileReplacing(real, []byte(strings.Join(lines, "\n")), mode)
+}
+
+// codexApprovalKeys counts the default_tools_approval_mode keys in the
+// agent-tincan entry's own table, 0 when there is no entry.
+func codexApprovalKeys(lines []string) int {
+	e, ok := findCodexEntry(lines)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for i := e.start + 1; i < e.mainEnd; i++ {
+		if tomlApprovalKey.MatchString(tomlStripComment(lines[i])) {
+			n++
+		}
+	}
+	return n
 }
 
 // codexConfigPath is Codex's config file under codexHome, else under
