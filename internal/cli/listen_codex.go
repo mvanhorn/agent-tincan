@@ -29,15 +29,16 @@ var (
 	tomlEnvConfig   = regexp.MustCompile(`(?:^|[\s{,])(?:TINCAN_CONFIG|"TINCAN_CONFIG"|'TINCAN_CONFIG')\s*=\s*(?:("(?:[^"\\]|\\.)*")|'([^']*)')`)
 )
 
-// codexEntry is the agent-tincan table of a Codex config.toml: its line
-// range (header to before the next table that is not its own sub-table),
-// whether its own table (not a sub-table) sets the approval mode to
-// approve, and the TINCAN_CONFIG it pins ("" when none, meaning the
-// default config). unclear is set when TINCAN_CONFIG appears in a form
+// codexEntry is the agent-tincan entry of a Codex config.toml. start and
+// mainEnd bound its own table (header to the next table header of any
+// kind), which is the only part setCodexApproval edits. approve and hasKey
+// come from that table alone. config is the TINCAN_CONFIG it pins ("" when
+// none, meaning the default config), read from its own table and from
+// every sub-table such as [mcp_servers.agent-tincan.env], wherever in the
+// file they appear. unclear is set when TINCAN_CONFIG appears in a form
 // this reader cannot take, or more than once with different values.
 type codexEntry struct {
-	start, end      int
-	mainEnd         int // where the entry's own table ends: its first sub-table, else end
+	start, mainEnd  int
 	approve, hasKey bool
 	config          string
 	unclear         bool
@@ -171,28 +172,27 @@ func tomlCodexEntryUnread(s string) string {
 func findCodexEntry(lines []string) (codexEntry, bool) {
 	e := codexEntry{start: -1}
 	seen := false
+	// inEntry: the current table is the entry's own table or one of its
+	// sub-tables. inMain: it is the entry's own table.
+	inEntry, inMain := false, false
 	for i, raw := range lines {
 		line := tomlStripComment(raw)
-		trimmed := strings.TrimSpace(line)
-		if e.start < 0 {
-			if keys, ok := tomlTableHeader(trimmed); ok && len(keys) == 2 && isCodexEntryKey(keys) {
-				e.start, e.end, e.mainEnd = i, len(lines), len(lines)
+		if tomlAnyTable.MatchString(line) {
+			if inMain {
+				e.mainEnd = i
+			}
+			keys, ok := tomlTableHeader(line)
+			inEntry = ok && isCodexEntryKey(keys)
+			inMain = inEntry && len(keys) == 2 && e.start < 0
+			if inMain {
+				e.start, e.mainEnd = i, len(lines)
 			}
 			continue
 		}
-		if tomlAnyTable.MatchString(line) {
-			if keys, ok := tomlTableHeader(trimmed); !ok || len(keys) < 3 || !isCodexEntryKey(keys) {
-				e.end = i
-				if e.mainEnd > i {
-					e.mainEnd = i
-				}
-				break
-			}
-			if e.mainEnd > i {
-				e.mainEnd = i
-			}
+		if !inEntry {
+			continue
 		}
-		if m := tomlApprovalKey.FindStringSubmatch(line); m != nil && i < e.mainEnd {
+		if m := tomlApprovalKey.FindStringSubmatch(line); m != nil && inMain {
 			e.hasKey = true
 			v := strings.TrimSpace(m[1])
 			e.approve = v == `"approve"` || v == `'approve'`

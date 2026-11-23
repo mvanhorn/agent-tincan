@@ -909,3 +909,82 @@ func TestTomlTableHeader(t *testing.T) {
 		}
 	}
 }
+
+// laterSubTable is a Codex config whose agent-tincan env sub-table comes
+// after another server's table, which TOML allows. That server's own
+// TINCAN_CONFIG and approval mode belong to it, not to agent-tincan.
+func laterSubTable(mainKeys, pin string) string {
+	return "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nargs = [\"mcp\"]\n" + mainKeys +
+		"\n[mcp_servers.other]\ncommand = \"other\"\ndefault_tools_approval_mode = \"prompt\"\nenv = { TINCAN_CONFIG = \"/elsewhere/other.json\" }\n" +
+		"\n[mcp_servers.agent-tincan.env]\nTINCAN_CONFIG = \"" + pin + "\"\n"
+}
+
+// A pin in a sub-table after another server's table still names this
+// agent, so install goes ahead.
+func TestListenInstallReadsLaterCodexSubTable(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "codex.json")
+	o := listenOptions(t, "linux", cfg)
+	if err := os.MkdirAll(filepath.Dir(o.codexConfig()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(o.codexConfig(), []byte(laterSubTable("", cfg)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installListener(o, codexWake(t)); err != nil {
+		t.Fatalf("install refused a matching later pin: %v", err)
+	}
+	b, _ := os.ReadFile(o.codexConfig())
+	if e, _ := findCodexEntry(strings.Split(string(b), "\n")); !e.approve || e.config != cfg {
+		t.Fatalf("entry = %+v\n%s", e, b)
+	}
+}
+
+// A later sub-table that pins another agent refuses an install for the
+// default config, the same as an adjacent pin would.
+func TestListenInstallRefusesLaterCodexSubTablePin(t *testing.T) {
+	o := listenOptions(t, "linux", "")
+	o.ConfigPath = o.DefaultConfig
+	if err := os.MkdirAll(filepath.Dir(o.codexConfig()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	in := laterSubTable("", "/elsewhere/claude.json")
+	if err := os.WriteFile(o.codexConfig(), []byte(in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := installListener(o, codexWake(t))
+	if err == nil || !strings.Contains(err.Error(), "/elsewhere/claude.json") || !strings.Contains(err.Error(), "Nothing was installed") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(listenServiceFile(o.Home, "linux", "codex")); err == nil {
+		t.Error("service written for a refused install")
+	}
+	if b, _ := os.ReadFile(o.codexConfig()); string(b) != in {
+		t.Errorf("Codex config changed:\n%s", b)
+	}
+}
+
+// The approval mode is added or replaced in the entry's own table only;
+// the other server's table and the later sub-table stay as they were.
+func TestSetCodexApprovalLaterSubTable(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	key := "default_tools_approval_mode = \"approve\"\n"
+	for _, tc := range []struct{ name, in, want string }{
+		{"adds", laterSubTable("", cfg), strings.Replace(laterSubTable("", cfg), "[mcp_servers.agent-tincan]\n", "[mcp_servers.agent-tincan]\n"+key, 1)},
+		{"replaces", laterSubTable("default_tools_approval_mode = \"prompt\"\n", cfg), laterSubTable(key, cfg)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tc.in), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			changed, notice, err := setCodexApproval(path, "/opt/tincan", cfg, "/def.json")
+			if err != nil || notice != "" || !changed {
+				t.Fatalf("changed=%v notice=%q err=%v", changed, notice, err)
+			}
+			b, _ := os.ReadFile(path)
+			if string(b) != tc.want {
+				t.Fatalf("got:\n%s\nwant:\n%s", b, tc.want)
+			}
+		})
+	}
+}
