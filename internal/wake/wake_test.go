@@ -1123,7 +1123,15 @@ func TestInFlightSendAfterRejoinIsNotRemembered(t *testing.T) {
 	now.set(start.Add(3 * time.Second))
 	queued(w, "grokbot", 1)
 	waitCalls(t, &rc, 2)
-	got, ok := w.LastWake("grokbot")
+	// The hook has the call before the waker records the wake, so wait for
+	// the record rather than reading it once.
+	var got store.Wake
+	var ok bool
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if got, ok = w.LastWake("grokbot"); ok {
+			break
+		}
+	}
 	if !ok || !got.At.Equal(start.Add(3*time.Second)) || got.Result != envelope.WakeOK {
 		t.Fatalf("new agent's wake = %+v %v", got, ok)
 	}
