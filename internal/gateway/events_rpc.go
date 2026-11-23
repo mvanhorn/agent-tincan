@@ -405,7 +405,8 @@ func (g *Gateway) handleEventsSubscribe(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	sub, err := g.events.store.CreateSubscription(r.Context(), EventSubscription{
+	tokenHash, _ := r.Context().Value(tokenHashKey{}).(string)
+	sub, err := g.events.store.CreateSubscriptionIfTokenActive(r.Context(), tokenHash, EventSubscription{
 		ID:            subID,
 		Agent:         agent,
 		ClientID:      clientID,
@@ -414,6 +415,11 @@ func (g *Gateway) handleEventsSubscribe(w http.ResponseWriter, r *http.Request, 
 		CallbackURL:   cbURL,
 		SigningSecret: signingSecret,
 	}, ttl)
+	if errors.Is(err, ErrTokenRevoked) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+g.base+`/.well-known/oauth-protected-resource"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if errors.Is(err, ErrTooManySubscriptions) {
 		writeEventsRPC(w, id, nil, &eventsRPCError{Code: rpcSubscriptionLimitReached, Message: err.Error()})
 		return

@@ -544,5 +544,73 @@ func TestEndToEndGatewayWakeRosterAndRemove(t *testing.T) {
 	}
 }
 
+func TestSubscribeRefusedWhenRevokedDuringVerification(t *testing.T) {
+	e, hub := setupWithEvents(t)
+	ctx := context.Background()
+	code, _, err := e.conn.Connect(ctx, "chatgpt", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := e.login(t, code)
+	secret, _ := gateway.GenerateSigningSecret()
+
+	cb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate agent removal / token revocation racing with the verification challenge.
+		if err := e.oauth.RevokeAgent(ctx, "chatgpt"); err != nil {
+			t.Errorf("RevokeAgent: %v", err)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"challenge": body["challenge"]})
+	}))
+	defer cb.Close()
+	gateway.AllowUnsafeCallbacksForTest(hub, cb.Client())
+
+	resp, _ := postMCP(t, e.gw.URL+"/mcp", tok, nil, map[string]any{
+		"jsonrpc": "2.0", "id": 99, "method": "events/subscribe",
+		"params": map[string]any{
+			"name":        "inbox.request",
+			"callbackUrl": cb.URL,
+			"secret":      secret,
+		},
+	})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 after revocation mid-challenge", resp.StatusCode)
+	}
+	if hub.HasActiveSubscription("chatgpt") {
+		t.Fatal("revoked token must not persist a subscription")
+	}
+}
+
+func TestCallbackQuerySecretStrippedFromErrors(t *testing.T) {
+	e, hub := setupWithEvents(t)
+	ctx := context.Background()
+	code, _, err := e.conn.Connect(ctx, "chatgpt", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := e.login(t, code)
+	secret, _ := gateway.GenerateSigningSecret()
+
+	// Closed server produces a *url.Error carrying the full URL + query token.
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL + "/hook?token=SUPER_SECRET_QUERY_TOKEN"
+	closed.Close()
+	gateway.AllowUnsafeCallbacksForTest(hub, &http.Client{Timeout: 200 * time.Millisecond})
+
+	_, raw := postMCP(t, e.gw.URL+"/mcp", tok, nil, map[string]any{
+		"jsonrpc": "2.0", "id": 100, "method": "events/subscribe",
+		"params": map[string]any{
+			"name":        "inbox.request",
+			"callbackUrl": closedURL,
+			"secret":      secret,
+		},
+	})
+	if strings.Contains(string(raw), "SUPER_SECRET_QUERY_TOKEN") {
+		t.Fatalf("callback query secret leaked into error response: %s", raw)
+	}
+}
+
 // Keep unused import check happy if mcp package is referenced above.
 var _ = (*mcp.ClientSession)(nil)

@@ -167,9 +167,28 @@ func (s *EventStore) CountActiveForAgent(ctx context.Context, agent string) (int
 	return n, err
 }
 
+// ErrTokenRevoked means the OAuth access token that started a subscription was
+// revoked or expired before the subscription could be persisted.
+var ErrTokenRevoked = errors.New("access token revoked or expired")
+
 // CreateSubscription sweeps expired subscriptions for the agent, enforces the
 // per-agent cap, and persists sub.
 func (s *EventStore) CreateSubscription(ctx context.Context, sub EventSubscription, ttl time.Duration) (EventSubscription, error) {
+	return s.createSubscription(ctx, "", sub, ttl)
+}
+
+// CreateSubscriptionIfTokenActive atomically verifies that tokenHash is still a
+// live access token for (sub.Agent, sub.ClientID) in gw_tokens inside the same
+// SQLite write transaction before persisting sub, closing the revocation race
+// across the outbound callback verification challenge.
+func (s *EventStore) CreateSubscriptionIfTokenActive(ctx context.Context, tokenHash string, sub EventSubscription, ttl time.Duration) (EventSubscription, error) {
+	if tokenHash == "" {
+		return EventSubscription{}, ErrTokenRevoked
+	}
+	return s.createSubscription(ctx, tokenHash, sub, ttl)
+}
+
+func (s *EventStore) createSubscription(ctx context.Context, tokenHash string, sub EventSubscription, ttl time.Duration) (EventSubscription, error) {
 	filtersJSON, err := marshalFilters(sub.Filters)
 	if err != nil {
 		return EventSubscription{}, err
@@ -184,6 +203,20 @@ func (s *EventStore) CreateSubscription(ctx context.Context, sub EventSubscripti
 		return EventSubscription{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if tokenHash != "" {
+		var tokenExp int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT expires_at FROM gw_tokens WHERE hash = ? AND kind = ? AND agent = ? AND client_id = ?`,
+			tokenHash, kindAccess, sub.Agent, sub.ClientID,
+		).Scan(&tokenExp)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && nowMs > tokenExp) {
+			return EventSubscription{}, ErrTokenRevoked
+		}
+		if err != nil {
+			return EventSubscription{}, err
+		}
+	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM gw_event_deliveries WHERE subscription_id IN (SELECT id FROM gw_event_subscriptions WHERE expires_at <= ?)`, nowMs); err != nil {
 		return EventSubscription{}, err

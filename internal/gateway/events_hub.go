@@ -604,7 +604,7 @@ func (h *EventHub) verifyCallback(ctx context.Context, subID, callbackURL, secre
 	}
 	resp, err := h.getVerifyClient().Do(req)
 	if err != nil {
-		return classifyCallbackError(err), err
+		return classifyCallbackError(err), sanitizeWebhookError(err)
 	}
 	defer resp.Body.Close()
 
@@ -622,6 +622,23 @@ func (h *EventHub) verifyCallback(ctx context.Context, subID, callbackURL, secre
 		return "challenge_failed", errors.New("callback did not echo the verification challenge")
 	}
 	return "", nil
+}
+
+// sanitizeWebhookError strips callback URLs (and any query-string tokens in
+// them) from net/http *url.Error wrappers before errors reach logs, last_error,
+// the admin API, or JSON-RPC responses.
+func sanitizeWebhookError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		op := ue.Op
+		if op == "" {
+			op = "Post"
+		}
+		return fmt.Errorf("%s %s: %w", op, SanitizeCallbackURL(ue.URL), ue.Err)
+	}
+	return err
 }
 
 func classifyCallbackError(err error) string {
@@ -665,7 +682,7 @@ func (h *EventHub) postSigned(ctx context.Context, client *http.Client, callback
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, sanitizeWebhookError(err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))

@@ -67,16 +67,18 @@ func (g *Gateway) Handler() http.Handler {
 }
 
 type (
-	agentKey    struct{}
-	clientIDKey struct{}
+	agentKey     struct{}
+	clientIDKey  struct{}
+	tokenHashKey struct{}
 )
 
 func (g *Gateway) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		trimmed := strings.TrimSpace(tok)
 		agent, clientID, err := "", "", error(nil)
 		if ok {
-			agent, clientID, err = g.oauth.ValidateToken(r.Context(), strings.TrimSpace(tok))
+			agent, clientID, err = g.oauth.ValidateToken(r.Context(), trimmed)
 		}
 		if !ok || err != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+g.base+`/.well-known/oauth-protected-resource"`)
@@ -85,6 +87,7 @@ func (g *Gateway) requireToken(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), agentKey{}, agent)
 		ctx = context.WithValue(ctx, clientIDKey{}, clientID)
+		ctx = context.WithValue(ctx, tokenHashKey{}, hash(trimmed))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
