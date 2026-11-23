@@ -390,7 +390,7 @@ func TestPhoneTasksTab(t *testing.T) {
 		t.Fatalf("task after the assign = %+v", assigned.Task)
 	}
 	row := list()[0]
-	if row.AskStatus != envelope.StatusQueued || row.DoneNonce != "" || row.DropNonce == "" {
+	if row.AskStatus != envelope.StatusQueued || row.DoneNonce == "" || row.DropNonce == "" {
 		t.Fatalf("listing of a working task = %+v", row)
 	}
 

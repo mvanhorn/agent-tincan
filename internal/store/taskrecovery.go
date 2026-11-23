@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
@@ -211,12 +210,5 @@ func recoveredTaskTitle(body, target string) string {
 	if line == "" {
 		return "Unfinished ask to " + target
 	}
-	if len(line) <= 200 {
-		return line
-	}
-	end := 197
-	for !utf8.RuneStart(line[end]) {
-		end--
-	}
-	return line[:end] + "…"
+	return shortAskLine(line)
 }

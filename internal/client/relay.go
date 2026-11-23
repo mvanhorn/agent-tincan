@@ -550,6 +550,12 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	if source, _ := ctx.Value(askSourceKey{}).(string); source != "" {
 		in["source"] = source
 	}
+	if in["kind"] == envelope.KindAsk && quietAskOf(ctx) {
+		in["quiet"] = true
+	}
+	if about := askAbout(ctx); about != "" {
+		in["about"] = about
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	if err == nil {
@@ -1256,6 +1262,31 @@ func WithAskSource(ctx context.Context, source string) context.Context {
 	return context.WithValue(ctx, askSourceKey{}, source)
 }
 
+type aboutKey struct{}
+
+// WithAskAbout links subsequent sends to the specified task or open ask.
+func WithAskAbout(ctx context.Context, about string) context.Context {
+	return context.WithValue(ctx, aboutKey{}, about)
+}
+
+func askAbout(ctx context.Context) string {
+	about, _ := ctx.Value(aboutKey{}).(string)
+	return about
+}
+
+type quietAskKey struct{}
+
+// WithQuietAsk sets the quiet send field on asks sent with ctx. It affects
+// task filing only. Older relays ignore the field.
+func WithQuietAsk(ctx context.Context, quiet bool) context.Context {
+	return context.WithValue(ctx, quietAskKey{}, quiet)
+}
+
+func quietAskOf(ctx context.Context) bool {
+	quiet, _ := ctx.Value(quietAskKey{}).(bool)
+	return quiet
+}
+
 // AdvertiseSocketWake turns SocketWakeFeature on or off for every later
 // call. It is safe to call while the client is in use.
 func (r *Relay) AdvertiseSocketWake(on bool) { r.socketWake.Store(on) }
@@ -1516,7 +1547,14 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 				req.Attachments = append(req.Attachments, envelope.Attachment{ID: up.ID})
 			}
 			var sent envelope.SendResponse
-			err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent)
+			source, _ := ctx.Value(askSourceKey{}).(string)
+			in := struct {
+				envelope.Request
+				Source string `json:"source,omitempty"`
+				Quiet  bool   `json:"quiet,omitempty"`
+				About  string `json:"about,omitempty"`
+			}{req, source, kind == envelope.KindAsk && quietAskOf(ctx), askAbout(ctx)}
+			err = r.call(ctx, r.api, "POST", "/v1/send", in, &sent)
 			if err == nil {
 				req = sent.Request
 				target = sent.Target

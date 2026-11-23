@@ -238,7 +238,7 @@ func TestTaskRepeatEnds(t *testing.T) {
 	ctx := context.Background()
 	ends := map[string]func(s *Store, id, schedule int64) error{
 		"done": func(s *Store, id, _ int64) error {
-			_, err := s.MarkTaskDone(ctx, id, envelope.TaskOwner, "")
+			_, _, err := s.MarkTaskDone(ctx, id, envelope.TaskOwner, "")
 			return err
 		},
 		"dropped by its filer": func(s *Store, id, _ int64) error {

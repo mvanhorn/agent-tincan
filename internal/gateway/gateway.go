@@ -27,7 +27,8 @@ type Gateway struct {
 	oauth   *OAuth
 	relay   http.Handler // the relay's agent API, called in-process
 	version string
-	a2aFile string // the a2a.json that says who is published, "" for none
+	a2aFile string    // the a2a.json that says who is published, "" for none
+	events  *EventHub // optional MCP Events hub for /mcp
 
 	mu       sync.Mutex
 	failures []time.Time // recent bad login codes, for lockout
@@ -41,6 +42,9 @@ func New(base string, oauth *OAuth, relay http.Handler, version string) *Gateway
 	return &Gateway{base: strings.TrimRight(base, "/"), oauth: oauth, relay: relay, version: version}
 }
 
+// SetEvents attaches an EventHub to serve MCP Events on /mcp.
+func (g *Gateway) SetEvents(h *EventHub) { g.events = h }
+
 // Handler is the public handler. Anything not listed here is 404.
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -51,7 +55,8 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("GET /authorize", g.authorizePage)
 	mux.HandleFunc("POST /authorize", g.authorizeSubmit)
 	mux.HandleFunc("POST /token", g.token)
-	mux.Handle("/mcp", g.requireToken(g.refuseGuests(mcp.NewStreamableHTTPHandler(g.serverFor, &mcp.StreamableHTTPOptions{Stateless: true}))))
+	mcpHandler := mcp.NewStreamableHTTPHandler(g.serverFor, &mcp.StreamableHTTPOptions{Stateless: true})
+	mux.Handle("/mcp", g.requireToken(g.refuseGuests(g.eventsMiddleware(mcpHandler))))
 	mux.HandleFunc("GET /.well-known/agent-card.json", g.rootCard)
 	mux.HandleFunc("GET /a2a/{teammate}/.well-known/agent-card.json", g.teammateCard)
 	mux.Handle("POST /a2a/{teammate}", g.whenPublished(g.requireToken(http.HandlerFunc(g.a2a))))
@@ -61,21 +66,29 @@ func (g *Gateway) Handler() http.Handler {
 	})
 }
 
-type agentKey struct{}
+type (
+	agentKey     struct{}
+	clientIDKey  struct{}
+	tokenHashKey struct{}
+)
 
 func (g *Gateway) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		agent, err := "", error(nil)
+		trimmed := strings.TrimSpace(tok)
+		agent, clientID, err := "", "", error(nil)
 		if ok {
-			agent, err = g.oauth.Validate(r.Context(), strings.TrimSpace(tok))
+			agent, clientID, err = g.oauth.ValidateToken(r.Context(), trimmed)
 		}
 		if !ok || err != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+g.base+`/.well-known/oauth-protected-resource"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), agentKey{}, agent)))
+		ctx := context.WithValue(r.Context(), agentKey{}, agent)
+		ctx = context.WithValue(ctx, clientIDKey{}, clientID)
+		ctx = context.WithValue(ctx, tokenHashKey{}, hash(trimmed))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -328,6 +341,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 type Connector struct {
 	Dir     *identity.Directory
 	OAuth   *OAuth
+	Events  *EventHub
 	Base    string
 	A2AFile string // the a2a.json that says who is published, "" for none
 }
@@ -376,10 +390,16 @@ func (c Connector) dropOldTokens(ctx context.Context, name string) error {
 	if ok && strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
 		return nil
 	}
-	return c.OAuth.RevokeAgent(ctx, name)
+	return c.Revoke(ctx, name)
 }
 
-// Revoke drops the agent's tokens.
+// Revoke drops the agent's tokens and terminates any active MCP Events subscriptions.
 func (c Connector) Revoke(ctx context.Context, name string) error {
-	return c.OAuth.RevokeAgent(ctx, name)
+	if err := c.OAuth.RevokeAgent(ctx, name); err != nil {
+		return err
+	}
+	if c.Events != nil {
+		c.Events.TerminateAgent(ctx, name, "agent_removed")
+	}
+	return nil
 }
