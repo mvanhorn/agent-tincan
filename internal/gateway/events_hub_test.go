@@ -516,3 +516,131 @@ func TestEventHubStandaloneGapRecoveryNotice(t *testing.T) {
 	}
 	t.Fatal("has_gap was not cleared after standalone recovery gap notice")
 }
+
+func TestEventHubRateLimitedStandaloneGapDoesNotSpin(t *testing.T) {
+	var nowUnixNano atomic.Int64
+	base := time.Date(2026, 11, 23, 6, 0, 0, 0, time.UTC)
+	nowUnixNano.Store(base.UnixNano())
+	fakeNow := func() time.Time { return time.Unix(0, nowUnixNano.Load()).UTC() }
+
+	hub := newTestHub(t, EventHubOptions{
+		Now:          fakeNow,
+		MaxPerHour:   1,
+		PollInterval: 10 * time.Millisecond,
+		RetryBackoff: []time.Duration{20 * time.Millisecond},
+	})
+	srv, got, mu := startWebhookRecorder(t, nil)
+	AllowUnsafeCallbacksForTest(hub, srv.Client())
+
+	secret, _ := GenerateSigningSecret()
+	ctx := context.Background()
+	_, err := hub.store.CreateSubscription(ctx, EventSubscription{
+		ID: "sub_rate_gap", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
+	}, 4*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Consume the 1/hour budget with one normal event.
+	hub.Queued(ctx, envelope.Request{ID: "req_1", From: "codex", To: "chatgpt"})
+	waitForCount(t, got, mu, 1)
+
+	// Mark has_gap and advance past the gap backoff, while still inside the 1-hour rate window.
+	if err := hub.store.SetHasGap(ctx, "sub_rate_gap"); err != nil {
+		t.Fatal(err)
+	}
+	nowUnixNano.Store(base.Add(time.Second).UnixNano())
+	hub.signalWorker()
+
+	// Wait until the hub records the gap deferral retry timestamp.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if hub.isGapDeferred("sub_rate_gap", fakeNow()) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !hub.isGapDeferred("sub_rate_gap", fakeNow()) {
+		t.Fatal("expected rate-limited standalone gap to record a retry deferral")
+	}
+
+	// Across several poll ticks before retryAt, no gap webhook may be sent and no worker should spin.
+	time.Sleep(60 * time.Millisecond)
+	mu.Lock()
+	count := len(*got)
+	mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected 1 webhook while rate-limited, got %d", count)
+	}
+
+	// Advance clock past the hourly rate window -> standalone gap notice delivers once and clears has_gap.
+	nowUnixNano.Store(base.Add(time.Hour + time.Second).UnixNano())
+	hub.signalWorker()
+	evs := waitForCount(t, got, mu, 2)
+	if evs[1].Payload["type"] != "gap" || evs[1].Payload["truncated"] != true {
+		t.Fatalf("expected standalone gap notice after rate window, got %+v", evs[1].Payload)
+	}
+	deadline = time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		sub, ok, _ := hub.store.Subscription(ctx, "sub_rate_gap")
+		if ok && !sub.HasGap {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("has_gap was not cleared after deferred standalone gap notice")
+}
+
+func TestEventHubDoesNotRedeliverCompletedDelivery(t *testing.T) {
+	hub := newTestHub(t, EventHubOptions{PollInterval: 5 * time.Millisecond})
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	AllowUnsafeCallbacksForTest(hub, srv.Client())
+	secret, _ := GenerateSigningSecret()
+	ctx := context.Background()
+	_, err := hub.store.CreateSubscription(ctx, EventSubscription{
+		ID: "sub_once", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hub.Queued(ctx, envelope.Request{ID: "req_once", From: "codex", To: "chatgpt"})
+	select {
+	case <-started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("delivery never started")
+	}
+
+	// Trigger overlapping scheduler passes while delivery 1 is in flight and across its completion.
+	for range 5 {
+		hub.processDue(ctx)
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	for range 5 {
+		hub.processDue(ctx)
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected delivery to be sent exactly once, got %d", got)
+	}
+}

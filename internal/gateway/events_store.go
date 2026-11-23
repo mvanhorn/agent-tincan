@@ -549,6 +549,62 @@ func (s *EventStore) DueDeliveries(ctx context.Context, limit int) ([]EventDeliv
 		return nil, err
 	}
 	defer rows.Close()
+	return scanDeliveries(rows)
+}
+
+// DueDeliverySubscriptionIDs returns up to limit distinct subscription IDs that
+// have at least one due delivery, ordered by earliest due timestamp.
+func (s *EventStore) DueDeliverySubscriptionIDs(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT subscription_id
+		 FROM gw_event_deliveries
+		 WHERE next_attempt_at <= ?
+		 GROUP BY subscription_id
+		 ORDER BY MIN(next_attempt_at) ASC, MIN(created_at) ASC
+		 LIMIT ?`,
+		s.now().UnixMilli(), limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// DueDeliveriesForSubscription returns up to limit due deliveries for one
+// subscription in FIFO order. Callers should hold the per-subscription worker
+// lock so concurrent workers cannot observe stale rows.
+func (s *EventStore) DueDeliveriesForSubscription(ctx context.Context, subscriptionID string, limit int) ([]EventDelivery, error) {
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT event_id, subscription_id, agent, event_name, payload_json, attempts, next_attempt_at, created_at
+		 FROM gw_event_deliveries
+		 WHERE subscription_id = ? AND next_attempt_at <= ?
+		 ORDER BY next_attempt_at, created_at
+		 LIMIT ?`,
+		subscriptionID, s.now().UnixMilli(), limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDeliveries(rows)
+}
+
+func scanDeliveries(rows *sql.Rows) ([]EventDelivery, error) {
 	var out []EventDelivery
 	for rows.Next() {
 		var d EventDelivery
@@ -720,6 +776,29 @@ func (s *EventStore) DueGapSubscriptions(ctx context.Context, minAge time.Durati
 		out = append(out, sub)
 	}
 	return out, rows.Err()
+}
+
+// DueGapSubscription re-verifies under a per-subscription worker lock that
+// subscriptionID still needs a standalone recovery gap notice.
+func (s *EventStore) DueGapSubscription(ctx context.Context, subscriptionID string, minAge time.Duration) (EventSubscription, bool, error) {
+	now := s.now().UTC()
+	nowMs := now.UnixMilli()
+	cutoffMs := now.Add(-minAge).UnixMilli()
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, agent, client_id, event_name, filters_json, callback_url, signing_secret, expires_at, consecutive_failures, has_gap, last_error, created_at, updated_at
+		 FROM gw_event_subscriptions s
+		 WHERE s.id = ? AND s.has_gap = 1 AND s.expires_at > ? AND s.updated_at <= ?
+		   AND NOT EXISTS (SELECT 1 FROM gw_event_deliveries d WHERE d.subscription_id = s.id)`,
+		subscriptionID, nowMs, cutoffMs,
+	)
+	sub, err := scanSubscription(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EventSubscription{}, false, nil
+	}
+	if err != nil {
+		return EventSubscription{}, false, err
+	}
+	return sub, true, nil
 }
 
 func truncateErr(s string) string {
