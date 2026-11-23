@@ -2,15 +2,22 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 // --self-upgrade fills in the two upgrade flags, keeping any the operator
@@ -176,6 +183,64 @@ func TestSelfUpgradeWarning(t *testing.T) {
 	}
 }
 
+// A --dist that links elsewhere is only as safe as the folders above the
+// link's target: whoever can write /srv/shared can swap /srv/shared/releases.
+func TestSelfUpgradeWarningSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the writability check is Unix-only")
+	}
+	exe := filepath.Join(t.TempDir(), "tincan")
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shared := t.TempDir()
+	releases := filepath.Join(shared, "releases")
+	if err := os.Mkdir(releases, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(shared, 0o755) })
+	dist := filepath.Join(t.TempDir(), "dist")
+	if err := os.Symlink(releases, dist); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := selfUpgradeWarning(exe, dist); !strings.Contains(got, real) || !strings.Contains(got, "other users") {
+		t.Fatalf("dist links into a folder others can write: warning %q, want %s named", got, real)
+	}
+}
+
+// A relative --dist is checked from the folder the relay runs in up to /,
+// not only up to ".".
+func TestSelfUpgradeWarningRelativeDist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the writability check is Unix-only")
+	}
+	exe := filepath.Join(t.TempDir(), "tincan")
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	open := t.TempDir()
+	work := filepath.Join(open, "relay")
+	if err := os.MkdirAll(filepath.Join(work, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(open, 0o755) })
+	t.Chdir(work)
+	got := selfUpgradeWarning(exe, "dist")
+	if !strings.Contains(got, "other users") || !strings.Contains(got, open) {
+		t.Fatalf("relative dist inside a folder others can write: warning %q, want %s named", got, open)
+	}
+}
+
 // --latest resolves the tag on this machine and checks its shape before
 // anything reaches the relay.
 func TestLatestReleaseTag(t *testing.T) {
@@ -205,25 +270,70 @@ func TestLatestReleaseTag(t *testing.T) {
 	}
 }
 
+// --latest sends the relay the tag it looked up, as from_github, and
+// nothing reaches the relay when the lookup fails or the flags clash.
 func TestRelayUpgradeLatestFlag(t *testing.T) {
 	var hits atomic.Int32
 	var tag atomic.Value
 	tag.Store("v0.9.0; bad")
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.Write([]byte(`{"tag_name":"` + tag.Load().(string) + `"}`))
 	}))
-	t.Cleanup(ts.Close)
+	t.Cleanup(gh.Close)
 	orig := latestReleaseURL
-	latestReleaseURL = ts.URL
+	latestReleaseURL = gh.URL
 	t.Cleanup(func() { latestReleaseURL = orig })
+
+	// The relay's release source holds release 0.9.0 for this platform.
+	rig := newSelfUpgradeRig(t, map[string]string{"VERSION": "0.7.0\n"})
+	files := goodDist("0.9.0")
+	var fetched []string
+	var fetchMu sync.Mutex
+	rel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchMu.Lock()
+		fetched = append(fetched, r.URL.Path)
+		fetchMu.Unlock()
+		body, ok := files[path.Base(r.URL.Path)]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(rel.Close)
+	rig.u.releaseURL = rel.URL
+
+	// Record each upgrade request the relay is sent.
+	var sent []client.RelayUpgradeRequest
+	var sentMu sync.Mutex
+	admin := rig.m.Server.AdminHandler()
+	socket := serveHandlerSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == client.RelayUpgradePath {
+			body, _ := io.ReadAll(r.Body)
+			var in client.RelayUpgradeRequest
+			if err := json.Unmarshal(body, &in); err != nil {
+				t.Errorf("upgrade request %q: %v", body, err)
+			}
+			sentMu.Lock()
+			sent = append(sent, in)
+			sentMu.Unlock()
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		admin.ServeHTTP(w, r)
+	}))
+	requests := func() []client.RelayUpgradeRequest {
+		sentMu.Lock()
+		defer sentMu.Unlock()
+		return slices.Clone(sent)
+	}
 
 	run := func(args ...string) (string, error) {
 		cmd := relayUpgradeCmd()
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
-		cmd.SetArgs(append(args, "--relay", "http://127.0.0.1:1", "--wait", "0"))
+		cmd.SetArgs(append(args, "--socket", socket, "--wait", "0"))
 		err := cmd.Execute()
 		return out.String(), err
 	}
@@ -239,15 +349,44 @@ func TestRelayUpgradeLatestFlag(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatalf("GitHub asked %d times, want 1", hits.Load())
 	}
+	if got := requests(); len(got) != 0 {
+		t.Fatalf("the relay was sent %+v before a good tag was found", got)
+	}
 
-	// A good tag is printed and used as --from-github; the relay at
-	// 127.0.0.1:1 then refuses the connection.
 	tag.Store("v0.9.0")
 	out, err := run("--latest")
+	if got := requests(); len(got) != 1 || got[0].FromGitHub != "v0.9.0" {
+		t.Fatalf("relay was sent %+v, want one request with from_github v0.9.0", got)
+	}
+	if err != nil {
+		t.Fatalf("upgrade: %v\n%s", err, out)
+	}
 	if !strings.Contains(out, "latest release: v0.9.0") {
-		t.Fatalf("output %q lacks the resolved tag (err %v)", out, err)
+		t.Fatalf("output %q lacks the resolved tag", out)
 	}
-	if err == nil {
-		t.Fatal("upgrade against a closed port succeeded")
+	fetchMu.Lock()
+	defer fetchMu.Unlock()
+	if !slices.Contains(fetched, "/v0.9.0/checksums.txt") {
+		t.Fatalf("relay fetched %q, want the v0.9.0 release", fetched)
 	}
+}
+
+// serveHandlerSocket serves h on a fresh unix socket, as the relay's local
+// admin socket.
+func serveHandlerSocket(t *testing.T, h http.Handler) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "a.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: h}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return sock
 }

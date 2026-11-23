@@ -67,11 +67,15 @@ func selfUpgradeWarning(exe, dist string) string {
 	}
 	var open []string
 	for _, p := range []string{dist, filepath.Dir(exe)} {
-		if p != "" {
-			open = append(open, writableByOthers(p)...)
+		if p == "" {
+			continue
+		}
+		for _, o := range writableByOthers(p) {
+			if !slices.Contains(open, o) {
+				open = append(open, o)
+			}
 		}
 	}
-	open = slices.Compact(open)
 	if len(open) > 0 {
 		msgs = append(msgs, "warning: "+strings.Join(open, " and ")+" can be written by other users, and anyone who can write there can run code as the relay at the next tincan relay-upgrade; keep it writable only by the relay user (chmod go-w)")
 	}
@@ -81,18 +85,32 @@ func selfUpgradeWarning(exe, dist string) string {
 // writableByOthers lists dir and each folder above it that a group or other
 // user can write. Whoever can write one of them can replace what the relay
 // upgrades from, and so run code as the relay at the next upgrade
-// (docs/trust-model.md). A sticky folder such as /tmp is left out: others
+// (docs/trust-model.md). A relative dir is made absolute first, so the walk
+// does not stop at ".". When dir is or runs through a symlink, the folders
+// above its target are checked too: whoever can write those can swap the
+// files the link leads to. A sticky folder such as /tmp is left out: others
 // there cannot rename or remove what they do not own.
 func writableByOthers(dir string) []string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = filepath.Clean(dir)
+	}
+	paths := []string{abs}
+	if real, err := filepath.EvalSymlinks(abs); err == nil && real != abs {
+		paths = append(paths, real)
+	}
 	var open []string
-	for p := filepath.Clean(dir); ; p = filepath.Dir(p) {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o022 != 0 && fi.Mode()&os.ModeSticky == 0 {
-			open = append(open, p)
-		}
-		if parent := filepath.Dir(p); parent == p {
-			return open
+	for _, start := range paths {
+		for p := start; ; p = filepath.Dir(p) {
+			if fi, err := os.Stat(p); err == nil && fi.Mode().Perm()&0o022 != 0 && fi.Mode()&os.ModeSticky == 0 && !slices.Contains(open, p) {
+				open = append(open, p)
+			}
+			if parent := filepath.Dir(p); parent == p {
+				break
+			}
 		}
 	}
+	return open
 }
 
 // latestReleaseTag asks GitHub for the newest stable release's tag, on the
