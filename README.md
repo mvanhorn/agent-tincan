@@ -212,6 +212,8 @@ Hermes. Hermes Agent (ours runs on a Mac mini) gets the Tincan tools from `tinca
 
 OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP server (`openclaw mcp add agent-tincan --command tincan --arg mcp`), with a skill that drives the `tincan` CLI as a fallback. To wake it, the relay POSTs to the Gateway's `/hooks/agent` endpoint with the hook token as a bearer token; each wake starts a fresh agent turn that empties the Agent Tincan inbox and replies.
 
+OpenBot. [OpenBot](https://openbot.run) runs a team of AI teammates on your computer. Its agents get the Tincan tools from the relay's MCP gateway, added as a custom app and signed in with OAuth. To wake it, the relay POSTs a signed, metadata-only Standard Webhooks event to an OpenBot routine's webhook, and the routine starts a turn that empties the Agent Tincan inbox.
+
 ChatGPT connector. ChatGPT itself can join as a custom connector. It runs in OpenAI's cloud and cannot join your tailnet, so the relay publishes one OAuth-protected MCP endpoint for it through Tailscale Funnel, and nothing else. ChatGPT can ask teammates and check its inbox while you are chatting with it. The gateway also supports MCP Events (SEP-3415): a client that subscribes gets a signed, metadata-only webhook when a teammate asks, and shows `wake=mcp-events`. Without a subscription its wake is `none`.
 
 History. The history agent is a small Tincan service on your Mac, not a model. It answers your agents' questions about what you asked your AI tools, and sends back the prompt, a short excerpt of the answer, and the images from that turn. It reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension, a Chrome plugin on your Mac that uses your logged-in browser. Copilot answers come back as text, without images. It is always listening.
@@ -248,6 +250,7 @@ In one table:
 | cursor-cli | Cursor's CLI agent (`cursor-agent`) on your Mac | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts a headless `cursor-agent -p` run, with only the Agent Tincan tools allowed, when something is waiting |
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
+| openbot | OpenBot, a desktop app that runs a team of AI teammates | A custom app in OpenBot pointed at the relay's public MCP gateway, signed in with `tincan connect openbot` | Webhook, signed with Standard Webhooks and metadata only, to an OpenBot routine's webhook |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | None by default: it acts while you are chatting with it. A gateway client that subscribes to MCP Events gets a signed, metadata-only webhook when a teammate asks, and shows `wake=mcp-events` |
 | history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | notes | The notes teammate, a small Tincan service on your Mac, not a model | `tincan notes serve` under launchd; saves, finds and reads back notes in Agent Notes, Bear or Apple Notes | Always listening (long-polls the relay) |
@@ -796,6 +799,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 {
   "grokbot":  { "method": "webhook", "url": "https://...", "bearer_token": "..." },
   "hermes":   { "method": "webhook", "url": "http://<hermes-host>:8644/webhooks/tincan", "hmac_secret": "..." },
+  "openbot":  { "method": "webhook", "format": "standard-webhooks", "url": "https://signal.openbot.run/v1/webhooks/<uuid>", "signing_secret": "whsec_..." },
   "instinct": { "method": "email", "email_to": "...", "agentmail_inbox": "...", "agentmail_key": "...", "max_per_hour": 12 },
   "muse":     { "method": "wait" },
   "fo":       { "method": "schedule", "every": "5m" },
@@ -807,7 +811,7 @@ Delivery never depends on wake: requests always wait in the relay queue. A wake 
 
 | Method | Who acts | How it works | Used by |
 |---|---|---|---|
-| `webhook` | relay | The relay POSTs `{"source":"agent-tincan","message":"<count text>","text":"<same>"}` to the agent's URL, with `Authorization: Bearer <bearer_token>` or an `X-Hub-Signature-256` HMAC signature (`hmac_secret`, the GitHub scheme). OpenClaw's entry sets `"format": "openclaw"` and uses the bearer token, no HMAC. | Grok Bot, Hermes, OpenClaw |
+| `webhook` | relay | The relay POSTs `{"source":"agent-tincan","message":"<count text>","text":"<same>"}` to the agent's URL, with `Authorization: Bearer <bearer_token>` or an `X-Hub-Signature-256` HMAC signature (`hmac_secret`, the GitHub scheme). OpenClaw's entry sets `"format": "openclaw"` and uses the bearer token, no HMAC. `"format": "standard-webhooks"` instead posts a metadata-only `{"type":"tincan.request", ...}` event (counts and request ids, no text) signed with `signing_secret` (`whsec_...`) as `webhook-id`, `webhook-timestamp` and `webhook-signature`, for receivers such as OpenBot routine webhooks. | Grok Bot, Hermes, OpenClaw, OpenBot |
 | `email` | relay | The relay sends an email with the subject "Agent Tincan: requests waiting" through an AgentMail inbox you control. `max_per_hour` caps wakes (default 12). | Instinct-style e2b sandboxes |
 | `command` | agent | `tincan listen --exec <command>` holds a long-poll and runs the command (through `sh -c`, with `TINCAN_WAITING` set to the count) whenever requests or unseen replies are waiting. It takes nothing itself and waits 30 seconds between nudges. While the command runs and during that wait, it keeps the agent online in `tincan agents` with a peek that claims nothing, for up to 30 minutes per run so a hung command still falls offline. | Codex, gemini-cli, grok-cli, the Claude Code cmux fallback, the Hermes fallback |
 | `channel` | agent | `tincan mcp --channel` pushes a short notice into a running Claude Code session. Without `--channel`, `tincan mcp` sends the same notice as a message through the session's own messaging socket while the session is idle (`--wake-socket=false` turns this off). | Claude Code |
@@ -862,6 +866,7 @@ See the [trust model](docs/trust-model.md#per-request-workers) for what this mod
 | Cursor CLI | `cursor-cli` | command | [cursor-cli.md](docs/adapters/cursor-cli.md) |
 | Hermes Agent | `hermes` | webhook (or command) | [hermes.md](docs/adapters/hermes.md) |
 | OpenClaw | `openclaw` | webhook | [openclaw.md](docs/adapters/openclaw.md) |
+| OpenBot | `generic` | webhook (`standard-webhooks`) | [openbot.md](docs/adapters/openbot.md) |
 | ChatGPT | `chatgpt` | none (or `mcp-events` while subscribed) | [chatgpt.md](docs/adapters/chatgpt.md) |
 | Fo-style agent started by a platform cron | `scheduled` | schedule | [scheduled.md](docs/adapters/scheduled.md) |
 | Hark, a hosted assistant that keeps only `/workspace` | `scheduled` | schedule | [hark.md](docs/adapters/hark.md) |
@@ -1321,6 +1326,30 @@ Restart the Gateway after changing `mcp.servers` or `hooks`. If the machine is n
 #### Adapter doc
 
 [docs/adapters/openclaw.md](docs/adapters/openclaw.md)
+
+### OpenBot (MCP gateway and a Standard Webhooks routine)
+
+#### What it is
+
+[OpenBot](https://openbot.run) is a desktop app that runs a team of AI teammates on your computer. Its agents reach Agent Tincan through the relay's public MCP gateway, added in OpenBot under Marketplace, Apps, Add custom and signed in with OAuth (`tincan connect openbot` prints the URL and a one-time code). The URL must be https, or http on loopback; OpenBot refuses OAuth over a plain `http://100.x` tailnet address.
+
+#### One-time setup
+
+Create a routine with "When to run: Webhook" and "Use the sender's secret", paste a `whsec_` secret, and point `wake.json` at the routine's URL:
+
+```json
+{ "openbot": { "method": "webhook", "format": "standard-webhooks", "url": "https://signal.openbot.run/v1/webhooks/<uuid>", "signing_secret": "whsec_<same secret as the routine>" } }
+```
+
+#### Limits and gotchas
+
+- The body is metadata only (type, counts, request ids), because it passes through OpenBot's cloud relay.
+- OpenBot's relay does not queue: an offline OpenBot answers 503 and drops the wake. The request stays queued, and the relay sends the wake again every `--wake-grace` until openbot checks in.
+- Personal use is free; work use needs OpenBot's commercial license from 2026-12-01.
+
+#### Adapter doc
+
+[docs/adapters/openbot.md](docs/adapters/openbot.md)
 
 ### ChatGPT through the OAuth MCP gateway
 

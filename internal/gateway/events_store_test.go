@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/webhooksign"
 )
 
 func openTestEventStore(t *testing.T, now func() time.Time) *EventStore {
@@ -31,7 +32,7 @@ func TestEventStoreIsolationRefreshExpireAndDelete(t *testing.T) {
 	es := openTestEventStore(t, func() time.Time { return now })
 	ctx := context.Background()
 
-	secretA, _ := GenerateSigningSecret()
+	secretA, _ := webhooksign.GenerateSecret()
 	subA, err := es.CreateSubscription(ctx, EventSubscription{
 		ID:            "sub_a1",
 		Agent:         "chatgpt",
@@ -101,7 +102,7 @@ func TestEventStorePerAgentCap(t *testing.T) {
 	now := time.Date(2026, 11, 22, 19, 0, 0, 0, time.UTC)
 	es := openTestEventStore(t, func() time.Time { return now })
 	ctx := context.Background()
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 
 	for i := range MaxSubsPerAgent {
 		_, err := es.CreateSubscription(ctx, EventSubscription{

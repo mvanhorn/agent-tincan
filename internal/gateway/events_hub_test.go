@@ -16,6 +16,7 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/webhooksign"
 )
 
 type capturedWebhook struct {
@@ -86,7 +87,7 @@ func TestEventHubMetadataOnlyAndFilters(t *testing.T) {
 	defer hub.Stop()
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
 
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, err = hub.store.CreateSubscription(ctx, EventSubscription{
 		ID:            "sub_urgent",
@@ -153,7 +154,7 @@ func TestEventHubMetadataOnlyAndFilters(t *testing.T) {
 		t.Fatalf("X-MCP-Subscription-Id = %q, want sub_urgent", ev.Headers.Get("X-MCP-Subscription-Id"))
 	}
 	ts, _ := strconv.ParseInt(ev.Headers.Get("webhook-timestamp"), 10, 64)
-	if !VerifyWebhookSignature(secret, eventID, ts, ev.Body, ev.Headers.Get("webhook-signature")) {
+	if !webhooksign.Verify(secret, eventID, ts, ev.Body, ev.Headers.Get("webhook-signature")) {
 		t.Fatalf("signature verification failed for %s", raw)
 	}
 	data := ev.Payload["data"].(map[string]any)
@@ -184,7 +185,7 @@ func TestEventHubReplyGraceAndNeedsInput(t *testing.T) {
 	defer hub.Stop()
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
 
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_rep", Agent: "chatgpt", ClientID: "c1", EventName: EventRequestReplied, CallbackURL: srv.URL, SigningSecret: secret,
@@ -258,7 +259,7 @@ func TestEventHubRetrySameEventIDAndGapRecovery(t *testing.T) {
 	defer hub.Stop()
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
 
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_retry", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
@@ -327,7 +328,7 @@ func TestEventHub410GoneAndAgentRemovalTerminate(t *testing.T) {
 	defer hub.Stop()
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
 
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_gone", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
@@ -365,7 +366,7 @@ func TestEventHubResumesPendingDeliveriesAcrossRestart(t *testing.T) {
 	defer st.Close()
 
 	srv, got, mu := startWebhookRecorder(t, nil)
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	es, err := NewEventStore(st.DB(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -451,7 +452,7 @@ func TestEventHubParallelDeliveryAcrossSubscriptions(t *testing.T) {
 	defer fastSrv.Close()
 
 	AllowUnsafeCallbacksForTest(hub, &http.Client{Timeout: 2 * time.Second})
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_slow", Agent: "slowbot", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: slowSrv.URL, SigningSecret: secret,
@@ -492,7 +493,7 @@ func TestEventHubStandaloneGapRecoveryNotice(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, _ = hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_gap_only", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
@@ -532,7 +533,7 @@ func TestEventHubRateLimitedStandaloneGapDoesNotSpin(t *testing.T) {
 	srv, got, mu := startWebhookRecorder(t, nil)
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
 
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, err := hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_rate_gap", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
@@ -620,7 +621,7 @@ func TestEventHubDoesNotRedeliverCompletedDelivery(t *testing.T) {
 	defer srv.Close()
 
 	AllowUnsafeCallbacksForTest(hub, srv.Client())
-	secret, _ := GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	ctx := context.Background()
 	_, err := hub.store.CreateSubscription(ctx, EventSubscription{
 		ID: "sub_once", Agent: "chatgpt", ClientID: "c1", EventName: EventInboxRequest, CallbackURL: srv.URL, SigningSecret: secret,
