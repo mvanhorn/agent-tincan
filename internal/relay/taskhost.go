@@ -162,6 +162,7 @@ const taskHostGuestAsk = "a guest's ask is open with you, so you have your ordin
 // withheld row: id, status, filer, source and creation time (the store's
 // HostTask).
 type taskView struct {
+	roomAccess func(context.Context, string) bool
 	// viewer is the agent, "" for an admin, who reads every task.
 	viewer string
 	// host is set when the caller reads with the host view.
@@ -180,7 +181,7 @@ type taskView struct {
 // the one place that decides it; whether the caller asked for the host
 // view is its caller's to weigh.
 func (s *Server) hostTaskView(ctx context.Context, name string) (taskView, error) {
-	view := taskView{viewer: name}
+	view := taskView{viewer: name, roomAccess: s.mayReadRooms}
 	a, ok, err := s.dir.Agent(ctx, name)
 	if err != nil || !ok || !a.TaskHost {
 		return view, err
@@ -208,7 +209,7 @@ func (s *Server) hostTaskView(ctx context.Context, name string) (taskView, error
 // and returns false when the view cannot be decided.
 func (s *Server) askedTaskView(w http.ResponseWriter, r *http.Request, name string) (taskView, bool) {
 	if r.URL.Query().Get("host") != "1" {
-		return taskView{viewer: name}, true
+		return taskView{viewer: name, roomAccess: s.mayReadRooms}, true
 	}
 	view, err := s.hostTaskView(r.Context(), name)
 	if err != nil {
@@ -245,10 +246,17 @@ func (v taskView) mark(out map[string]any) {
 // task reads task id as the view shows it. For a task host that may be a
 // withheld row.
 func (v taskView) task(ctx context.Context, st *store.Store, id int64) (envelope.Task, error) {
+	var task envelope.Task
+	var err error
 	if v.host {
-		return st.HostTask(ctx, id, v.viewer)
+		task, err = st.HostTask(ctx, id, v.viewer)
+	} else {
+		task, err = st.Task(ctx, id, v.viewer)
 	}
-	return st.Task(ctx, id, v.viewer)
+	if err == nil && task.RoomPostID != 0 && v.roomAccess != nil && !v.roomAccess(ctx, v.viewer) {
+		task = store.WithheldTask(task)
+	}
+	return task, err
 }
 
 // whole is task for a caller about to act on the task: a row whose text is
@@ -263,17 +271,155 @@ func (v taskView) whole(ctx context.Context, st *store.Store, id int64) (envelop
 }
 
 // tasks lists one page of the tasks the view shows, as store.Tasks does.
-func (v taskView) tasks(ctx context.Context, st *store.Store, after int64, limit int, closed bool) ([]envelope.Task, error) {
+func (v taskView) tasks(ctx context.Context, st *store.Store, after int64, limit int, closed, includeQuiet bool) ([]envelope.Task, error) {
+	var tasks []envelope.Task
+	var err error
 	if v.host {
-		return st.HostTasks(ctx, v.viewer, after, limit, closed)
+		tasks, err = st.HostTasks(ctx, v.viewer, after, limit, closed, includeQuiet)
+	} else {
+		tasks, err = st.Tasks(ctx, v.viewer, after, limit, closed, includeQuiet)
 	}
-	return st.Tasks(ctx, v.viewer, after, limit, closed)
+	if err != nil || v.roomAccess == nil {
+		return tasks, err
+	}
+	for i, task := range tasks {
+		if task.RoomPostID == 0 {
+			continue
+		}
+		if !v.roomAccess(ctx, v.viewer) {
+			for j := i; j < len(tasks); j++ {
+				if tasks[j].RoomPostID != 0 {
+					tasks[j] = store.WithheldTask(tasks[j])
+				}
+			}
+		}
+		break
+	}
+	return tasks, nil
 }
 
 // closed counts the done and dropped tasks the view shows.
-func (v taskView) closed(ctx context.Context, st *store.Store) (done, dropped int, err error) {
+func (v taskView) closed(ctx context.Context, st *store.Store, includeQuiet bool) (done, dropped int, err error) {
 	if v.host {
-		return st.ClosedHostTasks(ctx, v.viewer)
+		return st.ClosedHostTasks(ctx, v.viewer, includeQuiet)
 	}
-	return st.ClosedTasks(ctx, v.viewer)
+	return st.ClosedTasks(ctx, v.viewer, includeQuiet)
+}
+
+// hostMayActForOwner guards actions the named host takes from a direct chat.
+// Work already open from a guest or a claimed request cannot authorize them.
+func (s *Server) hostMayActForOwner(w http.ResponseWriter, r *http.Request, from string) bool {
+	ctx := r.Context()
+	a, named, err := s.dir.Agent(ctx, from)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return false
+	}
+	if !named || !a.TaskHost {
+		writeErr(w, http.StatusForbidden, errNotTaskHost)
+		return false
+	}
+	if why := s.taskHostRefusal(a); why != "" {
+		writeErr(w, http.StatusForbidden, fmt.Errorf("you are suspended as a task host: %s; nothing was changed", why))
+		return false
+	}
+	if open, err := s.store.OpenGuestAsks(ctx, from); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return false
+	} else if open > 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideDuringGuestAsk)
+		return false
+	}
+	// Any claim in any session, counted, not the one-claim chain a schedule
+	// reads.
+	if claimed, err := s.store.HeldClaims(ctx, from, 1); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return false
+	} else if len(claimed) > 0 {
+		writeErr(w, http.StatusConflict, errTaskDecideWhileClaimed)
+		return false
+	}
+	return true
+}
+
+func (s *Server) hostAssignTask(w http.ResponseWriter, r *http.Request, view taskView, id int64, to, words string) {
+	if to == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("assign needs to, the teammate to give the task to"))
+		return
+	}
+	sess, err := session(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx := r.Context()
+	task, err := view.task(ctx, s.store, id)
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if task.Status == envelope.TaskProposed {
+		writeErr(w, http.StatusConflict, errors.New("the owner must approve this proposed task before assignment"))
+		return
+	}
+	if task.Withheld {
+		writeTaskErr(w, store.ErrNoTask)
+		return
+	}
+
+	a := taskAssign{TaskID: id, From: view.viewer, To: to, Actor: envelope.TaskOwner, Session: sess, OwnerHost: true, OwnerWords: words}
+	if task.CurrentRequest != "" {
+		_, err = s.reassignTask(ctx, a)
+	} else {
+		_, err = s.assignTask(ctx, a)
+	}
+	if err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	s.nonces.void(taskNonceID(id))
+	s.recordTask(r, "task_assigned", view.viewer, id, map[string]any{"for_owner": true, "to": to, "bytes": len(words)})
+	s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
+}
+
+func (s *Server) handleHostAddTask(w http.ResponseWriter, r *http.Request, in taskAdd, from, sess string) {
+	if !s.hostMayActForOwner(w, r, from) {
+		return
+	}
+	if in.Source != "" {
+		writeErr(w, http.StatusBadRequest, errors.New("file work from an outside source as a proposed task without mine"))
+		return
+	}
+	if in.Assignee == "" {
+		in.Assignee = envelope.TaskOwner
+	}
+	ctx := r.Context()
+	if err := in.check(ctx, s); err != nil {
+		writeTaskErr(w, err)
+		return
+	}
+	if in.EverySeconds != 0 {
+		if err := s.checkScheduleCaller(ctx, from); err != nil {
+			writeTaskErr(w, err)
+			return
+		}
+	}
+	// The filing itself takes a slot even when a follow-up assignment
+	// is refused before the send policy would charge it.
+	var charged bool
+	if rp, ok := s.preparer().(RoomPolicy); ok {
+		if err := rp.Charge(from); err != nil {
+			writeErr(w, statusFor(err), err)
+			return
+		}
+		charged = true
+	}
+	out, err := s.addTask(ctx, in, envelope.TaskOwner, from, nil, false, func(id int64) error {
+		_, err := s.assignTask(ctx, taskAssign{
+			TaskID: id, From: from, To: in.Assignee, Actor: envelope.TaskOwner,
+			Session: sess, OwnerHost: true, FilingCharged: charged,
+		})
+		return err
+	})
+	s.writeAddedTask(w, r, in, from, out, err)
 }

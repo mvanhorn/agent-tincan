@@ -112,6 +112,6 @@ func printGuestConnected(cmd *cobra.Command, name string, out client.GuestConnec
 		cmd.Printf("Warning: a2a.json does not publish %s, so that card answers 404 until you add it.\n", strings.Join(out.Unpublished, ", "))
 	}
 	if !out.HoldAlerts {
-		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Set notify in approval.json or subscribe a phone to push, or check tincan held yourself.\n")
+		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Run tincan relay notify <agent>, subscribe a phone to push, or check tincan held yourself.\n")
 	}
 }

@@ -54,7 +54,7 @@ the tools can still run it from a shell.
 
 It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, on an admin device any webhook or email agent that
-was woken and has not checked in, this machine's Tailscale (its version against
+was woken and has not checked in and whether task hosts have a fallback, this machine's Tailscale (its version against
 the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
 tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
@@ -166,6 +166,15 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		add(webStatusCheck(ctx, r))
 		add(webLimitCheck(ctx, r, time.Now()))
 	}
+	// An admin device can read the roster without joining as an agent.
+	if !guest && (joined || client.IsNotJoined(err)) {
+		if warn := taskFallbackCheck(ctx, r); warn != nil {
+			add(*warn)
+		}
+		if gw := gatewayEventsCheck(ctx, r); gw != nil {
+			add(*gw)
+		}
+	}
 
 	// 2c. This host's Tailscale, which matters joined or not.
 	var joinedRelay *client.Relay
@@ -222,6 +231,66 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		rep.Fix = hostFix(exe)
 	}
 	return rep
+}
+
+// taskFallbackCheck warns on an admin device when a named host has no fallback.
+func taskFallbackCheck(ctx context.Context, r *client.Relay) *check {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	status, err := r.TaskFallback(ctx)
+	if err != nil || status == nil {
+		return nil
+	}
+	if warning := status.Warning(); warning != "" {
+		return &check{"task fallback", "warn", warning, client.TaskFallbackFix}
+	}
+	return nil
+}
+
+// gatewayEventsCheck reports active gateway MCP Events subscriptions on an admin
+// device when the relay runs with --chatgpt-gateway. It never shows signing
+// secrets or callback query strings.
+func gatewayEventsCheck(ctx context.Context, r *client.Relay) *check {
+	const name = "gateway mcp events"
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var out struct {
+		Subscriptions []struct {
+			ID                  string    `json:"id"`
+			Agent               string    `json:"agent"`
+			EventName           string    `json:"event_name"`
+			Callback            string    `json:"callback"`
+			ExpiresAt           time.Time `json:"expires_at"`
+			ConsecutiveFailures int       `json:"consecutive_failures"`
+			HasGap              bool      `json:"has_gap"`
+			LastError           string    `json:"last_error"`
+		} `json:"subscriptions"`
+	}
+	if err := r.Raw(ctx, "GET", "/v1/admin/gateway/events", nil, &out); err != nil {
+		return nil
+	}
+	if len(out.Subscriptions) == 0 {
+		return &check{name, "ok", "gateway enabled; no active MCP Events subscriptions", ""}
+	}
+	var parts []string
+	var failing []string
+	for _, s := range out.Subscriptions {
+		desc := fmt.Sprintf("%s %s -> %s (expires %s)", s.Agent, s.EventName, s.Callback, s.ExpiresAt.UTC().Format(time.RFC3339))
+		if s.ConsecutiveFailures > 0 || s.HasGap {
+			if s.LastError != "" {
+				desc += fmt.Sprintf(" [failures=%d: %s]", s.ConsecutiveFailures, s.LastError)
+			} else if s.HasGap {
+				desc += " [gap pending]"
+			}
+			failing = append(failing, desc)
+		}
+		parts = append(parts, desc)
+	}
+	if len(failing) > 0 {
+		return &check{name, "warn", fmt.Sprintf("%d active subscription(s) with delivery issues: %s", len(out.Subscriptions), strings.Join(parts, "; ")),
+			"Check that each callback endpoint is reachable over public HTTPS and accepting Standard Webhooks POSTs."}
+	}
+	return &check{name, "ok", fmt.Sprintf("%d active subscription(s): %s", len(out.Subscriptions), strings.Join(parts, "; ")), ""}
 }
 
 // unansweredCheck lists the webhook and email agents whose last wake went

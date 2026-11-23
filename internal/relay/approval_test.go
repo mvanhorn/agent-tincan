@@ -14,10 +14,110 @@ import (
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
+	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/policy"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/testrelay"
 )
+
+func TestAdminSetNotifyDestination(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	path := filepath.Join(t.TempDir(), "approval.json")
+	const original = `{"gate":{"muse":{"unless":[]}},"hold_ttl":"1h","Notify":"grokbot"}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	admin := m.Client(t, "admin")
+	sender := m.Client(t, "grokbot")
+	ctx := t.Context()
+	if err := sender.SetNotifyDestination(ctx, "instinct"); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("agent set notify: %v", err)
+	}
+	if err := admin.SetNotifyDestination(ctx, "missing"); !client.IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("admin set unknown notify: %v", err)
+	}
+	if got := a.NotifyDestination(); got != "grokbot" {
+		t.Fatalf("rejected updates changed notify to %q", got)
+	}
+
+	if err := admin.SetNotifyDestination(ctx, "instinct"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("approval.json mode = %o, want 600", got)
+	}
+	req := envelope.Request{From: "grokbot", To: "muse"}
+	if held, err := a.Held(&req); !held || err != nil || req.HoldTTL != time.Hour || req.ApprovalNotify != "instinct" {
+		t.Fatalf("updated policy: held = %v, err = %v, ttl = %v, notify = %q", held, err, req.HoldTTL, req.ApprovalNotify)
+	}
+
+	socket := httptest.NewServer(m.Server.AdminHandler())
+	defer socket.Close()
+	local, err := client.NewRelay(socket.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := local.SetNotifyDestination(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := a.Held(&req); !held || err != nil || req.HoldTTL != time.Hour || req.ApprovalNotify != "" {
+		t.Fatalf("cleared policy: held = %v, err = %v, ttl = %v, notify = %q", held, err, req.HoldTTL, req.ApprovalNotify)
+	}
+	events, err := m.Store.AuditEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updates []string
+	for _, e := range events {
+		if e.Event == "relay_notify_updated" {
+			updates = append(updates, e.Actor+" "+e.Detail)
+		}
+	}
+	if len(updates) != 2 ||
+		updates[0] != m.Addr("admin")+` {"notify":"instinct"}` ||
+		updates[1] != identity.LocalAdmin+` {"notify":""}` {
+		t.Fatalf("notify audit = %v", updates)
+	}
+}
+
+func TestAdminNotifyCreatesPolicyAndRefusesCorruptPolicy(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	path := filepath.Join(t.TempDir(), "approval.json")
+	a, err := policy.LoadApproval(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Approval: a}))
+	admin := m.Client(t, "admin")
+	if err := admin.SetNotifyDestination(t.Context(), "instinct"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || string(raw) != `{"gate":{},"notify":"instinct"}` {
+		t.Fatalf("new approval.json = %s, err = %v", raw, err)
+	}
+
+	const malformed = `{"gate":`
+	if err := os.WriteFile(path, []byte(malformed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.SetNotifyDestination(t.Context(), "muse"); !client.IsStatus(err, http.StatusInternalServerError) {
+		t.Fatalf("admin set notify over malformed policy: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil || string(raw) != malformed {
+		t.Fatalf("malformed approval.json changed: %s, err = %v", raw, err)
+	}
+}
 
 type approvalWakes struct {
 	mu      sync.Mutex

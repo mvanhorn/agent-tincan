@@ -303,7 +303,7 @@ func printGuestInvite(cmd *cobra.Command, name string, inv client.GuestInvited, 
 	cmd.Printf("2. Once they accept the share, have them run:\n  tincan join %s --relay %s\n\n", inv.Code, relay)
 	cmd.Printf("Its asks wait for you in tincan held, unless this guest has --no-hold.\n")
 	if !inv.HoldAlerts {
-		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Set notify in approval.json or subscribe a phone to push, or check tincan held yourself.\n")
+		cmd.Printf("Warning: nothing will tell you when a guest's ask is held. Run tincan relay notify <agent>, subscribe a phone to push, or check tincan held yourself.\n")
 	}
 }
 
@@ -511,8 +511,8 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 
 func askCmd() *cobra.Command {
 	var wait time.Duration
-	var parent, project, at, every, thenTo string
-	var notify, asJSON, urgent bool
+	var parent, project, at, every, thenTo, source, about string
+	var notify, asJSON, urgent, quiet bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent[,agent...]> <message...>",
@@ -527,6 +527,12 @@ instead, as a new request with every send check applied at that time.
 			if err := envelope.ValidProject(project); err != nil {
 				return err
 			}
+			if !envelope.ValidSource(source) || source != "" && notify {
+				return errors.New("--source takes a short lowercase label on an ask, such as mail or meeting")
+			}
+			if source != "" && (cmd.Flags().Changed("at") || cmd.Flags().Changed("every")) {
+				return errors.New("use tasks add --source for scheduled work from outside the team")
+			}
 			if err := checkThenArgs(thenTo, args, notify, attach); err != nil {
 				return err
 			}
@@ -535,7 +541,8 @@ instead, as a new request with every send check applied at that time.
 				return err
 			}
 			defer printHeld(cmd, r)
-			ctx := client.WithProject(cmd.Context(), project)
+			ctx := client.WithAskSource(client.WithProject(cmd.Context(), project), source)
+			ctx = client.WithAskAbout(client.WithQuietAsk(ctx, quiet), about)
 			body := strings.Join(args[1:], " ")
 			if thenTo != "" {
 				// The message and the follow-on are one argument each.
@@ -548,8 +555,8 @@ instead, as a new request with every send check applied at that time.
 			// Changed, not the values: an empty --at "$WHEN" asked for a
 			// schedule and must never turn into a send now.
 			if cmd.Flags().Changed("at") || cmd.Flags().Changed("every") {
-				if len(targets) > 1 || notify || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
-					return errors.New("a scheduled ask goes to one teammate, with no --notify, --parent, --attach, --project or --then")
+				if len(targets) > 1 || notify || about != "" || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
+					return errors.New("a scheduled ask goes to one teammate, with no --notify, --about, --parent, --attach, --project or --then")
 				}
 				return scheduleAsk(cmd, r, client.ScheduledAsk{To: targets[0], Body: body, Urgent: urgent}, at, every, asJSON)
 			}
@@ -609,8 +616,9 @@ instead, as a new request with every send check applied at that time.
 			}
 			if res.Status == envelope.StatusHeld {
 				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+				cmd.Print(client.FormatFiledTask(res.Request.TaskID))
 			} else {
-				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatResult(res)))
+				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatAskResult(res)))
 			}
 			if thenTo != "" {
 				cmd.Println(client.ThenNote(thenTo, res.Status))
@@ -620,9 +628,12 @@ instead, as a new request with every send check applied at that time.
 	}
 	cmd.Flags().StringVar(&thenTo, "then", "", `once answered, have the relay ask this agent too: ask muse "..." --then hermes "file the receipt"`)
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
+	cmd.Flags().StringVar(&about, "about", "", "existing open task number or request ID this ask follows up on")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "file a quiet task for housekeeping asks, never for work the owner requested")
 	cmd.Flags().StringVar(&project, "project", "", "the project of the session this is for, usually its repo directory name: that session gets it first, any session after about 10 minutes")
+	cmd.Flags().StringVar(&source, "source", "", "outside source of an ask's text, such as mail or meeting; if auto-filed, it waits for owner approval")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "a local file to attach (repeatable; images or small files)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON and exit 0 answered, 1 failed, 2 pending (--notify: 0 once sent)")
@@ -697,7 +708,11 @@ func inboxCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "inbox",
-		Short: "Get requests from teammates (claims them) and replies to your own requests",
+		Short: "Get and claim inbox items, including teammate requests and relay task notices",
+		Long: `Get and claim inbox items and read replies to your requests.
+The inbox identifies task hosts and shows task news when it arrives.
+In the owner's private chat, "what came back?" means read the live list
+with tincan tasks --host and show returned tasks, even if the inbox is empty.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, _, err := connect()
 			if err != nil {
@@ -725,6 +740,7 @@ const (
 // resultJSON is what ask and get --json print.
 type resultJSON struct {
 	Outcome string        `json:"outcome"`
+	TaskID  int64         `json:"task_id,omitempty"`
 	Result  client.Result `json:"result"`
 }
 
@@ -752,7 +768,7 @@ func outcome(res client.Result) (string, int) {
 // happened without parsing.
 func printResultJSON(w io.Writer, res client.Result) error {
 	name, code := outcome(res)
-	if err := writeJSON(w, resultJSON{Outcome: name, Result: res}); err != nil {
+	if err := writeJSON(w, resultJSON{Outcome: name, TaskID: res.Request.TaskID, Result: res}); err != nil {
 		return err
 	}
 	if code != 0 {
@@ -776,16 +792,21 @@ func writeJSON(w io.Writer, v any) error {
 // with ClaimError saying why, when another session got to it first.
 type inboxRequestJSON struct {
 	envelope.Request
-	Claimed    bool   `json:"claimed"`
-	ClaimError string `json:"claim_error,omitempty"`
+	Claimed            bool   `json:"claimed"`
+	ClaimError         string `json:"claim_error,omitempty"`
+	TaskNoticeGuidance string `json:"task_notice_guidance,omitempty"`
+	OwnerMessage       string `json:"owner_message,omitempty"`
 }
 
 // inboxJSON is what inbox --json prints. The lists are never null.
 type inboxJSON struct {
-	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
-	Requests         []inboxRequestJSON `json:"requests"`
-	Replies          []client.Result    `json:"replies"`
-	RepliesRemaining int                `json:"replies_remaining,omitempty"`
+	UpgradeAvailable  string             `json:"upgrade_available,omitempty"`
+	TaskHost          bool               `json:"task_host,omitempty"`
+	TaskHostGuidance  string             `json:"task_host_guidance,omitempty"`
+	TaskNoticePosting string             `json:"task_notice_posting,omitempty"`
+	Requests          []inboxRequestJSON `json:"requests"`
+	Replies           []client.Result    `json:"replies"`
+	RepliesRemaining  int                `json:"replies_remaining,omitempty"`
 }
 
 // checkInboxJSON is checkInbox printing JSON.
@@ -804,17 +825,35 @@ func checkInboxJSON(ctx context.Context, r *client.Relay, wait time.Duration, ou
 func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, errOut io.Writer) error {
 	doc := inboxJSON{
 		UpgradeAvailable: in.UpgradeAvailable,
+		TaskHost:         in.TaskHost,
 		Requests:         make([]inboxRequestJSON, 0, len(in.Requests)),
 		Replies:          in.Replies,
 		RepliesRemaining: in.RepliesRemaining,
+	}
+	if in.TaskHost {
+		doc.TaskHostGuidance = client.TaskHostInboxGuidance
 	}
 	if doc.Replies == nil {
 		doc.Replies = []client.Result{}
 	}
 	for _, req := range in.Requests {
 		item := inboxRequestJSON{Request: req, Claimed: true}
-		if _, err := r.Claim(ctx, req.ID); err != nil {
+		if claimed, err := r.Claim(ctx, req.ID); err != nil {
+			if req.TaskNoticeReceipt {
+				item.Body, _, _ = strings.Cut(req.Body, "\n")
+			}
 			item.Claimed, item.ClaimError = false, err.Error()
+		} else {
+			if req.TaskNoticeReceipt && claimed.Body != "" {
+				req.Body, item.Body = claimed.Body, claimed.Body
+			}
+			item.TaskNoticeGuidance = in.TaskNoticeGuidance(req)
+			if item.TaskNoticeGuidance != "" {
+				item.OwnerMessage = client.TaskNoticeOwnerMessage(req)
+				if item.OwnerMessage != "" {
+					doc.TaskNoticePosting = client.TaskNoticePostingInstructions
+				}
+			}
 		}
 		doc.Requests = append(doc.Requests, item)
 	}
@@ -852,7 +891,7 @@ func checkInbox(ctx context.Context, r *client.Relay, wait time.Duration, out, e
 func formatWait(ctx context.Context, r *client.Relay, in client.Inbox) string {
 	var b strings.Builder
 	if len(in.Requests) > 0 {
-		b.WriteString(client.FormatInbox(ctx, r, client.Inbox{Requests: in.Requests}))
+		b.WriteString(client.FormatInbox(ctx, r, client.Inbox{Requests: in.Requests, TaskHost: in.TaskHost}))
 	}
 	if len(in.Replies) > 0 {
 		b.WriteString(wake.WaitingMessage(0, len(in.Replies)) + "\n")
@@ -1085,9 +1124,10 @@ func heldCmd() *cobra.Command {
 			// predates them.
 			var reqs []struct {
 				envelope.Request
-				ToKind    string         `json:"to_kind"`
-				Pass      *relay.PassRef `json:"pass"`
-				PassError string         `json:"pass_error"`
+				Contributors []string       `json:"contributors"`
+				ToKind       string         `json:"to_kind"`
+				Pass         *relay.PassRef `json:"pass"`
+				PassError    string         `json:"pass_error"`
 			}
 			if err := r.Raw(cmd.Context(), "GET", "/v1/admin/held", nil, &reqs); err != nil {
 				return err
@@ -1102,6 +1142,12 @@ func heldCmd() *cobra.Command {
 					cmd.Printf("guest: the next entry is a guest's ask, or work that follows from one\n")
 				}
 				cmd.Printf("%s  %s -> %s  chain=%s  %s\n", req.ID, req.From, to, strings.Join(req.Chain, " -> "), heldText(req.Body))
+				if len(req.Contributors) > 0 {
+					cmd.Printf("  also carries text from: %s\n", strings.Join(req.Contributors, ", "))
+				}
+				if n := len(req.Exchanges); n > 0 && req.Exchanges[n-1].Answer != "" {
+					cmd.Printf("  %s asked: %s\n  %s answered: %s\n", req.To, heldText(req.Exchanges[n-1].Question), req.From, heldText(req.Exchanges[n-1].Answer))
+				}
 				switch {
 				case req.Pass != nil:
 					cmd.Printf("  pass: %s conversation %s -> %s\n", history.SourceLabel(history.Source(req.Pass.Source)), req.Pass.ConversationID, req.Pass.To)

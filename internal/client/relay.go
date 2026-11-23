@@ -211,7 +211,8 @@ const (
 
 // Roster is the relay's agent list with what the relay says about itself.
 type Roster struct {
-	Agents []AgentInfo `json:"agents"`
+	TaskFallback *TaskFallbackStatus `json:"task_fallback,omitempty"`
+	Agents       []AgentInfo         `json:"agents"`
 	// RelayVersion is the tincan build the relay runs, "" from a relay
 	// that predates it.
 	RelayVersion string `json:"relay_version,omitempty"`
@@ -546,6 +547,15 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	if project := projectOf(ctx); project != "" {
 		in["project"] = project
 	}
+	if source, _ := ctx.Value(askSourceKey{}).(string); source != "" {
+		in["source"] = source
+	}
+	if in["kind"] == envelope.KindAsk && quietAskOf(ctx) {
+		in["quiet"] = true
+	}
+	if about := askAbout(ctx); about != "" {
+		in["about"] = about
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
 	if err == nil {
@@ -637,6 +647,7 @@ const (
 // replies to requests it sent that it has not seen yet.
 type Inbox struct {
 	UpgradeAvailable string             `json:"upgrade_available,omitempty"`
+	TaskHost         bool               `json:"task_host,omitempty"`
 	Requests         []envelope.Request `json:"requests"`
 	Replies          []Result           `json:"replies,omitempty"`
 	// RepliesRemaining counts unseen replies left out of this poll to keep
@@ -703,7 +714,7 @@ func (r *Relay) Poll(ctx context.Context, hold time.Duration) (Inbox, error) {
 // (RepliesTake, RepliesKeep, or RepliesNone).
 func (r *Relay) PollReplies(ctx context.Context, hold time.Duration, replies string) (Inbox, error) {
 	var out Inbox
-	path := fmt.Sprintf("/v1/poll?hold=%d&replies=%s", int(hold.Seconds()), url.QueryEscape(replies))
+	path := fmt.Sprintf("/v1/poll?hold=%d&replies=%s&task_host=1", int(hold.Seconds()), url.QueryEscape(replies))
 	err := r.call(ctx, r.polls, "GET", path, nil, &out)
 	return out, err
 }
@@ -1244,6 +1255,38 @@ func projectOf(ctx context.Context) string {
 	return project
 }
 
+type askSourceKey struct{}
+
+// WithAskSource names the outside source of text in asks sent with ctx.
+func WithAskSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, askSourceKey{}, source)
+}
+
+type aboutKey struct{}
+
+// WithAskAbout links subsequent sends to the specified task or open ask.
+func WithAskAbout(ctx context.Context, about string) context.Context {
+	return context.WithValue(ctx, aboutKey{}, about)
+}
+
+func askAbout(ctx context.Context) string {
+	about, _ := ctx.Value(aboutKey{}).(string)
+	return about
+}
+
+type quietAskKey struct{}
+
+// WithQuietAsk sets the quiet send field on asks sent with ctx. It affects
+// task filing only. Older relays ignore the field.
+func WithQuietAsk(ctx context.Context, quiet bool) context.Context {
+	return context.WithValue(ctx, quietAskKey{}, quiet)
+}
+
+func quietAskOf(ctx context.Context) bool {
+	quiet, _ := ctx.Value(quietAskKey{}).(bool)
+	return quiet
+}
+
 // AdvertiseSocketWake turns SocketWakeFeature on or off for every later
 // call. It is safe to call while the client is in use.
 func (r *Relay) AdvertiseSocketWake(on bool) { r.socketWake.Store(on) }
@@ -1504,7 +1547,14 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 				req.Attachments = append(req.Attachments, envelope.Attachment{ID: up.ID})
 			}
 			var sent envelope.SendResponse
-			err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent)
+			source, _ := ctx.Value(askSourceKey{}).(string)
+			in := struct {
+				envelope.Request
+				Source string `json:"source,omitempty"`
+				Quiet  bool   `json:"quiet,omitempty"`
+				About  string `json:"about,omitempty"`
+			}{req, source, kind == envelope.KindAsk && quietAskOf(ctx), askAbout(ctx)}
+			err = r.call(ctx, r.api, "POST", "/v1/send", in, &sent)
 			if err == nil {
 				req = sent.Request
 				target = sent.Target

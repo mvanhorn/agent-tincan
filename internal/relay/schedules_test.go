@@ -53,9 +53,14 @@ type scheduleMesh struct {
 }
 
 func newScheduleMesh(t *testing.T) *scheduleMesh {
+	return newScheduleMeshWithConfig(t, relay.Config{})
+}
+
+func newScheduleMeshWithConfig(t *testing.T, cfg relay.Config) *scheduleMesh {
 	t.Helper()
 	clk := &scheduleClock{t: time.Now()}
-	m := testrelay.New(t, relay.Config{Now: clk.now})
+	cfg.Now = clk.now
+	m := testrelay.New(t, cfg)
 	m.Store.SetClock(clk.now)
 	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: clk.now}))
 	return &scheduleMesh{Mesh: m, clk: clk, grok: m.Client(t, "grokbot"), muse: m.Client(t, "muse"), admin: m.Client(t, "admin")}
@@ -971,7 +976,7 @@ func TestRepeatingTaskAddRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	repeat := map[string]any{"title": "Check the backups", "assignee": "muse", "every_seconds": 3600}
-	if err := add(m.grok, "/v1/tasks", repeat); !refusedWith(err, http.StatusConflict, "you hold a claimed request and a scheduled ask starts a new chain") {
+	if err := add(m.grok, "/v1/tasks", repeat); !refusedWith(err, http.StatusConflict, "you have an open request and a scheduled ask starts a new chain") {
 		t.Fatalf("repeating task during a claim: %v", err)
 	}
 	if _, err := m.grok.Reply(ctx, asked.ID, "ok", envelope.StatusAnswered); err != nil {

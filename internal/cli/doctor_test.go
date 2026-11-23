@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -201,12 +202,11 @@ func TestDoctorProgressToolCount(t *testing.T) {
 	skipOnWindows(t, "the fake MCP server is a shell script")
 	for _, missingProgress := range []bool{false, true} {
 		t.Run(fmt.Sprint(missingProgress), func(t *testing.T) {
-			names := []string{"ask", "get_reply", "check_inbox", "claim", "reply", "answer", "cancel", "list_agents", "trace", "search", "onboard", "get_attachment", "watch", "room_post", "room_read", "list_rooms", "lease", "list_leases", "list_schedules", "cancel_schedule", "add_task", "list_tasks", "get_task", "update_task", "decide_task"}
-			if !missingProgress {
-				names = append(names, "progress")
-			}
 			var tools []map[string]string
-			for _, name := range names {
+			for _, name := range mcpserver.ToolNames {
+				if missingProgress && name == "progress" {
+					continue
+				}
 				tools = append(tools, map[string]string{"name": name})
 			}
 			raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "result": map[string]any{"tools": tools}})
@@ -223,7 +223,7 @@ func TestDoctorProgressToolCount(t *testing.T) {
 				if got.Status != "fail" || !strings.Contains(got.Detail, "missing progress") {
 					t.Fatalf("old tools: %+v", got)
 				}
-			} else if got.Status != "ok" || !strings.Contains(got.Detail, "lists all 26 tools") {
+			} else if got.Status != "ok" || !strings.Contains(got.Detail, fmt.Sprintf("lists all %d tools", len(mcpserver.ToolNames))) {
 				t.Fatalf("tools: %+v", got)
 			}
 		})
@@ -425,5 +425,37 @@ func TestReadNativeHostsDropsDeadHosts(t *testing.T) {
 	}
 	if c := nativeHostsCheck(hosts); c.Status != "ok" {
 		t.Fatalf("dead waiting host still warned: %+v", c)
+	}
+}
+
+func TestDoctorWarnsWhenTaskHostsLackFallback(t *testing.T) {
+	var status atomic.Pointer[client.TaskFallbackStatus]
+	status.Store(&client.TaskFallbackStatus{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agents" {
+			t.Errorf("unexpected route %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(client.Roster{TaskFallback: status.Load()})
+	}))
+	defer srv.Close()
+	r, err := client.NewRelay(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := taskFallbackCheck(t.Context(), r); got != nil {
+		t.Fatalf("warning without any task hosts = %+v", got)
+	}
+	status.Store(&client.TaskFallbackStatus{Hosts: []string{"grokbot"}})
+	got := taskFallbackCheck(t.Context(), r)
+	if got == nil || got.Status != "warn" || !strings.Contains(got.Detail, "grokbot") ||
+		!strings.Contains(got.Fix, "tincan relay notify <agent>") {
+		t.Fatalf("missing destination check = %+v", got)
+	}
+	status.Store(&client.TaskFallbackStatus{Hosts: []string{"grokbot"}, NotifySet: true})
+	if got := taskFallbackCheck(t.Context(), r); got != nil {
+		t.Fatalf("warning with fallback configured = %+v", got)
 	}
 }

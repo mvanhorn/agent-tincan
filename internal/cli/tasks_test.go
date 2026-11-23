@@ -496,3 +496,126 @@ func TestTasksHostDecideFromTheShell(t *testing.T) {
 		t.Fatalf("decide approve = %q, %v", out, err)
 	}
 }
+
+func TestTasksDueCommands(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ownerDesk(t, m)
+	tasksRun(t, []string{"add", "Regular task", "--owner"}, "Added task #1")
+	tasksRun(t, []string{"add", "Overdue task", "--owner", "--due", "2000-11-21"}, "Due 2000-11-21.")
+	tasksRun(t, []string{"add", "Today's task", "--owner", "--due", "today"}, "Added task #3")
+	out := tasksRun(t, []string{"--owner"}, "Overdue (1)\n  #2", "Due today (1)\n  #3", "Open (1)\n  #1")
+	if strings.Index(out, "Overdue (1)") > strings.Index(out, "Due today (1)") || strings.Index(out, "Due today (1)") > strings.Index(out, "Open (1)") {
+		t.Fatalf("due task order = %q", out)
+	}
+	out = tasksRun(t, []string{"--owner", "--json"}, "2000-11-21")
+	var list []envelope.Task
+	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list) != 3 || list[0].ID != 2 || list[1].ID != 3 {
+		t.Fatalf("JSON due order = %s, %v", out, err)
+	}
+	tasksRun(t, []string{"show", "2", "--owner"}, "Overdue: 2000-11-21")
+	tasksRun(t, []string{"due", "2", "2030-11-29", "3pm", "--owner"}, "Task #2 is due 2030-11-29 15:00 PST.")
+	tasksRun(t, []string{"due", "2", "clear", "--owner"}, "Cleared the due date for task #2.")
+	tasksRun(t, []string{"show", "2", "--owner"}, "changed from 2000-11-21 to 2030-11-29 15:00 PST", "changed from 2030-11-29 15:00 PST to no deadline")
+}
+
+func TestTasksBriefingNowCommand(t *testing.T) {
+	m := testrelay.New(t, relay.Config{TaskBriefing: "off"})
+	ownerDesk(t, m)
+	ctx := t.Context()
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "muse", true); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"briefing", "--now"}, "No briefing queued.")
+	tasksRun(t, []string{"add", "Private deadline", "--owner", "--due", "2000-11-21"}, "Added task #1")
+	tasksRun(t, []string{"briefing", "--now"}, "Queued a task briefing.")
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	stdout, _, err := runSplit(t, inboxCmd(), "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var in inboxJSON
+	if err := json.Unmarshal([]byte(stdout), &in); err != nil || !in.TaskHost || len(in.Requests) != 1 {
+		t.Fatalf("briefing inbox = %s, %v", stdout, err)
+	}
+	req := in.Requests[0]
+	if req.TaskNoticeKind != envelope.TaskNoticeBriefing || !req.Claimed ||
+		!strings.Contains(req.OwnerMessage, "task #1 (open, due 2000-11-21)") ||
+		!strings.Contains(in.TaskNoticePosting, "last tool call") || !strings.Contains(stdout, "Private deadline") {
+		t.Fatalf("briefing owner message = %s", stdout)
+	}
+	if err := client.TaskNoticesTold(ctx, m.Client(t, "muse"), []string{req.ID}); err != nil {
+		t.Fatalf("acknowledge the claimed briefing: %v", err)
+	}
+}
+
+func TestTasksDecideAssignCommand(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "grokbot", true); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"add", "Call the dentist"}, "Added task #1")
+	tasksRun(t, []string{"decide", "1", "assign", "--to", "muse", "--words", "give 1 to muse"}, "Assigned task #1 to muse for the owner.")
+	if got := taskNow(t, m, 1); got.Assignee != "muse" || got.AgentAssigns != 0 {
+		t.Fatalf("host assigned task = %+v", got)
+	}
+}
+
+func TestTasksAllShowsQuietAsks(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	if err := m.Client(t, "admin").SetKind(t.Context(), "muse", "notes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Client(t, "grokbot").Send(t.Context(), "muse", "Quiet lookup", envelope.KindAsk, "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, all := range []bool{false, true} {
+		args := []string{"--json"}
+		if all {
+			args = append(args, "--all")
+		}
+		out, err := run(t, tasksCmd(), args...)
+		if err != nil || strings.Contains(out, "Quiet lookup") != all || strings.Contains(out, "\"quiet\": true") != all {
+			t.Fatalf("tasks %v = %q, %v", args, out, err)
+		}
+	}
+}
+
+func TestTasksDecideRetryAndCompleteFromTheShell(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	ctx := t.Context()
+	if _, err := m.Client(t, "admin").SetTaskHost(ctx, "muse", true); err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.AddTask(ctx, m.Client(t, "grokbot"), false, client.TaskAdd{Title: "Check the shipment"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	useConfig(t, client.Config{Relay: m.URL("muse"), Agent: "muse"})
+	id := fmt.Sprint(task.Task.ID)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"retry", "--to", "instinct"}, "requires --to and --reason"},
+		{[]string{"retry", "--to", "instinct", "--reason", "Try dispatch", "--words", "Do it"}, "without --words"},
+		{[]string{"complete"}, "requires --result"},
+		{[]string{"complete", "--result", " ", "--words", "Done"}, "without --words"},
+	} {
+		_, err := run(t, tasksCmd(), append([]string{"decide", id}, tc.args...)...)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+	}
+	tasksRun(t, []string{"decide", id, "retry", "--to", "instinct", "--reason", "Try the dispatch desk"}, "retry 1 of 2")
+	working := taskNow(t, m, task.Task.ID)
+	if _, err := m.Client(t, "instinct").Reply(ctx, working.CurrentRequest, "Verified.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	tasksRun(t, []string{"decide", id, "complete", "--result", "Confirmed at the desk"}, "Closed task #"+id)
+	if got := taskNow(t, m, task.Task.ID); got.Status != envelope.TaskDone || got.Result != "Confirmed at the desk" {
+		t.Fatalf("completion = %+v", got)
+	}
+}

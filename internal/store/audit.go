@@ -64,19 +64,26 @@ func (s *Store) Audit(ctx context.Context, e AuditEvent) error {
 		return err
 	}
 	defer tx.Rollback()
+	e.At = s.now().UTC().Truncate(time.Millisecond)
+	if err := auditTx(ctx, tx, e); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func auditTx(ctx context.Context, tx *sql.Tx, e AuditEvent) error {
 	var prev string
-	err = tx.QueryRowContext(ctx, `SELECT hash FROM audit ORDER BY seq DESC LIMIT 1`).Scan(&prev)
+	err := tx.QueryRowContext(ctx, `SELECT hash FROM audit ORDER BY seq DESC LIMIT 1`).Scan(&prev)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	e.At = s.now().UTC().Truncate(time.Millisecond)
 	e.PrevHash = prev
 	e.Hash = auditHash(prev, e)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO audit(at, event, request_id, trace_id, actor, detail, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.At.UnixMilli(), e.Event, e.RequestID, e.TraceID, e.Actor, e.Detail, e.PrevHash, e.Hash); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // VerifyAudit walks the log and reports the first entry whose hash does not

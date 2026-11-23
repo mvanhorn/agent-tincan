@@ -1,6 +1,7 @@
 package relay_test
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -172,9 +173,13 @@ func TestTaskHostDropsAndReopens(t *testing.T) {
 	if got := m.task(t, working.ID); got.Status != envelope.TaskWorking || got.CurrentRequest != working.CurrentRequest {
 		t.Fatalf("task after the refused drop = %+v", got)
 	}
-	// Done is refused as it is for the owner, naming the open ask.
-	if _, err := hostDecide(t, m.muse, working.ID, "done", "the flights are booked"); !refusedWith(err, http.StatusConflict, working.CurrentRequest) || !strings.Contains(err.Error(), "an ask is still open") {
-		t.Fatalf("host's done on a working task: %v", err)
+	words := "the flights are booked"
+	if got, err := hostDecide(t, m.muse, working.ID, "done", words); err != nil || got.Task.Status != envelope.TaskDone || got.Task.Result != words {
+		t.Fatalf("host's done on a working task: %+v, %v", got, err)
+	}
+	res, err := m.grok.Get(t.Context(), working.CurrentRequest, 0)
+	if err != nil || res.Status != envelope.StatusAnswered || res.Reply == nil || res.Reply.Body != words {
+		t.Fatalf("ask after owner's decision = %+v, %v", res, err)
 	}
 }
 
@@ -219,7 +224,7 @@ func TestTaskHostCannotApproveOrReset(t *testing.T) {
 	proposed := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Pay the invoice", "source": "mail"}).Task.ID
 	open := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Tidy the drive"}).Task.ID
 	for _, id := range []int64{proposed, open} {
-		for _, d := range []string{"approve", "reset", "", "complete", "DONE"} {
+		for _, d := range []string{"approve", "reset", "", "finish", "DONE"} {
 			if _, err := hostDecide(t, m.muse, id, d, "approve it"); !refusedWith(err, http.StatusBadRequest, "unknown decision") {
 				t.Errorf("decision %q on task %d: %v", d, id, err)
 			}
@@ -366,5 +371,197 @@ func TestTaskHostDecisionRefusedDuringGuestAsk(t *testing.T) {
 	}
 	if got, err := m.Store.Task(ctx, id, ""); err != nil || got.Status != envelope.TaskOpen {
 		t.Fatalf("task after the refusals = %+v, %v", got, err)
+	}
+}
+
+func TestTaskDueOnlyOwnerFilerOrHostOnWords(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	ctx := t.Context()
+	task, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Call the dentist", Due: "2030-11-29"})
+	if err != nil || task.Task.DueDay != "2030-11-29" || task.Task.DueAt != nil {
+		t.Fatalf("day-only task = %+v, %v", task, err)
+	}
+	id := task.Task.ID
+	if _, err := client.SetTaskDue(ctx, m.scout, false, id, "tomorrow"); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("change by unrelated agent = %v", err)
+	}
+	if _, err := client.HostSetTaskDue(ctx, m.muse, id, "2030-11-29 3pm", ""); !client.IsStatus(err, http.StatusBadRequest) {
+		t.Fatalf("host change without words = %v", err)
+	}
+	words := "Make the dentist task due Friday at 3pm"
+	out, err := client.HostSetTaskDue(ctx, m.muse, id, "2030-11-29 3pm", words)
+	if err != nil || out.DueAt == nil || *out.DueAt != 1922223600 || out.Status != task.Task.Status {
+		t.Fatalf("host change = %+v, %v", out, err)
+	}
+	ev := m.lastEvent(t, id)
+	if ev.Kind != envelope.TaskEventDue || ev.Actor != "muse" || !ev.ForOwner || ev.Body != words ||
+		ev.DueChange == nil || ev.DueChange.Before.DueDay != "2030-11-29" || ev.DueChange.Before.DueAt != nil ||
+		ev.DueChange.After.DueAt == nil || *ev.DueChange.After.DueAt != *out.DueAt {
+		t.Fatalf("host due history = %+v", ev)
+	}
+	if _, err := client.SetTaskDue(ctx, m.admin, true, id, "2026-11-29"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SetTaskDue(ctx, m.grok, false, id, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.task(t, id); got.DueDay != "" || got.DueAt != nil {
+		t.Fatalf("cleared task = %+v", got)
+	}
+}
+
+func TestTaskHostAssignsOnTheOwnersWords(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	ctx := t.Context()
+	task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Send the contract"}).Task
+	// A host acting for the owner does not use up an agent assignment.
+	for range store.MaxAgentAssigns {
+		if err := m.Store.CountTaskAssign(ctx, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	words := "give the contract task to Instinct"
+	if _, err := client.HostAssignTask(ctx, m.muse, task.ID, "instinct", words); !client.IsStatus(err, http.StatusForbidden) {
+		t.Fatalf("non-host assign = %v", err)
+	}
+	if _, err := client.HostAssignTask(ctx, m.grok, task.ID, "instinct", ""); !client.IsStatus(err, http.StatusBadRequest) {
+		t.Fatalf("assign with missing owner words = %v", err)
+	}
+	proposed := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Unapproved task", "source": "mail"}).Task
+	if _, err := client.HostAssignTask(ctx, m.grok, proposed.ID, "instinct", "assign it"); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("assign of a proposed task = %v", err)
+	}
+	if got := m.task(t, proposed.ID); got.Status != envelope.TaskProposed || got.CurrentRequest != "" {
+		t.Fatalf("proposed task changed: %+v", got)
+	}
+	out, err := client.HostAssignTask(ctx, m.grok, task.ID, "instinct", words)
+	if err != nil || out.Status != envelope.TaskWorking || out.Assignee != "instinct" || out.AgentAssigns != store.MaxAgentAssigns {
+		t.Fatalf("host assignment = %+v, %v", out, err)
+	}
+	ev := m.lastEvent(t, task.ID)
+	if ev.Kind != envelope.TaskEventAssigned || ev.Actor != "grokbot" || !ev.ForOwner || ev.Body != words {
+		t.Fatalf("assignment event = %+v", ev)
+	}
+	in, err := m.instinct.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].TaskID != task.ID || in.Requests[0].From != "grokbot" ||
+		!strings.Contains(in.Requests[0].Body, "the owner assigned to you") || strings.Contains(in.Requests[0].Body, words) {
+		t.Fatalf("owner's assignment = %+v, %v", in, err)
+	}
+}
+
+func TestTaskHostAddChargesEvenWhenHandoffFails(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	ctx := t.Context()
+
+	// Self-assignment fails before it charges a send slot. The task it
+	// leaves on the list still has to count as a filing.
+	add := client.TaskAdd{Title: "File and give it to myself", Mine: true, Assignee: "grokbot"}
+	out, err := client.AddTask(ctx, m.grok, false, add)
+	if err != nil || out.Task.Filer != envelope.TaskOwner || out.Task.Status != envelope.TaskOpen || out.AssignError == "" {
+		t.Fatalf("first filing = %+v, %v", out, err)
+	}
+	add.Title = "Another self-assigned task"
+	if _, err := client.AddTask(ctx, m.grok, false, add); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+	tasks, _, err := client.Tasks(ctx, m.admin, true, false)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("owner tasks after refused filing = %+v, %v", tasks, err)
+	}
+}
+
+func TestTaskHostAddAndAssignShareOneRateSlot(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "grokbot")
+	m.Server.SetPreparer(policy.New(m.Store, policy.Config{Now: m.clk.now, PerMinute: 1}))
+	ctx := t.Context()
+	out, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "File and delegate", Mine: true, Assignee: "instinct"})
+	if err != nil || out.Task.Status != envelope.TaskWorking || out.Task.Assignee != "instinct" || out.AssignError != "" {
+		t.Fatalf("filing and handoff with one available slot = %+v, %v", out, err)
+	}
+	if _, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Another task", Mine: true}); !client.IsStatus(err, http.StatusTooManyRequests) {
+		t.Fatalf("second filing = %v, want rate limit", err)
+	}
+}
+
+func TestTaskHostCanCloseAnsweredTaskAndOwnerCanReopen(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Confirm opening hours"})
+	closeAsAnswered := func() (envelope.Task, error) {
+		return client.HostCloseAnsweredTask(ctx, m.muse, task.ID, "The reply confirms both days' hours.")
+	}
+	if _, err := closeAsAnswered(); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("host closed open task without owner words: %v", err)
+	}
+	req := m.assign(t, task.ID, "grokbot", "instinct")
+	claimOne(t, m.instinct, req.ID)
+	if _, err := closeAsAnswered(); !client.IsStatus(err, http.StatusConflict) {
+		t.Fatalf("host closed working task without owner words: %v", err)
+	}
+	if _, err := m.instinct.Reply(ctx, req.ID, "Open both days, 4:30 to 10.", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := closeAsAnswered()
+	if err != nil || closed.Status != envelope.TaskDone || closed.Result != "Open both days, 4:30 to 10." {
+		t.Fatalf("host completion = %+v, %v", closed, err)
+	}
+	if ev := m.lastEvent(t, task.ID); ev.Actor != "muse" || ev.ForOwner || ev.Body != "closed it: answered. The reply confirms both days' hours." {
+		t.Fatalf("host history = %+v", ev)
+	}
+	reopened, err := client.DecideTask(ctx, m.admin, client.TaskReopen, task.ID, "review it again")
+	if err != nil || reopened.Status != envelope.TaskReturned || reopened.Result != closed.Result {
+		t.Fatalf("owner reopen = %+v, %v", reopened, err)
+	}
+}
+
+func TestTaskHostRetriesTwiceThenEscalates(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check a delivery"})
+	req := m.assign(t, task.ID, "grokbot", "muse")
+	const failed = "No answer at the original number."
+	if _, err := m.muse.Reply(ctx, req.ID, failed, envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	if first := read(t, m.scout); len(first) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(first[0]), "retry with a different approach") {
+		t.Fatalf("first failure notice = %+v", first)
+	}
+	for i, target := range []struct {
+		name   string
+		client *client.Relay
+	}{{"instinct", m.instinct}, {"muse", m.muse}} {
+		reason := fmt.Sprintf("Check the dispatch desk by channel %d", i+1)
+		got, err := client.HostRetryTask(ctx, m.scout, task.ID, target.name, reason)
+		if err != nil || got.Status != envelope.TaskWorking || got.HostRetries != i+1 {
+			t.Fatalf("retry %d = %+v, %v", i+1, got, err)
+		}
+		attempt := claimOne(t, target.client, got.CurrentRequest)
+		if !strings.Contains(attempt.Body, reason) || !strings.Contains(attempt.Body, failed) {
+			t.Fatalf("attempt lacked approach or prior result: %q", attempt.Body)
+		}
+		if _, err := target.client.Reply(ctx, attempt.ID, failed, envelope.StatusAnswered); err != nil {
+			t.Fatal(err)
+		}
+		news := read(t, m.scout)
+		want := "retry with a different approach"
+		if i == 1 {
+			want = "tell the owner what you tried"
+		}
+		if len(news) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(news[0]), want) {
+			t.Fatalf("retry %d notice = %+v", i+1, news)
+		}
+	}
+	if _, err := client.HostRetryTask(ctx, m.scout, task.ID, "instinct", "Try one more channel"); !refusedWith(err, http.StatusConflict, "two automatic retries have already been sent") {
+		t.Fatalf("third retry did not direct escalation: %v", err)
+	}
+	if got := m.task(t, task.ID); got.Status != envelope.TaskReturned || got.HostRetries != 2 || got.AgentAssigns != 2 || got.Result != failed || got.CurrentRequest != "" {
+		t.Fatalf("task after two retries = %+v", got)
 	}
 }

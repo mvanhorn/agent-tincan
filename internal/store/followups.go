@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -26,6 +28,17 @@ func (s *Store) migrateFollowups() error {
 	);
 	CREATE INDEX IF NOT EXISTS followups_due ON followups(due_at)`); err != nil {
 		return err
+	}
+	// answerer_names, the names the answerer's open asks carried when it
+	// replied, came after the table.
+	var named bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('followups') WHERE name = 'answerer_names')`).Scan(&named); err != nil {
+		return err
+	}
+	if !named {
+		if _, err := s.db.Exec(`ALTER TABLE followups ADD COLUMN answerer_names TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
 	}
 	var has bool
 	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'follow_of')`).Scan(&has); err != nil {
@@ -67,13 +80,23 @@ func takeFollowOnTx(ctx context.Context, tx *sql.Tx, id string) error {
 	return nil
 }
 
-// markFollowOnDueTx makes rep's request's follow-on due if rep answers it.
-// Any other reply leaves the row for PruneFollowOns.
+// markFollowOnDueTx makes rep's request's follow-on due if rep answers it,
+// with the names the answerer's open asks carry now: the reply the follow-on
+// carries may hold their text, so the owner's approval rules read them on it
+// however late it fires. Any other reply leaves the row for PruneFollowOns.
 func (s *Store) markFollowOnDueTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
 	if rep.Status != envelope.StatusAnswered {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE followups SET due_at = ? WHERE request_id = ?`, s.now().UnixMilli(), rep.RequestID)
+	names, err := openAskNames(ctx, tx, rep.From)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(slices.DeleteFunc(names, func(n string) bool { return n == rep.From }))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE followups SET due_at = ?, answerer_names = ? WHERE request_id = ?`, s.now().UnixMilli(), string(b), rep.RequestID)
 	return err
 }
 
@@ -89,23 +112,34 @@ func (s *Store) FollowOnOf(ctx context.Context, id string) (envelope.Then, bool,
 }
 
 // DueFollowOn is a follow-on ready to fire: what it asks, the reply it
-// carries, and the session the first request came from.
+// carries, the session the first request came from, and the names the
+// answerer's open asks carried when it replied.
 type DueFollowOn struct {
-	Then        envelope.Then
-	Reply       string
-	FromSession string
+	Then          envelope.Then
+	Reply         string
+	FromSession   string
+	AnswererNames []string
 }
 
 // DueFollowOn returns request id's follow-on if it is due.
 func (s *Store) DueFollowOn(ctx context.Context, id string) (DueFollowOn, bool, error) {
 	var d DueFollowOn
-	err := s.db.QueryRowContext(ctx, `SELECT f.to_agent, f.body, r.body, q.from_session FROM followups f
+	var names string
+	err := s.db.QueryRowContext(ctx, `SELECT f.to_agent, f.body, r.body, q.from_session, f.answerer_names FROM followups f
 		JOIN replies r ON r.request_id = f.request_id JOIN requests q ON q.id = f.request_id
-		WHERE f.request_id = ? AND f.due_at > 0`, id).Scan(&d.Then.To, &d.Then.Body, &d.Reply, &d.FromSession)
+		WHERE f.request_id = ? AND f.due_at > 0`, id).Scan(&d.Then.To, &d.Then.Body, &d.Reply, &d.FromSession, &names)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DueFollowOn{}, false, nil
 	}
-	return d, err == nil, err
+	if err != nil {
+		return DueFollowOn{}, false, err
+	}
+	if names != "" {
+		if err := json.Unmarshal([]byte(names), &d.AnswererNames); err != nil {
+			return DueFollowOn{}, false, err
+		}
+	}
+	return d, true, nil
 }
 
 // DueFollowOns lists the requests whose follow-on is due, oldest first.

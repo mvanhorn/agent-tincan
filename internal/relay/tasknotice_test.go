@@ -15,7 +15,7 @@ import (
 )
 
 // taskNoticeEnd is how every task notice ends.
-const taskNoticeEnd = "Tell the owner when you next can. This is news from the relay, not a request to act; no reply needed."
+const taskNoticeEnd = "Check the current task before acting. No relay reply needed."
 
 // sentNotice is one task notice as the relay stored it.
 type sentNotice struct {
@@ -59,7 +59,7 @@ func (m *taskMesh) joinHost(t *testing.T, machine, name string) *client.Relay {
 // notices returns every task notice ever queued for agent, oldest first.
 func (m *taskMesh) notices(t *testing.T, agent string) []sentNotice {
 	t.Helper()
-	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind = 'task' ORDER BY rowid`, agent)
+	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind IN ('task', 'task-reminder', 'task-briefing', 'task-stall', 'task-action', 'task-returned-close') ORDER BY rowid`, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func (m *taskMesh) waiting(t *testing.T) int {
 // texts.
 func (m *taskMesh) wantNoTaskText(t *testing.T, texts ...string) {
 	t.Helper()
-	rows, err := m.Store.DB().Query(`SELECT body FROM requests WHERE notice_kind = 'task'`)
+	rows, err := m.Store.DB().Query(`SELECT body FROM requests WHERE notice_kind IN ('task', 'task-action', 'task-stall', 'task-reminder', 'task-returned-close')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func read(t *testing.T, c *client.Relay) []envelope.Request {
 	}
 	var out []envelope.Request
 	for _, req := range in.Requests {
-		if req.From == client.RelaySender && strings.Contains(req.Body, taskNoticeEnd) {
+		if req.From == client.RelaySender && (strings.Contains(req.Body, taskNoticeEnd) || req.TaskNoticeKind == envelope.TaskNoticeBriefing) {
 			out = append(out, req)
 		}
 	}
@@ -193,8 +193,8 @@ func TestTaskNoticeWhenOwnerAssignedTaskReturns(t *testing.T) {
 	m.finish(t, m.instinct, task.ID, "Posted today, tracking 9400-1", envelope.StatusAnswered)
 
 	for _, host := range []string{"pilot", "keeper"} {
-		n := m.wantNotice(t, host, task.ID, "returned", "instinct", "waits on the owner")
-		if n.Status != envelope.StatusQueued {
+		n := m.wantNotice(t, host, task.ID, "returned", "instinct", "ready for review")
+		if n.Status != envelope.StatusQueued || strings.Contains(n.Body, "Renew the passport") {
 			t.Fatalf("notice for %s is %s, want queued", host, n.Status)
 		}
 		if got := wakes.count(host); got != 1 {
@@ -204,15 +204,106 @@ func TestTaskNoticeWhenOwnerAssignedTaskReturns(t *testing.T) {
 	for _, other := range []string{"grokbot", "instinct", "muse", "scout", "phone"} {
 		m.wantNotices(t, other, 0)
 	}
-	m.wantNoTaskText(t, "passport", "DS-82", "March", "Posted", "9400")
+	m.wantNoTaskText(t, "DS-82", "March", "Posted", "9400")
 	if n := m.waiting(t); n != 0 {
 		t.Fatalf("%d changes left in the outbox", n)
 	}
-	if got := read(t, pilot); len(got) != 1 || got[0].Kind != envelope.KindNotify {
+	if got := read(t, pilot); len(got) != 1 || got[0].Kind != envelope.KindNotify || got[0].TaskNoticeID != task.ID || got[0].TaskNoticeStatus != envelope.TaskReturned || got[0].TaskID != 0 {
 		t.Fatalf("pilot's poll handed it %+v, want its one notice", got)
 	}
 	if got := m.audited(t, "task_notified"); len(got) != 2 {
 		t.Fatalf("task_notified audit rows = %v, want one per host", got)
+	}
+}
+
+func TestWebhookTaskHostGetsNoticeInAnotherSession(t *testing.T) {
+	for _, tc := range []struct {
+		reply envelope.Status
+		news  string
+		task  envelope.TaskStatus
+	}{
+		{envelope.StatusAnswered, "is returned", envelope.TaskReturned},
+		{envelope.StatusNeedsInput, "is at question", envelope.TaskQuestion},
+		{envelope.StatusFailed, "is open again", envelope.TaskOpen},
+	} {
+		t.Run(string(tc.reply), func(t *testing.T) {
+			m := newTaskMesh(t)
+			host := m.joinHost(t, "grokbot", "pilot")
+			m.Server.SetWakeNamer(wakes{"pilot": "webhook"})
+			host.SetSession("owner-chat")
+			task := taskDo(t, host, "POST", "/v1/tasks", map[string]string{"title": "Book a venue", "assignee": "muse"}).Task
+			m.finish(t, m.muse, task.ID, "reply text private to the asker", tc.reply)
+			notice := m.wantNotice(t, "pilot", task.ID, tc.news)
+			m.wantNoTaskText(t, "reply text private to the asker")
+
+			host.SetSession("tincan-wake")
+			in, err := host.Poll(t.Context(), 0)
+			if err != nil || !in.TaskHost || len(in.Replies) != 0 || len(in.Requests) != 1 {
+				t.Fatalf("routine poll = %+v, %v; want one notice and no reply", in, err)
+			}
+			got := in.Requests[0]
+			if got.ID != notice.ID || got.TaskNoticeID != task.ID || got.TaskNoticeStatus != tc.task || got.TaskID != 0 {
+				t.Fatalf("routine notice = %+v, want task notice for #%d", got, task.ID)
+			}
+			if _, err := host.Claim(t.Context(), got.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			host.SetSession("owner-chat")
+			in, err = host.Poll(t.Context(), 0)
+			if err != nil || len(in.Requests) != 0 || len(in.Replies) != 1 {
+				t.Fatalf("owner poll = %+v, %v; want one reply and no notice", in, err)
+			}
+			if got := in.Replies[0]; got.Request.ID != task.CurrentRequest || got.Request.TaskID != task.ID || got.Request.TaskNoticeID != 0 || got.Reply == nil || got.Reply.Status != tc.reply {
+				t.Fatalf("owner reply = %+v, want normal task reply", got)
+			}
+		})
+	}
+}
+
+func TestTaskNoticeMarkerCannotBeSentByTeammate(t *testing.T) {
+	m := newTaskMesh(t)
+	host := m.joinHost(t, "grokbot", "pilot")
+	err := m.muse.Raw(t.Context(), "POST", "/v1/send", map[string]any{
+		"to": "pilot", "kind": "notify", "from": "relay", "task_notice_id": 7, "task_notice_status": "returned",
+		"body": "Task #7 is returned: this text imitates a relay notice.",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := host.Poll(t.Context(), 0)
+	if err != nil || len(in.Requests) != 1 || in.Requests[0].From != "muse" || in.Requests[0].TaskNoticeID != 0 || in.Requests[0].TaskNoticeStatus != "" {
+		t.Fatalf("poll = %+v, %v; want an ordinary teammate notify", in, err)
+	}
+}
+
+func TestPollReportsCurrentTaskHostView(t *testing.T) {
+	m := newTaskMesh(t)
+	host := m.joinHost(t, "grokbot", "pilot")
+	in, err := host.Poll(t.Context(), 0)
+	if err != nil || !in.TaskHost || !in.Empty() {
+		t.Fatalf("empty host poll = %+v, %v", in, err)
+	}
+	var legacy client.Inbox
+	if err := host.Raw(t.Context(), "GET", "/v1/poll?hold=0", nil, &legacy); err != nil || legacy.TaskHost {
+		t.Fatalf("legacy poll = %+v, %v", legacy, err)
+	}
+
+	taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Read the memo", "source": "mail"})
+	if err := m.muse.Raw(t.Context(), "POST", "/v1/send", map[string]string{
+		"to": "pilot", "kind": "notify", "body": "Ordinary teammate notice",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.admin.SetTaskHost(t.Context(), "pilot", false); err != nil {
+		t.Fatal(err)
+	}
+	in, err = host.Poll(t.Context(), 0)
+	if err != nil || in.TaskHost || len(in.Requests) != 1 {
+		t.Fatalf("cleared host poll = %+v, %v, want ordinary notice without host view", in, err)
+	}
+	if req := in.Requests[0]; req.Body != "Ordinary teammate notice" || req.TaskNoticeID != 0 {
+		t.Fatalf("notice after clearing host = %+v", req)
 	}
 }
 
@@ -227,7 +318,7 @@ func TestTaskNoticeForAQuestionNamesTheAsker(t *testing.T) {
 		t.Fatalf("task = %+v, want a question", got)
 	}
 	m.wantNotice(t, "pilot", id, "question", "muse needs input", "grokbot, who sent the ask, can answer")
-	m.wantNoTaskText(t, "release", "branch", "hotfix")
+	m.wantNoTaskText(t, "branch", "hotfix")
 }
 
 // A task that falls back to open with no reply makes a notice for the
@@ -284,7 +375,7 @@ func TestTaskNoticeWhenATaskFallsBackToOpen(t *testing.T) {
 			tc.end(t, m, task.CurrentRequest)
 			m.wantOpen(t, task.ID, "")
 			m.wantNotice(t, "pilot", task.ID, "open again with no assignee", "the ask grokbot sent ended with no result, by "+tc.by+".")
-			m.wantNoTaskText(t, "venue", "closed for good", "not mine")
+			m.wantNoTaskText(t, "closed for good", "not mine")
 			if n := m.waiting(t); n != 0 {
 				t.Fatalf("%d changes left in the outbox", n)
 			}
@@ -354,7 +445,7 @@ func TestTaskNoticeWhenTheSweepClosesAHeldAcknowledgement(t *testing.T) {
 		t.Fatalf("task after the claim lapsed = %+v", got)
 	}
 	m.wantNotice(t, "pilot", task.ID, "returned", "came back from muse")
-	m.wantNoTaskText(t, "report", "Working on it")
+	m.wantNoTaskText(t, "Working on it")
 }
 
 // A task filed with a source waits for the owner as proposed. The hosts
@@ -449,7 +540,7 @@ func TestTaskNoticeOneUnreadPerTaskAndHost(t *testing.T) {
 	if last := got[2]; last.Status != envelope.StatusQueued || !strings.Contains(last.Body, fmt.Sprintf("Task #%d is returned", id)) {
 		t.Fatalf("notice after the read = %+v, want a new one for the return", last)
 	}
-	m.wantNoTaskText(t, "venue", "Booked", "cake", "hall")
+	m.wantNoTaskText(t, "Booked", "hall")
 }
 
 // A host the owner's approval rules now gate is suspended and hears
@@ -535,4 +626,248 @@ func TestTaskNoticeDrainRetryDoesNotTellAHostTwice(t *testing.T) {
 	m.Server.Sweep(t.Context())
 	m.wantNotices(t, told, 1)
 	m.wantNotices(t, failed, 1)
+}
+
+func TestTaskReminderDeliveryAndPrivacy(t *testing.T) {
+	m := newTaskMesh(t)
+	pilot := m.joinHost(t, "instinct", "pilot")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	at := m.clk.now().Add(time.Minute)
+	res, err := client.AddTask(ctx, m.grok, false, client.TaskAdd{Title: "Private title", Detail: "Private detail", Assignee: "instinct", Due: at.UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.finish(t, m.instinct, res.Task.ID, "Private result", envelope.StatusAnswered)
+	m.wantNotices(t, "pilot", 1) // returned still unread
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+	m.clk.advance(time.Minute)
+	m.Server.Sweep(ctx)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 2)
+	want := fmt.Sprintf("Reminder: task #%d is due now.", res.Task.ID)
+	for attempt := 1; attempt <= 3; attempt++ {
+		var reminder envelope.Request
+		for _, req := range read(t, pilot) {
+			if _, err := pilot.Claim(ctx, req.ID); err != nil {
+				t.Fatal(err)
+			}
+			if req.TaskNoticeKind == envelope.TaskNoticeReminder {
+				reminder = req
+			} else if err := client.TaskNoticesTold(ctx, pilot, []string{req.ID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		message := fmt.Sprintf("Task #%d Private title: its reminder is due.", res.Task.ID)
+		if attempt > 1 {
+			message = "Re-send of the same task news: " + message
+		}
+		if reminder.TaskNoticeID != res.Task.ID || client.TaskNoticeOwnerMessage(reminder) != message ||
+			strings.Contains(reminder.Body, "Private result") || !strings.Contains(reminder.Body, want) {
+			t.Fatalf("reminder attempt %d = %+v", attempt, reminder)
+		}
+		m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+		m.Server.Sweep(ctx)
+	}
+	m.wantNotices(t, "pilot", 4)
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 1 || !strings.Contains(in.Requests[0].Body, want) || strings.Contains(in.Requests[0].Body, "Private") {
+		t.Fatalf("fallback = %+v, %v", in, err)
+	}
+
+	at = m.clk.now().Add(time.Minute)
+	if _, err := client.SetTaskDue(ctx, m.grok, false, res.Task.ID, at.UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(time.Minute)
+	m.Server.Sweep(ctx)
+	got := read(t, pilot)
+	if len(got) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(got[0]), "its reminder is due.") {
+		t.Fatalf("moved reminder = %+v", got)
+	}
+	if _, err := pilot.Claim(ctx, got[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.TaskNoticesTold(ctx, pilot, []string{got[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 5)
+}
+
+func TestTaskRemindersSkipLateClosedAndDayOnlyTasks(t *testing.T) {
+	m := newTaskMesh(t)
+	m.joinHost(t, "instinct", "pilot")
+	ctx := t.Context()
+	at := m.clk.now().Add(time.Minute).UTC().Format(time.RFC3339)
+	add := func(title, due string) envelope.Task {
+		t.Helper()
+		res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: title, Due: due})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Task
+	}
+	late := add("Late", at)
+	done := add("Done before deadline", at)
+	dropped := add("Dropped before deadline", at)
+	add("Day only", "2000-11-21")
+	if _, err := client.DecideTask(ctx, m.admin, client.TaskDone, done.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DropTask(ctx, m.admin, true, dropped.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	m.clk.advance(7 * time.Hour)
+	m.Server.Sweep(ctx)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 0)
+	events := m.events(t, late.ID)
+	if len(events) != 2 || events[1].Kind != envelope.TaskEventReminderDropped || !strings.Contains(events[1].Body, "six hours") {
+		t.Fatalf("late reminder history = %+v", events)
+	}
+}
+
+func TestTaskReminderCancelledWhenTaskClosesAfterQueue(t *testing.T) {
+	m := newTaskMesh(t)
+	pilot := m.joinHost(t, "instinct", "pilot")
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private task", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+	if _, err := client.DecideTask(ctx, m.admin, client.TaskDone, res.Task.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, pilot); len(got) != 0 {
+		t.Fatalf("closed task reminded = %+v", got)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+}
+
+func TestUnreadReminderExpiresInsteadOfSendingLate(t *testing.T) {
+	m := newTaskMesh(t)
+	pilot := m.joinHost(t, "instinct", "pilot")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private task", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+
+	m.clk.advance(7 * time.Hour)
+	if got := read(t, pilot); len(got) != 0 {
+		t.Fatalf("late reminder delivered = %+v", got)
+	}
+	m.Server.Sweep(ctx)
+	m.Server.Sweep(ctx)
+	m.wantNotices(t, "pilot", 1)
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 0 {
+		t.Fatalf("late reminder sent to fallback = %+v, %v", in, err)
+	}
+	events := m.events(t, res.Task.ID)
+	if len(events) != 2 || events[1].Kind != envelope.TaskEventReminderDropped {
+		t.Fatalf("late reminder history = %+v", events)
+	}
+}
+
+func TestTaskReminderFallbackCancelledWhenDueChanges(t *testing.T) {
+	m := newTaskMesh(t)
+	m.host(t, "muse")
+	m.gate(t, `{"gate":{},"notify":"scout"}`)
+	ctx := t.Context()
+	res, err := client.AddTask(ctx, m.admin, true, client.TaskAdd{Title: "Private title", Due: m.clk.now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Server.Sweep(ctx)
+	for range 3 {
+		got := read(t, m.muse)
+		if len(got) != 1 {
+			t.Fatalf("reminder attempt = %+v", got)
+		}
+		if _, err := m.muse.Claim(ctx, got[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		m.clk.advance(relay.DefaultTaskNoticeAckTimeout)
+		m.Server.Sweep(ctx)
+	}
+	waiting, err := m.Store.QueuedIDs(ctx, "scout")
+	if err != nil || len(waiting) != 1 {
+		t.Fatalf("queued fallback = %v, %v", waiting, err)
+	}
+	if _, err := client.SetTaskDue(ctx, m.admin, true, res.Task.ID, "clear"); err != nil {
+		t.Fatal(err)
+	}
+	in, err := m.scout.Poll(ctx, 0)
+	if err != nil || len(in.Requests) != 0 {
+		t.Fatalf("fallback delivered after due cleared = %+v, %v", in, err)
+	}
+}
+
+func TestTaskNoticeTitleIsOneLineAndTruncated(t *testing.T) {
+	m := newTaskMeshWithConfig(t, relay.Config{TaskBriefing: "off"})
+	m.host(t, "scout")
+	title := "Check\n\u202e\x1b the " + strings.Repeat("a", 170)
+	task := m.add(t, envelope.Task{Filer: "grokbot", Title: title})
+	m.assign(t, task.ID, "grokbot", "muse")
+	m.finish(t, m.muse, task.ID, "Verified.", envelope.StatusAnswered)
+	got := read(t, m.scout)
+	want := "Check the " + strings.Repeat("a", 69) + "…"
+	if len(got) != 1 || !strings.Contains(client.TaskNoticeOwnerMessage(got[0]), want+": muse sent a result.") ||
+		strings.ContainsAny(got[0].Body, "\u202e\x1b") {
+		t.Fatalf("notice title = %+v, want %q", got, want)
+	}
+}
+
+func TestTaskNoticeTitlesRecheckedOnPollAndClaim(t *testing.T) {
+	for _, revokeBeforePoll := range []bool{true, false} {
+		t.Run(fmt.Sprintf("revoke-before-poll=%t", revokeBeforePoll), func(t *testing.T) {
+			m, guest := guestMesh(t, relay.Config{TaskBriefing: "off"})
+			ctx := t.Context()
+			admin, host := m.Client(t, "admin"), m.Client(t, "muse")
+			if _, err := admin.SetTaskHost(ctx, "muse", true); err != nil {
+				t.Fatal(err)
+			}
+			const title = "Quarterly inventory status"
+			grok, worker := m.Client(t, "grokbot"), m.Client(t, "instinct")
+			task := taskDo(t, grok, "POST", "/v1/tasks", map[string]string{"title": title, "assignee": "instinct"}).Task
+			if _, err := worker.Reply(ctx, task.CurrentRequest, "Inventory verified.", envelope.StatusAnswered); err != nil {
+				t.Fatal(err)
+			}
+			if queued, err := client.TaskBriefingNow(ctx, admin); err != nil || !queued {
+				t.Fatalf("briefing queued = %t, %v", queued, err)
+			}
+			revoke := func() { approve(t, m, guestAsk(t, guest, "Check today's hours").ID) }
+			if revokeBeforePoll {
+				revoke()
+			}
+			notices := read(t, host)
+			if len(notices) != 2 {
+				t.Fatalf("expected a status notice and briefing, got %+v", notices)
+			}
+			for _, notice := range notices {
+				if strings.Contains(notice.Body, title) == revokeBeforePoll {
+					t.Fatalf("poll title did not match host access: %+v", notice)
+				}
+			}
+			if !revokeBeforePoll {
+				revoke()
+			}
+			for _, notice := range notices {
+				claimed, err := host.Claim(ctx, notice.ID)
+				if err != nil || strings.Contains(claimed.Body, title) {
+					t.Fatalf("claim revealed a title: %+v, %v", claimed, err)
+				}
+			}
+		})
+	}
 }

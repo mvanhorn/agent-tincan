@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -208,6 +209,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate lease lapsed: %w", err)
 	}
+	if err := s.migrateReadBy(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate read by: %w", err)
+	}
 	if err := s.migrateSearch(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate search: %w", err)
@@ -292,6 +297,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate task notices: %w", err)
 	}
+	if err := s.migrateTaskRecovery(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate task recovery: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -314,6 +323,28 @@ func (s *Store) migrateUrgent() error {
 		return nil
 	}
 	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+// migrateReadBy adds read_by, the target that was last handed the request's
+// text (by a poll, a claim or a read of the request), so an ask that went
+// back to the queue still counts among that target's open asks
+// (OpenAskNames). A move to another target leaves it naming the old one.
+func (s *Store) migrateReadBy() error {
+	var has bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = 'read_by')`).Scan(&has); err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN read_by TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// MarkRead records that agent, request id's target, was handed its text.
+func (s *Store) MarkRead(ctx context.Context, id, agent string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE requests SET read_by = ? WHERE id = ? AND to_agent = ? AND read_by != ?`, agent, id, agent, agent)
 	return err
 }
 
@@ -619,6 +650,11 @@ func (s *Store) PutAgent(ctx context.Context, a identity.Agent) error {
 		return err
 	}
 	if !a.TaskHost || node.String != a.NodeID {
+		if taskHost.Valid {
+			if err := s.cancelTaskNoticesFor(ctx, tx, a.Name); err != nil {
+				return err
+			}
+		}
 		taskHost = sql.NullInt64{}
 	}
 	until, asks, err := encodeGuest(a.Guest)
@@ -651,6 +687,9 @@ func (s *Store) DeleteAgent(ctx context.Context, name string) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return false, err
+	}
+	if err := s.cancelTaskNoticesFor(ctx, tx, name); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM wakes WHERE agent = ?`, name); err != nil {
@@ -714,16 +753,29 @@ func (s *Store) SetAgentFallback(ctx context.Context, name, to string) (bool, er
 // which stores NULL. It reports whether name exists. It is the only write
 // that sets the mark: PutAgent keeps or clears it and never grants it.
 func (s *Store) SetAgentTaskHost(ctx context.Context, name string, on bool) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
 	var mark any
 	if on {
 		mark = 1
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE agents SET task_host = ? WHERE name = ?`, mark, name)
+	res, err := tx.ExecContext(ctx, `UPDATE agents SET task_host = ? WHERE name = ?`, mark, name)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil || n == 0 {
+		return false, err
+	}
+	if !on {
+		if err := s.cancelTaskNoticesFor(ctx, tx, name); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit()
 }
 
 // TouchAgent records that name called the relay at t. It only moves the
@@ -905,11 +957,26 @@ func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, b
 // upload on no other message, and comes back filled in from its metadata.
 // A bad reference stores nothing.
 func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Duration) (envelope.Request, error) {
+	return s.enqueue(ctx, req, ttl, false, false)
+}
+
+// EnqueueFilingTasks links an ask or records it in a claimed task's
+// history in the same transaction that queues the request.
+func (s *Store) EnqueueFilingTasks(ctx context.Context, req envelope.Request, ttl time.Duration, requireHost bool) (envelope.Request, error) {
+	return s.enqueue(ctx, req, ttl, true, requireHost)
+}
+
+func (s *Store) enqueue(ctx context.Context, req envelope.Request, ttl time.Duration, fileTasks, requireHost bool) (envelope.Request, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Request{}, err
 	}
 	defer tx.Rollback()
+	if fileTasks {
+		if err := s.fileAskTx(ctx, tx, &req, requireHost); err != nil {
+			return envelope.Request{}, err
+		}
+	}
 	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
 		return envelope.Request{}, err
 	}
@@ -969,6 +1036,11 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, ErrNotRoomMember
 		}
 	}
+	if req.TaskRetry != nil {
+		if err := s.prepareTaskRetryTx(ctx, tx, &req); err != nil {
+			return envelope.Request{}, err
+		}
+	}
 	if req.TaskID != 0 {
 		if err := s.claimTaskTx(ctx, tx, req); err != nil {
 			return envelope.Request{}, err
@@ -986,13 +1058,25 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 	if req.Attachments, atts, err = bindAndEncodeAttachments(ctx, tx, req.Attachments, req.From, req.ID); err != nil {
 		return envelope.Request{}, err
 	}
+	// Keep task recovery subject to the task filer's broader guest check.
+	// This labels recovery without changing ordinary send or hold behavior.
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors, recovery_source, skip_task_recovery, recovery_repeat, task_filed_on_send, task_room_scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			CASE WHEN ? AND EXISTS (SELECT 1 FROM requests WHERE to_agent = ? AND `+openGuestAsk+`) THEN 'guest' ELSE ? END,
+			? OR EXISTS (SELECT 1 FROM agents WHERE name IN (?, ?) AND kind IN ('history', 'notes', 'pass', 'council')), ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
-		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors)
+		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors,
+		req.Kind == envelope.KindAsk && !req.NoParent, req.From, req.RecoverySource,
+		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat, req.TaskFiledOnSend, req.TaskRoomScope)
 	if err != nil {
 		return envelope.Request{}, err
+	}
+	if req.AboutTaskID != 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_followups (request_id, task_id) VALUES (?, ?)`,
+			req.ID, req.AboutTaskID); err != nil {
+			return envelope.Request{}, err
+		}
 	}
 	if err := s.followOnTx(ctx, tx, req); err != nil {
 		return envelope.Request{}, err
@@ -1046,20 +1130,33 @@ func (s *Store) DeliverFor(ctx context.Context, agent string, scope QueueScope, 
 	args := []any{string(envelope.StatusDelivered), now.Add(lease).UnixMilli(), now.UnixMilli(),
 		agent, string(envelope.StatusQueued), now.UnixMilli(), now.UnixMilli()}
 	args = append(append(args, filterArgs...), limit, maxDeliverBytes)
-	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?
+	rows, err := s.db.QueryContext(ctx, `UPDATE requests SET status = ?, lease_until = ?, updated_at = ?, read_by = to_agent
 		WHERE id IN (SELECT id FROM (
 			SELECT id, SUM(length(body) + length(exchanges)) OVER (ORDER BY urgent DESC, created_at, rowid) AS running,
 				ROW_NUMBER() OVER (ORDER BY urgent DESC, created_at, rowid) AS n
 			FROM requests WHERE to_agent = ? AND status = ? AND expires_at > ? AND deliver_after <= ?`+filter+`
 			ORDER BY urgent DESC, created_at, rowid LIMIT ?
 		) WHERE n = 1 OR running <= ?)
-		RETURNING `+requestCols, args...)
+		RETURNING `+requestCols+`,
+			COALESCE((SELECT attempt FROM task_notice_delivery WHERE request_id = requests.id), 0),
+			COALESCE((SELECT reported_status FROM task_notice_delivery WHERE request_id = requests.id), '')`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out, err := scanRequests(rows)
-	if err != nil {
+	var out []envelope.Request
+	for rows.Next() {
+		var attempt int
+		var reportedStatus envelope.TaskStatus
+		req, _, err := scanRequest(extraCols{rows, []any{&attempt, &reportedStatus}})
+		if err != nil {
+			return nil, err
+		}
+		req.TaskNoticeResend = attempt > 1
+		req.TaskNoticeStatus = reportedStatus
+		out = append(out, req)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	sortByPriority(out)
@@ -1356,7 +1453,7 @@ func (s *Store) ClaimLeasesFrom(ctx context.Context, id, agent, session string, 
 	}
 	res, err := x.ExecContext(ctx, `UPDATE requests SET status = ?, lease_until = CASE WHEN kind = ? THEN 0 WHEN urgent = 1 THEN ? ELSE ? END,
 		claimed_at = CASE WHEN status = ? THEN claimed_at ELSE ? END,
-		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL
+		claim_session = CASE WHEN status = ? THEN claim_session ELSE ? END, updated_at = ?, lease_lapsed_at = NULL, read_by = to_agent
 		WHERE id = ? AND to_agent = ? AND status IN (?, ?, ?) AND expires_at > ? AND (status != ? OR deliver_after <= ?)`+filter, append(args, filterArgs...)...)
 	if err != nil {
 		return envelope.Request{}, err
@@ -1412,7 +1509,7 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return err
 	}
 	if task.Valid {
-		if err := taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
+		if err := s.taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -1500,6 +1597,12 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if err := s.taskRepliedTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
+	if rep.Status == envelope.StatusAnswered && !rep.Provisional {
+		rep.CancelledFollowups, err = s.closeQuietTaskAfterReplyTx(ctx, tx, id)
+		if err != nil {
+			return envelope.Reply{}, err
+		}
+	}
 	if !rep.Replaced { // the ack already set any follow-on off
 		if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
 			return envelope.Reply{}, err
@@ -1542,6 +1645,9 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 		if note, err = s.RelayNote(ctx, id); err != nil {
 			return Result{}, err
 		}
+	}
+	if req.From != agent && req.WasHeld && !req.Approved && rep != nil && rep.From == envelope.TaskOwner {
+		rep = nil
 	}
 	req.RedactFor(agent)
 	res := Result{Request: req, Status: status, Reply: rep, Progress: req.Progress, Exchanges: req.Exchanges, RelayNote: note}
@@ -1599,7 +1705,7 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 		return nil, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ? WHERE id = ? AND status IN (?, ?, ?)`+cond,
+	res, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, updated_at = ?, skip_task_recovery = 1 WHERE id = ? AND status IN (?, ?, ?)`+cond,
 		string(envelope.StatusCancelled), s.now().UnixMilli(), id, string(envelope.StatusQueued), string(envelope.StatusDelivered), string(envelope.StatusHeld))
 	if err != nil {
 		return nil, err
@@ -1611,7 +1717,7 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	if err := s.taskReleasedTx(ctx, tx, id, agent, "cancelled the ask"); err != nil {
+	if err := s.taskCancelledTx(ctx, tx, id, agent); err != nil {
 		return nil, err
 	}
 	return closed, tx.Commit()
@@ -1662,7 +1768,7 @@ func (s *Store) CancelAllFor(ctx context.Context, agent string) ([]string, error
 	return ids, tx.Commit()
 }
 
-// Transition is one state change made by Sweep. Prev is the status the
+// Transition is one state change made by Sweep or RecoverTasks. Prev is the status the
 // request left, and ClaimedAt when its last claim began (zero if it was
 // never claimed).
 type Transition struct {
@@ -1795,12 +1901,60 @@ func (s *Store) openClaim(ctx context.Context, query string, args ...any) (envel
 	return reqs[0], true, nil
 }
 
+// OpenAskNames lists every agent whose text reached agent through an ask it
+// has open: the chain and contributors of each ask addressed to it that is
+// delivered, claimed, waiting on its question, or queued again after agent
+// was handed it (a lapsed lease, a handback, or a read by id). The owner's approval rules read
+// these on what agent sends next, whichever ask (if any) the send continues,
+// so holding a second claim or naming another parent does not drop a name.
+// A needs_input ask counts, unlike in OpenGuestClaims: on a send a hold only
+// waits for the owner, so an asker that never answers cannot block agent's
+// sends (it does block a schedule until the ask ends). Each name is listed
+// once.
+func (s *Store) OpenAskNames(ctx context.Context, agent string) ([]string, error) {
+	return openAskNames(ctx, s.db, agent)
+}
+
+func openAskNames(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, agent string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT chain, contributors FROM requests WHERE to_agent = ? AND kind = ?
+		AND (status IN (?, ?, ?) OR (status = ? AND (claimed_at > 0 OR read_by = to_agent)))`,
+		agent, string(envelope.KindAsk), string(envelope.StatusDelivered), string(envelope.StatusClaimed), string(envelope.StatusNeedsInput), string(envelope.StatusQueued))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var chain, contributors string
+		if err := rows.Scan(&chain, &contributors); err != nil {
+			return nil, err
+		}
+		for _, list := range []string{chain, contributors} {
+			if list == "" {
+				continue
+			}
+			var names []string
+			if err := json.Unmarshal([]byte(list), &names); err != nil {
+				return nil, err
+			}
+			for _, name := range names {
+				if name != "" && !slices.Contains(out, name) {
+					out = append(out, name)
+				}
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
 // Request returns a stored request regardless of caller (relay-internal).
 func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envelope.Status, error) {
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors, recovery_source, skip_task_recovery, task_filed_on_send, task_room_scope`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1810,7 +1964,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var created, progressAt int64
 	var note string
 	var roomPost, task sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors, &r.RecoverySource, &r.SkipTaskRecovery, &r.TaskFiledOnSend, &r.TaskRoomScope); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID, r.TaskID = roomPost.Int64, task.Int64

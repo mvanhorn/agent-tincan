@@ -33,8 +33,12 @@ type taskMesh struct {
 }
 
 func newTaskMesh(t *testing.T) *taskMesh {
+	return newTaskMeshWithConfig(t, relay.Config{})
+}
+
+func newTaskMeshWithConfig(t *testing.T, cfg relay.Config) *taskMesh {
 	t.Helper()
-	m := newScheduleMesh(t)
+	m := newScheduleMeshWithConfig(t, cfg)
 	scout := m.JoinOnMachineOf(t, "instinct", "scout")
 	// Joins are stamped by the real clock; move the injected one past them.
 	m.clk.advance(2 * time.Second)
@@ -506,12 +510,7 @@ func TestDropTaskCancelsClaimedAsk(t *testing.T) {
 	if rows := m.audited(t, "cancelled"); len(rows) != 2 || !strings.Contains(rows[1], "task_dropped") || strings.Contains(rows[1], "ship it") {
 		t.Fatalf("cancelled audit rows = %v", rows)
 	}
-	// Done is not a way around an open ask either.
-	busy := m.add(t, envelope.Task{Filer: "grokbot", Title: "still going"})
-	m.assign(t, busy.ID, "grokbot", "muse")
-	if _, err := m.Store.MarkTaskDone(ctx, busy.ID, envelope.TaskOwner, ""); err != store.ErrTaskAskOpen {
-		t.Fatalf("done while an ask is open: %v", err)
-	}
+
 }
 
 // The owner gives a working task to someone else: the open ask is
@@ -1297,7 +1296,7 @@ func TestTaskAdminAddReadComment(t *testing.T) {
 // route is the only agent route that reaches done, reopen or a drop of
 // another's task, it answers approve and reset as unknown even for a host,
 // and it refuses an agent that is no host. Every admin task route refuses
-// an agent that is not on an admin device, and their number is unchanged.
+// an agent that is not on an admin device, including changes to the due date.
 func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 	m := newTaskMesh(t)
 	open := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "open"}).Task
@@ -1328,8 +1327,8 @@ func TestTaskOwnerActionsAreAdminOnly(t *testing.T) {
 			decide++
 		}
 	}
-	if admin != 10 {
-		t.Errorf("%d admin task routes checked, want 10", admin)
+	if admin != 12 {
+		t.Errorf("%d admin task routes checked, want 12", admin)
 	}
 	if decide != 1 {
 		t.Errorf("%d agent decide routes, want 1", decide)
@@ -1550,17 +1549,32 @@ func TestTaskListingLeavesOutClosedUnlessAsked(t *testing.T) {
 	}
 }
 
-// Marking a task done while an ask is open under it is refused, and the
-// refusal says so.
-func TestTaskDoneRefusedWhileAskOpen(t *testing.T) {
+func TestTaskDoneAnswersWorkingAsk(t *testing.T) {
 	m := newTaskMesh(t)
-	id := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Order the parts", "assignee": "muse"}).Task.ID
-	if _, err := taskCall(t, m.admin, "POST", adminTaskPath(id, "/done"), nil); !refusedWith(err, http.StatusConflict, "an ask is still open under the task") {
-		t.Fatalf("done on a working task: %v", err)
+	m.host(t, "scout")
+	ctx := t.Context()
+	task := taskDo(t, m.grok, "POST", "/v1/tasks", map[string]string{"title": "Order the parts", "assignee": "muse"}).Task
+	claimOne(t, m.muse, task.CurrentRequest)
+	follow, err := m.grok.Send(client.WithAskAbout(ctx, fmt.Sprint(task.ID)), "instinct", "Check one detail", envelope.KindAsk, "", false)
+	if err != nil || follow.TaskID != 0 {
+		t.Fatalf("follow-up = %+v, %v", follow, err)
 	}
-	if got := m.task(t, id); got.Status != envelope.TaskWorking {
-		t.Fatalf("task after the refused done = %+v", got)
+	claimOne(t, m.instinct, follow.ID)
+	got := taskDo(t, m.admin, "POST", adminTaskPath(task.ID, "/done"), map[string]string{"note": "The parts arrived."}).Task
+	if got.Status != envelope.TaskDone || got.CurrentRequest != "" || got.Result != "The parts arrived." {
+		t.Fatalf("done task = %+v", got)
 	}
+	result, err := m.grok.Get(ctx, task.CurrentRequest, 0)
+	if err != nil || result.Status != envelope.StatusAnswered || result.Reply == nil || result.Reply.Body != got.Result {
+		t.Fatalf("asker result = %+v, %v", result, err)
+	}
+	if result, err := m.grok.Get(ctx, follow.ID, 0); err != nil || result.Status != envelope.StatusCancelled {
+		t.Fatalf("follow-up after closure = %+v, %v", result, err)
+	}
+	if err := m.muse.Progress(ctx, task.CurrentRequest, "late progress"); err == nil {
+		t.Fatal("the assignee still holds the claim")
+	}
+	m.wantNotices(t, "scout", 0)
 }
 
 // An agent that assigns a task it did not file keeps it in view, and so
@@ -1676,8 +1690,8 @@ func TestGuestCannotCallTaskRoutes(t *testing.T) {
 			t.Errorf("%s as a guest: %v", pattern, err)
 		}
 	}
-	if n != 17 {
-		t.Errorf("%d task routes checked, want 17", n)
+	if n != 21 {
+		t.Errorf("%d task routes checked, want 21", n)
 	}
 	if tasks := listTasks(t, m.Client(t, "admin"), "/v1/admin/tasks"); len(tasks) != 1 {
 		t.Errorf("%d tasks after the guest's calls, want 1", len(tasks))

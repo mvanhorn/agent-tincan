@@ -1,0 +1,238 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/envelope"
+)
+
+// TaskBriefing contains only metadata safe to send through task notices.
+type TaskBriefing struct {
+	Due, Waiting, Active, Done []BriefingTask
+	Missed                     []BriefingNotice
+	SmallAsksAnswered          int `json:",omitempty"`
+	Suggested                  int64
+}
+
+type BriefingTask struct {
+	ID       int64
+	Status   envelope.TaskStatus
+	Due      envelope.TaskDue
+	Assignee string
+	Blocker  string `json:",omitempty"`
+}
+
+type BriefingNotice struct {
+	TaskID int64
+	Kind   string
+	Status envelope.TaskStatus
+}
+
+// QueueTaskBriefing snapshots the list and queues a briefing through the
+// outbox. An empty scheduledDay means an on-demand briefing, which leaves
+// the automatic schedule and its event cursor alone.
+func (s *Store) QueueTaskBriefing(ctx context.Context, scheduledDay, today string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var lastDay string
+	var lastAt, afterEvent int64
+	if err := tx.QueryRowContext(ctx, `SELECT last_day, last_at, after_event FROM task_briefing_state WHERE id = 1`).Scan(&lastDay, &lastAt, &afterEvent); err != nil {
+		return false, err
+	}
+	if scheduledDay != "" && lastDay >= scheduledDay {
+		return false, nil
+	}
+
+	now := s.now()
+	var since int64
+	if lastAt == 0 {
+		since = now.Add(-24 * time.Hour).UnixMilli()
+	}
+	briefing, latestEvent, err := readTaskBriefing(ctx, tx, today, now, since, afterEvent)
+	if err != nil {
+		return false, err
+	}
+	queued := len(briefing.Due)+len(briefing.Waiting)+len(briefing.Active)+len(briefing.Done)+len(briefing.Missed) > 0 || briefing.Suggested != 0 || briefing.SmallAsksAnswered > 0
+	if queued {
+		payload, err := json.Marshal(briefing)
+		if err != nil {
+			return false, err
+		}
+		if err := cancelOlderBriefings(ctx, tx, now); err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_notices (kind, status, actor, created_at, briefing) VALUES (?, '', ?, ?, ?)`,
+			envelope.TaskNoticeBriefing, TaskRelay, now.UnixMilli(), string(payload)); err != nil {
+			return false, err
+		}
+		lastAt, afterEvent = now.UnixMilli(), latestEvent
+	}
+	if scheduledDay != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE task_briefing_state SET last_day = ?, last_at = ?, after_event = ? WHERE id = 1`,
+			scheduledDay, lastAt, afterEvent); err != nil {
+			return false, err
+		}
+	}
+	return queued, tx.Commit()
+}
+
+// cancelOlderBriefings removes staged briefings and closes attempts that
+// still await receipts. A concurrent drain or retry must see either the
+// old briefing or its replacement in the same transaction.
+func cancelOlderBriefings(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	kind := envelope.TaskNoticeBriefing
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notice_told WHERE notice_id IN (
+		SELECT id FROM task_notices WHERE kind = ?)`, kind); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notices WHERE kind = ?`, kind); err != nil {
+		return err
+	}
+	const pending = `SELECT r.id FROM requests r JOIN task_notice_delivery d ON d.request_id = r.id
+		WHERE r.notice_kind = ? AND d.outcome = ''`
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'cancelled', lease_until = 0, updated_at = ?
+		WHERE id IN (`+pending+`) AND status IN ('queued', 'delivered', 'claimed')`, now.UnixMilli(), kind); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE task_notice_delivery SET outcome = 'cancelled' WHERE request_id IN (`+pending+`)`, kind)
+	return err
+}
+
+// One snapshot is shared by all hosts, so it uses the withheld view even
+// when an individual host happens to be the filer.
+const briefingDeadlineVisible = `(t.status != 'proposed' AND t.room_post_id IS NULL AND t.participant_only = 0 AND NOT ` + taskNeverApproved + ` AND NOT ` + taskOriginalAskUnapproved + `)`
+const briefingTaskCols = `t.id, t.status, COALESCE(t.due_day, ''), t.due_at, t.assignee, ` + briefingDeadlineVisible + `, CASE
+	WHEN t.status = 'open' AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'assigned')
+		THEN 'last attempt ended without a result'
+	WHEN t.status = 'open' AND t.assignee = '' THEN 'assign it or take it on'
+	WHEN t.status = 'working' THEN COALESCE((SELECT CASE
+		WHEN q.status = 'held' THEN 'waiting for approval'
+		WHEN p.notified >= 2 AND p.changed_at <= p.notified_at THEN 'no new progress'
+		WHEN q.status = 'claimed' THEN 'in progress'
+		ELSE 'waiting for the assignee to start' END
+		FROM requests q LEFT JOIN task_progress_state p ON p.request_id = q.id WHERE q.id = t.current_request), '')
+	ELSE '' END`
+
+func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Time, since, afterEvent int64) (b TaskBriefing, latestEvent int64, err error) {
+	b.Due, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
+		WHERE t.quiet != 1 AND t.status NOT IN ('done', 'dropped') AND t.due_day <= ? AND `+briefingDeadlineVisible+`
+		ORDER BY t.due_day, COALESCE(t.due_at, 9223372036854775807), t.id LIMIT 3`, today)
+	if err != nil {
+		return b, 0, err
+	}
+	b.Waiting, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
+		WHERE t.quiet != 1 AND (t.status IN ('returned', 'question', 'proposed') OR (t.quiet = 2 AND t.status = 'open'))
+		ORDER BY COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = t.id AND e.status = t.status AND e.kind IN ('added', 'status')), t.id), t.id`)
+	if err != nil {
+		return b, 0, err
+	}
+	b.Active, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
+		WHERE t.quiet != 1 AND (t.status = 'working' OR t.status = 'open' AND t.quiet != 2)
+		ORDER BY t.id`)
+	if err != nil {
+		return b, 0, err
+	}
+	b.Done, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
+		WHERE t.quiet != 1 AND t.status = 'done' AND EXISTS (
+			SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'status' AND e.status = 'done'
+			AND e.id > ? AND e.created_at >= ?
+		) ORDER BY t.id`, afterEvent, since)
+	if err != nil {
+		return b, 0, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), ?1), COUNT(*) FILTER (WHERE quiet_answer = 1)
+		FROM task_events WHERE id > ?1 AND created_at >= ?2 AND kind = 'status'
+		AND (status = 'done' OR quiet_answer = 1)`, afterEvent, since).Scan(&latestEvent, &b.SmallAsksAnswered); err != nil {
+		return b, 0, err
+	}
+	b.Missed, err = missedBriefingNotices(ctx, tx, now.Add(-24*time.Hour).UnixMilli())
+	if err != nil {
+		return b, 0, err
+	}
+	if len(b.Due) > 0 {
+		b.Suggested = b.Due[0].ID
+		return b, latestEvent, nil
+	}
+	var earliest sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT t.id FROM tasks t
+		WHERE t.quiet != 1 AND t.status NOT IN ('done', 'dropped') AND t.due_day > ? AND `+briefingDeadlineVisible+`
+		ORDER BY due_day, COALESCE(due_at, 9223372036854775807), id LIMIT 1)`, today).Scan(&earliest); err != nil {
+		return b, 0, err
+	}
+	b.Suggested = earliest.Int64
+	if !earliest.Valid {
+		for _, task := range b.Waiting {
+			if task.Status == envelope.TaskReturned {
+				b.Suggested = task.ID
+				break
+			}
+		}
+	}
+	return b, latestEvent, nil
+}
+
+func briefingTasks(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]BriefingTask, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []BriefingTask
+	for rows.Next() {
+		var task BriefingTask
+		var visible bool
+		if err := rows.Scan(&task.ID, &task.Status, &task.Due.DueDay, &task.Due.DueAt, &task.Assignee, &visible, &task.Blocker); err != nil {
+			return nil, err
+		}
+		if !visible {
+			task.Due = envelope.TaskDue{}
+			task.Assignee = ""
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func missedBriefingNotices(ctx context.Context, tx *sql.Tx, since int64) ([]BriefingNotice, error) {
+	// A receipt confirms the original notice across hosts and retries. Old
+	// deliveries lack an outbox ID, so match their fixed text and metadata
+	// within the briefing window.
+	rows, err := tx.QueryContext(ctx, `SELECT CAST(r.notice_for AS INTEGER), r.notice_kind, d.reported_status
+		FROM task_notice_delivery d JOIN requests r ON r.id = d.request_id
+		JOIN agents h ON h.name = r.to_agent AND h.task_host = 1
+		JOIN tasks t ON t.id = CAST(r.notice_for AS INTEGER)
+		WHERE d.outcome IN ('', 'exhausted') AND r.created_at >= ?
+		AND r.notice_kind IN (?, ?, ?, ?) AND t.`+taskOpenStatuses+`
+		AND NOT EXISTS (
+			SELECT 1 FROM task_notice_delivery ack
+			WHERE ack.outcome = 'told' AND ack.notice_id = d.notice_id
+		)
+		AND (d.notice_id IS NOT NULL OR NOT EXISTS (
+			SELECT 1 FROM task_notice_delivery ack JOIN requests receipt ON receipt.id = ack.request_id
+			WHERE ack.outcome = 'told' AND ack.notice_id IS NULL AND receipt.created_at >= ?
+			AND receipt.notice_kind = r.notice_kind AND receipt.notice_for = r.notice_for
+			AND ack.reported_status = d.reported_status AND receipt.body = r.body
+		))
+		GROUP BY r.notice_for, r.notice_kind, d.reported_status
+		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since, NoteTask, envelope.TaskNoticeReminder, envelope.TaskNoticeStall, envelope.TaskNoticeAction, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var notices []BriefingNotice
+	for rows.Next() {
+		var n BriefingNotice
+		if err := rows.Scan(&n.TaskID, &n.Kind, &n.Status); err != nil {
+			return nil, err
+		}
+		notices = append(notices, n)
+	}
+	return notices, rows.Err()
+}

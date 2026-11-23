@@ -13,12 +13,14 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 )
 
-// MaxOpenTasks caps the tasks one agent filed that are not done or dropped.
+// MaxOpenTasks caps the tasks one agent explicitly filed that are not done or dropped.
 const MaxOpenTasks = 50
 
 // MaxAgentAssigns caps how many times agents may assign one task before the
 // owner resets its count.
 const MaxAgentAssigns = 5
+
+const MaxHostTaskRetries = 2
 
 var (
 	// ErrNoTask means there is no such task, or none the caller may see.
@@ -31,11 +33,9 @@ var (
 	ErrTaskBusy = errors.New("the task has an ask open under it or is not open to one")
 	// ErrTaskState means a task was not in a status the change allows.
 	ErrTaskState = errors.New("the task is not in a status that allows this")
-	// ErrTaskAskOpen refuses marking a task done while an ask is open under
-	// it.
-	ErrTaskAskOpen = errors.New("an ask is still open under the task; drop the task or wait for the ask to end")
 	// ErrTaskAssignLimit refuses an agent's assign of a task agents have
 	// already assigned MaxAgentAssigns times since the owner's last reset.
+	ErrTaskRetries     = errors.New("two automatic retries have already been sent; tell the owner what is blocking the task")
 	ErrTaskAssignLimit = fmt.Errorf("agents have assigned this task %d times; the owner must assign it or reset the count", MaxAgentAssigns)
 )
 
@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS task_events (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_id, id);
+CREATE TABLE IF NOT EXISTS task_followups (
+  request_id TEXT PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  task_id INTEGER NOT NULL REFERENCES tasks(id)
+);
+CREATE INDEX IF NOT EXISTS task_followups_task ON task_followups(task_id);
+CREATE TABLE IF NOT EXISTS task_progress_state (
+  request_id TEXT PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  normalized TEXT NOT NULL,
+  changed_at INTEGER NOT NULL,
+  notified INTEGER NOT NULL DEFAULT 0,
+  notified_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS task_claimants (
   task_id INTEGER NOT NULL REFERENCES tasks(id),
   agent   TEXT NOT NULL,
@@ -129,6 +141,16 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS requests_task ON requests(task_id) WHERE task_id IS NOT NULL`); err != nil {
 		return err
+	}
+	for _, col := range []string{"task_filed_on_send", "task_room_scope"} {
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, col).Scan(&has); err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN ` + col + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return err
+			}
+		}
 	}
 	// contributors is the JSON list of agents, beside the sender and the
 	// chain, whose text the request's body carries; '' for none. The owner's
@@ -173,15 +195,56 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 			return err
 		}
 	}
-	return nil
+	for _, col := range []struct{ name, kind string }{
+		{"due_day", "TEXT"}, {"due_at", "INTEGER"}, {"reminded_at", "INTEGER"}, {"reminder_dropped_at", "INTEGER"},
+		{"quiet", "INTEGER NOT NULL DEFAULT 0"}, {"host_retries", "INTEGER NOT NULL DEFAULT 0"}, {"room_post_id", "INTEGER"}, {"participant_only", "INTEGER NOT NULL DEFAULT 0"},
+		{"returned_close_notified", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col.name).Scan(&has); err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN ` + col.name + " " + col.kind); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'due_change')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN due_change TEXT`); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'quiet_answer')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN quiet_answer INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'returned_by_host')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		// Older returns have no snapshot of the host mark.
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN returned_by_host INTEGER`); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS tasks_reminder_due ON tasks(due_at)
+		WHERE reminded_at IS NULL AND reminder_dropped_at IS NULL AND status NOT IN ('done', 'dropped');
+		CREATE INDEX IF NOT EXISTS tasks_live_loud ON tasks(id) WHERE quiet != 1 AND status NOT IN ('done', 'dropped')`)
+	return err
 }
 
-// taskSelect reads tasks with the status of the ask open under each and
-// the schedule each repeats on, neither of which is copied onto the task.
-const taskSelect = `SELECT ` + taskCols + taskFrom
+// taskSelect reads task rows with the current ask, repeat and room visibility.
+const taskSelect = `SELECT ` + taskCols + `, (` + taskRoomWithheld + ` OR ` + taskParticipantWithheld + `)` + taskFrom
 
-const taskCols = `t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(q.status, ''),
-		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, '')`
+const taskCols = `t.id, t.title, t.detail, t.status, t.filer, t.assignee, t.dedupe_key, t.result, t.result_request, t.current_request, t.agent_assigns, COALESCE(t.source, ''), COALESCE(t.suggested_assignee, ''), t.created_at, COALESCE(t.due_day, ''), t.due_at, COALESCE(q.status, ''),
+		COALESCE(r.id, 0), COALESCE(r.every_s, 0), COALESCE(r.to_agent, ''), t.quiet = 1, COALESCE(t.room_post_id, 0), t.participant_only, t.host_retries`
 
 const taskFrom = `
 	FROM tasks t LEFT JOIN requests q ON q.id = t.current_request LEFT JOIN schedules r ON r.task_id = t.id`
@@ -201,7 +264,7 @@ const taskFrom = `
 // of that test. A task that was assigned once leaves the shared pool for
 // good: its ask may have been held and denied, and the target of a denied
 // ask must not read the text afterwards.
-const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed'
+const taskVisible = `(?1 = '' OR t.filer = ?1 OR t.status != 'proposed' AND NOT ` + taskOriginalAskUnapproved + `
 		AND NOT (COALESCE(q.to_agent, '') = ?1 AND COALESCE(q.status, '') = 'held') AND (
 		q.to_agent = ?1
 		OR EXISTS (SELECT 1 FROM task_claimants c WHERE c.task_id = t.id AND c.agent = ?1)
@@ -223,10 +286,25 @@ const taskNeverApproved = `(EXISTS (SELECT 1 FROM task_events e WHERE e.task_id 
 // gets as a row without text.
 const taskHostVisible = `(t.filer = ?1 OR NOT (COALESCE(q.to_agent, '') = ?1 AND COALESCE(q.status, '') = 'held'))`
 
+// An automatically filed task's original text is the held ask itself.
+// Keep it private even if the ask is denied and ceases to be current.
+const taskOriginalAskUnapproved = `EXISTS (SELECT 1 FROM requests r WHERE r.task_id = t.id AND r.task_filed_on_send = 1 AND r.was_held = 1 AND r.approved = 0)`
+
 // taskHostWithheld is true for a task whose text task host ?1 may not read:
-// one the owner never approved (taskNeverApproved) that the host did not
-// file.
-const taskHostWithheld = `(t.filer != ?1 AND ` + taskNeverApproved + `)`
+// a proposed task or an automatically filed ask whose text is still
+// unapproved, unless the host filed it.
+const taskHostWithheld = `(` + taskRoomWithheld + ` OR ` + taskParticipantWithheld + ` OR t.filer != ?1 AND (` + taskNeverApproved + ` OR ` + taskOriginalAskUnapproved + `))`
+
+const taskRoomWithheld = `(?1 != '' AND t.room_post_id IS NOT NULL AND NOT EXISTS (
+	SELECT 1 FROM room_posts p JOIN room_members m ON m.room_id = p.room_id AND m.agent = ?1 WHERE p.id = t.room_post_id))`
+
+// The host gets status metadata for service asks without gaining access
+// to the original request or private results from services.
+const taskParticipantWithheld = `(?1 != '' AND t.participant_only = 1 AND t.filer != ?1 AND NOT EXISTS (
+	SELECT 1 FROM requests r WHERE r.task_id = t.id AND r.task_filed_on_send = 1 AND r.to_agent = ?1))`
+
+// quiet is 0 for ordinary tasks, 1 for quiet tasks and 2 after escalation.
+const taskListVisible = ` AND t.quiet != 1`
 
 const taskOpenStatuses = `status NOT IN ('done', 'dropped')`
 
@@ -246,7 +324,7 @@ type execer interface {
 }
 
 func getTask(ctx context.Context, q queryer, id int64, viewer string) (envelope.Task, error) {
-	t, err := scanTask(q.QueryRowContext(ctx, taskSelect+` WHERE `+taskVisible+` AND t.id = ?2`, viewer, id))
+	t, err := scanVisibleTask(q.QueryRowContext(ctx, taskSelect+` WHERE `+taskVisible+` AND t.id = ?2`, viewer, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return envelope.Task{}, ErrNoTask
 	}
@@ -283,12 +361,7 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	}
 	defer tx.Rollback()
 	now := s.now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`,
-		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now)
-	if err != nil {
-		return envelope.Task{}, false, err
-	}
-	id, err := res.LastInsertId()
+	id, err := insertTask(ctx, tx, t, now)
 	if err != nil {
 		return envelope.Task{}, false, err
 	}
@@ -306,7 +379,8 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	}
 	if t.Filer != envelope.TaskOwner {
 		var live int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE filer = ? AND `+taskOpenStatuses, t.Filer).Scan(&live); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks t WHERE t.filer = ? AND t.`+taskOpenStatuses+`
+			AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.task_id = t.id AND r.task_filed_on_send = 1)`, t.Filer).Scan(&live); err != nil {
 			return envelope.Task{}, false, err
 		}
 		if live > MaxOpenTasks {
@@ -335,6 +409,15 @@ func (s *Store) addTask(ctx context.Context, t envelope.Task, repeat *envelope.S
 	return out, true, tx.Commit()
 }
 
+func insertTask(ctx context.Context, tx *sql.Tx, t envelope.Task, now int64) (int64, error) {
+	res, err := tx.ExecContext(ctx, `INSERT INTO tasks (title, detail, status, filer, assignee, dedupe_key, source, suggested_assignee, named_for, created_at, due_day, due_at, quiet, room_post_id, participant_only) VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?, ?, NULLIF(?, 0), ?)`,
+		t.Title, t.Detail, string(t.Status), t.Filer, t.Assignee, t.Key, t.Source, t.SuggestedAssignee, t.NamedFor, now, t.DueDay, t.DueAt, t.Quiet, t.RoomPostID, t.ParticipantOnly)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 // Task returns task id as viewer may read it; viewer "" is an admin's, any
 // task. It returns ErrNoTask for a task viewer may not read, so a caller
 // learns nothing about it.
@@ -345,10 +428,10 @@ func (s *Store) Task(ctx context.Context, id int64, viewer string) (envelope.Tas
 // Tasks lists up to limit of the tasks viewer may read with an id above
 // after, oldest first; viewer "" is an admin's, every task. Done and dropped
 // tasks are listed only with closed.
-func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int, closed bool) ([]envelope.Task, error) {
-	live := ""
+func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int, closed bool, includeQuiet ...bool) ([]envelope.Task, error) {
+	live := taskQuietFilter(includeQuiet)
 	if !closed {
-		live = ` AND t.` + taskOpenStatuses
+		live += ` AND t.` + taskOpenStatuses
 	}
 	rows, err := s.db.QueryContext(ctx, taskSelect+` WHERE `+taskVisible+live+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, viewer, after, limit)
 	if err != nil {
@@ -357,7 +440,7 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 	defer rows.Close()
 	out := []envelope.Task{}
 	for rows.Next() {
-		t, err := scanTask(rows)
+		t, err := scanVisibleTask(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -368,12 +451,18 @@ func (s *Store) Tasks(ctx context.Context, viewer string, after int64, limit int
 
 // ClosedTasks counts the done and the dropped tasks viewer may read; viewer
 // "" is an admin's, every one.
-func (s *Store) ClosedTasks(ctx context.Context, viewer string) (done, dropped int, err error) {
+func (s *Store) ClosedTasks(ctx context.Context, viewer string, includeQuiet ...bool) (done, dropped int, err error) {
 	if viewer == "" {
-		// Every task: the count is read from the status index alone.
-		return s.closedTasks(ctx, `SELECT status, COUNT(*) FROM tasks WHERE status IN ('done', 'dropped') GROUP BY status`)
+		return s.closedTasks(ctx, `SELECT status, COUNT(*) FROM tasks t WHERE status IN ('done', 'dropped')`+taskQuietFilter(includeQuiet)+` GROUP BY status`)
 	}
-	return s.closedTasks(ctx, closedTasksWhere+taskVisible+closedTasksBy, viewer)
+	return s.closedTasks(ctx, closedTasksWhere+taskVisible+taskQuietFilter(includeQuiet)+closedTasksBy, viewer)
+}
+
+func taskQuietFilter(includeQuiet []bool) string {
+	if len(includeQuiet) != 0 && includeQuiet[0] {
+		return ""
+	}
+	return taskListVisible
 }
 
 const (
@@ -382,12 +471,12 @@ const (
 )
 
 // HostTask returns task id as task host host is shown it: whole, or as a
-// withheld row (withheldTask) when the owner never approved it and host did
-// not file it. It returns ErrNoTask for a task that is not shown to the
+// withheld row (WithheldTask) when an approval or room access rule holds
+// its text back from the host. It returns ErrNoTask for a task that is not shown to the
 // host at all. Whether host is a task host now is the caller's to have
 // checked.
 func (s *Store) HostTask(ctx context.Context, id int64, host string) (envelope.Task, error) {
-	t, err := scanHostTask(s.db.QueryRowContext(ctx, hostTaskSelect+` AND t.id = ?2`, host, id))
+	t, err := scanVisibleTask(s.db.QueryRowContext(ctx, hostTaskSelect+` AND t.id = ?2`, host, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return envelope.Task{}, ErrNoTask
 	}
@@ -396,10 +485,10 @@ func (s *Store) HostTask(ctx context.Context, id int64, host string) (envelope.T
 
 // HostTasks is Tasks for task host host: up to limit of the tasks it is
 // shown with an id above after, oldest first, each as HostTask returns it.
-func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit int, closed bool) ([]envelope.Task, error) {
-	live := ""
+func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit int, closed bool, includeQuiet ...bool) ([]envelope.Task, error) {
+	live := taskQuietFilter(includeQuiet)
 	if !closed {
-		live = ` AND t.` + taskOpenStatuses
+		live += ` AND t.` + taskOpenStatuses
 	}
 	rows, err := s.db.QueryContext(ctx, hostTaskSelect+live+` AND t.id > ?2 ORDER BY t.id LIMIT ?3`, host, after, limit)
 	if err != nil {
@@ -408,7 +497,7 @@ func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit i
 	defer rows.Close()
 	out := []envelope.Task{}
 	for rows.Next() {
-		t, err := scanHostTask(rows)
+		t, err := scanVisibleTask(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -419,8 +508,8 @@ func (s *Store) HostTasks(ctx context.Context, host string, after int64, limit i
 
 // ClosedHostTasks counts the done and the dropped tasks task host host is
 // shown, withheld rows among them.
-func (s *Store) ClosedHostTasks(ctx context.Context, host string) (done, dropped int, err error) {
-	return s.closedTasks(ctx, closedTasksWhere+taskHostVisible+closedTasksBy, host)
+func (s *Store) ClosedHostTasks(ctx context.Context, host string, includeQuiet ...bool) (done, dropped int, err error) {
+	return s.closedTasks(ctx, closedTasksWhere+taskHostVisible+taskQuietFilter(includeQuiet)+closedTasksBy, host)
 }
 
 // hostTaskSelect reads the tasks task host ?1 is shown, each with whether
@@ -428,23 +517,22 @@ func (s *Store) ClosedHostTasks(ctx context.Context, host string) (done, dropped
 // and scanHostTask.
 const hostTaskSelect = `SELECT ` + taskCols + `, ` + taskHostWithheld + taskFrom + ` WHERE ` + taskHostVisible
 
-// scanHostTask reads one row of hostTaskSelect, and hands on a task whose
-// text is withheld as withheldTask makes it.
-func scanHostTask(sc scanner) (envelope.Task, error) {
+// scanVisibleTask reads the task and its visibility flag.
+func scanVisibleTask(sc scanner) (envelope.Task, error) {
 	var withheld bool
 	t, err := scanTaskAnd(sc, &withheld)
 	if err != nil || !withheld {
 		return t, err
 	}
-	return withheldTask(t), nil
+	return WithheldTask(t), nil
 }
 
-// withheldTask is the row a task host is shown of t, a task whose text it
+// WithheldTask is the row a task host is shown of t, a task whose text it
 // may not read. It is built from the fields named here and no others, so
 // the title, detail, result, key and suggested assignee are left out, and
 // so is any field a task gains later.
-func withheldTask(t envelope.Task) envelope.Task {
-	return envelope.Task{ID: t.ID, Status: t.Status, Filer: t.Filer, Source: t.Source, CreatedAt: t.CreatedAt, Withheld: true}
+func WithheldTask(t envelope.Task) envelope.Task {
+	return envelope.Task{ID: t.ID, Status: t.Status, Filer: t.Filer, Source: t.Source, CreatedAt: t.CreatedAt, Quiet: t.Quiet, Withheld: true}
 }
 
 // closedTasks runs query, which counts tasks by status, and returns the
@@ -506,7 +594,14 @@ func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Reques
 	if req.TaskActor != "" {
 		actor = req.TaskActor
 	}
-	_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{TaskID: req.TaskID, Actor: actor, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}, s.now().UnixMilli())
+	ev := envelope.TaskEvent{TaskID: req.TaskID, Actor: actor, Kind: envelope.TaskEventAssigned, Body: req.To, Status: envelope.TaskWorking}
+	if req.TaskRetry != nil {
+		ev.Body = req.To + ": retry with " + req.TaskRetry.Reason
+	}
+	if req.TaskOwnerWords != "" {
+		ev.Actor, ev.Body, ev.ForOwner = req.From, req.TaskOwnerWords, true
+	}
+	_, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
 	return err
 }
 
@@ -514,6 +609,43 @@ func (s *Store) claimTaskTx(ctx context.Context, tx *sql.Tx, req envelope.Reques
 // send to to from now on. A schedule never targets its own sender, a pair
 // no schedule may be made with, so an assign to that agent leaves the
 // repeat where it was.
+// taskStalled checks the currently open attempt, including a lapsed claim
+// waiting in queue. A meaningful update after the notice takes it out.
+const taskStalled = `EXISTS (SELECT 1 FROM requests r JOIN task_progress_state p ON p.request_id = r.id
+	WHERE r.id = tasks.current_request AND r.status IN ('claimed', 'queued', 'delivered')
+	AND p.notified >= 2 AND p.changed_at <= :stalled_before)`
+
+func (s *Store) prepareTaskRetryTx(ctx context.Context, tx *sql.Tx, req *envelope.Request) error {
+	retry := req.TaskRetry
+	var current string
+	err := tx.QueryRowContext(ctx, `UPDATE tasks SET host_retries = host_retries + 1, agent_assigns = agent_assigns + 1
+		WHERE id = ?1 AND host_retries < ?2 AND current_request = ?3 AND agent_assigns < :assign_limit
+			AND (status IN ('open', 'returned') AND current_request = '' OR status = 'working' AND `+taskStalled+`)
+		RETURNING current_request`, req.TaskID, MaxHostTaskRetries, retry.Current, sql.Named("assign_limit", MaxAgentAssigns), sql.Named("stalled_before", retry.StalledBefore.UnixMilli())).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		var tries, assigns int
+		if err := tx.QueryRowContext(ctx, `SELECT host_retries, agent_assigns FROM tasks WHERE id = ?`, req.TaskID).Scan(&tries, &assigns); err != nil {
+			return err
+		}
+		if tries >= MaxHostTaskRetries {
+			return ErrTaskRetries
+		}
+		if assigns >= MaxAgentAssigns {
+			return ErrTaskAssignLimit
+		}
+		return ErrTaskBusy
+	}
+	if err != nil || current == "" {
+		return err
+	}
+	req.TaskCancelled, err = s.cancelTaskAskTx(ctx, tx, req.TaskID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE tasks SET current_request = '', status = 'open', assignee = '' WHERE id = ?`, req.TaskID)
+	return err
+}
+
 func moveTaskRepeatTx(ctx context.Context, tx *sql.Tx, id int64, to string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE schedules SET to_agent = ?1 WHERE task_id = ?2 AND to_agent != ?1 AND from_agent != ?1`, to, id)
 	return err
@@ -565,14 +697,16 @@ func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string,
 		}
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE tasks SET `+set+` WHERE id = ? AND current_request = ?`, append(slices.Clone(args), task.Int64, reqID)...)
+	var quiet bool
+	err := tx.QueryRowContext(ctx, `UPDATE tasks SET `+set+` WHERE id = ? AND current_request = ? RETURNING quiet = 1`, append(slices.Clone(args), task.Int64, reqID)...).Scan(&quiet)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
-		return err
-	}
 	ev.TaskID = task.Int64
+	ev.QuietAnswer = quiet && ev.Kind == envelope.TaskEventStatus && ev.Status == envelope.TaskReturned
 	now := s.now().UnixMilli()
 	if _, err = addTaskEvent(ctx, tx, ev, now); err != nil {
 		return err
@@ -580,9 +714,35 @@ func (s *Store) followTaskTx(ctx context.Context, tx *sql.Tx, reqID, set string,
 	// A task that came back, asks a question or is open again is news for
 	// the task hosts; one that is working again is not.
 	if ev.Kind == envelope.TaskEventStatus && ev.Status != envelope.TaskWorking {
+		if err := s.cancelTaskNudgesTx(ctx, tx, ev.TaskID); err != nil {
+			return err
+		}
 		return taskAskNoticeTx(ctx, tx, reqID, ev.Status, ev.Actor, now)
 	}
 	return nil
+}
+
+// taskCancelledTx drops the task created for an untouched first attempt.
+func (s *Store) taskCancelledTx(ctx context.Context, tx *sql.Tx, reqID, actor string) error {
+	const note = "cancelled the ask"
+	var task int64
+	err := tx.QueryRowContext(ctx, `UPDATE tasks SET status = 'dropped', assignee = '', current_request = ''
+		WHERE current_request = ?1 AND id = (SELECT task_id FROM requests
+			WHERE id = ?1 AND task_filed_on_send = 1 AND claimed_at = 0)
+		AND NOT EXISTS (SELECT 1 FROM replies WHERE request_id = ?1)
+		AND (SELECT COUNT(*) FROM task_events WHERE task_id = tasks.id) = 2
+		AND NOT EXISTS (SELECT 1 FROM task_events WHERE task_id = tasks.id AND kind NOT IN ('added', 'assigned'))
+		RETURNING id`, reqID).Scan(&task)
+	if errors.Is(err, sql.ErrNoRows) {
+		return s.taskReleasedTx(ctx, tx, reqID, actor, note)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = addTaskEvent(ctx, tx, envelope.TaskEvent{
+		TaskID: task, Actor: actor, Kind: envelope.TaskEventStatus, Status: envelope.TaskDropped, Body: note,
+	}, s.now().UnixMilli())
+	return err
 }
 
 // taskReleasedTx is followTaskTx for an ask that ended with no result: the
@@ -593,7 +753,7 @@ func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, no
 	if err := forgetHeldTargetTx(ctx, tx, reqID); err != nil {
 		return err
 	}
-	return s.followTaskTx(ctx, tx, reqID, `status = ?, assignee = '', current_request = ''`, []any{string(envelope.TaskOpen)},
+	return s.followTaskTx(ctx, tx, reqID, `status = ?, assignee = '', current_request = '', quiet = CASE quiet WHEN 1 THEN 2 ELSE quiet END`, []any{string(envelope.TaskOpen)},
 		envelope.TaskEvent{Actor: actor, Kind: envelope.TaskEventStatus, Body: note, Status: envelope.TaskOpen})
 }
 
@@ -606,6 +766,9 @@ func (s *Store) taskReleasedTx(ctx context.Context, tx *sql.Tx, reqID, actor, no
 // request, so a task assigned again since keeps what it has. Either write
 // of a result stores the agents behind it beside it (taskResultAuthorsTx).
 func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) error {
+	if err := s.taskFollowupReplyTx(ctx, tx, rep); err != nil {
+		return err
+	}
 	// One read ends it for a reply to a request that is no attempt at a
 	// task.
 	var task sql.NullInt64
@@ -639,9 +802,10 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 			return err
 		}
 		now := s.now().UnixMilli()
-		if _, err = tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at)
-			SELECT task_id, ?, ?, ?, ?, ? FROM requests WHERE id = ?`,
-			rep.From, envelope.TaskEventStatus, taskNote(string(rep.Status), "replaced the earlier acknowledgement"), string(envelope.TaskReturned), now, rep.RequestID); err != nil {
+		if _, err = addTaskEvent(ctx, tx, envelope.TaskEvent{
+			TaskID: task.Int64, Actor: rep.From, Kind: envelope.TaskEventStatus, Status: envelope.TaskReturned,
+			Body: taskNote(string(rep.Status), "replaced the earlier acknowledgement"),
+		}, now); err != nil {
 			return err
 		}
 		return taskAskNoticeTx(ctx, tx, rep.RequestID, envelope.TaskReturned, rep.From, now)
@@ -657,8 +821,9 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 // taskResultAuthorsTx is the JSON list a task keeps with the result rep
 // stores: the agents whose text the answer may hold. rep.From wrote it, and
 // wrote it while working the request it answers, so the request's sender,
-// chain and contributors are behind it as well. Never the owner, whose text
-// needs no approval of the owner's.
+// chain and contributors are behind it as well, and so is every name its
+// other open asks carry (openAskNames): it may have read those too. Never
+// the owner, whose text needs no approval of the owner's.
 func taskResultAuthorsTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) (string, error) {
 	var from, chain, contributors string
 	if err := tx.QueryRowContext(ctx, `SELECT from_agent, chain, contributors FROM requests WHERE id = ?`, rep.RequestID).Scan(&from, &chain, &contributors); err != nil {
@@ -676,6 +841,11 @@ func taskResultAuthorsTx(ctx context.Context, tx *sql.Tx, rep envelope.Reply) (s
 		names = append(names, more...)
 	}
 	names = append(names, from)
+	open, err := openAskNames(ctx, tx, rep.From)
+	if err != nil {
+		return "", err
+	}
+	names = append(names, open...)
 	authors := []string{}
 	for _, name := range names {
 		if name != "" && name != envelope.TaskOwner && !slices.Contains(authors, name) {
@@ -711,8 +881,28 @@ func taskResult(rep envelope.Reply) string {
 // taskProgressTx copies a progress note claimer just set on request reqID
 // into the history of the task the request is an attempt at. One statement,
 // which writes nothing for any other request.
-func taskProgressTx(ctx context.Context, tx *sql.Tx, reqID, claimer, note string, at int64) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, created_at)
+func (s *Store) taskProgressTx(ctx context.Context, tx *sql.Tx, reqID, claimer, note string, at int64) error {
+	normalized := normalizeTaskProgress(note)
+	if normalized == "" {
+		return nil
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO task_progress_state (request_id, normalized, changed_at)
+		VALUES (?, ?, ?) ON CONFLICT (request_id) DO UPDATE SET normalized = excluded.normalized, changed_at = excluded.changed_at, notified = 0, notified_at = 0
+		WHERE task_progress_state.normalized != excluded.normalized`, reqID, normalized, at)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	var task int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(task_id, 0) FROM requests WHERE id = ?`, reqID).Scan(&task); err != nil {
+		return err
+	}
+	if err := s.cancelTaskNudgesTx(ctx, tx, task); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, created_at)
 		SELECT q.task_id, ?, ?, ?, ? FROM requests q JOIN tasks t ON t.id = q.task_id AND t.current_request = q.id WHERE q.id = ?`,
 		claimer, envelope.TaskEventProgress, note, at, reqID)
 	return err
@@ -724,6 +914,9 @@ func taskProgressTx(ctx context.Context, tx *sql.Tx, reqID, claimer, note string
 // returns the ids it cancelled, none for a task with no open ask. The task
 // row is the caller's to change in the same transaction.
 func (s *Store) cancelTaskAskTx(ctx context.Context, tx *sql.Tx, id int64) ([]string, error) {
+	if err := s.cancelTaskNudgesTx(ctx, tx, id); err != nil {
+		return nil, err
+	}
 	var ask string
 	err := tx.QueryRowContext(ctx, `UPDATE requests SET status = ?, lease_until = 0, updated_at = ?
 		WHERE id = (SELECT current_request FROM tasks WHERE id = ?) AND status IN (?, ?, ?, ?, ?) RETURNING id`,
@@ -766,6 +959,11 @@ func (s *Store) DropTask(ctx context.Context, id int64, actor, note string) (env
 	if err != nil {
 		return envelope.Task{}, nil, err
 	}
+	followups, err := s.cancelTaskFollowupsTx(ctx, tx, id)
+	if err != nil {
+		return envelope.Task{}, nil, err
+	}
+	cancelled = append(cancelled, followups...)
 	res, err := tx.ExecContext(ctx, `UPDATE tasks SET status = ?, assignee = CASE WHEN current_request = '' THEN assignee ELSE '' END, current_request = ''
 		WHERE id = ? AND `+taskOpenStatuses, string(envelope.TaskDropped), id)
 	if err != nil {
@@ -783,6 +981,9 @@ func (s *Store) DropTask(ctx context.Context, id int64, actor, note string) (env
 		return envelope.Task{}, nil, err
 	}
 	if err := endTaskRepeatTx(ctx, tx, id); err != nil {
+		return envelope.Task{}, nil, err
+	}
+	if err := s.closeTaskReminderTx(ctx, tx, id); err != nil {
 		return envelope.Task{}, nil, err
 	}
 	out, err := getTask(ctx, tx, id, "")
@@ -819,29 +1020,95 @@ func (s *Store) ReleaseTask(ctx context.Context, id int64, actor, note string) (
 	return cancelled, tx.Commit()
 }
 
-// MarkTaskDone closes task id as actor's change, with note in its history.
-// Only an open or returned task can be done: one with an ask open under it
-// gets ErrTaskAskOpen, and any other status ErrTaskState.
-func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) (envelope.Task, error) {
+// MarkTaskDone closes the task, answering any open ask with the owner's note.
+func (s *Store) MarkTaskDone(ctx context.Context, id int64, actor, note string) (envelope.Task, envelope.Reply, error) {
 	return s.markTaskDone(ctx, id, taskChange{actor: actor, note: note})
 }
 
-// MarkTaskDoneForOwner is MarkTaskDone for task host host acting on the
-// owner's words: the history entry names the host, is marked as done for
-// the owner (envelope.TaskEvent.ForOwner), quotes the words and records the
-// status the task had, which a later reopen returns it to.
-func (s *Store) MarkTaskDoneForOwner(ctx context.Context, id int64, host, words string) (envelope.Task, error) {
+// MarkAnsweredTaskDone closes a returned task on the host's judgment.
+func (s *Store) MarkAnsweredTaskDone(ctx context.Context, id int64, host, reason string) (envelope.Task, envelope.Reply, error) {
+	var reply envelope.Reply
+	task, err := s.setTaskStatus(ctx, id, envelope.TaskDone, taskChange{
+		actor: host, note: "closed it: answered. " + reason, answered: true, completed: &reply,
+	}, envelope.TaskReturned)
+	return task, reply, err
+}
+
+// CompleteTaskWithHostResult records verified work the named host did itself.
+func (s *Store) CompleteTaskWithHostResult(ctx context.Context, id int64, host, result, current string, stalledBefore time.Time) (envelope.Task, envelope.Reply, error) {
+	var reply envelope.Reply
+	task, err := s.setTaskStatus(ctx, id, envelope.TaskDone, taskChange{
+		actor: host, note: "closed it: answered directly", completed: &reply, hostResult: result,
+		current: current, stalledBefore: stalledBefore,
+	}, envelope.TaskOpen, envelope.TaskReturned, envelope.TaskWorking)
+	return task, reply, err
+}
+
+// MarkTaskDoneForOwner records the host and the owner's direct words.
+func (s *Store) MarkTaskDoneForOwner(ctx context.Context, id int64, host, words string) (envelope.Task, envelope.Reply, error) {
 	return s.markTaskDone(ctx, id, taskChange{actor: host, note: words, forOwner: true})
 }
 
-func (s *Store) markTaskDone(ctx context.Context, id int64, by taskChange) (envelope.Task, error) {
-	out, err := s.setTaskStatus(ctx, id, envelope.TaskDone, by, envelope.TaskOpen, envelope.TaskReturned)
-	if errors.Is(err, ErrTaskState) {
-		if t, terr := s.Task(ctx, id, ""); terr == nil && (t.Status == envelope.TaskWorking || t.Status == envelope.TaskQuestion) {
-			err = ErrTaskAskOpen
+func (s *Store) markTaskDone(ctx context.Context, id int64, by taskChange) (envelope.Task, envelope.Reply, error) {
+	from := []envelope.TaskStatus{envelope.TaskOpen, envelope.TaskReturned}
+	var reply envelope.Reply
+	if by.actor == envelope.TaskOwner || by.forOwner {
+		by.completed = &reply
+		from = append(from, envelope.TaskWorking, envelope.TaskQuestion)
+	}
+	out, err := s.setTaskStatus(ctx, id, envelope.TaskDone, by, from...)
+	if err != nil {
+		return envelope.Task{}, envelope.Reply{}, err
+	}
+	return out, reply, nil
+}
+
+// finishTaskAttemptTx answers the ask without running a follow-on or mirroring
+// the owner's private note into a room. The task already has status done.
+func (s *Store) finishTaskAttemptTx(ctx context.Context, tx *sql.Tx, task int64, by, note string) (envelope.Reply, error) {
+	var rep envelope.Reply
+	if err := tx.QueryRowContext(ctx, `SELECT current_request FROM tasks WHERE id = ?`, task).Scan(&rep.RequestID); err != nil {
+		return rep, err
+	}
+	if rep.RequestID == "" && by == envelope.TaskOwner {
+		return rep, nil
+	}
+	if note == "" {
+		note = "The owner marked this task done."
+	}
+	now := s.now()
+	rep.From, rep.Status, rep.Body, rep.CreatedAt = by, envelope.StatusAnswered, note, now.UTC().Truncate(time.Millisecond)
+	if rep.RequestID != "" {
+		if err := tx.QueryRowContext(ctx, `UPDATE requests SET status = 'answered', updated_at = ?1, lease_until = 0,
+		lease_lapsed_at = NULL, held_ack = '', reply_seen_at = 0, reply_generation = reply_generation + 1
+		WHERE id = ?2 AND status IN ('queued', 'delivered', 'claimed', 'held', 'needs_input')
+		RETURNING reply_generation`, now.UnixMilli(), rep.RequestID).Scan(&rep.Generation); err != nil {
+			return envelope.Reply{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM replies WHERE request_id = ?`, rep.RequestID); err != nil {
+			return envelope.Reply{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO replies (request_id, from_agent, status, body, created_at)
+		VALUES (?, ?, ?, ?, ?)`, rep.RequestID, rep.From, rep.Status, rep.Body, now.UnixMilli()); err != nil {
+			return envelope.Reply{}, err
 		}
 	}
-	return out, err
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET result = ?, result_request = ?, result_authors = CASE WHEN ? = ? THEN NULL ELSE json_array(?) END, current_request = ''
+		WHERE id = ?`, rep.Body, rep.RequestID, by, envelope.TaskOwner, by, task); err != nil {
+		return envelope.Reply{}, err
+	}
+	// Retain a result version for assignment/compare-and-set after a reopen.
+	if _, err := addTaskEvent(ctx, tx, envelope.TaskEvent{
+		TaskID: task, Actor: rep.From, Kind: envelope.TaskEventStatus, Status: envelope.TaskReturned,
+		Body: "recorded the result",
+	}, now.UnixMilli()); err != nil {
+		return envelope.Reply{}, err
+	}
+	var err error
+	if rep.RequestID != "" {
+		rep.Superseded, err = s.closeNoticesTx(ctx, tx, rep.RequestID)
+	}
+	return rep, err
 }
 
 // TaskCarried is what the next ask under a task is built from, read as one
@@ -957,7 +1224,7 @@ func (s *Store) ReopenTaskForOwner(ctx context.Context, id int64, host, words st
 // closed t is not a host's: the owner's own done and drop, and an agent's
 // drop, reopen to open as before.
 const taskHostClosedPrior = `(SELECT e.prior FROM task_events e WHERE e.id = (SELECT MAX(c.id) FROM task_events c WHERE c.task_id = t.id AND c.kind = '` + envelope.TaskEventStatus + `' AND c.status IN ('done', 'dropped'))
-		AND e.for_owner = 1 AND e.prior IN ('open', 'returned'))`
+		AND (e.prior = 'returned' OR e.for_owner = 1 AND e.prior = 'open'))`
 
 func (s *Store) reopenTask(ctx context.Context, id int64, by taskChange) (envelope.Task, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1003,21 +1270,26 @@ func (s *Store) SetTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 	return s.setTaskStatus(ctx, id, to, taskChange{actor: actor, note: note}, from...)
 }
 
-// DropTaskForOwner drops task id for task host host acting on the owner's
-// words, from a status with no ask open under it (proposed, open or
-// returned), so it never cancels a teammate's ask: a task with one gets
-// ErrTaskState, as an agent's drop of its own task does. The history entry
-// is marked as MarkTaskDoneForOwner marks it.
-func (s *Store) DropTaskForOwner(ctx context.Context, id int64, host, words string) (envelope.Task, error) {
-	return s.setTaskStatus(ctx, id, envelope.TaskDropped, taskChange{actor: host, note: words, forOwner: true}, envelope.TaskProposed, envelope.TaskOpen, envelope.TaskReturned)
+// DropInactiveTask drops a task with no open assignment and cancels its
+// active follow-ups. The caller has checked who may drop it.
+func (s *Store) DropInactiveTask(ctx context.Context, id int64, actor, note string, forOwner bool) (envelope.Task, []string, error) {
+	var closed envelope.Reply
+	task, err := s.setTaskStatus(ctx, id, envelope.TaskDropped, taskChange{
+		actor: actor, note: note, forOwner: forOwner, completed: &closed,
+	}, envelope.TaskProposed, envelope.TaskOpen, envelope.TaskReturned)
+	return task, closed.CancelledFollowups, err
 }
 
 // taskChange is who changes a task's status and the note its history
 // entry keeps. forOwner marks a task host acting on the owner's words: the
 // note is those words, and the entry records the status the task had.
 type taskChange struct {
-	actor, note string
-	forOwner    bool
+	actor, note         string
+	forOwner            bool
+	answered            bool
+	completed           *envelope.Reply
+	hostResult, current string
+	stalledBefore       time.Time
 }
 
 func (s *Store) setTaskStatus(ctx context.Context, id int64, to envelope.TaskStatus, by taskChange, from ...envelope.TaskStatus) (envelope.Task, error) {
@@ -1042,6 +1314,17 @@ func (s *Store) setTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 			args = append(args, string(st))
 		}
 	}
+	if by.hostResult != "" {
+		var allowed bool
+		if err := tx.QueryRowContext(ctx, `SELECT current_request = ?2 AND
+			(status IN ('open', 'returned') OR status = 'working' AND `+taskStalled+`)
+			FROM tasks WHERE id = ?1`, id, by.current, sql.Named("stalled_before", by.stalledBefore.UnixMilli())).Scan(&allowed); err != nil {
+			return envelope.Task{}, err
+		}
+		if !allowed {
+			return envelope.Task{}, ErrTaskBusy
+		}
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE tasks SET status = ? WHERE id = ?`+cond, args...)
 	if err != nil {
 		return envelope.Task{}, err
@@ -1053,15 +1336,39 @@ func (s *Store) setTaskStatus(ctx context.Context, id int64, to envelope.TaskSta
 	if n == 0 {
 		return envelope.Task{}, ErrTaskState
 	}
+	if by.completed != nil && to == envelope.TaskDone {
+		author, note := envelope.TaskOwner, by.note
+		if by.hostResult != "" {
+			author, note = by.actor, by.hostResult
+		}
+		rep, err := s.finishTaskAttemptTx(ctx, tx, id, author, note)
+		if err != nil {
+			return envelope.Task{}, err
+		}
+		*by.completed = rep
+	}
 	ev := envelope.TaskEvent{TaskID: id, Actor: by.actor, Kind: envelope.TaskEventStatus, Body: by.note, Status: to}
-	if by.forOwner {
-		ev.ForOwner, ev.Prior = true, envelope.TaskStatus(prior)
+	if by.forOwner || by.answered {
+		ev.ForOwner, ev.Prior = by.forOwner, envelope.TaskStatus(prior)
 	}
 	if _, err := addTaskEvent(ctx, tx, ev, s.now().UnixMilli()); err != nil {
 		return envelope.Task{}, err
 	}
 	if to == envelope.TaskDone || to == envelope.TaskDropped {
+		if err := s.cancelTaskNudgesTx(ctx, tx, id); err != nil {
+			return envelope.Task{}, err
+		}
+		cancelled, err := s.cancelTaskFollowupsTx(ctx, tx, id)
+		if err != nil {
+			return envelope.Task{}, err
+		}
+		if by.completed != nil {
+			by.completed.CancelledFollowups = cancelled
+		}
 		if err := endTaskRepeatTx(ctx, tx, id); err != nil {
+			return envelope.Task{}, err
+		}
+		if err := s.closeTaskReminderTx(ctx, tx, id); err != nil {
 			return envelope.Task{}, err
 		}
 	}
@@ -1121,12 +1428,22 @@ func (s *Store) ResetTaskAssigns(ctx context.Context, id int64, actor string) (e
 // AppendTaskEvent adds ev to the history of task ev.TaskID, stamped now. It
 // returns ErrNoTask when there is no such task.
 func (s *Store) AppendTaskEvent(ctx context.Context, ev envelope.TaskEvent) (envelope.TaskEvent, error) {
-	return addTaskEvent(ctx, s.db, ev, s.now().UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	defer tx.Rollback()
+	ev, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
+	if err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	return ev, tx.Commit()
 }
 
 // addTaskEvent writes one history entry, with ev.Chain when it has one. The
-// task check and the insert are one statement.
-func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
+// task check and the insert are one statement. Activity that makes a pending
+// closure notice stale cancels it in the same transaction.
+func addTaskEvent(ctx context.Context, tx *sql.Tx, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
 	var chain sql.NullString
 	if len(ev.Chain) > 0 {
 		b, err := json.Marshal(ev.Chain)
@@ -1135,9 +1452,20 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		chain = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '') WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), ev.TaskID)
+	var dueChange sql.NullString
+	if ev.DueChange != nil {
+		b, err := json.Marshal(ev.DueChange)
+		if err != nil {
+			return envelope.TaskEvent{}, err
+		}
+		dueChange = sql.NullString{String: string(b), Valid: true}
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change, quiet_answer, returned_by_host)
+		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULLIF(?9, ''), ?10, ?11,
+			CASE WHEN ?3 = 'status' AND ?5 = 'returned' AND ?9 = '' THEN
+				EXISTS (SELECT 1 FROM agents WHERE name = ?2 AND task_host = 1) END
+		WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?1)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.QuietAnswer)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -1145,6 +1473,9 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		return envelope.TaskEvent{}, ErrNoTask
 	}
 	if ev.ID, err = res.LastInsertId(); err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	if err := invalidateReturnedCloseNotice(ctx, tx, ev, at); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	ev.At = time.UnixMilli(at).UTC()
@@ -1183,32 +1514,35 @@ func recordTaskClaimant(ctx context.Context, x execer, id int64, agent string) e
 	return err
 }
 
-func scanTask(sc scanner) (envelope.Task, error) { return scanTaskAnd(sc) }
-
 // scanTaskAnd reads the columns of taskCols into a task, and the columns a
 // query selects after them into more.
 func scanTaskAnd(sc scanner, more ...any) (envelope.Task, error) {
 	var t envelope.Task
 	var status, ask string
 	var created int64
-	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo}, more...)...); err != nil {
+	if err := sc.Scan(append([]any{&t.ID, &t.Title, &t.Detail, &status, &t.Filer, &t.Assignee, &t.Key, &t.Result, &t.ResultRequest, &t.CurrentRequest, &t.AgentAssigns, &t.Source, &t.SuggestedAssignee, &created, &t.DueDay, &t.DueAt, &ask, &t.RepeatSchedule, &t.RepeatEverySeconds, &t.RepeatTo, &t.Quiet, &t.RoomPostID, &t.ParticipantOnly, &t.HostRetries}, more...)...); err != nil {
 		return envelope.Task{}, err
 	}
 	t.Status, t.AskStatus, t.CreatedAt = envelope.TaskStatus(status), envelope.Status(ask), time.UnixMilli(created).UTC()
 	return t, nil
 }
 
-const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, '')`
+const taskEventCols = `id, task_id, actor, kind, body, status, created_at, COALESCE(chain, ''), for_owner, COALESCE(prior, ''), COALESCE(due_change, '')`
 
 func scanTaskEvent(sc scanner) (envelope.TaskEvent, error) {
 	var ev envelope.TaskEvent
-	var status, chain, prior string
+	var status, chain, prior, dueChange string
 	var at int64
-	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior); err != nil {
+	if err := sc.Scan(&ev.ID, &ev.TaskID, &ev.Actor, &ev.Kind, &ev.Body, &status, &at, &chain, &ev.ForOwner, &prior, &dueChange); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	if chain != "" {
 		if err := json.Unmarshal([]byte(chain), &ev.Chain); err != nil {
+			return envelope.TaskEvent{}, err
+		}
+	}
+	if dueChange != "" {
+		if err := json.Unmarshal([]byte(dueChange), &ev.DueChange); err != nil {
 			return envelope.TaskEvent{}, err
 		}
 	}

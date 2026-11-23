@@ -55,7 +55,7 @@
     <article class="section prose">
       <div class="wrap narrow">
         <h1>Privacy policy</h1>
-        <p class="updated">Last updated September 28, 2026</p>
+        <p class="updated">Last updated November 23, 2026</p>
 
         <p>This policy covers Agent Tincan and its Chrome extension, Agent Tincan History (the "extension"). Agent Tincan is software you run yourself: a small relay on your own private Tailscale network, a local helper on your own computer, and the agents you choose to connect. Agent Tincan does not operate any server that receives your data.</p>
         <p>In short: the extension reads and sends ChatGPT, Claude, Grok, Gemini, Perplexity and Copilot conversations only when your own agents ask for it, and hands the results only to the Agent Tincan helper on your computer. Nothing goes to us. There is no analytics, no advertising, and no sale of data.</p>
@@ -86,7 +86,7 @@
 
         <h2>What is stored</h2>
         <ul>
-          <li>The extension stores nothing persistent. It keeps only short-lived state in memory while it runs, such as which background tabs it opened, and that is gone when Chrome closes the extension.</li>
+          <li>The extension stores one persistent value: the name you give this Chrome profile on its options page, if you set one, kept in Chrome's local extension storage for that profile only. Everything else it keeps is short-lived state in memory while it runs, such as which background tabs it opened, and that is gone when Chrome closes the extension.</li>
           <li>The Agent Tincan helper on your computer keeps a few small state files readable only by your user account. They hold ids and times, such as which conversation each of your agents used last and which requests were already sent, and never message text or answers. Entries about sends are dropped after 90 minutes.</li>
           <li>Images fetched for a request are written to a private temporary folder on your computer and removed once the reply is sent.</li>
         </ul>
@@ -96,6 +96,7 @@
           <li><code>nativeMessaging</code>: to talk to the Agent Tincan helper on your computer, which is the only place the extension sends data.</li>
           <li><code>alarms</code>: to check once a minute whether the helper is running and reconnect to it if it restarted.</li>
           <li><code>scripting</code>: to type a message into, and read the reply from, the background ChatGPT, Claude, Grok, Gemini, Perplexity or Copilot tab the extension opened for that send, to fetch an image Gemini generated from inside that Gemini tab, and to read the chat list in a background copilot.com tab it opened for that. It is never used on any other tab.</li>
+          <li><code>storage</code>: to keep one value, the owner's name for this Chrome profile that you set on the options page. The helper uses it only to pick which local connection this profile answers on, so a web agent started with <code>--profile &lt;name&gt;</code> reaches only the sites signed in on that profile. It holds no conversation text, cookies or tokens.</li>
           <li><code>https://chatgpt.com/*</code>: to list and read your ChatGPT conversations and their files, and to send messages to ChatGPT, with your existing session.</li>
           <li><code>https://*.oaiusercontent.com/*</code>: to download images that ChatGPT stores behind signed links on this domain. These downloads carry no cookies or credentials.</li>
           <li><code>https://claude.ai/*</code>: to list and read your claude.ai conversations and their files, and to send messages to Claude, with your existing session.</li>
