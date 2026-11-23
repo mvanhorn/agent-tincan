@@ -848,10 +848,12 @@ attempt at the task carries it.
 One flow: you file a task with to: "muse". muse gets an ask that carries the
 title and what is wanted, and replies. The task is then returned with muse's
 result, and the reply comes to you like any other. When the result fully
-answers the ask, the task host closes the task and tells the owner. Otherwise
-a returned task waits an hour for you to follow up (an about ask or a comment
-from you restarts the hour). Then the relay asks a host to review and close
-it, or marks it done with the result kept in its history if no host can act.
+answers the ask, the task host closes the task and tells the owner. When a
+task host returned a result to you, the task waits an hour for you to follow
+up (an about ask or a comment from you restarts the hour). Then the relay
+asks a host to review and close it, or marks it done with the result kept in
+its history if no host can act. A result returned by an ordinary teammate
+stays returned until a host or the owner closes it.
 
 While a task you claimed is open, keep reporting. After 15 minutes with
 nothing new the relay nudges you once, and after 30 minutes it tells the task
