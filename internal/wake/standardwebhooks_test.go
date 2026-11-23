@@ -302,3 +302,38 @@ func TestLoadConfigStandardWebhooksFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestStandardWebhooksBodyStaysUnder64KiB: OpenBot refuses a body over
+// 64 KiB, so a big backlog lists at most maxBodyIDs ids of each kind while
+// the counts stay exact, and unknown ids are an empty list, not null.
+func TestStandardWebhooksBodyStaysUnder64KiB(t *testing.T) {
+	long := func(prefix string, n int) []string {
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = prefix + strings.Repeat("x", 120) + strconv.Itoa(i)
+		}
+		return ids
+	}
+	raw := standardWebhooksBody(wakeNote{waiting: 5000, urgent: 3, unseen: 5000, requestIDs: long("q", 5000), replyIDs: long("r", 5000)})
+	if len(raw) >= 64<<10 {
+		t.Fatalf("body is %d bytes, want under 64 KiB", len(raw))
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(anyStrings(body["request_ids"])); got != maxBodyIDs {
+		t.Errorf("request_ids lists %d, want %d", got, maxBodyIDs)
+	}
+	if got := len(anyStrings(body["reply_request_ids"])); got != maxBodyIDs {
+		t.Errorf("reply_request_ids lists %d, want %d", got, maxBodyIDs)
+	}
+	if body["waiting"] != 5000.0 || body["unseen_replies"] != 5000.0 || body["urgent"] != 3.0 {
+		t.Errorf("counts = %v, want the exact backlog", body)
+	}
+
+	raw = standardWebhooksBody(wakeNote{waiting: 1})
+	if !strings.Contains(string(raw), `"request_ids":[]`) || !strings.Contains(string(raw), `"reply_request_ids":[]`) {
+		t.Errorf("unknown ids: body %s, want empty lists", raw)
+	}
+}
