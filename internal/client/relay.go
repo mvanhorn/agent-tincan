@@ -574,10 +574,12 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
-	if keyed && ctx.Err() == nil && sendAnswerLost(err) {
+	if keyed && ctx.Err() == nil && sendAnswerLost(err) && r.stillTakesSendKeys(ctx) {
 		// The relay may have queued the send before its answer was lost.
 		// Under the same key a second post is safe; one is enough, since
-		// call already waited out dial blips.
+		// call already waited out dial blips. The capability is read again
+		// first: a relay rolled back to a build without keys inside the
+		// recheck window would ignore the key and queue the send twice.
 		out = sent{}
 		err = r.callOnce(ctx, r.api, "POST", "/v1/send", in, &out)
 	}
@@ -632,6 +634,19 @@ func (r *Relay) takesSendKeys(ctx context.Context) bool {
 	r.keysMu.Lock()
 	defer r.keysMu.Unlock()
 	r.keysAt, r.keysOK = now, ok
+	return ok
+}
+
+// stillTakesSendKeys reads the relay's capabilities now, skipping the
+// cache, and records the answer for later sends. A failed read counts as
+// no keys, so an unsure send is reported as failed rather than posted
+// again.
+func (r *Relay) stillTakesSendKeys(ctx context.Context) bool {
+	caps, err := r.Capabilities(ctx)
+	ok := err == nil && caps.IdempotencyKey
+	r.keysMu.Lock()
+	defer r.keysMu.Unlock()
+	r.keysAt, r.keysOK = time.Now(), ok
 	return ok
 }
 

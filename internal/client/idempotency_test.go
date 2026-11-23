@@ -234,3 +234,53 @@ func TestSendWithoutKeyToOlderRelay(t *testing.T) {
 		t.Fatalf("second send: %+v, %v", req, err)
 	}
 }
+
+// downgradesAfterFirstSend is losesFirstSendAnswer for a relay rolled back
+// to a build without keys right after the first send: from then on its
+// capabilities no longer list idempotency_key.
+type downgradesAfterFirstSend struct {
+	losesFirstSendAnswer
+}
+
+func (d *downgradesAfterFirstSend) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodGet || req.URL.Path != "/v1/capabilities" {
+		return d.losesFirstSendAnswer.RoundTrip(req)
+	}
+	resp, err := d.losesFirstSendAnswer.RoundTrip(req)
+	d.mu.Lock()
+	sent := len(d.keys) > 0
+	d.mu.Unlock()
+	if err != nil || !sent {
+		return resp, err
+	}
+	defer resp.Body.Close()
+	var caps map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
+		return nil, err
+	}
+	delete(caps, "idempotency_key")
+	b, err := json.Marshal(caps)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body, resp.ContentLength = io.NopCloser(bytes.NewReader(b)), int64(len(b))
+	resp.Header.Del("Content-Length")
+	return resp, nil
+}
+
+// TestSendNotRetriedAfterRelayDowngrade: the client trusts a cached key
+// capability for minutes, but reads it again before posting a send a
+// second time. A relay rolled back to a build without keys would ignore
+// the key and queue the send twice, so the send is posted once and the
+// lost answer comes back as an error.
+func TestSendNotRetriedAfterRelayDowngrade(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	tr := &downgradesAfterFirstSend{losesFirstSendAnswer{agent: "grokbot"}}
+	asker := client.NewRelayHTTP(m.URL("grokbot"), &http.Client{Transport: tr})
+	if _, err := asker.Ask(context.Background(), "muse", "deploy build 42", "", 0, false); err == nil {
+		t.Fatal("send whose answer was lost after a downgrade succeeded, want the lost answer's error")
+	}
+	if len(tr.keys) != 1 {
+		t.Fatalf("send posts = %d (%v), want 1: a downgraded relay would queue a second post again", len(tr.keys), tr.keys)
+	}
+}
