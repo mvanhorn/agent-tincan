@@ -172,6 +172,8 @@ func listenHint(to string, t *envelope.Target) string {
 		return to + " is listening now and will start a turn when it picks this up.\n"
 	case "none":
 		return to + " checks only when its owner next prompts it.\n"
+	case "mcp-events":
+		return to + " is subscribed to MCP Events and will be woken by webhook.\n"
 	}
 	return ""
 }
@@ -552,6 +554,8 @@ func TaskNoticeFallbackMessage(req envelope.Request) string {
 		return fmt.Sprintf("Task #%d needs follow-through after an attempt ended without a result.", req.TaskNoticeID)
 	case envelope.TaskNoticeStall:
 		return fmt.Sprintf("Task #%d is still working and has had no new progress.", req.TaskNoticeID)
+	case envelope.TaskNoticeReturnedClose:
+		return fmt.Sprintf("Task #%d is returned and the asker has not followed up.", req.TaskNoticeID)
 	}
 	var news string
 	switch req.TaskNoticeStatus {

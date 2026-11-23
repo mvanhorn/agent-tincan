@@ -198,6 +198,7 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	for _, col := range []struct{ name, kind string }{
 		{"due_day", "TEXT"}, {"due_at", "INTEGER"}, {"reminded_at", "INTEGER"}, {"reminder_dropped_at", "INTEGER"},
 		{"quiet", "INTEGER NOT NULL DEFAULT 0"}, {"host_retries", "INTEGER NOT NULL DEFAULT 0"}, {"room_post_id", "INTEGER"}, {"participant_only", "INTEGER NOT NULL DEFAULT 0"},
+		{"returned_close_notified", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name = ?)`, col.name).Scan(&has); err != nil {
 			return err
@@ -221,6 +222,15 @@ CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);`)
 	}
 	if !has {
 		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN quiet_answer INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_events') WHERE name = 'returned_by_host')`).Scan(&has); err != nil {
+		return err
+	}
+	if !has {
+		// Older returns have no snapshot of the host mark.
+		if _, err := s.db.Exec(`ALTER TABLE task_events ADD COLUMN returned_by_host INTEGER`); err != nil {
 			return err
 		}
 	}
@@ -792,9 +802,10 @@ func (s *Store) taskRepliedTx(ctx context.Context, tx *sql.Tx, rep envelope.Repl
 			return err
 		}
 		now := s.now().UnixMilli()
-		if _, err = tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at)
-			SELECT task_id, ?, ?, ?, ?, ? FROM requests WHERE id = ?`,
-			rep.From, envelope.TaskEventStatus, taskNote(string(rep.Status), "replaced the earlier acknowledgement"), string(envelope.TaskReturned), now, rep.RequestID); err != nil {
+		if _, err = addTaskEvent(ctx, tx, envelope.TaskEvent{
+			TaskID: task.Int64, Actor: rep.From, Kind: envelope.TaskEventStatus, Status: envelope.TaskReturned,
+			Body: taskNote(string(rep.Status), "replaced the earlier acknowledgement"),
+		}, now); err != nil {
 			return err
 		}
 		return taskAskNoticeTx(ctx, tx, rep.RequestID, envelope.TaskReturned, rep.From, now)
@@ -1417,12 +1428,22 @@ func (s *Store) ResetTaskAssigns(ctx context.Context, id int64, actor string) (e
 // AppendTaskEvent adds ev to the history of task ev.TaskID, stamped now. It
 // returns ErrNoTask when there is no such task.
 func (s *Store) AppendTaskEvent(ctx context.Context, ev envelope.TaskEvent) (envelope.TaskEvent, error) {
-	return addTaskEvent(ctx, s.db, ev, s.now().UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	defer tx.Rollback()
+	ev, err = addTaskEvent(ctx, tx, ev, s.now().UnixMilli())
+	if err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	return ev, tx.Commit()
 }
 
 // addTaskEvent writes one history entry, with ev.Chain when it has one. The
-// task check and the insert are one statement.
-func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
+// task check and the insert are one statement. Activity that makes a pending
+// closure notice stale cancels it in the same transaction.
+func addTaskEvent(ctx context.Context, tx *sql.Tx, ev envelope.TaskEvent, at int64) (envelope.TaskEvent, error) {
 	var chain sql.NullString
 	if len(ev.Chain) > 0 {
 		b, err := json.Marshal(ev.Chain)
@@ -1439,9 +1460,12 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		}
 		dueChange = sql.NullString{String: string(b), Valid: true}
 	}
-	res, err := x.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change, quiet_answer)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ? WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?)`,
-		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.QuietAnswer, ev.TaskID)
+	res, err := tx.ExecContext(ctx, `INSERT INTO task_events (task_id, actor, kind, body, status, created_at, chain, for_owner, prior, due_change, quiet_answer, returned_by_host)
+		SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULLIF(?9, ''), ?10, ?11,
+			CASE WHEN ?3 = 'status' AND ?5 = 'returned' AND ?9 = '' THEN
+				EXISTS (SELECT 1 FROM agents WHERE name = ?2 AND task_host = 1) END
+		WHERE EXISTS (SELECT 1 FROM tasks WHERE id = ?1)`,
+		ev.TaskID, ev.Actor, ev.Kind, ev.Body, string(ev.Status), at, chain, ev.ForOwner, string(ev.Prior), dueChange, ev.QuietAnswer)
 	if err != nil {
 		return envelope.TaskEvent{}, err
 	}
@@ -1449,6 +1473,9 @@ func addTaskEvent(ctx context.Context, x execer, ev envelope.TaskEvent, at int64
 		return envelope.TaskEvent{}, ErrNoTask
 	}
 	if ev.ID, err = res.LastInsertId(); err != nil {
+		return envelope.TaskEvent{}, err
+	}
+	if err := invalidateReturnedCloseNotice(ctx, tx, ev, at); err != nil {
 		return envelope.TaskEvent{}, err
 	}
 	ev.At = time.UnixMilli(at).UTC()

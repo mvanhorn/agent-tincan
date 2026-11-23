@@ -28,9 +28,18 @@ const NoteTask = "task"
 // NoteTaskReminderFallback links the final alert to a reminder for cancellation.
 const NoteTaskReminderFallback = "task-reminder-fallback"
 
+// NoteTaskReturnedCloseFallback links the final alert to the task for cancellation.
+const NoteTaskReturnedCloseFallback = "task-returned-close-fallback"
+
 // IsTaskNotice identifies requests tracked by the task receipt path.
 func IsTaskNotice(kind string) bool {
-	return kind == NoteTask || kind == envelope.TaskNoticeReminder || kind == envelope.TaskNoticeBriefing || kind == envelope.TaskNoticeStall || kind == envelope.TaskNoticeAction
+	switch kind {
+	case NoteTask, envelope.TaskNoticeReminder, envelope.TaskNoticeBriefing, envelope.TaskNoticeStall,
+		envelope.TaskNoticeAction, envelope.TaskNoticeReturnedClose:
+		return true
+	default:
+		return false
+	}
 }
 
 // TaskNotice is one task change waiting to be told to the task hosts.
@@ -207,6 +216,11 @@ func (s *Store) EnqueueTaskNotice(ctx context.Context, n TaskNotice, req envelop
 		return envelope.Request{}, false, err
 	}
 	defer tx.Rollback()
+	if n.Kind == envelope.TaskNoticeReturnedClose {
+		if current, err := returnedCloseNoticeCurrent(ctx, tx, n.TaskID); err != nil || !current {
+			return envelope.Request{}, false, err
+		}
+	}
 	// Read the current time in the transaction: a reminder can wait in
 	// the outbox beyond the cutoff, or be cancelled after a drain reads it.
 	if n.Kind == envelope.TaskNoticeReminder {
@@ -287,4 +301,24 @@ func (s *Store) DeleteTaskNotice(ctx context.Context, id int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func cancelTaskNoticesTx(ctx context.Context, tx *sql.Tx, id, now int64, kind, fallback string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notice_told WHERE notice_id IN (
+		SELECT id FROM task_notices WHERE kind = ? AND task_id = ?)`, kind, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_notices WHERE kind = ? AND task_id = ?`, kind, id); err != nil {
+		return err
+	}
+	const attempts = `SELECT r.id FROM requests r JOIN task_notice_delivery d ON r.id = d.request_id
+		WHERE r.notice_kind = ? AND r.notice_for = ? AND d.outcome = ''`
+	task := strconv.FormatInt(id, 10)
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = 'cancelled', lease_until = 0, updated_at = ?
+		WHERE (id IN (`+attempts+`) OR (notice_kind = ? AND notice_for = ?))
+		AND status IN ('queued', 'delivered', 'claimed')`, now, kind, task, fallback, task); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE task_notice_delivery SET outcome = 'cancelled' WHERE request_id IN (`+attempts+`)`, kind, task)
+	return err
 }

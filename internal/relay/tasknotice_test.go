@@ -59,7 +59,7 @@ func (m *taskMesh) joinHost(t *testing.T, machine, name string) *client.Relay {
 // notices returns every task notice ever queued for agent, oldest first.
 func (m *taskMesh) notices(t *testing.T, agent string) []sentNotice {
 	t.Helper()
-	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind IN ('task', 'task-reminder', 'task-briefing', 'task-stall', 'task-action') ORDER BY rowid`, agent)
+	rows, err := m.Store.DB().Query(`SELECT id, from_agent, kind, body, status FROM requests WHERE to_agent = ? AND notice_kind IN ('task', 'task-reminder', 'task-briefing', 'task-stall', 'task-action', 'task-returned-close') ORDER BY rowid`, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func (m *taskMesh) waiting(t *testing.T) int {
 // texts.
 func (m *taskMesh) wantNoTaskText(t *testing.T, texts ...string) {
 	t.Helper()
-	rows, err := m.Store.DB().Query(`SELECT body FROM requests WHERE notice_kind IN ('task', 'task-action', 'task-stall', 'task-reminder')`)
+	rows, err := m.Store.DB().Query(`SELECT body FROM requests WHERE notice_kind IN ('task', 'task-action', 'task-stall', 'task-reminder', 'task-returned-close')`)
 	if err != nil {
 		t.Fatal(err)
 	}

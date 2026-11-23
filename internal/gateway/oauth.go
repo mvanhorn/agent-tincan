@@ -246,13 +246,19 @@ func (o *OAuth) issue(ctx context.Context, agent, clientID string) (Tokens, erro
 
 // Validate returns the agent an access token belongs to.
 func (o *OAuth) Validate(ctx context.Context, access string) (string, error) {
-	var agent string
-	var exp int64
-	err := o.db.QueryRowContext(ctx, `SELECT agent, expires_at FROM gw_tokens WHERE hash = ? AND kind = ?`, hash(access), kindAccess).Scan(&agent, &exp)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && o.now().UnixMilli() > exp) {
-		return "", errInvalid
-	}
+	agent, _, err := o.ValidateToken(ctx, access)
 	return agent, err
+}
+
+// ValidateToken returns the agent and client_id an access token belongs to.
+func (o *OAuth) ValidateToken(ctx context.Context, access string) (string, string, error) {
+	var agent, clientID string
+	var exp int64
+	err := o.db.QueryRowContext(ctx, `SELECT agent, client_id, expires_at FROM gw_tokens WHERE hash = ? AND kind = ?`, hash(access), kindAccess).Scan(&agent, &clientID, &exp)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && o.now().UnixMilli() > exp) {
+		return "", "", errInvalid
+	}
+	return agent, clientID, err
 }
 
 // RevokeAgent deletes every token and pending code for an agent.

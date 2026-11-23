@@ -36,6 +36,7 @@ const DefaultUnansweredQuestionAfter = 4 * time.Hour
 type Config struct {
 	TaskNudgeAfter          time.Duration
 	TaskStallAfter          time.Duration
+	TaskReturnedCloseAfter  time.Duration
 	FileAllAsks             string        // auto (or empty), on, or off
 	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task or a quiet task is surfaced
 
@@ -146,6 +147,9 @@ func (c *Config) defaults() {
 	if c.TaskStallAfter == 0 {
 		c.TaskStallAfter = store.DefaultTaskStallAfter
 	}
+	if c.TaskReturnedCloseAfter <= 0 {
+		c.TaskReturnedCloseAfter = store.DefaultTaskReturnedCloseAfter
+	}
 	if c.TaskBriefing == "" {
 		c.TaskBriefing = DefaultTaskBriefing
 	}
@@ -206,11 +210,19 @@ type Replier interface {
 	Replied(ctx context.Context, req envelope.Request)
 }
 
+// Clarifier is an optional Events extension told when a teammate asks a
+// clarification question (status needs_input) on an asker's request.
+// req.From is the asker.
+type Clarifier interface {
+	NeedsInput(ctx context.Context, req envelope.Request)
+}
+
 // Server is the relay.
 type Server struct {
-	wakeSettings WakeSettings
-	cfg          Config
-	dir          *identity.Directory
+	wakeSettings  WakeSettings
+	gatewayEvents func(context.Context) (any, error)
+	cfg           Config
+	dir           *identity.Directory
 	// lookupAgent is how requestTTL reads the recipient's kind; it is
 	// dir.Agent, replaced in tests to simulate a failed lookup.
 	lookupAgent func(ctx context.Context, name string) (identity.Agent, bool, error)
@@ -535,6 +547,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("PUT /v1/agents/{name}/fallback", s.handleSetFallback)
 	mux.HandleFunc("PUT /v1/agents/{name}/task-host", s.handleSetTaskHost)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
+	mux.HandleFunc("GET /v1/admin/gateway/events", s.handleGatewayEvents)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
@@ -703,6 +716,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	if err := s.store.QueueTaskStalls(ctx, s.cfg.TaskNudgeAfter, s.cfg.TaskStallAfter); err != nil {
 		log.Printf("sweep: task stalls: %v", err)
 	}
+	s.sweepReturnedHostTasks(ctx)
 	s.queueTaskReminders(ctx)
 	s.sweepTaskBriefing(ctx)
 	s.drainTaskNotices(ctx)
@@ -1924,10 +1938,18 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	s.drainTaskNotices(ctx)
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
-	if req, _, err := s.store.Request(ctx, id); err == nil {
+	if req, status, err := s.store.Request(ctx, id); err == nil {
+		req.Status = status
 		s.hub.notify(inboxKey(req.From))
-		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
-			rp.Replied(ctx, req)
+		if req.Kind != envelope.KindPing {
+			if rep.Status == envelope.StatusNeedsInput {
+				if cl, ok := s.events.(Clarifier); ok {
+					cl.NeedsInput(ctx, req)
+				}
+			}
+			if rp, ok := s.events.(Replier); ok {
+				rp.Replied(ctx, req)
+			}
 		}
 		if req.RoomPostID != 0 {
 			s.auditMirror(ctx, rep)
@@ -2588,6 +2610,37 @@ func (s *Server) UnseenReplyIDs(agent string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return s.store.UnseenReplyIDs(ctx, agent)
+}
+
+// IsReplyUnseen reports whether requestID still has an unread reply for agent.
+// On a store read error it returns true so a wake is not silently dropped.
+func (s *Server) IsReplyUnseen(agent, requestID string) bool {
+	ids, err := s.UnseenReplyIDs(agent)
+	if err != nil {
+		return true
+	}
+	return slices.Contains(ids, requestID)
+}
+
+// SetGatewayEvents installs the sanitized MCP Events subscription lister served
+// at GET /v1/admin/gateway/events when --chatgpt-gateway is enabled.
+func (s *Server) SetGatewayEvents(fn func(context.Context) (any, error)) { s.gatewayEvents = fn }
+
+func (s *Server) handleGatewayEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return
+	}
+	if s.gatewayEvents == nil {
+		writeErr(w, http.StatusNotFound, errors.New("the MCP gateway is not enabled on this relay (start the relay with --chatgpt-gateway)"))
+		return
+	}
+	subs, err := s.gatewayEvents(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": subs})
 }
 
 // LastPoll is agent's last inbox poll, including peek: the later of this

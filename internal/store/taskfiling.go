@@ -201,8 +201,12 @@ func (s *Store) findTaskFollowup(ctx context.Context, tx *sql.Tx, req envelope.R
 		byID, byRequest := parseTaskReference(ref)
 		var parent int64
 		err := tx.QueryRowContext(ctx, `SELECT t.id`+taskFrom+`
-			WHERE t.status IN ('open', 'working', 'question') AND (t.id = ?2 OR
-				(q.id = ?3 AND q.status IN ('queued', 'delivered', 'claimed', 'needs_input') AND q.expires_at > ?4))
+			WHERE ((t.status IN ('open', 'working', 'question') AND (t.id = ?2 OR
+				(q.id = ?3 AND q.status IN ('queued', 'delivered', 'claimed', 'needs_input') AND q.expires_at > ?4)))
+			OR t.status = 'returned' AND t.id IN (
+				SELECT t.id FROM tasks t `+returnedHostResult+` WHERE `+returnedHostTask+`
+				AND result.from_agent = ?1 AND (t.id = ?2 OR result.id = ?3)
+			))
 			AND t.room_post_id IS NULL AND t.participant_only = 0
 			AND (`+taskVisible+` OR q.from_agent = ?1 OR (?5 AND `+taskHostVisible+`
 				AND EXISTS (SELECT 1 FROM agents WHERE name = ?1 AND task_host = 1)))

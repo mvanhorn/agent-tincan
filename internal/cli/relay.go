@@ -60,6 +60,7 @@ type relayFlags struct {
 	ownerNotice                    int
 	taskNoticeAck                  time.Duration
 	taskNudgeAfter, taskStallAfter time.Duration
+	taskReturnedCloseAfter         time.Duration
 	taskZone                       string
 	dist                           string
 	upgradeExit                    bool
@@ -219,6 +220,7 @@ func addRelayFlags(fs *pflag.FlagSet, f *relayFlags) {
 	fs.StringVar(&f.taskBriefingZone, "task-briefing-zone", "", "IANA time zone for the daily task briefing (defaults to --task-zone)")
 	fs.DurationVar(&f.taskNudgeAfter, "task-nudge-after", store.DefaultTaskNudgeAfter, "how long without new progress before nudging a task assignee")
 	fs.DurationVar(&f.taskStallAfter, "task-stall-after", store.DefaultTaskStallAfter, "how long without new progress before a task host is asked to act")
+	fs.DurationVar(&f.taskReturnedCloseAfter, "task-returned-close-after", store.DefaultTaskReturnedCloseAfter, "how long to wait for the asker to follow up on a task returned by a host")
 	fs.DurationVar(&f.taskNoticeAck, "task-notice-ack-timeout", relay.DefaultTaskNoticeAckTimeout, "how long after a task notice is claimed to wait for the host's acknowledgment before retrying")
 	fs.StringVar(&f.fileAllAsks, "file-all-asks", "auto", "file teammate asks as tasks: auto (when a task host is named), on, or off")
 	fs.DurationVar(&f.unansweredQuestionAfter, "unanswered-question-after", relay.DefaultUnansweredQuestionAfter, "how long a clarification waits before an unfinished ask is filed or a quiet task is surfaced")
@@ -272,6 +274,9 @@ func (f relayFlags) validate() error {
 	if f.taskNudgeAfter <= 0 || f.taskStallAfter <= f.taskNudgeAfter {
 		return errors.New("--task-nudge-after must be positive and shorter than --task-stall-after")
 	}
+	if f.taskReturnedCloseAfter <= 0 {
+		return errors.New("--task-returned-close-after must be positive")
+	}
 	if f.taskNoticeAck <= 0 {
 		return errors.New("--task-notice-ack-timeout must be positive")
 	}
@@ -292,7 +297,8 @@ func (f relayFlags) relayConfig() relay.Config {
 		briefingZone, _ = envelope.TaskLocation(f.taskBriefingZone)
 	}
 	return relay.Config{Version: Version, TaskZone: zone, TaskBriefing: f.taskBriefing, TaskBriefingZone: briefingZone, UnansweredQuestionAfter: f.unansweredQuestionAfter, NotesRequestTTL: f.notesTTL, WakeGrace: f.wakeGrace, UrgentWakeGrace: f.urgentGrace, UrgentClaimLease: f.urgentLease, OwnerNoticeAfter: f.ownerNotice,
-		TaskNoticeAckTimeout: f.taskNoticeAck, TaskNudgeAfter: f.taskNudgeAfter, TaskStallAfter: f.taskStallAfter, FileAllAsks: f.fileAllAsks, ParsePass: parsePassRef}
+		TaskNoticeAckTimeout: f.taskNoticeAck, TaskNudgeAfter: f.taskNudgeAfter, TaskStallAfter: f.taskStallAfter,
+		TaskReturnedCloseAfter: f.taskReturnedCloseAfter, FileAllAsks: f.fileAllAsks, ParsePass: parsePassRef}
 }
 
 // parsePassRef reads a pass request for the relay's held listing and
@@ -625,8 +631,28 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		srv.SetEmailInboxes(inboxes)
 		log.Printf("polling AgentMail for email replies from %d agents with include_requests on", len(inboxes))
 	}
-	srv.SetEvents(waker)
-	srv.SetWakeNamer(waker)
+	stopGWEvents := func() {}
+	var gwEvents *gateway.EventHub
+	if f.gateway {
+		gwEvents, err = gateway.NewEventHub(st.DB(), gateway.EventHubOptions{
+			QueuedCount:   srv.QueuedCount,
+			IsReplyUnseen: srv.IsReplyUnseen,
+			ReplyGrace:    f.replyGrace,
+		})
+		if err != nil {
+			return fmt.Errorf("gateway events: %w", err)
+		}
+		stopGWEvents = gwEvents.Stop
+		defer stopGWEvents()
+		srv.SetEvents(relay.MultiEvents{waker, gwEvents})
+		srv.SetWakeNamer(relay.WithMCPEventsWake(waker, gwEvents.HasActiveSubscription))
+		srv.SetGatewayEvents(func(ctx context.Context) (any, error) {
+			return gwEvents.Summary(ctx)
+		})
+	} else {
+		srv.SetEvents(waker)
+		srv.SetWakeNamer(waker)
+	}
 	if err := resumeReplyWakes(ctx, st, waker); err != nil {
 		log.Printf("reschedule reply wakes: %v", err) // replies stay unseen for the agent's next check
 	}
@@ -686,9 +712,10 @@ func runRelay(ctx context.Context, f relayFlags) error {
 			return err
 		}
 		a2aFile := filepath.Join(f.stateDir, "a2a.json")
-		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Base: base, A2AFile: a2aFile})
+		srv.SetConnector(gateway.Connector{Dir: dir, OAuth: oauth, Events: gwEvents, Base: base, A2AFile: a2aFile})
 		pub := gateway.New(base, oauth, srv.Handler(), Version)
 		pub.SetA2AFile(a2aFile)
+		pub.SetEvents(gwEvents)
 		gw := client.Configure(&http.Server{Handler: pub.Handler()}, client.RelayAPI)
 		go func() { errc <- gw.Serve(gln) }()
 		servers = append(servers, gw)
@@ -726,6 +753,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 		// poll in flight, Retry-After waits included.
 		{"stopping sweeps and email reply polls", func() { stopRun(); <-ran }},
 		{"stopping wakes", waker.Stop},
+		{"stopping gateway events", stopGWEvents},
 		{"stopping push alerts", srv.WaitPush},
 		{"closing the gateway", closeGW},
 		{"closing the tailnet listener", closeNet},
