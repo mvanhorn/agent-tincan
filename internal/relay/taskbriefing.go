@@ -55,7 +55,7 @@ func (s *Server) handleTaskBriefingNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"queued": queued})
 }
 
-// taskBriefingMessage renders a snapshot built solely from task metadata.
+// taskBriefingMessage renders a snapshot safe for fallback delivery.
 func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 	var msg strings.Builder
 	msg.WriteString("Morning briefing.")
@@ -75,13 +75,29 @@ func taskBriefingMessage(b store.TaskBriefing, zone string) string {
 			if t.Assignee != "" {
 				fmt.Fprintf(&msg, ", with %s", envelope.TaskWho(t.Assignee))
 			}
+			if t.Blocker != "" && label != "Due today or overdue" {
+				fmt.Fprintf(&msg, ", %s", t.Blocker)
+			}
 			msg.WriteByte(')')
 		}
 		msg.WriteByte('.')
 	}
 	writeTasks("Due today or overdue", b.Due)
-	writeTasks("Waiting on you", b.Waiting)
+	var returned, waiting []store.BriefingTask
+	for _, task := range b.Waiting {
+		if task.Status == envelope.TaskReturned {
+			returned = append(returned, task)
+		} else {
+			waiting = append(waiting, task)
+		}
+	}
+	writeTasks("Returned for review", returned)
+	writeTasks("Waiting on input or assignment", waiting)
+	writeTasks("Open work to follow up", b.Active)
 	writeTasks("Done since the last briefing", b.Done)
+	if b.SmallAsksAnswered > 0 {
+		fmt.Fprintf(&msg, " Small asks answered since last briefing: %d.", b.SmallAsksAnswered)
+	}
 	if b.Suggested != 0 {
 		fmt.Fprintf(&msg, " Suggested today: task #%d.", b.Suggested)
 	}

@@ -957,11 +957,26 @@ func (s *Store) TakeInvite(ctx context.Context, code string) (identity.Invite, b
 // upload on no other message, and comes back filled in from its metadata.
 // A bad reference stores nothing.
 func (s *Store) Enqueue(ctx context.Context, req envelope.Request, ttl time.Duration) (envelope.Request, error) {
+	return s.enqueue(ctx, req, ttl, false, false)
+}
+
+// EnqueueFilingTasks links an ask or records it in a claimed task's
+// history in the same transaction that queues the request.
+func (s *Store) EnqueueFilingTasks(ctx context.Context, req envelope.Request, ttl time.Duration, requireHost bool) (envelope.Request, error) {
+	return s.enqueue(ctx, req, ttl, true, requireHost)
+}
+
+func (s *Store) enqueue(ctx context.Context, req envelope.Request, ttl time.Duration, fileTasks, requireHost bool) (envelope.Request, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return envelope.Request{}, err
 	}
 	defer tx.Rollback()
+	if fileTasks {
+		if err := s.fileAskTx(ctx, tx, &req, requireHost); err != nil {
+			return envelope.Request{}, err
+		}
+	}
 	if req, err = s.enqueueTx(ctx, tx, req, ttl); err != nil {
 		return envelope.Request{}, err
 	}
@@ -1021,6 +1036,11 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 			return envelope.Request{}, ErrNotRoomMember
 		}
 	}
+	if req.TaskRetry != nil {
+		if err := s.prepareTaskRetryTx(ctx, tx, &req); err != nil {
+			return envelope.Request{}, err
+		}
+	}
 	if req.TaskID != 0 {
 		if err := s.claimTaskTx(ctx, tx, req); err != nil {
 			return envelope.Request{}, err
@@ -1041,16 +1061,22 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 	// Keep task recovery subject to the task filer's broader guest check.
 	// This labels recovery without changing ordinary send or hold behavior.
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors, recovery_source, skip_task_recovery, recovery_repeat)
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors, recovery_source, skip_task_recovery, recovery_repeat, task_filed_on_send, task_room_scope)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			CASE WHEN ? AND EXISTS (SELECT 1 FROM requests WHERE to_agent = ? AND `+openGuestAsk+`) THEN 'guest' ELSE ? END,
-			? OR EXISTS (SELECT 1 FROM agents WHERE name IN (?, ?) AND kind IN ('history', 'notes', 'pass', 'council')), ?)`,
+			? OR EXISTS (SELECT 1 FROM agents WHERE name IN (?, ?) AND kind IN ('history', 'notes', 'pass', 'council')), ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
 		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors,
 		req.Kind == envelope.KindAsk && !req.NoParent, req.From, req.RecoverySource,
-		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat)
+		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat, req.TaskFiledOnSend, req.TaskRoomScope)
 	if err != nil {
 		return envelope.Request{}, err
+	}
+	if req.AboutTaskID != 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_followups (request_id, task_id) VALUES (?, ?)`,
+			req.ID, req.AboutTaskID); err != nil {
+			return envelope.Request{}, err
+		}
 	}
 	if err := s.followOnTx(ctx, tx, req); err != nil {
 		return envelope.Request{}, err
@@ -1483,7 +1509,7 @@ func (s *Store) SetProgressLeases(ctx context.Context, id, claimer, note string,
 		return err
 	}
 	if task.Valid {
-		if err := taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
+		if err := s.taskProgressTx(ctx, tx, id, claimer, note, now.UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -1571,6 +1597,12 @@ func (s *Store) replyTx(ctx context.Context, tx *sql.Tx, id, agent string, rep e
 	if err := s.taskRepliedTx(ctx, tx, rep); err != nil {
 		return envelope.Reply{}, err
 	}
+	if rep.Status == envelope.StatusAnswered && !rep.Provisional {
+		rep.CancelledFollowups, err = s.closeQuietTaskAfterReplyTx(ctx, tx, id)
+		if err != nil {
+			return envelope.Reply{}, err
+		}
+	}
 	if !rep.Replaced { // the ack already set any follow-on off
 		if err := s.markFollowOnDueTx(ctx, tx, rep); err != nil {
 			return envelope.Reply{}, err
@@ -1613,6 +1645,9 @@ func (s *Store) Get(ctx context.Context, id, agent string) (Result, error) {
 		if note, err = s.RelayNote(ctx, id); err != nil {
 			return Result{}, err
 		}
+	}
+	if req.From != agent && req.WasHeld && !req.Approved && rep != nil && rep.From == envelope.TaskOwner {
+		rep = nil
 	}
 	req.RedactFor(agent)
 	res := Result{Request: req, Status: status, Reply: rep, Progress: req.Progress, Exchanges: req.Exchanges, RelayNote: note}
@@ -1682,7 +1717,7 @@ func (s *Store) cancel(ctx context.Context, id, agent, cond string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	if err := s.taskReleasedTx(ctx, tx, id, agent, "cancelled the ask"); err != nil {
+	if err := s.taskCancelledTx(ctx, tx, id, agent); err != nil {
 		return nil, err
 	}
 	return closed, tx.Commit()
@@ -1919,7 +1954,7 @@ func (s *Store) Request(ctx context.Context, id string) (envelope.Request, envel
 	return s.lookup(ctx, id)
 }
 
-const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors, recovery_source, skip_task_recovery`
+const requestCols = `id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, attachments, exchanges, resumed, was_held, approved, group_id, urgent, progress_note, progress_at, moved_from, room_post_id, to_project, follow_of, from_guest, guest_approved, notice_for, notice_kind, rerouted, task_id, contributors, recovery_source, skip_task_recovery, task_filed_on_send, task_room_scope`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -1929,7 +1964,7 @@ func scanRequest(sc scanner) (envelope.Request, envelope.Status, error) {
 	var created, progressAt int64
 	var note string
 	var roomPost, task sql.NullInt64
-	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors, &r.RecoverySource, &r.SkipTaskRecovery); err != nil {
+	if err := sc.Scan(&r.ID, &r.From, &r.To, &r.ParentID, &r.TraceID, &r.Hop, &chain, &kind, &r.Body, &status, &created, &atts, &exchanges, &r.Resumed, &r.WasHeld, &r.Approved, &r.Group, &r.Urgent, &note, &progressAt, &movedFrom, &roomPost, &r.Project, &r.FollowOf, &r.FromGuest, &r.GuestApproved, &r.NoticeFor, &r.NoticeKind, &r.Rerouted, &task, &contributors, &r.RecoverySource, &r.SkipTaskRecovery, &r.TaskFiledOnSend, &r.TaskRoomScope); err != nil {
 		return envelope.Request{}, "", err
 	}
 	r.RoomPostID, r.TaskID = roomPost.Int64, task.Int64

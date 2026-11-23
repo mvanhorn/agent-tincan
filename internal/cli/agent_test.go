@@ -722,3 +722,88 @@ func TestAskWithoutThenStillJoinsWords(t *testing.T) {
 		t.Fatalf("inbox %+v %v", inbox, err)
 	}
 }
+
+func TestAskReportsFiledTask(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
+	useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+	out, err := run(t, askCmd(), "muse", "check the line", "--wait", "0s")
+	if err != nil || !strings.Contains(out, "\nFiled as task #1.\n") {
+		t.Fatalf("ask = %q, %v", out, err)
+	}
+	cmd := askCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	out, err = run(t, cmd, "muse", "check the other line", "--wait", "0s", "--json")
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 2 {
+		t.Fatalf("ask JSON = %q, %v", out, err)
+	}
+	var got resultJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil || got.TaskID != 2 || got.Result.Request.TaskID != got.TaskID {
+		t.Fatalf("ask JSON = %q, %v", out, err)
+	}
+}
+
+func TestQuietAskCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		host  bool
+		reply envelope.Status
+		want  envelope.TaskStatus
+	}{
+		{"answered", true, envelope.StatusAnswered, envelope.TaskDone},
+		{"failed", true, envelope.StatusFailed, envelope.TaskOpen},
+		{"no task host", false, envelope.StatusAnswered, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			m := testrelay.New(t, relay.Config{TaskBriefing: "off"})
+			useConfig(t, client.Config{Relay: m.URL("grokbot"), Agent: "grokbot"})
+			host, muse := m.Client(t, "instinct"), m.Client(t, "muse")
+			if tc.host {
+				if _, err := m.Client(t, "admin").SetTaskHost(ctx, "instinct", true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := run(t, askCmd(), "muse", "Check your client version", "--quiet", "--wait", "0s"); err != nil {
+				t.Fatal(err)
+			}
+			inbox, err := muse.Poll(ctx, 0)
+			if err != nil || len(inbox.Requests) != 1 {
+				t.Fatalf("recipient inbox = %+v, %v", inbox, err)
+			}
+			req := inbox.Requests[0]
+			if (req.TaskID != 0) != tc.host {
+				t.Fatalf("request = %+v, want task: %v", req, tc.host)
+			}
+			if tc.host {
+				if task := taskNow(t, m, req.TaskID); !task.Quiet {
+					t.Fatalf("task at send = %+v", task)
+				}
+			}
+			if _, err := muse.Reply(ctx, req.ID, "version check result", tc.reply); err != nil {
+				t.Fatal(err)
+			}
+			m.Server.Sweep(ctx)
+			if !tc.host {
+				tasks, err := m.Store.Tasks(ctx, "", 0, 10, true, true)
+				if err != nil || len(tasks) != 0 {
+					t.Fatalf("stored tasks = %+v, %v", tasks, err)
+				}
+				return
+			}
+			failed := tc.reply == envelope.StatusFailed
+			if task := taskNow(t, m, req.TaskID); task.Quiet == failed || task.Status != tc.want {
+				t.Fatalf("task after reply = %+v, want %s (quiet: %v)", task, tc.want, !failed)
+			}
+			tasks, _, _, err := client.HostTasks(ctx, host, false)
+			if err != nil || (len(tasks) != 0) != failed {
+				t.Fatalf("default host list = %+v, %v", tasks, err)
+			}
+			notices, err := host.Poll(ctx, 0)
+			if err != nil || failed && (len(notices.Requests) != 1 || notices.Requests[0].TaskNoticeKind != envelope.TaskNoticeAction) || !failed && len(notices.Requests) != 0 {
+				t.Fatalf("host inbox = %+v, %v", notices, err)
+			}
+
+		})
+	}
+}

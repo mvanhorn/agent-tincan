@@ -166,6 +166,9 @@ func (s *Store) RemoveRoomMember(ctx context.Context, room, agent string) (bool,
 	}
 	note := fmt.Sprintf("Cancelled: %s was removed from room %s.", agent, room)
 	for _, rid := range ids {
+		if err := s.taskReleasedTx(ctx, tx, rid, TaskRelay, note); err != nil {
+			return false, nil, err
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO relay_notes (request_id, kind, episode, note, at) VALUES (?, ?, 0, ?, ?)
 			ON CONFLICT(request_id, kind, episode) DO NOTHING`, rid, NoteRoomRemoved, note, now); err != nil {
 			return false, nil, err

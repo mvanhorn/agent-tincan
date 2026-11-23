@@ -83,10 +83,10 @@ func (s *Server) TellAskers(agent string, wk store.Wake) {
 	}
 }
 
-// agentSideWake reports a wake method the relay does not drive and has no
-// overdue check for: channel, wait, command, none and the like. The relay
-// cannot tell whether such an agent is looking at its queue, so an ask it
-// leaves untaken is the asker's to hear about.
+// agentSideWake reports a wake method without a relay-driven follow-up loop:
+// channel, wait, command, none, mcp-events and the like. An MCP Events
+// subscription may be reply-only or urgent_only, so keeping untaken-request
+// notices and owner fallback preserves the safety net for normal asks.
 func agentSideWake(method string) bool {
 	return !relayWoken(method) && method != wake.Schedule
 }

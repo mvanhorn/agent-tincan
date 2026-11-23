@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
@@ -78,15 +79,19 @@ func (s *Store) TellTaskNotices(ctx context.Context, agent string, ids []string)
 	for _, id := range ids {
 		d := TaskDelivery{Request: envelope.Request{ID: id}}
 		var status, outcome string
-		err := tx.QueryRowContext(ctx, `SELECT r.trace_id, r.notice_for, r.status, d.attempt, d.outcome
+		var settledCloseNotice bool
+		err := tx.QueryRowContext(ctx, `SELECT r.trace_id, r.notice_for, r.status, d.attempt, d.outcome,
+			r.notice_kind = ? AND r.claimed_at > 0 AND d.outcome = 'cancelled'
 			FROM task_notice_delivery d JOIN requests r ON r.id = d.request_id
-			WHERE r.id = ? AND r.to_agent = ?`, id, agent).Scan(&d.Request.TraceID, &d.Request.NoticeFor, &status, &d.Attempt, &outcome)
+			WHERE r.id = ? AND r.to_agent = ?`, envelope.TaskNoticeReturnedClose, id, agent).
+			Scan(&d.Request.TraceID, &d.Request.NoticeFor, &status, &d.Attempt, &outcome, &settledCloseNotice)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			return nil, fmt.Errorf("task notice %s: %w", id, ErrNotFound)
 		case err != nil:
 			return nil, err
-		case outcome == "told":
+		case outcome == "told" || settledCloseNotice:
+			// The host may close the task before acknowledging its notice.
 			continue
 		case status != string(envelope.StatusClaimed) || outcome != "":
 			return nil, fmt.Errorf("task notice %s is not awaiting a receipt: %w", id, ErrWrongState)
@@ -111,6 +116,22 @@ func (s *Store) AdvanceTaskNotice(ctx context.Context, d TaskDelivery, next enve
 	defer tx.Rollback()
 	now := s.now()
 	outcome := "exhausted"
+	if d.Request.NoticeKind == envelope.TaskNoticeReturnedClose {
+		id, err := strconv.ParseInt(d.Request.NoticeFor, 10, 64)
+		if err != nil {
+			return envelope.Request{}, false, err
+		}
+		current, err := returnedCloseNoticeCurrent(ctx, tx, id)
+		if err != nil {
+			return envelope.Request{}, false, err
+		}
+		if !current {
+			if err := cancelTaskNoticesTx(ctx, tx, id, now.UnixMilli(), envelope.TaskNoticeReturnedClose, NoteTaskReturnedCloseFallback); err != nil {
+				return envelope.Request{}, false, err
+			}
+			return envelope.Request{}, false, tx.Commit()
+		}
+	}
 	if d.Request.NoticeKind == envelope.TaskNoticeReminder {
 		var id, dueAt int64
 		var dropped bool

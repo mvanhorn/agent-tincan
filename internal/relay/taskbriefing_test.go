@@ -62,7 +62,7 @@ func taskDay(t *testing.T, m *taskMesh, day string) int64 {
 func assertBriefing(t *testing.T, req envelope.Request, want ...string) string {
 	t.Helper()
 	message := client.TaskNoticeOwnerMessage(req)
-	if message == "" || !req.TaskNoticeReceipt || strings.Contains(req.Body, "Private") || strings.Contains(message, "Private") {
+	if message == "" || !req.TaskNoticeReceipt || strings.Contains(req.Body, "Private detail") || strings.Contains(message, "Private outside title") {
 		t.Fatalf("briefing metadata = %+v, message = %q", req, message)
 	}
 	for _, part := range want {
@@ -108,8 +108,8 @@ func TestTaskBriefingSectionsAndRestart(t *testing.T) {
 		fmt.Sprintf("task #%d (question", question),
 		fmt.Sprintf("Done since the last briefing: task #%d (done", done),
 	)
-	if strings.Contains(message, fmt.Sprintf("task #%d (", today)) {
-		t.Fatalf("fourth due task in briefing: %q", message)
+	if !strings.Contains(message, fmt.Sprintf("task #%d (open, due 2026-11-21, assign it or take it on)", today)) {
+		t.Fatalf("open task missing from briefing: %q", message)
 	}
 	if err := client.TaskNoticesTold(ctx, m.muse, []string{b.ID}); err != nil {
 		t.Fatal(err)
@@ -404,12 +404,13 @@ func TestTaskBriefingRetriesAndFallsBack(t *testing.T) {
 	if err != nil || !queued {
 		t.Fatalf("queue briefing = %v, %v", queued, err)
 	}
-	var initial string
+	var initial, fallbackMessage string
 	for attempt := range 3 {
 		req := takeBriefing(t, m.muse)
 		message := assertBriefing(t, req, fmt.Sprintf("task #%d (open, due 2026-11-21)", id))
 		if attempt == 0 {
 			initial = message
+			fallbackMessage = client.TaskNoticeFallbackMessage(req)
 		} else if message != "Re-send of the same task news: "+initial {
 			t.Fatalf("retried briefing = %q", message)
 		}
@@ -418,7 +419,7 @@ func TestTaskBriefingRetriesAndFallsBack(t *testing.T) {
 	}
 	in, err := m.instinct.Poll(ctx, 0)
 	if err != nil || len(in.Requests) != 1 || !strings.Contains(in.Requests[0].Body, "Task briefing: muse did not acknowledge") ||
-		!strings.Contains(in.Requests[0].Body, initial) || strings.Contains(in.Requests[0].Body, "Private") {
+		!strings.Contains(in.Requests[0].Body, fallbackMessage) || strings.Contains(in.Requests[0].Body, "Private") {
 		t.Fatalf("fallback briefing inbox = %+v, %v", in, err)
 	}
 }
@@ -452,7 +453,7 @@ func TestTaskBriefingWithholdsProposedDeadlineUntilApproval(t *testing.T) {
 		t.Fatalf("queue briefing = %v, %v", queued, err)
 	}
 	req := takeBriefing(t, m.muse)
-	message := assertBriefing(t, req, fmt.Sprintf("Waiting on you: task #%d (proposed)", id))
+	message := assertBriefing(t, req, fmt.Sprintf("Waiting on input or assignment: task #%d (proposed)", id))
 	if strings.Contains(message, "2001-02-03") || strings.Contains(message, "Suggested today:") || strings.Contains(message, "Due today or overdue:") {
 		t.Fatalf("briefing exposed a withheld deadline: %q", message)
 	}
@@ -467,4 +468,34 @@ func TestTaskBriefingWithholdsProposedDeadlineUntilApproval(t *testing.T) {
 		t.Fatalf("queue briefing after approval = %v, %v", queued, err)
 	}
 	assertBriefing(t, takeBriefing(t, m.muse), fmt.Sprintf("Due today or overdue: task #%d (open, due 2001-02-03)", id))
+}
+
+func TestTaskBriefingCarriesUnfinishedTasksAcrossDays(t *testing.T) {
+	start := time.Date(2026, 11, 21, 14, 59, 0, 0, time.UTC)
+	m, _ := newBriefingMesh(t, start, "15:00")
+	scout := m.JoinOnMachineOf(t, "instinct", "scout")
+	m.host(t, "scout")
+	ctx := t.Context()
+	id := m.add(t, envelope.Task{Filer: "grokbot", Title: "Follow up with the supplier"}).ID
+	req := m.assign(t, id, "grokbot", "muse")
+	if _, err := m.muse.Reply(ctx, req.ID, "The supplier did not answer.", envelope.StatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	working := m.add(t, envelope.Task{Filer: "grokbot", Title: "Check parts"}).ID
+	attempt := m.assign(t, working, "grokbot", "instinct")
+	m.clk.advance(time.Minute)
+	for day := range 2 {
+		m.Server.Sweep(ctx)
+		b := takeBriefing(t, scout)
+		assertBriefing(t, b, fmt.Sprintf("task #%d (open, last attempt ended without a result)", id),
+			fmt.Sprintf("task #%d (working", working))
+		if err := client.TaskNoticesTold(ctx, scout, []string{b.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if day == 0 {
+			m.clk.advance(23*time.Hour + 50*time.Minute)
+			claimOne(t, m.instinct, attempt.ID)
+			m.clk.advance(10 * time.Minute)
+		}
+	}
 }

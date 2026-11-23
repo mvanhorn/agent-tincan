@@ -31,8 +31,9 @@ func (s *Server) setTaskDue(w http.ResponseWriter, r *http.Request, actor string
 		return
 	}
 	ctx := r.Context()
+	view := taskView{viewer: actor, roomAccess: s.mayReadRooms}
 	if actor != envelope.TaskOwner {
-		if _, err := s.store.Task(ctx, id, actor); err != nil {
+		if _, err := view.whole(ctx, s.store, id); err != nil {
 			writeTaskErr(w, err)
 			return
 		}
@@ -54,5 +55,9 @@ func (s *Server) setTaskDue(w http.ResponseWriter, r *http.Request, actor string
 		actor = ""
 	}
 	s.recordTask(r, "task_due", actor, id, nil)
+	if t.RoomPostID != 0 && actor != "" {
+		s.writeTaskNow(w, r, view, id, http.StatusOK, nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, taskReply{Task: t})
 }

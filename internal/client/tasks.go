@@ -80,13 +80,15 @@ type TaskResult struct {
 
 // Task actions available to the owner or a named host acting on their words.
 const (
-	TaskApprove = "approve"
-	TaskDone    = "done"
-	TaskReopen  = "reopen"
-	TaskReset   = "reset"
-	TaskDrop    = "drop"
-	TaskDue     = "due"
-	TaskAssign  = "assign"
+	TaskApprove  = "approve"
+	TaskDone     = "done"
+	TaskReopen   = "reopen"
+	TaskReset    = "reset"
+	TaskDrop     = "drop"
+	TaskDue      = "due"
+	TaskAssign   = "assign"
+	TaskRetry    = "retry"
+	TaskComplete = "complete"
 )
 
 // ErrTaskHostDecisionsUnsupported identifies a relay that predates a task
@@ -160,12 +162,12 @@ type TaskCounts struct {
 // (admin devices only), with overdue and due-today items first. Done and dropped tasks are listed
 // only with closed; either way the counts say how many of each there are.
 // Each detail and result is cut to its start; Task reads one whole.
-func Tasks(ctx context.Context, c Rawer, owner, closed bool) ([]envelope.Task, TaskCounts, error) {
+func Tasks(ctx context.Context, c Rawer, owner, closed bool, includeQuiet ...bool) ([]envelope.Task, TaskCounts, error) {
 	caps, err := taskCapabilities(ctx, c)
 	if err != nil {
 		return nil, TaskCounts{}, err
 	}
-	list, counts, _, err := readTasks(ctx, c, tasksPath(owner)+"?", closed, caps.TaskZone)
+	list, counts, _, err := readTasks(ctx, c, tasksPath(owner)+"?", closed, caps.TaskZone, includeQuiet)
 	return list, counts, err
 }
 
@@ -187,7 +189,7 @@ const hostParam = "host=1&"
 // serves it only to a task host the owner named, and the returned view says
 // whether it did; any other agent gets what Tasks returns. A relay that
 // does not advertise task hosts is not asked.
-func HostTasks(ctx context.Context, c Rawer, closed bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
+func HostTasks(ctx context.Context, c Rawer, closed bool, includeQuiet ...bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
 	caps, err := taskCapabilities(ctx, c)
 	if err != nil {
 		return nil, TaskCounts{}, TaskHostView{}, err
@@ -196,19 +198,22 @@ func HostTasks(ctx context.Context, c Rawer, closed bool) ([]envelope.Task, Task
 	if caps.TaskHosts {
 		path += hostParam
 	}
-	return readTasks(ctx, c, path, closed, caps.TaskZone)
+	return readTasks(ctx, c, path, closed, caps.TaskZone, includeQuiet)
 }
 
 // readTasks reads every page of the listing at path, which ends with the
 // parameters before after. The host view is reported served only when every
 // page was.
-func readTasks(ctx context.Context, c Rawer, path string, closed bool, zone string) ([]envelope.Task, TaskCounts, TaskHostView, error) {
+func readTasks(ctx context.Context, c Rawer, path string, closed bool, zone string, includeQuiet []bool) ([]envelope.Task, TaskCounts, TaskHostView, error) {
 	var list []envelope.Task
 	var counts TaskCounts
 	var after int64
 	view := TaskHostView{Served: true}
 	if closed {
 		path = strings.Replace(path, "?", "?closed=1&", 1)
+	}
+	if len(includeQuiet) != 0 && includeQuiet[0] {
+		path += "include_quiet=1&"
 	}
 	for {
 		var out struct {
@@ -365,9 +370,30 @@ func HostAssignTask(ctx context.Context, c Rawer, id int64, to, words string) (e
 	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskAssign, Words: words, To: to}, "")
 }
 
+// HostCloseAnsweredTask closes a returned task whose result is complete.
+func HostCloseAnsweredTask(ctx context.Context, c Rawer, id int64, reason string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskDone, Reason: reason}, "")
+}
+
+// HostRetryTask retries an unfinished task using the approach in reason.
+func HostRetryTask(ctx context.Context, c Rawer, id int64, to, reason string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskRetry, To: to, Reason: reason}, "")
+}
+
+// HostCompleteTask records the verified result of work performed by the host.
+func HostCompleteTask(ctx context.Context, c Rawer, id int64, result string) (envelope.Task, error) {
+	return hostDecideTask(ctx, c, id, hostTaskDecision{Decision: TaskComplete, Result: result}, "")
+}
+
+func FormatAnsweredTaskClosure(t envelope.Task) string {
+	return fmt.Sprintf("Closed task #%d as answered. Tell the owner the result in one plain sentence and include the task number.", t.ID)
+}
+
 type hostTaskDecision struct {
 	Decision string `json:"decision"`
 	Words    string `json:"owner_words"`
+	Reason   string `json:"reason,omitempty"`
+	Result   string `json:"result,omitempty"`
 	To       string `json:"to,omitempty"`
 	envelope.TaskDue
 }
@@ -492,7 +518,7 @@ func FormatHostTasks(list []envelope.Task, counts TaskCounts, view TaskHostView)
 	head := ""
 	switch {
 	case view.Served:
-		head = "You are the owner's task host: this is every task on the list, with overdue and due-today tasks first, then work waiting on the owner.\n"
+		head = "You are the owner's task host: this view shows overdue and due-today tasks first, then work waiting on the owner.\n"
 	case view.Refused != "":
 		head = "This is your ordinary view, not the task host view: " + ScheduleText(view.Refused) + ".\n"
 	}
@@ -506,6 +532,9 @@ const taskWithheld = "text withheld until the owner approves it"
 // that say why it has none.
 func taskTitle(t envelope.Task) string {
 	if t.Withheld {
+		if t.Source == "" {
+			return "task text withheld"
+		}
 		return taskWithheld
 	}
 	return ScheduleText(t.Title)
@@ -525,6 +554,9 @@ func taskLine(t envelope.Task) string {
 	}
 	if t.AskStatus != "" {
 		fmt.Fprintf(&b, ", ask %s", t.AskStatus)
+	}
+	if t.Quiet {
+		b.WriteString(", quiet")
 	}
 	if t.Source != "" {
 		fmt.Fprintf(&b, ", source %s", t.Source)
@@ -583,6 +615,9 @@ func FormatTaskRepeat(t envelope.Task) string {
 func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task #%d: %s\nStatus: %s\nFiled by: %s at %s\n", t.ID, taskTitle(t), t.Status, envelope.TaskWho(t.Filer), clockTime(t.CreatedAt, now))
+	if t.Quiet {
+		b.WriteString("Quiet task.\n")
+	}
 	if due := FormatTaskDue(t); due != "" {
 		label := "Due"
 		if taskDueRank(t, now) == 0 {
@@ -604,6 +639,9 @@ func FormatTask(t envelope.Task, events []envelope.TaskEvent, now time.Time) str
 	}
 	if t.Key != "" {
 		fmt.Fprintf(&b, "Key: %s\n", ScheduleText(t.Key))
+	}
+	if t.HostRetries > 0 {
+		fmt.Fprintf(&b, "Host retries used: %d of 2\n", t.HostRetries)
 	}
 	if t.AgentAssigns > 0 {
 		fmt.Fprintf(&b, "Agent assigns: %d\n", t.AgentAssigns)

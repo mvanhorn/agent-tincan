@@ -67,7 +67,7 @@ func TestTaskNoticeRetriesAndFallsBackAfterThirdAttempt(t *testing.T) {
 	ctx := t.Context()
 	task := taskDo(t, m.muse, "POST", "/v1/tasks", map[string]string{"title": "Private title", "source": "mail"}).Task
 	initial := m.wantNotice(t, "pilot", task.ID, "proposed")
-	initialMessage := fmt.Sprintf("Task #%d was proposed and is waiting for your approval.", task.ID)
+	initialMessage := fmt.Sprintf("Task #%d: review and approve this task if you want it to proceed.", task.ID)
 	for attempt := 1; attempt <= 3; attempt++ {
 		got := read(t, pilot)
 		if len(got) != 1 || got[0].Body != initial.Body || !got[0].TaskNoticeReceipt {

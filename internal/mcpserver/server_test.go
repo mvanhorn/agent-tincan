@@ -1504,3 +1504,75 @@ func TestGetReplyKeepsControlRunes(t *testing.T) {
 		t.Fatalf("get_reply = %q", got)
 	}
 }
+
+func TestAskReportsFiledTaskOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on", MaxWait: time.Millisecond})
+	cs := session(t, m, "instinct")
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "ask",
+		Arguments: map[string]any{"to": "muse", "message": "check the line", "wait_seconds": 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, ok := res.StructuredContent.(map[string]any)
+	if res.IsError || !ok || data["task_id"] != float64(1) {
+		t.Fatalf("ask = %+v, structured = %#v", res, res.StructuredContent)
+	}
+}
+
+func TestQuietAskOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on", MaxWait: time.Millisecond})
+	cs := session(t, m, "instinct")
+	got := call(t, cs, "ask", map[string]any{"to": "muse", "message": "Check your client version", "quiet": true, "wait_seconds": 1})
+	if !strings.Contains(got, "Filed as task #1") {
+		t.Fatalf("ask = %q", got)
+	}
+	task, _, err := client.Task(t.Context(), m.Client(t, "instinct"), false, 1)
+	if err != nil || !task.Quiet {
+		t.Fatalf("MCP ask task = %+v, %v", task, err)
+	}
+}
+
+func TestListTasksIncludesQuietOnRequest(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on"})
+	ctx := t.Context()
+	if err := m.Client(t, "admin").SetKind(ctx, "muse", "notes"); err != nil {
+		t.Fatal(err)
+	}
+	req, err := m.Client(t, "instinct").Send(ctx, "muse", "Small lookup", envelope.KindAsk, "", false)
+	if err != nil || req.TaskID == 0 {
+		t.Fatalf("quiet ask = %+v, %v", req, err)
+	}
+	cs := session(t, m, "instinct")
+	if got := call(t, cs, "list_tasks", nil); strings.Contains(got, "Small lookup") {
+		t.Fatalf("default list = %q", got)
+	}
+	if got := call(t, cs, "list_tasks", map[string]any{"include_quiet": true}); !strings.Contains(got, "Small lookup") || !strings.Contains(got, ", quiet") {
+		t.Fatalf("quiet list = %q", got)
+	}
+	if got := call(t, cs, "get_task", map[string]any{"task_id": req.TaskID}); !strings.Contains(got, "Quiet task.") {
+		t.Fatalf("quiet task = %q", got)
+	}
+}
+
+func TestAskAboutOverMCP(t *testing.T) {
+	m := testrelay.New(t, relay.Config{FileAllAsks: "on", MaxWait: time.Millisecond})
+	ctx := t.Context()
+	agent := m.Client(t, "instinct")
+	original, err := agent.Send(ctx, "muse", "Check today's hours", envelope.KindAsk, "", false)
+	if err != nil || original.TaskID == 0 {
+		t.Fatalf("parent = %+v, %v", original, err)
+	}
+	cs := session(t, m, "instinct")
+	out := call(t, cs, "ask", map[string]any{
+		"to": "muse", "message": "Any update?", "about": original.ID, "wait_seconds": 1,
+	})
+	if strings.Contains(out, "ERROR:") {
+		t.Fatalf("ask = %q", out)
+	}
+	tasks, _, _, err := client.HostTasks(ctx, agent, false)
+	if err != nil || len(tasks) != 1 || tasks[0].ID != original.TaskID {
+		t.Fatalf("tasks = %+v, %v", tasks, err)
+	}
+}
