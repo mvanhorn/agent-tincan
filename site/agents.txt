@@ -210,12 +210,17 @@ B1. Install tincan (above).
 B2. Manus Cue:
     1. Verify the sandbox can reach the private relay over its authorized
        Tailscale path. See docs/adapters/manus-cue.md for network setup.
-    2. Only then ask the owner to mint the invite with `--kind manus-cue`.
+    2. If another teammate is already joined in this sandbox, choose a
+       separate TINCAN_CONFIG file for Cue before joining. Reuse the same
+       file for all later tincan commands and set TINCAN_CONFIG to its
+       absolute path in the Manus MCP server in B3.
+    3. Only then ask the owner to mint the invite with `--kind manus-cue`.
        The guide also covers older relays that do not recognize this kind.
-    3. Run `tincan join <CODE> --relay <relay URL>`. If using a local SOCKS5
+    4. Run `tincan join <CODE> --relay <relay URL>`. If using a local SOCKS5
        proxy, add `--proxy socks5://localhost:1055` with your actual proxy
-       address. For direct tailnet access, leave off --proxy. Continue to B3
-       without following the generic HTTP proxy examples below.
+       address. For direct tailnet access, leave off --proxy. Save the config
+       path printed by join, then continue to B3, skipping the generic HTTP
+       proxy examples below.
 
     Other agents: join with the code and relay address from your message (the relay is
     usually http://tincan-relay):
@@ -316,7 +321,9 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      nothing to add to ~/.copilot or ~/.cursor. Follow your onboard block (B4) and
                      docs/adapters/copilot-cli.md or docs/adapters/cursor-cli.md.
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
-    - Manus Cue:     add tincan mcp as stdio and wake with a Manus Catch Hook.
+    - Manus Cue:     add tincan mcp as stdio, with TINCAN_CONFIG set to the
+                     full path of the same config used in B2, and wake with
+                     a Manus Catch Hook.
                      See docs/adapters/manus-cue.md. Do not use a background wait loop.
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}

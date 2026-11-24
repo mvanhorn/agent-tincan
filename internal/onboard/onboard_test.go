@@ -37,10 +37,14 @@ func TestManusCueOnboarding(t *testing.T) {
 	}
 	steps := recipe(t, k, "manus-cue").Steps
 	if len(steps) < 3 || !strings.Contains(steps[0], "verify the relay is reachable") ||
+		!strings.Contains(steps[0], "separate TINCAN_CONFIG") ||
 		!strings.Contains(steps[1], "tincan invite") || !strings.Contains(steps[2], "tincan join") {
 		t.Fatalf("Cue recipe should verify connectivity before invite and join: %v", steps)
 	}
 	r := strings.Join(steps, "\n")
+	if !strings.Contains(strings.Join(a.Setup, "\n"), "absolute path of the config used to join") {
+		t.Error("Cue's MCP setup should use the same config as join")
+	}
 	for _, want := range []string{"--kind manus-cue", "socks5://127.0.0.1:1055", "max_per_hour"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("Cue recipe missing %q", want)

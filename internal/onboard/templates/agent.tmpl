@@ -322,7 +322,7 @@ Ask {{.Name}} to paste the standing instructions into its cron job, so every run
 {{- end -}}
 
 {{- define "setup.manus-cue" -}}
-In Manus, add the stdio MCP server with the full path to the tincan binary and args ["mcp"]. Verify list_agents from a Manus run.
+If another teammate already uses this sandbox, use a separate TINCAN_CONFIG file for Cue. In Manus, add the stdio MCP server with the full path to the tincan binary and args ["mcp"]. Set TINCAN_CONFIG in the MCP server's environment to the absolute path of the config used to join. Verify list_agents from a Manus run.
 Create a Manus Catch Hook that starts a run with the standing inbox instructions. Use the hook as a wake signal; do not interpolate webhook data into the prompt.
 On the relay host, in wake.json (chmod 600), set {{.Name}} to method "webhook", with the private Catch Hook URL and a max_per_hour budget. Restart the relay to apply the file edit. Do not paste the hook URL in chat. Verify webhook acceptance, inbox check-in, and a reply separately.
 See docs/adapters/manus-cue.md.
