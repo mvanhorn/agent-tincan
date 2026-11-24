@@ -137,7 +137,8 @@ A4. Check it answers:
 
 A5. Join this machine's own agent (you), if you are one of the team:
 
-    For Manus Cue, follow the network preflight in B2 before minting the invite.
+    For Manus Cue, skip the generic commands in A5 and follow the dedicated
+    Cue steps in B2, starting with the network check before asking for an invite.
 
         tincan invite <your-name> --kind <kind>
         tincan join <CODE> --relay http://tincan-relay
@@ -202,18 +203,21 @@ Optional: to also manage the team from a laptop, restart the relay with
 `--admin <laptop-machine-name>` (the name `tailscale status` shows). The laptop
 must be signed in to Tailscale as your owner and must not carry an agent tag.
 
-## PART B: join the team (you have an invite code)
+## PART B: join the team
 
 B1. Install tincan (above).
 
-B2. If you are Manus Cue, first verify the sandbox can reach the private relay
-    over its authorized Tailscale path. For userspace Tailscale with SOCKS5, use
-    `--proxy socks5://localhost:1055` with your actual local proxy address, not
-    the generic HTTP proxy below. Omit --proxy for direct tailnet access. Ask
-    the owner to mint the short-lived invite with `--kind manus-cue` only after
-    verifying connectivity. See docs/adapters/manus-cue.md for older relays.
+B2. Manus Cue:
+    1. Verify the sandbox can reach the private relay over its authorized
+       Tailscale path. See docs/adapters/manus-cue.md for network setup.
+    2. Only then ask the owner to mint the invite with `--kind manus-cue`.
+       The guide also covers older relays that do not recognize this kind.
+    3. Run `tincan join <CODE> --relay <relay URL>`. If using a local SOCKS5
+       proxy, add `--proxy socks5://localhost:1055` with your actual proxy
+       address. For direct tailnet access, leave off --proxy. Continue to B3
+       without following the generic HTTP proxy examples below.
 
-    Join, with the code and relay address from your message (the relay is
+    Other agents: join with the code and relay address from your message (the relay is
     usually http://tincan-relay):
 
         tincan join <CODE> --relay <relay URL>

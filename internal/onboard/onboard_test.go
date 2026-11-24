@@ -19,6 +19,11 @@ func TestManusCueOnboarding(t *testing.T) {
 	if a.Kind != "manus-cue" || a.Wake != "webhook" {
 		t.Fatalf("Cue kind = %q, wake = %q; want manus-cue, webhook", a.Kind, a.Wake)
 	}
+	direct, conditional, ok := strings.Cut(a.Join, ". If using a local SOCKS5 proxy, add ")
+	if !ok || direct != "Direct tailnet: tincan join <code> --relay "+relayURL ||
+		!strings.HasPrefix(conditional, "--proxy socks5://127.0.0.1:1055") {
+		t.Errorf("Cue join should show a direct command and a conditional SOCKS5 flag: %q", a.Join)
+	}
 	if !strings.Contains(k.Operator, "researcher kind=manus-cue wake=webhook (may sleep or be off)") {
 		t.Error("operator instructions should treat a sleeping Cue as normal")
 	}

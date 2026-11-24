@@ -14,7 +14,7 @@ On an admin device (or on the relay host with --socket <state-dir>/admin.sock): 
 On the agent's machine: {{template "join.proxy-sandbox" .}}
 {{- end -}}
 {{- define "recipe.invite.manus-cue" -}}
-In the Cue sandbox, set up an authorized Tailscale path and verify the relay is reachable before asking for an invite. The join example uses a local SOCKS5 proxy; use its actual address or omit --proxy if the sandbox has direct tailnet access. See docs/adapters/manus-cue.md.
+In the Cue sandbox, set up an authorized Tailscale path and verify the relay is reachable before asking for an invite. See docs/adapters/manus-cue.md.
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
 On the agent's machine: {{template "join.manus-cue" .}}
 {{- end -}}

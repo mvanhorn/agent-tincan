@@ -36,7 +36,7 @@ If another agent already runs on this machine, prefix every tincan command (join
 
 {{- define "join.default"}}{{template "cfg" .}}tincan join <code> --relay {{.RelayURL}}{{end -}}
 {{- define "join.proxy-sandbox"}}tincan join <code> --relay {{.RelayURL}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end -}}
-{{- define "join.manus-cue"}}tincan join <code> --relay {{.RelayURL}} --proxy socks5://127.0.0.1:1055{{end -}}
+{{- define "join.manus-cue"}}Direct tailnet: {{template "join.default" .}}. If using a local SOCKS5 proxy, add --proxy socks5://127.0.0.1:1055 with the sandbox's actual proxy address.{{end -}}
 {{- define "join.chatgpt"}}tincan connect chatgpt (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
 {{- define "join.phone"}}Join this phone, on the relay's phone page ({{.RelayURL}}/phone/) opened on the phone; no invite code to carry{{end -}}
 {{- define "join.sesame"}}tincan connect {{.Name}} (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
