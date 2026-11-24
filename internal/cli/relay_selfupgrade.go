@@ -74,10 +74,44 @@ func selfUpgradeWarning(exe, dist string) string {
 			}
 		}
 	}
+	if dist != "" {
+		for _, f := range writableReleaseFiles(dist) {
+			if !slices.Contains(open, f) {
+				open = append(open, f)
+			}
+		}
+	}
 	if len(open) > 0 {
 		msgs = append(msgs, "warning: "+strings.Join(open, " and ")+" can be written by other users, and anyone who can write there can run code as the relay at the next tincan relay-upgrade; keep it writable only by the relay user (chmod go-w)")
 	}
 	return strings.Join(msgs, "\n")
+}
+
+// writableReleaseFiles lists the staged release files in dist (VERSION,
+// checksums.txt and the tincan_* binaries) that a group or other user can
+// write. Safe folders do not protect a file that is itself writable: its
+// owner's group can change a binary and its checksum in place, and the next
+// plain upgrade accepts them. A symlinked file is checked at its target.
+func writableReleaseFiles(dist string) []string {
+	entries, err := os.ReadDir(dist)
+	if err != nil {
+		return nil
+	}
+	var open []string
+	for _, e := range entries {
+		name := e.Name()
+		if name != "VERSION" && name != "checksums.txt" && !strings.HasPrefix(name, "tincan_") {
+			continue
+		}
+		p := filepath.Join(dist, name)
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o022 != 0 {
+			open = append(open, p)
+		}
+	}
+	return open
 }
 
 // writableByOthers lists dir and each folder above it that a group or other

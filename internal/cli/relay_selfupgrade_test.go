@@ -401,3 +401,43 @@ func serveHandlerSocket(t *testing.T, h http.Handler) string {
 	t.Cleanup(func() { srv.Close() })
 	return sock
 }
+
+// Safe folders do not protect a staged release file that is itself group
+// or world writable: its group can change the binary and its checksum in
+// place, and the next plain upgrade accepts them.
+func TestSelfUpgradeWarningWritableReleaseFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the writability check is Unix-only")
+	}
+	exe := filepath.Join(t.TempDir(), "tincan")
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dist := t.TempDir()
+	files := map[string]os.FileMode{
+		"tincan_linux_amd64": 0o775,
+		"checksums.txt":      0o664,
+		"VERSION":            0o644,
+		"notes.txt":          0o666,
+	}
+	for name, mode := range files {
+		p := filepath.Join(dist, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := selfUpgradeWarning(exe, dist)
+	for _, name := range []string{"tincan_linux_amd64", "checksums.txt"} {
+		if !strings.Contains(got, filepath.Join(dist, name)) {
+			t.Errorf("warning %q, want the writable %s named", got, name)
+		}
+	}
+	for _, name := range []string{"VERSION", "notes.txt"} {
+		if strings.Contains(got, filepath.Join(dist, name)) {
+			t.Errorf("warning %q names %s, which is safe or not a release file", got, name)
+		}
+	}
+}
