@@ -791,6 +791,11 @@ func (d *Directory) IsAdmin(ctx context.Context, remoteAddr string) bool {
 	return d.requireAdmin(ctx, remoteAddr) == nil
 }
 
+// AdminTag is the Tailscale tag granting admin commands, or empty when
+// none is configured. Callers that show the owner which tag to flip in
+// the Tailscale admin panel read it here.
+func (d *Directory) AdminTag() string { return d.cfg.AdminTag }
+
 func (d *Directory) requireAdmin(ctx context.Context, remoteAddr string) error {
 	if remoteAddr == LocalAdmin {
 		return nil

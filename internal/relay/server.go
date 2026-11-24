@@ -2196,6 +2196,12 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Version != "" {
 		res["relay_version"] = s.cfg.Version
 	}
+	// The configured --admin-tag rides alongside the roster for every
+	// caller, so doctor and the setup console can name the tag that
+	// grants admin without an admin-only read.
+	if tag := s.dir.AdminTag(); tag != "" {
+		res["admin_tag"] = tag
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
