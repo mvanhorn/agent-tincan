@@ -387,6 +387,57 @@ func TestUnansweredWakeCheck(t *testing.T) {
 	}
 }
 
+// setupConsoleCheck asks the console's JSON routes the way the /admin/
+// page does: kinds for the invite form, peers for the Tailnet devices
+// section. Non-admin devices and relays that predate the console skip it.
+func TestSetupConsoleCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		kindsCode int
+		kinds     string
+		peersCode int
+		peers     string
+		status    string
+		want      []string
+	}{
+		{"console", 200, `{"kinds":["hermes","codex"]}`, 200, `{"peers":[{},{},{}]}`, "ok", []string{"setup console at /admin/", "2 agent kinds", "lists 3 peers"}},
+		{"no peers route", 200, `{"kinds":["hermes"]}`, 404, `{"error":"no"}`, "ok", []string{"1 agent kinds", "device list unavailable"}},
+		{"empty kinds", 200, `{"kinds":[]}`, 200, `{"peers":[]}`, "warn", []string{"no agent kinds"}},
+		{"not admin", 403, `{"error":"no"}`, 403, `{"error":"no"}`, "ok", []string{"skipped", "admin device"}},
+		{"old relay", 404, `{"error":"no"}`, 404, `{"error":"no"}`, "ok", []string{"skipped", "predates"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/admin/kinds":
+					w.WriteHeader(tc.kindsCode)
+					fmt.Fprint(w, tc.kinds)
+				case "/v1/admin/peers":
+					w.WriteHeader(tc.peersCode)
+					fmt.Fprint(w, tc.peers)
+				default:
+					t.Errorf("unexpected route %s", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+			r, err := client.NewRelayFor(client.Config{Relay: srv.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := setupConsoleCheck(t.Context(), r)
+			text := c.Detail + "\n" + c.Fix
+			if c.Name != "setup console" || c.Status != tc.status {
+				t.Fatalf("check = %+v", c)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(text, w) {
+					t.Errorf("missing %q in %q", w, text)
+				}
+			}
+		})
+	}
+}
+
 // doctor lists each running native host with its profile and build, and
 // warns when one waits because another host holds its socket.
 func TestNativeHostsCheck(t *testing.T) {
