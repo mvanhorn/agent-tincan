@@ -204,21 +204,140 @@ func TestGeminiWakeAgyEngineArgv(t *testing.T) {
 	}
 }
 
-// Without the opt-in, the agy engine refuses once, clearly, and backs off.
-func TestGeminiWakeAgyRefusesUnconfinedByDefault(t *testing.T) {
+// agySettings decodes the --settings JSON an agy run was given.
+type agySettings struct {
+	ToolPermission string `json:"toolPermission"`
+	Permissions    struct {
+		Allow []string `json:"allow"`
+		Deny  []string `json:"deny"`
+	} `json:"permissions"`
+}
+
+func (r wakeRun) agySettings(t *testing.T) agySettings {
+	t.Helper()
+	got := r.flagValues("--settings")
+	if len(got) != 1 {
+		t.Fatalf("agy argv has %d --settings values, want 1: %q", len(got), r.argv)
+	}
+	var s agySettings
+	if err := json.Unmarshal([]byte(got[0]), &s); err != nil {
+		t.Fatalf("--settings is not JSON (%v): %s", err, got[0])
+	}
+	return s
+}
+
+// Without the opt-in, agy runs confined: in its terminal sandbox, with a
+// per-run strict permission mode that allows only MCP tools and file reads,
+// and denies every command, every write, and reads of the tincan configs
+// (teammates' keys) and ~/.ssh. Nothing is written to agy's own settings.
+func TestGeminiWakeAgyConfinedByDefault(t *testing.T) {
 	h := newGeminiHarness(t)
 	r := h.run()
-	if r.err == nil || len(h.runs()) != 0 {
-		t.Fatalf("agy ran without the unconfined opt-in: %v\nstderr:\n%s", r.err, r.stderr)
+	if r.err != nil {
+		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
 	}
-	if !strings.Contains(r.stderr, "TINCAN_GEMINI_ALLOW_UNCONFINED") || !h.backoff() || h.noticeCount() != 1 {
-		t.Fatalf("refusal: backoff %v, notices %d\nstderr:\n%s", h.backoff(), h.noticeCount(), r.stderr)
+	runs := h.runs()
+	if len(runs) != 1 {
+		t.Fatalf("agy ran %d times, want 1\nstderr:\n%s", len(runs), r.stderr)
 	}
-	// It says where the opt-in goes and how to clear the backoff it sets.
-	for _, want := range []string{"tincan listen --exec", "restart the listener", "/backoff", "Set up with a Google account (no API key)"} {
-		if !strings.Contains(r.stderr, want) {
-			t.Errorf("refusal does not say %q:\n%s", want, r.stderr)
+	a := runs[0]
+	for _, want := range []string{"--sandbox"} {
+		if !has(a.argv, want) {
+			t.Errorf("confined agy argv lacks %s: %q", want, a.argv)
 		}
+	}
+	if has(a.argv, "--dangerously-skip-permissions") {
+		t.Fatalf("confined agy run skips permissions: %q", a.argv)
+	}
+	if got := a.flagValues("--output-format"); len(got) != 1 || got[0] != "json" {
+		t.Fatalf("--output-format = %q, want json", got)
+	}
+	s := a.agySettings(t)
+	if s.ToolPermission != "strict" {
+		t.Errorf("toolPermission = %q, want strict", s.ToolPermission)
+	}
+	slices.Sort(s.Permissions.Allow)
+	if !slices.Equal(s.Permissions.Allow, []string{"mcp(*)", "read_file(/)"}) {
+		t.Errorf("allow = %q, want only mcp(*) and read_file(/)", s.Permissions.Allow)
+	}
+	cfgDir := canonical(t, filepath.Dir(h.config))
+	for _, want := range []string{"command(*)", "write_file(/)", "read_file(" + cfgDir + ")", "read_file(" + canonical(t, h.home) + "/.ssh)"} {
+		if !slices.Contains(s.Permissions.Deny, want) {
+			t.Errorf("deny = %q, lacks %s", s.Permissions.Deny, want)
+		}
+	}
+	p := a.prompt()
+	checkDrainPrompt(t, p)
+	if strings.Contains(p, "read anywhere") {
+		t.Errorf("confined prompt still offers reads anywhere:\n%s", p)
+	}
+	for _, want := range []string{"cannot write files or run commands"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("confined prompt does not say %q:\n%s", want, p)
+		}
+	}
+	if h.backoff() || h.noticeCount() != 0 {
+		t.Fatalf("confined run backed off or told the operator: backoff %v, notices %d", h.backoff(), h.noticeCount())
+	}
+	if _, err := os.Stat(filepath.Join(h.home, ".gemini", "antigravity-cli", "settings.json")); err == nil {
+		t.Fatalf("the wake wrote agy's own settings file")
+	}
+}
+
+// The unconfined opt-in keeps the full-agent run: tool approval skipped,
+// no per-run settings, and the usual drain prompt.
+func TestGeminiWakeAgyUnconfinedOptIn(t *testing.T) {
+	h := newGeminiHarness(t)
+	r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1")
+	if r.err != nil {
+		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	a := h.runs()[0]
+	if got := a.flagValues("--settings"); len(got) != 0 {
+		t.Fatalf("unconfined run got --settings %q", got)
+	}
+	if !strings.Contains(a.prompt(), "read anywhere") {
+		t.Errorf("unconfined prompt changed:\n%s", a.prompt())
+	}
+}
+
+// Paths with quotes and spaces still produce valid --settings JSON.
+func TestGeminiWakeAgySettingsEscapePaths(t *testing.T) {
+	for _, tool := range []string{"jq", "python3"} {
+		t.Run(tool, func(t *testing.T) {
+			if _, err := exec.LookPath(tool); err != nil {
+				t.Skip(tool + " not on PATH")
+			}
+			h := newGeminiHarness(t)
+			odd := filepath.Join(h.home, `my "tincan" cfg`, "gemini-cli.json")
+			mkdirs(t, filepath.Dir(odd))
+			h.config = odd
+			h.servers(h.agyMCP, map[string]any{"agent-tincan": h.tincanEntry(odd)})
+			if r := h.run("TINCAN_GEMINI_JSON_TOOL=" + tool); r.err != nil {
+				t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+			}
+			s := h.runs()[0].agySettings(t)
+			if want := "read_file(" + canonical(t, filepath.Dir(odd)) + ")"; !slices.Contains(s.Permissions.Deny, want) {
+				t.Fatalf("deny = %q, lacks %s", s.Permissions.Deny, want)
+			}
+		})
+	}
+}
+
+// A run whose JSON lists denied actions logs their names; the exit status
+// still decides failure accounting.
+func TestGeminiWakeAgyLogsDeniedActions(t *testing.T) {
+	h := newGeminiHarness(t)
+	out := `FAKE_STDOUT={"conversation_id":"c1","status":"SUCCESS","response":"","denied_actions":[{"action":"write_file","display_name":"Edit"},{"action":"command","display_name":"Run"}]}`
+	r := h.run(out)
+	if r.err != nil {
+		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
+	}
+	if !strings.Contains(r.stderr, "denied") || !strings.Contains(r.stderr, "write_file") || !strings.Contains(r.stderr, "command") {
+		t.Fatalf("denied actions not logged:\n%s", r.stderr)
+	}
+	if h.backoff() {
+		t.Fatal("a successful run with denials backed off")
 	}
 }
 
@@ -594,14 +713,18 @@ func TestGeminiWakeUpgradeNoticeAlone(t *testing.T) {
 // the workdir in a private list beside the teammate's config
 // (<name>.wake-sessions), so the history agent can leave wake runs out.
 func TestGeminiWakeRecordsSessions(t *testing.T) {
-	for _, engine := range [][]string{
-		{"TINCAN_GEMINI_ALLOW_UNCONFINED=1"},
-		{"TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy-key"},
+	for _, c := range []struct {
+		key    string
+		engine []string
+	}{
+		{"conversation_id", nil},
+		{"conversation_id", []string{"TINCAN_GEMINI_ALLOW_UNCONFINED=1"}},
+		{"session_id", []string{"TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy-key"}},
 	} {
-		t.Run(engine[0], func(t *testing.T) {
+		t.Run(c.key+strings.Join(c.engine, ","), func(t *testing.T) {
 			h := newGeminiHarness(t)
 			sid := "3f2b8c1d-6a4e-4f7b-9c0d-2e1f3a4b5c6d"
-			r := h.run(append(engine, `FAKE_STDOUT={"session_id": "`+sid+`", "response":"done"}`)...)
+			r := h.run(append(c.engine, `FAKE_STDOUT={"`+c.key+`": "`+sid+`", "response":"done"}`)...)
 			if r.err != nil {
 				t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
 			}
