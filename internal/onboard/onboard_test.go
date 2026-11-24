@@ -45,6 +45,11 @@ func TestManusCueOnboarding(t *testing.T) {
 	if !strings.Contains(strings.Join(a.Setup, "\n"), "absolute path of the config used to join") {
 		t.Error("Cue's MCP setup should use the same config as join")
 	}
+	for _, want := range []string{"including tincan doctor and tincan rejoin, set TINCAN_CONFIG", "use tincan inbox and tincan reply only with that config", "rather than using the default inbox"} {
+		if !strings.Contains(a.Instructions, want) {
+			t.Errorf("Cue shell fallback is missing %q", want)
+		}
+	}
 	for _, want := range []string{"--kind manus-cue", "socks5://127.0.0.1:1055", "max_per_hour"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("Cue recipe missing %q", want)

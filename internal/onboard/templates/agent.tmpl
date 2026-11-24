@@ -141,7 +141,8 @@ If you joined with --proxy, add the same --proxy to tincan rejoin.
 {{- end -}}
 
 {{- define "instructions.manus-cue" -}}
-A Manus Catch Hook run for Agent Tincan is a wake signal, not a request body. Use the stdio MCP tools to call check_inbox first, handle each request and reply on its request ID. Process any replies to your own asks and check again until the inbox is empty. If the MCP server is unavailable, run tincan inbox and tincan reply from the sandbox.
+A Manus Catch Hook run for Agent Tincan is a wake signal, not a request body. Use the stdio MCP tools to call check_inbox first, handle each request and reply on its request ID. Process any replies to your own asks and check again until the inbox is empty.
+For every shell command, including tincan doctor and tincan rejoin, set TINCAN_CONFIG to the same absolute config path used for Cue's join and MCP server. If the MCP server is unavailable, use tincan inbox and tincan reply only with that config. If you cannot confirm Cue's config path, stop and ask {{.Owner}} rather than using the default inbox.
 The sandbox can sleep between runs. If the relay is unreachable, verify Tailscale and the local SOCKS proxy first. Resume with the saved configuration on the same Tailscale node; ask the relay admin for a fresh invite only if enrollment is lost or a different tagged node needs to join.
 {{- end -}}
 
