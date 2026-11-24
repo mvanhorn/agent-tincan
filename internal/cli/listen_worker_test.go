@@ -581,6 +581,13 @@ func newOldRelay(t *testing.T, cancel context.CancelFunc) *client.Relay {
 
 func gitRepo(t *testing.T) string {
 	t.Helper()
+	// Keep the fixture hermetic, as releasetools_test.go does: a developer's
+	// global or system git config can override what these tests set up (a
+	// core.hooksPath skips the hooks a test plants in .git/hooks, and
+	// commit.gpgsign can fail the fixture's own commit). t.Setenv also
+	// reaches the git processes the worker under test starts.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	repo := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-q"},

@@ -23,9 +23,14 @@ type webJournal struct {
 }
 
 const (
-	webSendIntent   = "image_intent"
-	webSendSent     = "sent"
-	webSendAnswered = "answered"
+	webSendIntent = "image_intent"
+	// webSendTextIntent is a text send recorded just before it is typed
+	// in. The agent can die after the site took the message but before
+	// the send is confirmed; a redelivery that finds this entry must not
+	// type the message a second time.
+	webSendTextIntent = "intent"
+	webSendSent       = "sent"
+	webSendAnswered   = "answered"
 )
 
 type webSend struct {
@@ -40,7 +45,8 @@ type webSend struct {
 	SubmittedAt time.Time `json:"submitted_at,omitzero"`
 	// Recorded is when the entry was first written; pruning goes by it.
 	Recorded time.Time `json:"recorded"`
-	// State is sent, or answered once the reply was built and sent.
+	// State is intent (or image_intent) before the send, sent once the
+	// site accepted it, or answered once the reply was built and sent.
 	State string `json:"state"`
 }
 
@@ -72,16 +78,24 @@ func (w *WebAgent) loadJournal() webJournal {
 	if j.Requests == nil {
 		j.Requests = map[string]webSend{}
 	}
+	w.prune(j)
+	return j
+}
+
+// prune drops entries past the retention and ones whose ids are
+// malformed. An unresolved image send has no retention and is kept.
+func (w *WebAgent) prune(j webJournal) {
 	cutoff := time.Now().Add(-w.journalRetention())
 	for id, e := range j.Requests {
 		if e.State == webSendIntent || (e.Input && e.State != webSendAnswered) {
 			continue
 		}
-		if e.Recorded.Before(cutoff) || !validNativeID(e.ConversationID) || (e.UserMessageID != "" && !validNativeID(e.UserMessageID)) {
+		// A text intent that starts a new chat has no conversation id yet.
+		newChat := e.State == webSendTextIntent && e.ConversationID == ""
+		if e.Recorded.Before(cutoff) || (!newChat && !validNativeID(e.ConversationID)) || (e.UserMessageID != "" && !validNativeID(e.UserMessageID)) {
 			delete(j.Requests, id)
 		}
 	}
-	return j
 }
 
 // journal records (or updates) reqID's entry and prunes old ones. Callers
@@ -130,10 +144,13 @@ func (w *WebAgent) loadInputJournal() (webJournal, error) {
 		return j, errors.New("invalid image send journal")
 	}
 	for _, e := range j.Requests {
-		if e.State != webSendIntent && e.State != webSendSent && e.State != webSendAnswered {
+		if e.State != webSendIntent && e.State != webSendTextIntent && e.State != webSendSent && e.State != webSendAnswered {
 			return j, errors.New("unknown send journal state")
 		}
-		if e.State != webSendIntent && !validNativeID(e.ConversationID) {
+		// An intent can predate its conversation id: an image intent
+		// always, a text intent when it starts a new chat.
+		open := e.State == webSendIntent || (e.State == webSendTextIntent && e.ConversationID == "")
+		if !open && !validNativeID(e.ConversationID) {
 			return j, errors.New("invalid journal conversation")
 		}
 	}
@@ -146,6 +163,25 @@ func (w *WebAgent) journalStrict(reqID string, e webSend) error {
 		return err
 	}
 	j.Requests[reqID] = e
+	return w.writeJournalStrict(j)
+}
+
+// unjournal drops reqID's entry, failing closed like journalStrict.
+func (w *WebAgent) unjournal(reqID string) error {
+	j, err := w.loadInputJournal()
+	if err != nil {
+		return err
+	}
+	delete(j.Requests, reqID)
+	return w.writeJournalStrict(j)
+}
+
+// writeJournalStrict replaces the journal with j and syncs it to disk.
+// It prunes j first, as journal does: every text send writes its intent
+// here, and while sends keep failing before they are confirmed, nothing
+// else would drop their expired intents.
+func (w *WebAgent) writeJournalStrict(j webJournal) error {
+	w.prune(j)
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err

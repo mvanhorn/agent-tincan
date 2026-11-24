@@ -1,69 +1,16 @@
 package gateway
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/webhooksign"
 )
 
-func TestStandardWebhooksSignAndVerify(t *testing.T) {
-	// Known test vector: 24-byte key base64-encoded with whsec_ prefix.
-	rawKey := []byte("0123456789abcdef01234567")
-	secret := "whsec_" + base64.StdEncoding.EncodeToString(rawKey)
-	eventID := "evt_test_12345"
-	ts := int64(1732300000)
-	body := []byte(`{"type":"event","eventId":"evt_test_12345","name":"inbox.request"}`)
-
-	mac := hmac.New(sha256.New, rawKey)
-	mac.Write([]byte("evt_test_12345.1732300000." + string(body)))
-	want := "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))
-
-	got, err := SignWebhook(secret, eventID, ts, body)
-	if err != nil {
-		t.Fatalf("SignWebhook: %v", err)
-	}
-	if got != want {
-		t.Fatalf("signature = %q, want %q", got, want)
-	}
-	if !VerifyWebhookSignature(secret, eventID, ts, body, got) {
-		t.Fatal("VerifyWebhookSignature rejected valid signature")
-	}
-	// Multiple space-separated signatures (rotation header).
-	if !VerifyWebhookSignature(secret, eventID, ts, body, "v1,deadbeef "+got) {
-		t.Fatal("VerifyWebhookSignature rejected valid rotated signature")
-	}
-	// Tampered body must fail.
-	if VerifyWebhookSignature(secret, eventID, ts, append(body, ' '), got) {
-		t.Fatal("VerifyWebhookSignature accepted tampered body")
-	}
-	// Raw base64 without whsec_ prefix produces the same signature.
-	rawSecret := base64.StdEncoding.EncodeToString(rawKey)
-	gotRaw, err := SignWebhook(rawSecret, eventID, ts, body)
-	if err != nil || gotRaw != want {
-		t.Fatalf("raw base64 secret: got=%q err=%v want=%q", gotRaw, err, want)
-	}
-}
-
-func TestParseSigningSecretRejectsWeakOrMalformed(t *testing.T) {
-	for _, bad := range []string{
-		"",
-		"whsec_",
-		"whsec_not-valid-base64!!!",
-		"whsec_" + base64.StdEncoding.EncodeToString([]byte("too-short")),
-		base64.StdEncoding.EncodeToString(make([]byte, 15)),
-	} {
-		if _, err := ParseSigningSecret(bad); err == nil {
-			t.Errorf("ParseSigningSecret(%q) succeeded, want error", bad)
-		}
-	}
-}
-
 func TestApplyWebhookHeaders(t *testing.T) {
-	secret, err := GenerateSigningSecret()
+	secret, err := webhooksign.GenerateSecret()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +30,7 @@ func TestApplyWebhookHeaders(t *testing.T) {
 		t.Fatalf("X-MCP-Subscription-Id = %q, want sub_42", got)
 	}
 	sig := req.Header.Get("webhook-signature")
-	if !VerifyWebhookSignature(secret, "evt_abc", 1732300123, body, sig) {
+	if !webhooksign.Verify(secret, "evt_abc", 1732300123, body, sig) {
 		t.Fatalf("webhook-signature %q failed verification", sig)
 	}
 }

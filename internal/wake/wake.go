@@ -76,6 +76,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/store"
+	"github.com/mvanhorn/agent-tincan/internal/webhooksign"
 )
 
 // Method names.
@@ -100,6 +101,12 @@ const (
 	// message, name, agentId and deliver, authenticated by the hook token
 	// as a bearer header, with an Idempotency-Key the retry reuses.
 	FormatOpenClaw = "openclaw"
+	// FormatStandardWebhooks posts a metadata-only JSON event signed the
+	// Standard Webhooks way (webhook-id, webhook-timestamp and
+	// webhook-signature: v1,<base64 HMAC-SHA256>) with signing_secret.
+	// OpenBot routine webhooks take it. The body carries a type, counts and
+	// request ids, never request text, since it passes a third-party relay.
+	FormatStandardWebhooks = "standard-webhooks"
 )
 
 // Target is one agent's wake settings in the relay-local config.
@@ -111,8 +118,12 @@ type Target struct {
 	BearerToken string `json:"bearer_token,omitempty"`
 	// HMACSecret signs the body as X-Hub-Signature-256 (GitHub scheme). Hermes.
 	HMACSecret string `json:"hmac_secret,omitempty"`
-	// Format selects the webhook body: FormatGeneric or FormatOpenClaw.
+	// Format selects the webhook body: FormatGeneric, FormatOpenClaw or
+	// FormatStandardWebhooks.
 	Format string `json:"format,omitempty"`
+	// SigningSecret is the Standard Webhooks key, "whsec_<base64>", that
+	// signs a format standard-webhooks wake. Only that format uses it.
+	SigningSecret string `json:"signing_secret,omitempty"`
 	// AgentID is the OpenClaw agent id sent as agentId (format openclaw).
 	// Empty lets the gateway resolve its default agent.
 	AgentID string `json:"agent_id,omitempty"`
@@ -219,8 +230,11 @@ func checkTarget(t Target) error {
 	if t.IncludeRequests && t.Method != Email {
 		return fmt.Errorf("include_requests needs method email, not %q", t.Method)
 	}
-	if t.Format != FormatGeneric && (t.Method != Webhook || t.Format != FormatOpenClaw) {
-		return fmt.Errorf("unknown format %q (webhook supports \"openclaw\")", t.Format)
+	if t.Format != FormatGeneric && (t.Method != Webhook || (t.Format != FormatOpenClaw && t.Format != FormatStandardWebhooks)) {
+		return fmt.Errorf("unknown format %q (webhook supports \"openclaw\" and \"standard-webhooks\")", t.Format)
+	}
+	if t.SigningSecret != "" && t.Format != FormatStandardWebhooks {
+		return errors.New("signing_secret is only used by format standard-webhooks; set that format or remove it")
 	}
 	switch t.Method {
 	case Webhook:
@@ -229,6 +243,9 @@ func checkTarget(t Target) error {
 		}
 		if t.Format == FormatOpenClaw {
 			return checkOpenClaw(t)
+		}
+		if t.Format == FormatStandardWebhooks {
+			return checkStandardWebhooks(t)
 		}
 	case Email:
 		if t.EmailTo == "" || t.AgentMailFrom == "" || t.AgentMailKey == "" {
@@ -278,6 +295,29 @@ func checkOpenClaw(t Target) error {
 	}
 	if u.Query().Has("token") {
 		return errors.New("OpenClaw rejects a token query parameter; remove it from url and use bearer_token")
+	}
+	return nil
+}
+
+// checkStandardWebhooks validates a Standard Webhooks target: a whsec_
+// signing secret that decodes, and no other authentication, since the
+// receiver (an OpenBot routine webhook) checks only the signature.
+func checkStandardWebhooks(t Target) error {
+	if t.SigningSecret == "" {
+		return errors.New("format standard-webhooks needs signing_secret (whsec_<base64>, the receiver's webhook secret)")
+	}
+	if !strings.HasPrefix(t.SigningSecret, webhooksign.Prefix) {
+		return errors.New("signing_secret must start with whsec_ followed by the base64 key")
+	}
+	if _, err := webhooksign.ParseSecret(t.SigningSecret); err != nil {
+		// err never quotes the secret.
+		return fmt.Errorf("signing_secret: %w (want whsec_ followed by a base64 key of at least 16 bytes)", err)
+	}
+	if t.BearerToken != "" {
+		return errors.New("format standard-webhooks authenticates with signing_secret; remove bearer_token")
+	}
+	if t.HMACSecret != "" {
+		return errors.New("format standard-webhooks authenticates with signing_secret; remove hmac_secret")
 	}
 	return nil
 }
@@ -852,21 +892,23 @@ func (w *Waker) deliver(agent string, p *nudge, gen uint64) {
 	// wake is marked in flight, so a poll during the lookup still counts as
 	// the first poll after the previous wake.
 	waiting, unseen := p.requests, replies
-	var ids []string
+	var ids, queuedIDs, replyIDs []string
 	if q, r, ok := w.coveredIDs(agent); ok {
 		waiting, unseen = len(q), len(r)
-		ids = append(q, r...)
+		queuedIDs, replyIDs = q, r
+		ids = append(slices.Clip(q), r...)
 	}
 	if w.audit != nil {
 		w.audit.BeginWake(agent)
 	}
 	at := w.opts.Now()
-	code, answer, err := w.send(ctx, t, msg, key)
+	n := wakeNote{msg: msg, key: key, waiting: waiting, urgent: min(urgent, waiting), unseen: unseen, requestIDs: queuedIDs, replyIDs: replyIDs}
+	code, answer, err := w.send(ctx, t, n)
 	if err != nil {
 		select {
 		case <-time.After(w.opts.RetryDelay):
 			at = w.opts.Now()
-			code, answer, err = w.send(ctx, t, msg, key)
+			code, answer, err = w.send(ctx, t, n)
 		case <-ctx.Done():
 		}
 	}
@@ -1197,6 +1239,46 @@ func nudgeKey() string {
 	return "agent-tincan-" + hex.EncodeToString(b)
 }
 
+// wakeNote is what one count-only wake send carries: the text, the nudge's
+// idempotency key, and the counts and ids the metadata-only
+// standard-webhooks body is built from.
+type wakeNote struct {
+	msg string
+	// key is the nudge's idempotency key (nudgeKey): the in-call retry
+	// reuses it and the next nudge gets a new one.
+	key                     string
+	waiting, urgent, unseen int
+	// requestIDs are the queued requests the wake covers and replyIDs the
+	// agent's own requests with unseen replies. Nil when unknown.
+	requestIDs, replyIDs []string
+}
+
+// maxBodyIDs caps the ids a standard-webhooks body lists, keeping it far
+// under the 64 KiB OpenBot accepts. The counts stay exact.
+const maxBodyIDs = 200
+
+// standardWebhooksBody is the metadata-only event a standard-webhooks wake
+// posts: a string type (OpenBot requires one), the counts and the request
+// ids. It never carries request or reply text, senders or kinds.
+func standardWebhooksBody(n wakeNote) []byte {
+	capIDs := func(ids []string) []string {
+		if ids == nil {
+			return []string{}
+		}
+		return ids[:min(len(ids), maxBodyIDs)]
+	}
+	body, _ := json.Marshal(map[string]any{
+		"type":              "tincan.request",
+		"source":            "agent-tincan",
+		"waiting":           n.waiting,
+		"urgent":            n.urgent,
+		"unseen_replies":    n.unseen,
+		"request_ids":       capIDs(n.requestIDs),
+		"reply_request_ids": capIDs(n.replyIDs),
+	})
+	return body
+}
+
 // webhookBody is the JSON a webhook wake posts.
 func webhookBody(t Target, msg string) []byte {
 	if t.Format == FormatOpenClaw {
@@ -1223,19 +1305,33 @@ func webhookBody(t Target, msg string) []byte {
 // answered with (0 when there was no response). For a webhook it also
 // returns a short, sanitized summary of the 2xx response body (see
 // answerSummary).
-func (w *Waker) send(ctx context.Context, t Target, msg, key string) (int, string, error) {
+func (w *Waker) send(ctx context.Context, t Target, n wakeNote) (int, string, error) {
+	msg := n.msg
 	switch t.Method {
 	case Webhook:
 		body := webhookBody(t, msg)
+		if t.Format == FormatStandardWebhooks {
+			body = standardWebhooksBody(n)
+		}
 		req, err := http.NewRequestWithContext(ctx, "POST", t.URL, bytes.NewReader(body))
 		if err != nil {
 			return 0, "", &sendError{reason: "invalid webhook URL", err: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if t.Format == FormatOpenClaw {
-			req.Header.Set("Idempotency-Key", key)
+			req.Header.Set("Idempotency-Key", n.key)
 		}
 		secrets := webhookSecrets(t, req.URL)
+		if t.Format == FormatStandardWebhooks {
+			// webhook-id is the nudge key: the receiver dedupes on it, so
+			// the in-call retry is one delivery and a follow-up nudge is a
+			// new one.
+			sig, err := webhooksign.SetHeaders(req, t.SigningSecret, n.key, w.opts.Now(), body)
+			if err != nil {
+				return 0, "", &sendError{reason: "invalid signing_secret", err: err}
+			}
+			secrets = append(secrets, sig, strings.TrimPrefix(sig, "v1,"))
+		}
 		if t.BearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+t.BearerToken)
 		}
@@ -1298,11 +1394,19 @@ func (w *Waker) do(req *http.Request) (int, []byte, error) {
 const maxAnswer = 200
 
 // webhookSecrets lists what a webhook response must not echo into the logs:
-// the URL, its path, query, query values and userinfo, and the bearer token
-// and HMAC secret. Strings too short to be a secret are left out, so a "/"
-// path does not blank out the summary.
+// the URL, its path, query, query values and userinfo, the bearer token,
+// the HMAC secret and the Standard Webhooks signing secret. Strings too
+// short to be a secret are left out, so a "/" path does not blank out the
+// summary.
 func webhookSecrets(t Target, u *url.URL) []string {
 	out := []string{t.URL, t.BearerToken, t.HMACSecret, u.Path, u.EscapedPath(), u.RawQuery}
+	if t.SigningSecret != "" {
+		// The whole whsec_ secret, its base64 key part and the decoded key.
+		out = append(out, t.SigningSecret, strings.TrimPrefix(t.SigningSecret, webhooksign.Prefix))
+		if key, err := webhooksign.ParseSecret(t.SigningSecret); err == nil {
+			out = append(out, string(key))
+		}
+	}
 	if u.User != nil {
 		out = append(out, u.User.String())
 	}

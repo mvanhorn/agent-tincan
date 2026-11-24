@@ -20,6 +20,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/identity"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
+	"github.com/mvanhorn/agent-tincan/internal/webhooksign"
 )
 
 func setupWithEvents(t *testing.T) (*env, *gateway.EventHub) {
@@ -175,7 +176,7 @@ func TestEventsListAndLifecycle(t *testing.T) {
 	}
 	tokB, _ := e.login(t, codeB)
 
-	secret, err := gateway.GenerateSigningSecret()
+	secret, err := webhooksign.GenerateSecret()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +197,7 @@ func TestEventsListAndLifecycle(t *testing.T) {
 			http.Error(w, "webhook-id mismatch", http.StatusBadRequest)
 			return
 		}
-		if !gateway.VerifyWebhookSignature(secret, in.EventID, ts, body, r.Header.Get("webhook-signature")) {
+		if !webhooksign.Verify(secret, in.EventID, ts, body, r.Header.Get("webhook-signature")) {
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
@@ -322,7 +323,7 @@ func TestEventsSubscribeVerificationErrors(t *testing.T) {
 	e, hub := setupWithEvents(t)
 	code, _, _ := e.conn.Connect(context.Background(), "chatgpt", false)
 	tok, _ := e.login(t, code)
-	secret, _ := gateway.GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 
 	// 1. SSRF URL rejected with -32027 and data.reason = invalid_url (with default SSRF guard active!).
 	resp, raw := postMCP(t, e.gw.URL+"/mcp", tok, nil, map[string]any{
@@ -475,7 +476,7 @@ func TestEndToEndGatewayWakeRosterAndRemove(t *testing.T) {
 		t.Fatalf("before subscribe: wake = %q, want none", got)
 	}
 
-	secret, _ := gateway.GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 	resp, raw := postMCP(t, e.gw.URL+"/mcp", tok, map[string]string{"MCP-Protocol-Version": "2026-07-28"}, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "events/subscribe",
 		"params": map[string]any{
@@ -552,7 +553,7 @@ func TestSubscribeRefusedWhenRevokedDuringVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok, _ := e.login(t, code)
-	secret, _ := gateway.GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 
 	cb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate agent removal / token revocation racing with the verification challenge.
@@ -591,7 +592,7 @@ func TestCallbackQuerySecretStrippedFromErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok, _ := e.login(t, code)
-	secret, _ := gateway.GenerateSigningSecret()
+	secret, _ := webhooksign.GenerateSecret()
 
 	// Closed server produces a *url.Error carrying the full URL + query token.
 	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
