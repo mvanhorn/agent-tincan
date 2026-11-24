@@ -162,6 +162,28 @@ func TestTailnetCheckAdminTag(t *testing.T) {
 	}
 }
 
+// relayAdminTag reads the tag from a real relay: the mesh serves admin_tag
+// alongside the roster for every caller, and omits it when none is set.
+func TestDoctorSeesRelayAdminTag(t *testing.T) {
+	const tag = "tag:tincan-admin"
+	m := testrelay.NewWithAdminTag(t, relay.Config{}, tag)
+	r, err := client.NewRelayFor(client.Config{Relay: m.URL("admin")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := relayAdminTag(t.Context(), r); got != tag {
+		t.Fatalf("admin tag = %q, want %q", got, tag)
+	}
+	plain := testrelay.New(t, relay.Config{})
+	pr, err := client.NewRelayFor(client.Config{Relay: plain.URL("admin")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := relayAdminTag(t.Context(), pr); got != "" {
+		t.Fatalf("relay without a tag: %q", got)
+	}
+}
+
 // relayAdminTag reads the tag the relay reports to every caller, and says
 // nothing when the relay predates it or cannot be asked.
 func TestRelayAdminTag(t *testing.T) {
@@ -370,6 +392,59 @@ func TestTailnetChecksRemoteProxySkipsRole(t *testing.T) {
 	got := tailnetChecks(t.Context(), r, r, false)
 	if len(got) != 1 || got[0].Status != "ok" || !strings.Contains(got[0].Detail, "tag check skipped") {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// An admin device that never joined still names a relay: doctor reads the
+// relay's tag through it for display, without asking it for the role, and
+// never asks through a guest's account or a remote proxy.
+func TestTailnetChecksUnjoinedStillReadsTag(t *testing.T) {
+	const tag = "tag:tincan-admin"
+	serving := func(t *testing.T) *client.Relay {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/agents" {
+				fmt.Fprintf(w, `{"agents":[],"admin_tag":%q}`, tag)
+				return
+			}
+			t.Errorf("unexpected relay call: %s", r.URL.Path)
+		}))
+		t.Cleanup(srv.Close)
+		r, err := client.NewRelayFor(client.Config{Relay: srv.URL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	stubTailnet(t, tailnetSelf("1.104.4", false, tag))
+	got := tailnetChecks(t.Context(), nil, serving(t), false)
+	if len(got) != 1 || got[0].Status != "ok" || !strings.Contains(got[0].Detail, "carries the relay's --admin-tag "+tag) {
+		t.Fatalf("unjoined admin device: %+v", got)
+	}
+	if strings.Contains(got[0].Detail, "tag check skipped") {
+		t.Fatalf("role must stay unknown without a join: %+v", got)
+	}
+	// A guest's machine is on another account: never asked.
+	stubTailnet(t, tailnetSelf("1.104.4", false, tag))
+	got = tailnetChecks(t.Context(), nil, serving(t), true)
+	if len(got) != 1 || strings.Contains(got[0].Detail, "--admin-tag") {
+		t.Fatalf("guest: %+v", got)
+	}
+	// Through a remote proxy the relay answers for the proxy's node.
+	stubTailnet(t, tailnetSelf("1.104.4", false, tag))
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected relay call: %s", req.URL.Path)
+		return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(`{"error":"no"}`)), Request: req}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+	proxied, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://hatch-egress-proxy:3130"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = tailnetChecks(t.Context(), nil, proxied, false)
+	if len(got) != 1 || strings.Contains(got[0].Detail, "--admin-tag") {
+		t.Fatalf("remote proxy: %+v", got)
 	}
 }
 

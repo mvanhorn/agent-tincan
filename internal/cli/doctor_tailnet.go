@@ -96,6 +96,13 @@ func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool)
 		// a stopped daemon the relay is not asked at all.
 		adminTag = relayAdminTag(ctx, r)
 	}
+	// An admin device that never joined still names a relay: read the tag
+	// through it for display, without taking its word for the role (it
+	// answers for whatever node reached it, which may not be this
+	// machine). Guests and remote proxies are still never asked.
+	if adminTag == "" && !guest && r == nil && configured != nil && !configured.ThroughRemoteProxy() && running == 1 {
+		adminTag = relayAdminTag(ctx, configured)
+	}
 	// Only when the relay did not answer: a relay that answered is reached
 	// some other way (a managed connector, another daemon), and a remote
 	// proxy means this machine does not use its own Tailscale at all.
