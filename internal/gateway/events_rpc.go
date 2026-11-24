@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"time"
+
+	"github.com/mvanhorn/agent-tincan/internal/webhooksign"
 )
 
 // MCP Events JSON-RPC error codes.
@@ -370,7 +372,7 @@ func (g *Gateway) handleEventsSubscribe(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	signingSecret := p.signingSecret()
-	if _, err := ParseSigningSecret(signingSecret); err != nil {
+	if _, err := webhooksign.ParseSecret(signingSecret); err != nil {
 		writeEventsRPC(w, id, nil, &eventsRPCError{Code: rpcInvalidParams, Message: err.Error()})
 		return
 	}

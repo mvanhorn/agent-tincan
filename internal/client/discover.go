@@ -142,6 +142,9 @@ func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 		search, cancel := context.WithTimeout(context.WithoutCancel(ctx), relocateFor)
 		f = &relocation{done: make(chan struct{}), cancel: cancel}
 		r.finding = f
+		// Read here, not in the goroutine: a search can outlive the call
+		// that started it, and tests swap learnAfterMove between runs.
+		learn := learnAfterMove
 		go func() {
 			moved := r.follow(search, old)
 			cancel()
@@ -160,7 +163,7 @@ func (r *Relay) startFind(ctx context.Context, old string) <-chan struct{} {
 			close(f.done)
 			if moved {
 				refresh, cancel := context.WithTimeout(context.WithoutCancel(search), refreshFor)
-				learnAfterMove(refresh, r)
+				learn(refresh, r)
 				cancel()
 			}
 			r.findMu.Lock()

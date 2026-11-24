@@ -85,7 +85,12 @@ type Capabilities struct {
 	// TaskHostDecisions is set by a relay that takes a task host's decisions
 	// on the owner's word (POST /v1/tasks/{id}/decide). An older relay has no
 	// such route, so a client checks this first and says to upgrade.
-	TaskHostDecisions  bool  `json:"task_host_decisions,omitempty"`
+	TaskHostDecisions bool `json:"task_host_decisions,omitempty"`
+	// IdempotencyKey is set by a relay that honors a send's
+	// idempotency_key. An older relay ignores the key and queues a retried
+	// send again, and refuses it from a guest, so a client sets the key and
+	// retries a send only when this is set.
+	IdempotencyKey     bool  `json:"idempotency_key,omitempty"`
 	Attachments        bool  `json:"attachments"`
 	MaxAttachmentBytes int64 `json:"max_attachment_bytes,omitempty"`
 	MaxAttachments     int   `json:"max_attachments,omitempty"`

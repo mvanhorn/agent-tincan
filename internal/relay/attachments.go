@@ -130,6 +130,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.TaskBriefings = true
 	caps.TaskHostDelegation = true
 	caps.TaskHostDecisions = true
+	caps.IdempotencyKey = true
 	writeJSON(w, http.StatusOK, caps)
 }
 

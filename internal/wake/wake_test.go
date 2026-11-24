@@ -661,6 +661,19 @@ func TestRememberKeepsNewerWake(t *testing.T) {
 // wake-grace timer. New treats 0 as DefaultWakeGrace.
 const skipFollowUp = time.Duration(-1)
 
+// waitCallsAtLeast is waitCalls for a test whose webhook keeps getting
+// calls after the one it checks.
+func waitCallsAtLeast(t *testing.T, rc *recorder, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for rc.count() < n && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rc.count() < n {
+		t.Fatalf("webhook calls = %d, want at least %d", rc.count(), n)
+	}
+}
+
 func waitCalls(t *testing.T, rc *recorder, n int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

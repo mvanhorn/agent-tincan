@@ -439,7 +439,9 @@ func TestRequestFollowUpCoalescesWithReplyRetry(t *testing.T) {
 	if got := message(t, rc.body(1)); got != WaitingMessage(1, 1) {
 		t.Fatalf("coalesced follow-up = %q", got)
 	}
-	waitCalls(t, &rc, 3)
+	// The request keeps getting follow-ups every WakeGrace while it is
+	// queued, so a slow runner can see a fourth call before this check.
+	waitCallsAtLeast(t, &rc, 3)
 	if got := message(t, rc.body(2)); got != WaitingMessage(1, 1) {
 		t.Fatalf("next reply step = %q, want it still carrying the request", got)
 	}

@@ -27,6 +27,7 @@ The relay answers 403 to any request whose `Host` is not one of its own addresse
 | `exchanges` | relay | Optional clarification history: `[{"question", "answer", "at"}]`. `at` is the question's timestamp; `answer` is absent until answered. Client-supplied exchanges are ignored. |
 | `resumed` | relay | Optional boolean, true after the asker has supplied clarification. Retained on subsequent deliveries and claims. |
 | `then` | client | Optional follow-on, `{"to", "body"}`: one ask the relay sends once this one is answered. See Follow-on asks. |
+| `idempotency_key` | client | Optional, on a send only. A key naming this send, so a retry of it queues nothing new. The relay keeps it and never returns or delivers it. See [Idempotent sends](#idempotent-sends). |
 | `task_id` | relay | Optional. Set on an ask that is one attempt at a task on the shared list: the id of that task. A send cannot set it, and older clients ignore it and see an ordinary ask. See [Tasks](#tasks). |
 | `moved_from` | relay | Optional list, oldest first, of the agents the request moved off: web agents whose site was out of messages before it was sent there (see Failover), or a target that left it untaken when the owner set a fallback (see Fallback). `to` is then the agent that took it. A client-supplied value is ignored. |
 
@@ -338,6 +339,46 @@ An approved request follows the ordinary body and attachment access rules,
 even after it reaches a terminal state. Approval history survives relay restarts;
 upgrades backfill existing holds and decisions from request state and audit events.
 
+## Idempotent sends
+
+A send may include an optional `idempotency_key`: 1 to 128 ASCII letters,
+digits, `.`, `_`, `:` or `-`. Any other value is refused with HTTP 400, so a
+client never believes a send is deduplicated when it is not. The key belongs
+to the sender: two agents may use the same key, and each gets its own
+request.
+
+The first send under a key queues the request as usual and answers 201. A
+later send from the same agent under the same key queues nothing, and wakes,
+holds, notifies and audits nothing. When it asks for the same send it
+answers 200 with the request the key named (the same `id`, `trace_id` and
+`created_at`), its current state in `status`, and the `target` a first send
+would get. This holds after the request is answered and across relay
+restarts, and retries racing each other create one request. The retry is
+answered before the send checks that could refuse it now, such as the rate
+limit the first send spent.
+
+The same send means the same `to`, `kind`, `body`, `parent_id`, `group`,
+`urgent`, `quiet`, `about`, attachment ids in order, `project`, `source` and `then`, as the
+relay reads them (`to` trimmed, a missing `kind` read as `ask`). Anything else
+under a used key is refused with HTTP 409 and the id of the request the key
+names: `{"error": "idempotency key already used for a different send; use a new key for a new send", "id": "<id>"}`.
+Nothing is queued and the original is left as it was.
+
+The relay stores the key and a digest of the send on the request row, behind
+a unique index on sender and key. It does not return the key on any route or
+deliver it to the recipient. Only `POST /v1/send` reads it; other routes that
+take send fields, such as `POST /v1/schedules`, ignore it.
+
+`GET /v1/capabilities` advertises `"idempotency_key": true`. An older relay
+ignores the field and queues every post, and refuses it on a guest's send,
+so the tincan client sends a key only to a relay that advertises it,
+reading the flag again every 10 minutes. It puts one random key on each
+send and, when the answer to a send is lost (a timeout, a proxy's 502 or
+504, or a connection that closes or resets before the whole answer
+arrives), posts it once more under that key, so the asker gets the request
+the relay already queued instead of a second one. An answer the relay gave,
+such as a 4xx, is not posted again.
+
 ## Request groups
 
 A send may include an optional `group` string of 1 to 64 ASCII letters, digits,
@@ -432,7 +473,7 @@ A wrapper in front of every route answers 403 with `guests may not use this rout
 
 `POST /v1/join` is not on the list, so a machine carrying a guest cannot join again under any code. Past `guest_until`, every route answers 403, including this list, before the sweep runs, and `POST /v1/send` and the answer route check again once the body is read. The sweep then revokes any gateway tokens, cancels the guest's open requests and audits `guest_expired`. The row stays, so the name stays taken until `tincan remove`.
 
-On `POST /v1/send`, a guest may set `to`, `body`, and `kind` of `ask`. Any other field that is set, in any spelling the decoder would accept and including a field this relay does not know, is refused with 403. That covers `then`, `group`, `urgent`, `parent_id` and `attachments`. An empty value counts as not set, since real clients send some. A `to` that is not listed is refused with 403 and the same words whether or not that name exists. The response carries no `target`.
+On `POST /v1/send`, a guest may set `to`, `body`, `kind` of `ask`, and `idempotency_key` (see Idempotent sends; a retry returns only the guest's own request). Any other field that is set, in any spelling the decoder would accept and including a field this relay does not know, is refused with 403. That covers `then`, `group`, `urgent`, `parent_id` and `attachments`. An empty value counts as not set, since real clients send some. A `to` that is not listed is refused with 403 and the same words whether or not that name exists. The response carries no `target`.
 
 A send to a guest, a `then` to a guest, a watch on a guest (404, as for an unknown agent) and a room membership or mention for a guest are all refused: guests ask, and only the relay's notices reach one. A follow-on whose target has become a guest is dropped with a notice to its sender.
 

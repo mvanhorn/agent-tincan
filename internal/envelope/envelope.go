@@ -1,11 +1,13 @@
 // Package envelope defines the request and reply shapes the relay stores and
 // delivers. The relay owns identity and chain fields: From comes from WhoIs,
 // and ID, TraceID, Hop, Chain, and CreatedAt are assigned when a request is
-// queued. A client only supplies To, Body, Kind, and an optional ParentID.
+// queued. A client only supplies To, Body, Kind, and an optional ParentID
+// and IdempotencyKey.
 package envelope
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,6 +38,8 @@ const MaxThenBody = 16 << 10
 
 var (
 	groupID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// idempotencyKey is the shape of a send's optional idempotency key.
+	idempotencyKey = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	// ErrBodyTooLarge is returned when a body exceeds the configured cap.
 	ErrBodyTooLarge = errors.New("body too large")
 	// ErrTooManyAttachments is returned when a message names more than
@@ -194,7 +198,20 @@ type Request struct {
 	// RecoveryRepeat names the schedule on enqueue for an ask that repeats.
 	RecoveryRepeat int64 `json:"-"`
 
-	// Status is set on held sends; omitted for ordinary requests.
+	// IdempotencyKey is the sender's optional key for this send. A later
+	// send from the same agent under the same key queues nothing: it gets
+	// back the request the key names, or 409 when it asks for a different
+	// send (docs/protocol.md, Idempotent sends). It stays on the relay: it is
+	// never returned or delivered, so it does not cross the wire here.
+	IdempotencyKey string `json:"-"`
+	// SendHash is a digest of what a keyed send asked for, as ParseSend read
+	// it; a later send under the key is a retry only when its digest matches.
+	// Relay-only, set with IdempotencyKey.
+	SendHash string `json:"-"`
+
+	// Status is set on held sends and on a send answered from its
+	// idempotency key (then it is the request's current status); omitted
+	// for ordinary requests.
 	Status Status `json:"status,omitempty"`
 	// HoldTTL and ApprovalNotify are internal policy metadata, never wire input.
 	HoldTTL        time.Duration `json:"-"`
@@ -599,6 +616,9 @@ type sendInput struct {
 	Attachments []Attachment `json:"attachments"`
 	Project     string       `json:"project"`
 	Then        *Then        `json:"then"`
+	// IdempotencyKey is optional: 1 to 128 ASCII letters, digits, '.',
+	// '_', ':' or '-'.
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // ValidSource reports whether source is empty or a short outside-source label.
@@ -618,6 +638,11 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	}
 	if in.Group != "" && !groupID.MatchString(in.Group) {
 		return Request{}, errors.New("send: invalid group id")
+	}
+	// A key the relay cannot store is refused rather than dropped, so a
+	// client never believes a send is deduplicated when it is not.
+	if in.IdempotencyKey != "" && !idempotencyKey.MatchString(in.IdempotencyKey) {
+		return Request{}, errors.New("send: invalid idempotency key: use 1 to 128 ASCII letters, digits, '.', '_', ':' or '-'")
 	}
 	in.To = strings.TrimSpace(in.To)
 	switch {
@@ -666,7 +691,42 @@ func ParseSend(raw []byte, sender string, maxBody int) (Request, error) {
 	if err != nil {
 		return Request{}, fmt.Errorf("send: %w", err)
 	}
-	return Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, QuietAsk: in.Quiet, About: in.About, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}, nil
+	req := Request{RecoverySource: in.Source, Group: in.Group, Urgent: in.Urgent, QuietAsk: in.Quiet, About: in.About, From: sender, To: in.To, ParentID: in.ParentID, Kind: in.Kind, Body: in.Body, Attachments: atts, Project: in.Project, Then: in.Then}
+	if in.IdempotencyKey != "" {
+		req.IdempotencyKey, req.SendHash = in.IdempotencyKey, sendHash(in, atts)
+	}
+	return req, nil
+}
+
+// sendHash is a digest of every field a client sets on a send, read after
+// ParseSend normalised them (to trimmed, a missing kind read as ask, a
+// ping's body dropped). The relay may later change the stored request (move
+// it to another target, fill in its parent, frame a guest's body), so a
+// retry is recognised by this digest of what was asked, not by comparing
+// the stored fields.
+func sendHash(in sendInput, atts []Attachment) string {
+	ids := make([]string, len(atts))
+	for i, a := range atts {
+		ids[i] = a.ID
+	}
+	// Marshal of a struct writes its fields in a fixed order, so equal
+	// sends give equal bytes. It cannot fail on these types.
+	b, _ := json.Marshal(struct {
+		To          string
+		Kind        Kind
+		Body        string
+		ParentID    string
+		Group       string
+		Urgent      bool
+		Quiet       bool
+		About       string
+		Attachments []string
+		Project     string
+		Source      string
+		Then        *Then
+	}{in.To, in.Kind, in.Body, in.ParentID, in.Group, in.Urgent, in.Quiet, in.About, ids, in.Project, in.Source, in.Then})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // checkThen refuses a follow-on on anything but a single ask without
