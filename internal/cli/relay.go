@@ -98,10 +98,10 @@ systemd user unit (Linux) that keeps the relay running; write no plist by
 hand, or macOS lists it under the signing certificate's name.
 
 Admin commands (invite, remove, relay notify) are accepted from the local admin socket in
-the state dir and from machines named in --admin that carry no Tailscale tags
-(and, with --admin-login, are owned by a listed login), or from any machine
-carrying --admin-tag. Tag agent machines (e.g. tag:agent) so a name alone
-can never make them admins.
+the state dir and from machines named in --admin that carry no Tailscale tags,
+or from any machine carrying --admin-tag. With --admin-login, either path also
+needs the node's owning login in the list. Tag agent machines (e.g. tag:agent)
+so a name alone can never make them admins.
 
 Admin devices can also open the phone page at /phone/ (see docs/phone.md).
 When the tailnet issues the relay an HTTPS certificate, the relay serves it
