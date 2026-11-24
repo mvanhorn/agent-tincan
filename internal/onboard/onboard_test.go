@@ -327,15 +327,13 @@ func TestCopilotAndCursorCLIBlocks(t *testing.T) {
 	}{
 		{KindCopilotCLI, "Copilot", []string{
 			"copilot --version", "COPILOT_HOME=~/.config/tincan/copilot-cli.wake/.copilot copilot login", "COPILOT_GITHUB_TOKEN",
-			"examples/copilot-cli/copilot-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x ~/bin/copilot-wake.sh",
-			"TINCAN_CONFIG=~/.config/tincan/copilot-cli.json tincan listen --exec ~/bin/copilot-wake.sh",
+			"TINCAN_CONFIG=~/.config/tincan/copilot-cli.json tincan listen install --wake copilot-cli", "never stores a token",
 			"--allow-tool 'agent-tincan(<tool>)'", "--disable-builtin-mcps",
 			`method "command"`, "docs/adapters/copilot-cli.md",
 		}, []string{"--allow-all-tools", "--yolo"}},
 		{KindCursorCLI, "Cursor", []string{
 			"cursor-agent --version", "cursor-agent login", "CURSOR_API_KEY",
-			"examples/cursor-cli/cursor-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x ~/bin/cursor-wake.sh",
-			"TINCAN_CONFIG=~/.config/tincan/cursor-cli.json tincan listen --exec ~/bin/cursor-wake.sh",
+			"TINCAN_CONFIG=~/.config/tincan/cursor-cli.json tincan listen install --wake cursor-cli", "never stores a token",
 			"CURSOR_CONFIG_DIR", "hooks.json", "TINCAN_WAKE_TIMEOUT",
 			`method "command"`, "docs/adapters/cursor-cli.md",
 		}, []string{"--force", "--yolo"}},
@@ -379,16 +377,16 @@ func TestCopilotAndCursorCLIBlocks(t *testing.T) {
 		if !strings.Contains(r.Title, c.title) || !strings.Contains(all, "tincan invite <name> --kind "+c.kind) {
 			t.Fatalf("%s recipe: %+v", c.kind, r)
 		}
-		if !strings.Contains(all, "tincan listen --exec ~/bin/") {
+		if !strings.Contains(all, "tincan listen install --wake "+c.kind) {
 			t.Errorf("%s recipe lacks the listener line:\n%s", c.kind, all)
 		}
 	}
 }
 
-func TestCodexSetupUsesWakeScript(t *testing.T) {
+func TestCodexSetupInstallsTheWake(t *testing.T) {
 	k := build(t, Options{RelayURL: relayURL, Roster: []Member{{Name: "codex", Wake: "command", Kind: "codex"}}})
 	setup := strings.Join(block(t, k, "codex").Setup, "\n")
-	for _, want := range []string{"examples/codex/codex-wake.sh", "tincan listen --exec ~/bin/codex-wake.sh", "chmod +x", "lock", "--sandbox workspace-write", "TINCAN_CODEX_WRITE_ROOTS"} {
+	for _, want := range []string{"TINCAN_CONFIG=~/.config/tincan/codex.json tincan listen install --wake codex", "default_tools_approval_mode", "lock", "--sandbox workspace-write", "TINCAN_CODEX_WRITE_ROOTS"} {
 		if !strings.Contains(setup, want) {
 			t.Errorf("codex setup missing %q:\n%s", want, setup)
 		}

@@ -1625,6 +1625,13 @@ func (h *NativeHost) serve(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// atomicWriteHook, when set by a test, sees writeFileAtomic's temporary
+// file once its bytes are written and before it is published.
+var atomicWriteHook func(tmp *os.File)
+
+// writeFileAtomic writes data to a temporary file next to path and renames
+// it over path. The temporary file is created 0600 and set to mode before
+// any byte is written, so data is never readable with wider bits.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
@@ -1638,6 +1645,9 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
+	}
+	if atomicWriteHook != nil {
+		atomicWriteHook(tmp)
 	}
 	if err := tmp.Close(); err != nil {
 		return err

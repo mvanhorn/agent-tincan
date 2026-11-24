@@ -240,10 +240,9 @@ func jsonEntry(name string, v any) (mcpConfigEntry, bool) {
 }
 
 var (
-	tomlSection = regexp.MustCompile(`^\[mcp_servers\.(?:"([^"]+)"|([^".\]]+))\]\s*$`)
-	tomlString  = regexp.MustCompile(`^(\w+)\s*=\s*"([^"]*)"`)
-	tomlArray   = regexp.MustCompile(`^args\s*=\s*\[(.*)\]`)
-	tomlItem    = regexp.MustCompile(`"([^"]*)"`)
+	tomlString = regexp.MustCompile(`^(\w+)\s*=\s*"([^"]*)"`)
+	tomlArray  = regexp.MustCompile(`^args\s*=\s*\[(.*)\]`)
+	tomlItem   = regexp.MustCompile(`"([^"]*)"`)
 )
 
 // tomlServers reads [mcp_servers.<name>] tables from a Codex or Grok Build
@@ -262,14 +261,15 @@ func tomlServers(s string) []mcpConfigEntry {
 	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "[") {
-			if cur != nil && strings.HasPrefix(line, "[mcp_servers."+cur.Name+".") {
+			keys, ok := tomlTableHeader(line)
+			if cur != nil && ok && len(keys) > 2 && keys[0] == "mcp_servers" && keys[1] == cur.Name {
 				sub = true
 				continue
 			}
 			flush()
 			sub = false
-			if m := tomlSection.FindStringSubmatch(line); m != nil {
-				cur = &mcpConfigEntry{Name: m[1] + m[2]}
+			if ok && len(keys) == 2 && keys[0] == "mcp_servers" {
+				cur = &mcpConfigEntry{Name: keys[1]}
 			}
 			continue
 		}
