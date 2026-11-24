@@ -56,7 +56,7 @@ func TestTailnetCheckVersion(t *testing.T) {
 		{"99999999999999999999.0.0", "warn", "unknown"},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
-			c := tailnetCheck(tailnetSelf(tc.version, false, "tag:agent"), roleAgent)
+			c := tailnetCheck(tailnetSelf(tc.version, false, "tag:agent"), roleAgent, "")
 			if c.Name != "tailnet" || c.Status != tc.status || !strings.Contains(c.Detail, tc.want) {
 				t.Fatalf("got %+v, want %s containing %q", c, tc.status, tc.want)
 			}
@@ -67,7 +67,7 @@ func TestTailnetCheckVersion(t *testing.T) {
 // Tailscale SSH is reported either way, and on an old version the fix says
 // why it matters here.
 func TestTailnetCheckSSH(t *testing.T) {
-	c := tailnetCheck(tailnetSelf("1.104.3", true, "tag:agent"), roleAgent)
+	c := tailnetCheck(tailnetSelf("1.104.3", true, "tag:agent"), roleAgent, "")
 	if c.Status != "warn" || !strings.Contains(c.Detail, "Tailscale SSH on") {
 		t.Fatalf("old with SSH: %+v", c)
 	}
@@ -77,19 +77,19 @@ func TestTailnetCheckSSH(t *testing.T) {
 		}
 	}
 
-	c = tailnetCheck(tailnetSelf("1.104.3", false, "tag:agent"), roleAgent)
+	c = tailnetCheck(tailnetSelf("1.104.3", false, "tag:agent"), roleAgent, "")
 	if !strings.Contains(c.Detail, "Tailscale SSH off") || strings.Contains(c.Fix, "Tailscale SSH is on here") {
 		t.Fatalf("old without SSH: %+v", c)
 	}
 
-	c = tailnetCheck(tailnetSelf("1.104.4", true, "tag:agent"), roleAgent)
+	c = tailnetCheck(tailnetSelf("1.104.4", true, "tag:agent"), roleAgent, "")
 	if c.Status != "ok" || c.Fix != "" || !strings.Contains(c.Detail, "Tailscale SSH on") {
 		t.Fatalf("current with SSH: %+v", c)
 	}
 
 	s := tailnetSelf("1.104.4", false, "tag:agent")
 	s.SSH = nil
-	c = tailnetCheck(s, roleAgent)
+	c = tailnetCheck(s, roleAgent, "")
 	if c.Status != "ok" || !strings.Contains(c.Detail, "Tailscale SSH unknown") {
 		t.Fatalf("prefs unreadable: %+v", c)
 	}
@@ -117,7 +117,7 @@ func TestTailnetCheckTags(t *testing.T) {
 		{"not running", stopped, roleAgent, "ok", "tags unknown", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := tailnetCheck(tc.self, tc.role)
+			c := tailnetCheck(tc.self, tc.role, "")
 			if c.Status != tc.status || !strings.Contains(c.Detail, tc.want) {
 				t.Fatalf("got %+v, want %s containing %q", c, tc.status, tc.want)
 			}
@@ -131,9 +131,71 @@ func TestTailnetCheckTags(t *testing.T) {
 	}
 }
 
+// A relay with --admin-tag keeps a tagged node an admin without a restart.
+// Tags are controlled by tagOwners, so the fix says so.
+func TestTailnetCheckAdminTag(t *testing.T) {
+	const tag = "tag:tincan-admin"
+
+	c := tailnetCheck(tailnetSelf("1.104.4", false), roleAgent, "")
+	if !strings.Contains(c.Fix, "--admin-tag") || !strings.Contains(c.Fix, "tagOwners") || !strings.Contains(c.Fix, "never an admin device") {
+		t.Fatalf("untagged agent fix misses the tag rule: %+v", c)
+	}
+
+	c = tailnetCheck(tailnetSelf("1.104.4", false, tag), roleAdmin, tag)
+	if c.Status != "ok" || !strings.Contains(c.Detail, "admin via --admin-tag "+tag) {
+		t.Fatalf("tagged admin: %+v", c)
+	}
+
+	c = tailnetCheck(tailnetSelf("1.104.4", false, tag), roleAgent, tag)
+	if c.Status != "ok" || !strings.Contains(c.Detail, "carries the relay's --admin-tag "+tag) {
+		t.Fatalf("tagged non-admin carrying the admin tag: %+v", c)
+	}
+
+	c = tailnetCheck(tailnetSelf("1.104.4", false), roleAdmin, tag)
+	if c.Status != "ok" || !strings.Contains(c.Detail, "also grants --admin-tag "+tag) {
+		t.Fatalf("untagged admin with a tag configured: %+v", c)
+	}
+
+	c = tailnetCheck(tailnetSelf("1.104.4", false, "tag:agent"), roleAgent, tag)
+	if c.Status != "ok" || strings.Contains(c.Detail, "--admin-tag") {
+		t.Fatalf("other tag is not the admin tag: %+v", c)
+	}
+}
+
+// relayAdminTag reads the tag the relay reports to every caller, and says
+// nothing when the relay predates it or cannot be asked.
+func TestRelayAdminTag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/agents" {
+			t.Errorf("unexpected route %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"agents":[],"admin_tag":"tag:tincan-admin"}`)
+	}))
+	defer srv.Close()
+	r, err := client.NewRelayFor(client.Config{Relay: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := relayAdminTag(t.Context(), r); got != "tag:tincan-admin" {
+		t.Fatalf("admin tag = %q", got)
+	}
+
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"agents":[]}`)
+	}))
+	defer old.Close()
+	ro, err := client.NewRelayFor(client.Config{Relay: old.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := relayAdminTag(t.Context(), ro); got != "" {
+		t.Fatalf("relay without a tag: %q", got)
+	}
+}
+
 // The check warns at worst, with every problem named in one line.
 func TestTailnetCheckNeverFails(t *testing.T) {
-	c := tailnetCheck(tailnetSelf("1.104.3", true), roleAgent)
+	c := tailnetCheck(tailnetSelf("1.104.3", true), roleAgent, "")
 	if c.Status != "warn" {
 		t.Fatalf("got %+v", c)
 	}
