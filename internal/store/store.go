@@ -35,6 +35,9 @@ var (
 	// ErrNoticeSuperseded means a stale-claim notice was not queued: the
 	// request it is about had already closed.
 	ErrNoticeSuperseded = errors.New("the request this notice is about has already closed")
+	// ErrDuplicateSend means the sender already queued a request under this
+	// idempotency key; SentWithKey returns it.
+	ErrDuplicateSend = errors.New("idempotency key already used by this sender")
 )
 
 const schema = `
@@ -301,6 +304,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate task recovery: %w", err)
 	}
+	if err := s.migrateIdempotencyKey(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate idempotency key: %w", err)
+	}
 	for {
 		more, err := s.backfillSearchBatch()
 		if err != nil {
@@ -312,6 +319,28 @@ func Open(path string) (*Store, error) {
 		}
 	}
 	return s, nil
+}
+
+// migrateIdempotencyKey adds a send's idempotency key and the digest of what
+// it asked for (send_hash) to requests, with a unique index on sender and key
+// for keyed rows only. Both columns default to the empty string, so a relay
+// that predates them still opens the database and inserts rows the index
+// skips.
+func (s *Store) migrateIdempotencyKey() error {
+	for _, col := range []string{"idempotency_key", "send_hash"} {
+		var has bool
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('requests') WHERE name = ?)`, col).Scan(&has); err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := s.db.Exec(`ALTER TABLE requests ADD COLUMN ` + col + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS requests_idempotency ON requests(from_agent, idempotency_key) WHERE idempotency_key != ''`)
+	return err
 }
 
 func (s *Store) migrateUrgent() error {
@@ -992,6 +1021,17 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 		ttl = req.HoldTTL
 	}
 	req.WasHeld, req.Approved = status == envelope.StatusHeld, false
+	if req.IdempotencyKey != "" {
+		// Checked first, before attachments are bound: a retry names the
+		// uploads its first send already took. The unique index backs this.
+		var used bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests WHERE from_agent = ? AND idempotency_key = ?)`, req.From, req.IdempotencyKey).Scan(&used); err != nil {
+			return envelope.Request{}, err
+		}
+		if used {
+			return envelope.Request{}, ErrDuplicateSend
+		}
+	}
 	if req.NoticeFor != "" && req.NoticeKind == NoteStaleClaim {
 		// Checked in the transaction that inserts the notice, so a reply or
 		// cancel commits either before it (no notice) or after it (which
@@ -1061,14 +1101,15 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 	// Keep task recovery subject to the task filer's broader guest check.
 	// This labels recovery without changing ordinary send or hold behavior.
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests
-		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors, recovery_source, skip_task_recovery, recovery_repeat, task_filed_on_send, task_room_scope)
+		(id, from_agent, to_agent, parent_id, trace_id, hop, chain, kind, body, status, created_at, updated_at, expires_at, attachments, was_held, approved, group_id, urgent, from_session, room_post_id, to_project, queued_at, follow_of, from_guest, guest_approved, notice_for, notice_kind, task_id, contributors, recovery_source, skip_task_recovery, recovery_repeat, task_filed_on_send, task_room_scope, idempotency_key, send_hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			CASE WHEN ? AND EXISTS (SELECT 1 FROM requests WHERE to_agent = ? AND `+openGuestAsk+`) THEN 'guest' ELSE ? END,
-			? OR EXISTS (SELECT 1 FROM agents WHERE name IN (?, ?) AND kind IN ('history', 'notes', 'pass', 'council')), ?, ?, ?)`,
+			? OR EXISTS (SELECT 1 FROM agents WHERE name IN (?, ?) AND kind IN ('history', 'notes', 'pass', 'council')), ?, ?, ?, ?, ?)`,
 		req.ID, req.From, req.To, req.ParentID, req.TraceID, req.Hop, string(chain), string(req.Kind), req.Body,
 		string(status), now.UnixMilli(), now.UnixMilli(), now.Add(ttl).UnixMilli(), atts, req.WasHeld, req.Approved, req.Group, req.Urgent, req.FromSession, sql.NullInt64{Int64: req.RoomPostID, Valid: req.RoomPostID != 0}, req.Project, now.UnixMilli(), req.FollowOf, req.FromGuest, req.GuestApproved, req.NoticeFor, req.NoticeKind, sql.NullInt64{Int64: req.TaskID, Valid: req.TaskID != 0}, contributors,
 		req.Kind == envelope.KindAsk && !req.NoParent, req.From, req.RecoverySource,
-		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat, req.TaskFiledOnSend, req.TaskRoomScope)
+		req.SkipTaskRecovery || req.RoomPostID != 0 || strings.HasPrefix(req.Group, envelope.PassGroupPrefix), req.From, req.To, req.RecoveryRepeat, req.TaskFiledOnSend, req.TaskRoomScope,
+		req.IdempotencyKey, req.SendHash)
 	if err != nil {
 		return envelope.Request{}, err
 	}
@@ -1081,6 +1122,27 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, req envelope.Request,
 	if err := s.followOnTx(ctx, tx, req); err != nil {
 		return envelope.Request{}, err
 	}
+	return req, nil
+}
+
+// SentWithKey returns the request sender queued under idempotency key, with
+// its current status in Status and the key and send digest filled in, or
+// ErrNotFound when sender has not used the key. The key is looked up under
+// the sender alone, so one agent's key never finds another agent's request.
+func (s *Store) SentWithKey(ctx context.Context, sender, key string) (envelope.Request, error) {
+	var id, hash string
+	err := s.db.QueryRowContext(ctx, `SELECT id, send_hash FROM requests WHERE from_agent = ? AND idempotency_key = ? AND idempotency_key != ''`, sender, key).Scan(&id, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return envelope.Request{}, ErrNotFound
+	}
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	req, st, err := s.lookup(ctx, id)
+	if err != nil {
+		return envelope.Request{}, err
+	}
+	req.Status, req.IdempotencyKey, req.SendHash = st, key, hash
 	return req, nil
 }
 

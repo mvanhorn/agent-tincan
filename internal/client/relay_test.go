@@ -140,7 +140,7 @@ func TestConfiguredAgentSentOnEveryRequest(t *testing.T) {
 	r.Reply(ctx, "r1", "ok", envelope.StatusAnswered)
 	r.Cancel(ctx, "r1")
 	r.Raw(ctx, "GET", "/v1/trace", nil, nil)
-	if len(seen) != 8 { // poll and peek share a path
+	if len(seen) != 9 { // poll and peek share a path; send reads capabilities
 		t.Fatalf("calls seen = %v", seen)
 	}
 	for call, agent := range seen {
