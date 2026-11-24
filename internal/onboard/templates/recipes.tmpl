@@ -13,6 +13,10 @@ On the agent's machine: {{template "join.default" .}}
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
 On the agent's machine: {{template "join.proxy-sandbox" .}}
 {{- end -}}
+{{- define "recipe.invite.manus-cue" -}}
+On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
+On the agent's machine: {{template "join.manus-cue" .}}
+{{- end -}}
 {{- define "recipe.invite.notes" -}}
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite notes --kind notes. The service only runs as the agent named notes. The code is valid 10 minutes; hand it straight to the Agent Notes Mac, never through group chat or logs.
 On the Agent Notes Mac: TINCAN_CONFIG=~/.config/tincan/notes.json tincan join <code> --relay {{.RelayURL}}

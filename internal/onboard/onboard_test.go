@@ -10,6 +10,38 @@ import (
 
 const relayURL = "http://100.64.0.9:8787"
 
+func TestManusCueOnboarding(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Roster: []Member{
+		{Name: "researcher", Kind: "manus-cue"},
+		{Name: "existing", Kind: "proxy-sandbox", Wake: "wait"},
+	}})
+	a := block(t, k, "researcher")
+	if a.Kind != "manus-cue" || a.Wake != "webhook" {
+		t.Fatalf("Cue kind = %q, wake = %q; want manus-cue, webhook", a.Kind, a.Wake)
+	}
+	if !strings.Contains(k.Operator, "researcher kind=manus-cue wake=webhook (may sleep or be off)") {
+		t.Error("operator instructions should treat a sleeping Cue as normal")
+	}
+	for _, want := range []string{"Catch Hook", "check_inbox", "stdio", "socks5://127.0.0.1:1055", "same Tailscale node"} {
+		if !strings.Contains(blockText(a), want) {
+			t.Errorf("Cue onboarding missing %q", want)
+		}
+	}
+	if strings.Contains(blockText(a), "tincan wait &") || !strings.Contains(blockText(block(t, k, "existing")), "tincan wait &") {
+		t.Fatal("Cue must not inherit the proxy-sandbox wait loop or change existing members")
+	}
+	r := strings.Join(recipe(t, k, "manus-cue").Steps, "\n")
+	for _, want := range []string{"--kind manus-cue", "socks5://127.0.0.1:1055", "max_per_hour"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("Cue recipe missing %q", want)
+		}
+	}
+	offline := build(t, Options{Offline: true})
+	if got := recipe(t, offline, "manus-cue").Title; !strings.Contains(got, "Manus Cue") {
+		t.Errorf("offline Cue recipe title = %q", got)
+	}
+}
+
 func matts() []Member {
 	return []Member{
 		{Name: "grokbot", Wake: "webhook", Online: true},

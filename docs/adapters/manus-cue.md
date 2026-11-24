@@ -1,0 +1,20 @@
+# Manus Cue
+
+Manus Cue uses the regular Agent Tincan MCP server inside its sandbox. A Manus Catch Hook starts a run to drain the inbox when work arrives. A sleeping sandbox is not an enrollment failure. No public MCP gateway is required.
+
+1. Give the sandbox an authorized Tailscale path to the private relay. With userspace Tailscale, point Tincan at its local SOCKS proxy, for example `socks5://127.0.0.1:1055`. Omit the proxy if the sandbox reaches the tailnet directly. Restrict sandbox access to the relay port.
+2. On the relay admin device, run `tincan invite <name> --kind manus-cue`. In the sandbox, install Tincan and run `tincan join <code> --relay <private-relay-url> --proxy socks5://127.0.0.1:1055` (adjust for the actual path). An already joined agent can be switched with `tincan kind <name> manus-cue` on a relay that supports this kind, without another invite.
+3. Add a stdio MCP server in Manus with the absolute path to the binary and args `["mcp"]`. From a Manus run, verify `list_agents`. After upgrading, start a fresh run or reload the server if it still runs the old binary.
+4. Create a Catch Hook with a fixed instruction to call `check_inbox`, work through the results, reply on the same request IDs, and check again until the inbox is empty. Do not pass the incoming payload into the prompt. In the relay's `wake.json`, add the agent under its joined name with `"method": "webhook"`, its Catch Hook `"url"`, and a `"max_per_hour"` budget. Keep the file at mode `0600` and restart the relay to apply the edit. Treat the URL as a credential: anyone with an unprotected Catch Hook URL could start runs.
+
+Run `tincan onboard` for the full standing instructions. The default wake path starts a run; it does not inject messages into an existing chat. Do not depend on a background wait loop surviving sleep.
+
+The recipe was live-tested with self-managed userspace Tailscale. It does not require the Manus-managed Tailscale connector. On an older relay that does not recognize `manus-cue`, use an invite without `--kind` (or keep the existing kind) and follow this guide rather than the generic wait-loop instructions.
+
+## Tailnet setup and recovery
+
+`tincan join` enrolls the agent with the relay; it does not enroll the sandbox in Tailscale or edit tailnet policy. Use an existing authorized connection when available. If you install userspace Tailscale yourself, bind its SOCKS listener to loopback and keep its node state in access-restricted storage that the platform persists. Verify persistence across a sandbox replacement before relying on it. If no state survives, stop and have the owner approve the replacement node instead of silently enrolling it.
+
+For a self-managed node, give it a dedicated tag and grant only outbound TCP to the relay's tag and listening port. Do not grant tailnet-wide access, advertise routes, or enable SSH for this integration. If the owner uses an auth key to enroll the node, use a one-use key scoped to that tag, hand it over by a secret channel, and remove it from the sandbox after enrollment. Keep the node state and Tincan config private; neither should be copied into instructions or shared as an attachment.
+
+To test, send one harmless ask while the sandbox is asleep. `tincan wakes <name> --since 15m` distinguishes webhook acceptance from the next inbox poll; use `tincan get <id>` to verify the reply. A successful webhook response alone does not show that Cue reached the relay. If it does not check in, verify Tailscale and the proxy in the sandbox. Reuse the existing configuration when the same node comes back. A different tagged node does not auto-rebind, even if it has the same hostname; have the admin issue a fresh invite only when that is actually needed.
