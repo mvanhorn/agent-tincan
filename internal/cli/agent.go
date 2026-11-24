@@ -511,8 +511,8 @@ func formatAgents(agents []client.AgentInfo, now time.Time) string {
 
 func askCmd() *cobra.Command {
 	var wait time.Duration
-	var parent, project, at, every, thenTo, source string
-	var notify, asJSON, urgent bool
+	var parent, project, at, every, thenTo, source, about string
+	var notify, asJSON, urgent, quiet bool
 	var attach []string
 	cmd := &cobra.Command{
 		Use:   "ask <agent[,agent...]> <message...>",
@@ -542,6 +542,7 @@ instead, as a new request with every send check applied at that time.
 			}
 			defer printHeld(cmd, r)
 			ctx := client.WithAskSource(client.WithProject(cmd.Context(), project), source)
+			ctx = client.WithAskAbout(client.WithQuietAsk(ctx, quiet), about)
 			body := strings.Join(args[1:], " ")
 			if thenTo != "" {
 				// The message and the follow-on are one argument each.
@@ -554,8 +555,8 @@ instead, as a new request with every send check applied at that time.
 			// Changed, not the values: an empty --at "$WHEN" asked for a
 			// schedule and must never turn into a send now.
 			if cmd.Flags().Changed("at") || cmd.Flags().Changed("every") {
-				if len(targets) > 1 || notify || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
-					return errors.New("a scheduled ask goes to one teammate, with no --notify, --parent, --attach, --project or --then")
+				if len(targets) > 1 || notify || about != "" || parent != "" || len(attach) > 0 || project != "" || thenTo != "" {
+					return errors.New("a scheduled ask goes to one teammate, with no --notify, --about, --parent, --attach, --project or --then")
 				}
 				return scheduleAsk(cmd, r, client.ScheduledAsk{To: targets[0], Body: body, Urgent: urgent}, at, every, asJSON)
 			}
@@ -615,8 +616,9 @@ instead, as a new request with every send check applied at that time.
 			}
 			if res.Status == envelope.StatusHeld {
 				cmd.Printf("Request %s: held, waiting for the owner's approval.\n", res.Request.ID)
+				cmd.Print(client.FormatFiledTask(res.Request.TaskID))
 			} else {
-				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatResult(res)))
+				cmd.Print(forTerminal(cmd.OutOrStdout(), client.FormatAskResult(res)))
 			}
 			if thenTo != "" {
 				cmd.Println(client.ThenNote(thenTo, res.Status))
@@ -626,8 +628,10 @@ instead, as a new request with every send check applied at that time.
 	}
 	cmd.Flags().StringVar(&thenTo, "then", "", `once answered, have the relay ask this agent too: ask muse "..." --then hermes "file the receipt"`)
 	cmd.Flags().DurationVar(&wait, "wait", client.MaxInlineWait, "how long to wait for the reply (max 20s)")
+	cmd.Flags().StringVar(&about, "about", "", "existing open task number or request ID this ask follows up on")
 	cmd.Flags().StringVar(&parent, "parent", "", "the request you are handling, if this continues it (usually automatic)")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "time-critical request: wake immediately and deliver first")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "file a quiet task for housekeeping asks, never for work the owner requested")
 	cmd.Flags().StringVar(&project, "project", "", "the project of the session this is for, usually its repo directory name: that session gets it first, any session after about 10 minutes")
 	cmd.Flags().StringVar(&source, "source", "", "outside source of an ask's text, such as mail or meeting; if auto-filed, it waits for owner approval")
 	cmd.Flags().BoolVar(&notify, "notify", false, "send without waiting for a reply")
@@ -736,6 +740,7 @@ const (
 // resultJSON is what ask and get --json print.
 type resultJSON struct {
 	Outcome string        `json:"outcome"`
+	TaskID  int64         `json:"task_id,omitempty"`
 	Result  client.Result `json:"result"`
 }
 
@@ -763,7 +768,7 @@ func outcome(res client.Result) (string, int) {
 // happened without parsing.
 func printResultJSON(w io.Writer, res client.Result) error {
 	name, code := outcome(res)
-	if err := writeJSON(w, resultJSON{Outcome: name, Result: res}); err != nil {
+	if err := writeJSON(w, resultJSON{Outcome: name, TaskID: res.Request.TaskID, Result: res}); err != nil {
 		return err
 	}
 	if code != 0 {
@@ -833,9 +838,15 @@ func printInboxJSON(ctx context.Context, r *client.Relay, in client.Inbox, out, 
 	}
 	for _, req := range in.Requests {
 		item := inboxRequestJSON{Request: req, Claimed: true}
-		if _, err := r.Claim(ctx, req.ID); err != nil {
+		if claimed, err := r.Claim(ctx, req.ID); err != nil {
+			if req.TaskNoticeReceipt {
+				item.Body, _, _ = strings.Cut(req.Body, "\n")
+			}
 			item.Claimed, item.ClaimError = false, err.Error()
 		} else {
+			if req.TaskNoticeReceipt && claimed.Body != "" {
+				req.Body, item.Body = claimed.Body, claimed.Body
+			}
 			item.TaskNoticeGuidance = in.TaskNoticeGuidance(req)
 			if item.TaskNoticeGuidance != "" {
 				item.OwnerMessage = client.TaskNoticeOwnerMessage(req)

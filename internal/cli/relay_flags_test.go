@@ -180,3 +180,24 @@ func TestRelayUnansweredQuestionAfterFlag(t *testing.T) {
 		t.Fatalf("zero --unanswered-question-after: %v", err)
 	}
 }
+
+func TestRelayFileAllAsksFlag(t *testing.T) {
+	cmd := relayCmd()
+	if got, err := cmd.Flags().GetString("file-all-asks"); err != nil || got != "auto" {
+		t.Fatalf("default --file-all-asks = %q, %v", got, err)
+	}
+	for _, mode := range []string{"auto", "on", "off"} {
+		if got := (relayFlags{fileAllAsks: mode}).relayConfig().FileAllAsks; got != mode {
+			t.Fatalf("file mode = %q, want %q", got, mode)
+		}
+	}
+	for _, mode := range []string{"", "invalid"} {
+		cmd := relayCmd()
+		if err := cmd.Flags().Parse([]string{"--file-all-asks=" + mode}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.RunE(cmd, nil); err == nil || !strings.Contains(err.Error(), "--file-all-asks") {
+			t.Fatalf("--file-all-asks=%q: %v", mode, err)
+		}
+	}
+}

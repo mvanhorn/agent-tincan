@@ -11,9 +11,10 @@ import (
 
 // TaskBriefing contains only metadata safe to send through task notices.
 type TaskBriefing struct {
-	Due, Waiting, Done []BriefingTask
-	Missed             []BriefingNotice
-	Suggested          int64
+	Due, Waiting, Active, Done []BriefingTask
+	Missed                     []BriefingNotice
+	SmallAsksAnswered          int `json:",omitempty"`
+	Suggested                  int64
 }
 
 type BriefingTask struct {
@@ -21,6 +22,7 @@ type BriefingTask struct {
 	Status   envelope.TaskStatus
 	Due      envelope.TaskDue
 	Assignee string
+	Blocker  string `json:",omitempty"`
 }
 
 type BriefingNotice struct {
@@ -53,11 +55,11 @@ func (s *Store) QueueTaskBriefing(ctx context.Context, scheduledDay, today strin
 	if lastAt == 0 {
 		since = now.Add(-24 * time.Hour).UnixMilli()
 	}
-	briefing, latestDone, err := readTaskBriefing(ctx, tx, today, now, since, afterEvent)
+	briefing, latestEvent, err := readTaskBriefing(ctx, tx, today, now, since, afterEvent)
 	if err != nil {
 		return false, err
 	}
-	queued := len(briefing.Due)+len(briefing.Waiting)+len(briefing.Done)+len(briefing.Missed) > 0 || briefing.Suggested != 0
+	queued := len(briefing.Due)+len(briefing.Waiting)+len(briefing.Active)+len(briefing.Done)+len(briefing.Missed) > 0 || briefing.Suggested != 0 || briefing.SmallAsksAnswered > 0
 	if queued {
 		payload, err := json.Marshal(briefing)
 		if err != nil {
@@ -70,7 +72,7 @@ func (s *Store) QueueTaskBriefing(ctx context.Context, scheduledDay, today strin
 			envelope.TaskNoticeBriefing, TaskRelay, now.UnixMilli(), string(payload)); err != nil {
 			return false, err
 		}
-		lastAt, afterEvent = now.UnixMilli(), latestDone
+		lastAt, afterEvent = now.UnixMilli(), latestEvent
 	}
 	if scheduledDay != "" {
 		if _, err := tx.ExecContext(ctx, `UPDATE task_briefing_state SET last_day = ?, last_at = ?, after_event = ? WHERE id = 1`,
@@ -105,31 +107,49 @@ func cancelOlderBriefings(ctx context.Context, tx *sql.Tx, now time.Time) error 
 
 // One snapshot is shared by all hosts, so it uses the withheld view even
 // when an individual host happens to be the filer.
-const briefingDeadlineVisible = `(t.status != 'proposed' AND NOT ` + taskNeverApproved + `)`
-const briefingTaskCols = `t.id, t.status, COALESCE(t.due_day, ''), t.due_at, t.assignee, ` + briefingDeadlineVisible
+const briefingDeadlineVisible = `(t.status != 'proposed' AND t.room_post_id IS NULL AND t.participant_only = 0 AND NOT ` + taskNeverApproved + ` AND NOT ` + taskOriginalAskUnapproved + `)`
+const briefingTaskCols = `t.id, t.status, COALESCE(t.due_day, ''), t.due_at, t.assignee, ` + briefingDeadlineVisible + `, CASE
+	WHEN t.status = 'open' AND EXISTS (SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'assigned')
+		THEN 'last attempt ended without a result'
+	WHEN t.status = 'open' AND t.assignee = '' THEN 'assign it or take it on'
+	WHEN t.status = 'working' THEN COALESCE((SELECT CASE
+		WHEN q.status = 'held' THEN 'waiting for approval'
+		WHEN p.notified >= 2 AND p.changed_at <= p.notified_at THEN 'no new progress'
+		WHEN q.status = 'claimed' THEN 'in progress'
+		ELSE 'waiting for the assignee to start' END
+		FROM requests q LEFT JOIN task_progress_state p ON p.request_id = q.id WHERE q.id = t.current_request), '')
+	ELSE '' END`
 
-func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Time, since, afterEvent int64) (b TaskBriefing, latestDone int64, err error) {
+func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Time, since, afterEvent int64) (b TaskBriefing, latestEvent int64, err error) {
 	b.Due, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
-		WHERE t.status NOT IN ('done', 'dropped') AND t.due_day <= ? AND `+briefingDeadlineVisible+`
+		WHERE t.quiet != 1 AND t.status NOT IN ('done', 'dropped') AND t.due_day <= ? AND `+briefingDeadlineVisible+`
 		ORDER BY t.due_day, COALESCE(t.due_at, 9223372036854775807), t.id LIMIT 3`, today)
 	if err != nil {
 		return b, 0, err
 	}
 	b.Waiting, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
-		WHERE t.status IN ('returned', 'question', 'proposed')
+		WHERE t.quiet != 1 AND (t.status IN ('returned', 'question', 'proposed') OR (t.quiet = 2 AND t.status = 'open'))
 		ORDER BY COALESCE((SELECT MAX(e.id) FROM task_events e WHERE e.task_id = t.id AND e.status = t.status AND e.kind IN ('added', 'status')), t.id), t.id`)
 	if err != nil {
 		return b, 0, err
 	}
+	b.Active, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
+		WHERE t.quiet != 1 AND (t.status = 'working' OR t.status = 'open' AND t.quiet != 2)
+		ORDER BY t.id`)
+	if err != nil {
+		return b, 0, err
+	}
 	b.Done, err = briefingTasks(ctx, tx, `SELECT `+briefingTaskCols+` FROM tasks t
-		WHERE t.status = 'done' AND EXISTS (
+		WHERE t.quiet != 1 AND t.status = 'done' AND EXISTS (
 			SELECT 1 FROM task_events e WHERE e.task_id = t.id AND e.kind = 'status' AND e.status = 'done'
 			AND e.id > ? AND e.created_at >= ?
 		) ORDER BY t.id`, afterEvent, since)
 	if err != nil {
 		return b, 0, err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM task_events WHERE kind = 'status' AND status = 'done'`).Scan(&latestDone); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), ?1), COUNT(*) FILTER (WHERE quiet_answer = 1)
+		FROM task_events WHERE id > ?1 AND created_at >= ?2 AND kind = 'status'
+		AND (status = 'done' OR quiet_answer = 1)`, afterEvent, since).Scan(&latestEvent, &b.SmallAsksAnswered); err != nil {
 		return b, 0, err
 	}
 	b.Missed, err = missedBriefingNotices(ctx, tx, now.Add(-24*time.Hour).UnixMilli())
@@ -138,11 +158,11 @@ func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Ti
 	}
 	if len(b.Due) > 0 {
 		b.Suggested = b.Due[0].ID
-		return b, latestDone, nil
+		return b, latestEvent, nil
 	}
 	var earliest sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `SELECT (SELECT t.id FROM tasks t
-		WHERE t.status NOT IN ('done', 'dropped') AND t.due_day > ? AND `+briefingDeadlineVisible+`
+		WHERE t.quiet != 1 AND t.status NOT IN ('done', 'dropped') AND t.due_day > ? AND `+briefingDeadlineVisible+`
 		ORDER BY due_day, COALESCE(due_at, 9223372036854775807), id LIMIT 1)`, today).Scan(&earliest); err != nil {
 		return b, 0, err
 	}
@@ -155,7 +175,7 @@ func readTaskBriefing(ctx context.Context, tx *sql.Tx, today string, now time.Ti
 			}
 		}
 	}
-	return b, latestDone, nil
+	return b, latestEvent, nil
 }
 
 func briefingTasks(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]BriefingTask, error) {
@@ -168,7 +188,7 @@ func briefingTasks(ctx context.Context, tx *sql.Tx, query string, args ...any) (
 	for rows.Next() {
 		var task BriefingTask
 		var visible bool
-		if err := rows.Scan(&task.ID, &task.Status, &task.Due.DueDay, &task.Due.DueAt, &task.Assignee, &visible); err != nil {
+		if err := rows.Scan(&task.ID, &task.Status, &task.Due.DueDay, &task.Due.DueAt, &task.Assignee, &visible, &task.Blocker); err != nil {
 			return nil, err
 		}
 		if !visible {
@@ -189,7 +209,7 @@ func missedBriefingNotices(ctx context.Context, tx *sql.Tx, since int64) ([]Brie
 		JOIN agents h ON h.name = r.to_agent AND h.task_host = 1
 		JOIN tasks t ON t.id = CAST(r.notice_for AS INTEGER)
 		WHERE d.outcome IN ('', 'exhausted') AND r.created_at >= ?
-		AND r.notice_kind IN (?, ?) AND t.`+taskOpenStatuses+`
+		AND r.notice_kind IN (?, ?, ?, ?) AND t.`+taskOpenStatuses+`
 		AND NOT EXISTS (
 			SELECT 1 FROM task_notice_delivery ack
 			WHERE ack.outcome = 'told' AND ack.notice_id = d.notice_id
@@ -201,7 +221,7 @@ func missedBriefingNotices(ctx context.Context, tx *sql.Tx, since int64) ([]Brie
 			AND ack.reported_status = d.reported_status AND receipt.body = r.body
 		))
 		GROUP BY r.notice_for, r.notice_kind, d.reported_status
-		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since, NoteTask, envelope.TaskNoticeReminder, since)
+		ORDER BY MIN(r.created_at), MIN(r.rowid)`, since, NoteTask, envelope.TaskNoticeReminder, envelope.TaskNoticeStall, envelope.TaskNoticeAction, since)
 	if err != nil {
 		return nil, err
 	}

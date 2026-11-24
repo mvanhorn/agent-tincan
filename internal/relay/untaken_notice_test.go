@@ -231,3 +231,43 @@ func TestUntakenNoticeNotAfterClarification(t *testing.T) {
 		t.Fatalf("told about an ask the target took and asked about: %+v", got)
 	}
 }
+
+// Regression: wake=mcp-events keeps untaken-request notices and owner fallback
+// active because a subscription may be reply-only or urgent_only.
+func TestUntakenNoticeAndFallbackForMCPEvents(t *testing.T) {
+	t.Run("notice", func(t *testing.T) {
+		h, clk, fw := untakenHarness(t)
+		fw.methods["muse"] = WakeMCPEvents
+		ctx := context.Background()
+		ask := h.send(instinctAddr, "muse", "check the release notes")
+
+		clk.advance(DefaultWakeGrace + time.Minute)
+		pollAll(t, h, grokAddr, strangerAddr)
+		h.srv.Sweep(ctx)
+		got := untakenNotices(t, h, instinctAddr)
+		if len(got) != 1 || !strings.Contains(got[0].Body, ask.ID) {
+			t.Fatalf("untaken notices for mcp-events = %+v, want one referencing %s", got, ask.ID)
+		}
+	})
+
+	t.Run("fallback", func(t *testing.T) {
+		h, clk, fw, rec := fallbackHarness(t)
+		fw.methods["muse"] = WakeMCPEvents
+		ctx := context.Background()
+		ask := h.send(instinctAddr, "muse", "check the release notes")
+
+		clk.advance(DefaultWakeGrace + time.Minute)
+		pollAll(t, h, strangerAddr)
+		h.srv.Sweep(ctx)
+		res := getAs(h, instinctAddr, ask.ID)
+		if res.Request.To != "scout" || res.Status != envelope.StatusQueued {
+			t.Fatalf("after grace with mcp-events fallback = %s to=%q, want queued to scout", res.Status, res.Request.To)
+		}
+		if len(rec.to) == 0 || rec.to[len(rec.to)-1] != "scout" {
+			t.Fatalf("fallback scout was not woken: %v", rec.to)
+		}
+		if got := rerouteNotices(t, h, instinctAddr); len(got) != 1 {
+			t.Fatalf("reroute notices = %+v, want 1", got)
+		}
+	})
+}

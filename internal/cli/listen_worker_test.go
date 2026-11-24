@@ -378,12 +378,16 @@ func TestPerRequestWorkerOutlivingItsLeaseIsNotStartedTwice(t *testing.T) {
 	w.started(id)
 	session := w.read(id + ".session")
 
-	requeued := false
+	// The relay marks a lapsed claim for good. Polling for the queued
+	// state instead races the listener, which the requeue wakes and which
+	// can take the request back before a status read lands.
 	eventually(t, "the claim to lapse and come back", func() bool {
 		w.m.Server.Sweep(t.Context())
-		st := w.status(id)
-		requeued = requeued || st == envelope.StatusQueued
-		return requeued && st == envelope.StatusClaimed
+		var lapsed bool
+		if err := w.m.Store.DB().QueryRowContext(t.Context(), `SELECT claim_lapsed FROM requests WHERE id = ?`, id).Scan(&lapsed); err != nil {
+			t.Fatal(err)
+		}
+		return lapsed && w.status(id) == envelope.StatusClaimed
 	})
 	// A second process would start from a later peek, so outlast a few.
 	for end := time.Now().Add(3 * listenWorkerReclaimEvery); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
@@ -577,6 +581,13 @@ func newOldRelay(t *testing.T, cancel context.CancelFunc) *client.Relay {
 
 func gitRepo(t *testing.T) string {
 	t.Helper()
+	// Keep the fixture hermetic, as releasetools_test.go does: a developer's
+	// global or system git config can override what these tests set up (a
+	// core.hooksPath skips the hooks a test plants in .git/hooks, and
+	// commit.gpgsign can fail the fixture's own commit). t.Setenv also
+	// reaches the git processes the worker under test starts.
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	repo := t.TempDir()
 	for _, args := range [][]string{
 		{"init", "-q"},

@@ -183,7 +183,7 @@ func TestTaskNoticeRowForProposedTask(t *testing.T) {
 	if _, err := s.SetTaskStatus(ctx, task.ID, envelope.TaskOpen, envelope.TaskOwner, "", envelope.TaskProposed); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); err != nil {
+	if _, _, err := s.MarkTaskDone(ctx, task.ID, envelope.TaskOwner, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ReopenTask(ctx, task.ID, envelope.TaskOwner, ""); err != nil {

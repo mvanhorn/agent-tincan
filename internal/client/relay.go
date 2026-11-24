@@ -282,11 +282,14 @@ func QueueAge(d time.Duration) string {
 	return fmt.Sprintf("%dm", int(d/time.Minute))
 }
 
-// sentStatus is a fresh send's status: held when the relay is holding it for
-// the owner's approval, queued otherwise.
+// sentStatus is a send's status as its answer gave it. A fresh send names
+// held when the relay is holding it for the owner's approval and otherwise
+// leaves status out, which means queued. A retry under an idempotency key
+// gets the original request in its current state, which may be answered,
+// cancelled or another, so a status the relay gave is kept.
 func sentStatus(req envelope.Request) envelope.Status {
-	if req.Status == envelope.StatusHeld {
-		return envelope.StatusHeld
+	if req.Status != "" {
+		return req.Status
 	}
 	return envelope.StatusQueued
 }
@@ -376,6 +379,12 @@ type Relay struct {
 	handbackMu sync.Mutex
 	handbackAt time.Time
 	handbackOK bool
+
+	// keysAt is when send last read the relay's idempotency_key capability,
+	// and keysOK what it said (see takesSendKeys).
+	keysMu sync.Mutex
+	keysAt time.Time
+	keysOK bool
 }
 
 // maxSentIDs bounds sentIDs. Past it the record starts over, and a reply
@@ -550,12 +559,95 @@ func (r *Relay) send(ctx context.Context, in map[string]any) (sent, error) {
 	if source, _ := ctx.Value(askSourceKey{}).(string); source != "" {
 		in["source"] = source
 	}
+	if in["kind"] == envelope.KindAsk && quietAskOf(ctx) {
+		in["quiet"] = true
+	}
+	if about := askAbout(ctx); about != "" {
+		in["about"] = about
+	}
+	// One key for every post of this send, so a post the relay already took
+	// returns that request instead of queueing it again. call itself may post
+	// again at a moved relay's new address after a timeout.
+	keyed := r.takesSendKeys(ctx)
+	if keyed {
+		in["idempotency_key"] = rand.Text()
+	}
 	var out sent
 	err := r.call(ctx, r.api, "POST", "/v1/send", in, &out)
+	if keyed && ctx.Err() == nil && sendAnswerLost(err) && r.stillTakesSendKeys(ctx) {
+		// The relay may have queued the send before its answer was lost.
+		// Under the same key a second post is safe; one is enough, since
+		// call already waited out dial blips. The capability is read again
+		// first: a relay rolled back to a build without keys inside the
+		// recheck window would ignore the key and queue the send twice.
+		out = sent{}
+		err = r.callOnce(ctx, r.api, "POST", "/v1/send", in, &out)
+	}
 	if err == nil {
 		r.noteSent(out.ID)
 	}
 	return out, err
+}
+
+// sendAnswerLost reports whether err leaves it unknown whether the relay
+// queued a send: nothing answered at its address (unreachable: a timeout,
+// a proxy's 502 or 504), or the connection failed after the send may have
+// reached the relay, before or while its answer came back: the connection
+// closed (io.EOF), the answer was cut short (io.ErrUnexpectedEOF), or a
+// read or write on the open connection failed, as a reset does on every
+// platform. An answer from the relay itself, such as a 4xx, is known and
+// not lost. Only a keyed send acts on this, since posting again under the
+// same key returns the request the relay already took.
+func sendAnswerLost(err error) bool {
+	if err == nil {
+		return false
+	}
+	if unreachable(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	op, ok := errors.AsType[*net.OpError](err)
+	return ok && (op.Op == "read" || op.Op == "write")
+}
+
+// sendKeysRecheck is how long send trusts the relay's idempotency_key
+// capability before reading it again, so a client running across a relay
+// upgrade starts using keys.
+const sendKeysRecheck = 10 * time.Minute
+
+// takesSendKeys reports whether the relay advertises idempotency keys on
+// send. A relay that does not, or whose capabilities cannot be read, gets
+// sends without a key, as before: an older relay would queue a retried
+// post twice, and refuses a guest's send with an unknown field. A failed
+// read is kept until the next recheck too, so while the relay is down each
+// send waits out one failed call, not two.
+func (r *Relay) takesSendKeys(ctx context.Context) bool {
+	now := time.Now()
+	r.keysMu.Lock()
+	if !r.keysAt.IsZero() && now.Sub(r.keysAt) < sendKeysRecheck {
+		ok := r.keysOK
+		r.keysMu.Unlock()
+		return ok
+	}
+	r.keysMu.Unlock()
+	caps, err := r.Capabilities(ctx)
+	ok := err == nil && caps.IdempotencyKey
+	r.keysMu.Lock()
+	defer r.keysMu.Unlock()
+	r.keysAt, r.keysOK = now, ok
+	return ok
+}
+
+// stillTakesSendKeys reads the relay's capabilities now, skipping the
+// cache, and records the answer for later sends. A failed read counts as
+// no keys, so an unsure send is reported as failed rather than posted
+// again.
+func (r *Relay) stillTakesSendKeys(ctx context.Context) bool {
+	caps, err := r.Capabilities(ctx)
+	ok := err == nil && caps.IdempotencyKey
+	r.keysMu.Lock()
+	defer r.keysMu.Unlock()
+	r.keysAt, r.keysOK = time.Now(), ok
+	return ok
 }
 
 // asked finishes an ask whose send returned s: without a wait it reports
@@ -1256,6 +1348,31 @@ func WithAskSource(ctx context.Context, source string) context.Context {
 	return context.WithValue(ctx, askSourceKey{}, source)
 }
 
+type aboutKey struct{}
+
+// WithAskAbout links subsequent sends to the specified task or open ask.
+func WithAskAbout(ctx context.Context, about string) context.Context {
+	return context.WithValue(ctx, aboutKey{}, about)
+}
+
+func askAbout(ctx context.Context) string {
+	about, _ := ctx.Value(aboutKey{}).(string)
+	return about
+}
+
+type quietAskKey struct{}
+
+// WithQuietAsk sets the quiet send field on asks sent with ctx. It affects
+// task filing only. Older relays ignore the field.
+func WithQuietAsk(ctx context.Context, quiet bool) context.Context {
+	return context.WithValue(ctx, quietAskKey{}, quiet)
+}
+
+func quietAskOf(ctx context.Context) bool {
+	quiet, _ := ctx.Value(quietAskKey{}).(bool)
+	return quiet
+}
+
 // AdvertiseSocketWake turns SocketWakeFeature on or off for every later
 // call. It is safe to call while the client is in use.
 func (r *Relay) AdvertiseSocketWake(on bool) { r.socketWake.Store(on) }
@@ -1516,7 +1633,14 @@ func (r *Relay) SendGroup(ctx context.Context, targets []string, body string, ki
 				req.Attachments = append(req.Attachments, envelope.Attachment{ID: up.ID})
 			}
 			var sent envelope.SendResponse
-			err = r.call(ctx, r.api, "POST", "/v1/send", req, &sent)
+			source, _ := ctx.Value(askSourceKey{}).(string)
+			in := struct {
+				envelope.Request
+				Source string `json:"source,omitempty"`
+				Quiet  bool   `json:"quiet,omitempty"`
+				About  string `json:"about,omitempty"`
+			}{req, source, kind == envelope.KindAsk && quietAskOf(ctx), askAbout(ctx)}
+			err = r.call(ctx, r.api, "POST", "/v1/send", in, &sent)
 			if err == nil {
 				req = sent.Request
 				target = sent.Target

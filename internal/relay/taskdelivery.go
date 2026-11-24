@@ -95,11 +95,11 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		reason = "host ineligible or notice cancelled"
 	} else if d.Attempt < taskNoticeAttempts {
 		// Eligibility may have changed since the sweep collected its batch.
-		host, found, err := s.dir.Agent(ctx, old.To)
+		view, err := s.hostTaskView(ctx, old.To)
 		if err != nil {
 			return err
 		}
-		if found && host.TaskHost && s.taskHostRefusal(host) == "" {
+		if view.host {
 			next.To, next.NoticeKind, next.NoticeFor, next.Body = old.To, old.NoticeKind, old.NoticeFor, old.Body
 			next.TaskNoticeStatus = old.TaskNoticeStatus
 		} else {
@@ -110,8 +110,11 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 		// The owner already chose where relay alerts go. Send only fixed
 		// task metadata there when this host can no longer deliver it.
 		next.To = s.notifyDestination()
-		if old.NoticeKind == envelope.TaskNoticeReminder {
+		switch old.NoticeKind {
+		case envelope.TaskNoticeReminder:
 			next.NoticeKind, next.NoticeFor = store.NoteTaskReminderFallback, old.NoticeFor
+		case envelope.TaskNoticeReturnedClose:
+			next.NoticeKind, next.NoticeFor = store.NoteTaskReturnedCloseFallback, old.NoticeFor
 		}
 		old.From, old.Kind = client.RelaySender, envelope.KindNotify
 		markTaskNotice(&old)
@@ -120,7 +123,7 @@ func (s *Server) retryTaskNotice(ctx context.Context, d store.TaskDelivery) erro
 			label = "Task briefing"
 		}
 		next.Body = fmt.Sprintf("%s: %s did not acknowledge this task notice by attempt %d. %s",
-			label, old.To, d.Attempt, client.TaskNoticeOwnerMessage(old))
+			label, old.To, d.Attempt, client.TaskNoticeFallbackMessage(old))
 	}
 	var ttl time.Duration
 	if next.To != "" {

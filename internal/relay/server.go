@@ -34,7 +34,11 @@ const DefaultUnansweredQuestionAfter = 4 * time.Hour
 
 // Config tunes the relay.
 type Config struct {
-	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task
+	TaskNudgeAfter          time.Duration
+	TaskStallAfter          time.Duration
+	TaskReturnedCloseAfter  time.Duration
+	FileAllAsks             string        // auto (or empty), on, or off
+	UnansweredQuestionAfter time.Duration // when a plain ask waiting for input becomes a task or a quiet task is surfaced
 
 	RequestTTL      time.Duration // how long an unanswered request lives
 	NotesRequestTTL time.Duration // RequestTTL for requests to a notes-kind agent
@@ -143,6 +147,15 @@ func (c *Config) defaults() {
 	if c.TaskZone == nil {
 		c.TaskZone, _ = envelope.TaskLocation("")
 	}
+	if c.TaskNudgeAfter == 0 {
+		c.TaskNudgeAfter = store.DefaultTaskNudgeAfter
+	}
+	if c.TaskStallAfter == 0 {
+		c.TaskStallAfter = store.DefaultTaskStallAfter
+	}
+	if c.TaskReturnedCloseAfter <= 0 {
+		c.TaskReturnedCloseAfter = store.DefaultTaskReturnedCloseAfter
+	}
 	if c.TaskBriefing == "" {
 		c.TaskBriefing = DefaultTaskBriefing
 	}
@@ -203,11 +216,19 @@ type Replier interface {
 	Replied(ctx context.Context, req envelope.Request)
 }
 
+// Clarifier is an optional Events extension told when a teammate asks a
+// clarification question (status needs_input) on an asker's request.
+// req.From is the asker.
+type Clarifier interface {
+	NeedsInput(ctx context.Context, req envelope.Request)
+}
+
 // Server is the relay.
 type Server struct {
-	wakeSettings WakeSettings
-	cfg          Config
-	dir          *identity.Directory
+	wakeSettings  WakeSettings
+	gatewayEvents func(context.Context) (any, error)
+	cfg           Config
+	dir           *identity.Directory
 	// lookupAgent is how requestTTL reads the recipient's kind; it is
 	// dir.Agent, replaced in tests to simulate a failed lookup.
 	lookupAgent func(ctx context.Context, name string) (identity.Agent, bool, error)
@@ -319,6 +340,18 @@ type Server struct {
 
 	// health is what /metrics reports about the sweep loop (see health.go).
 	health health
+
+	// sendKeys holds a lock for each idempotency key a send is in flight
+	// under, keyed by sender and key (see lockSendKey).
+	sendKeyMu sync.Mutex
+	sendKeys  map[string]*sendKeyLock
+}
+
+// sendKeyLock is one in-flight idempotency key. refs counts the sends that
+// hold mu or wait for it; the entry is dropped when the last one is done.
+type sendKeyLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // persistEvery bounds how often an agent's activity is written to the store.
@@ -524,6 +557,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("PUT /v1/agents/{name}/fallback", s.handleSetFallback)
 	mux.HandleFunc("PUT /v1/agents/{name}/task-host", s.handleSetTaskHost)
 	mux.HandleFunc("POST /v1/admin/connect", s.handleConnect)
+	mux.HandleFunc("GET /v1/admin/gateway/events", s.handleGatewayEvents)
 	mux.HandleFunc("GET /v1/trace/{trace}", s.handleTrace)
 	mux.HandleFunc("GET /v1/trace", s.handleRecent)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
@@ -682,9 +716,23 @@ func (s *Server) Sweep(ctx context.Context) {
 	for _, t := range expiredQuestions {
 		s.notifySwept(ctx, t)
 	}
+	if err := s.store.EscalateQuietQuestions(ctx, s.cfg.UnansweredQuestionAfter); err != nil {
+		log.Printf("sweep: quiet task questions: %v", err)
+	}
+	if closed, err := s.store.CloseReturnedQuietTasks(ctx); err != nil {
+		log.Printf("sweep: close returned quiet tasks: %v", err)
+	} else {
+		for _, id := range closed {
+			s.hub.notify(requestKey(id))
+		}
+	}
 	// Last, so the hosts hear of what this pass did to tasks (an expiry, a
 	// held acknowledgement closed, a guest removed) and of any change an
 	// earlier drain could not finish telling.
+	if err := s.store.QueueTaskStalls(ctx, s.cfg.TaskNudgeAfter, s.cfg.TaskStallAfter); err != nil {
+		log.Printf("sweep: task stalls: %v", err)
+	}
+	s.sweepReturnedHostTasks(ctx)
 	s.queueTaskReminders(ctx)
 	s.sweepTaskBriefing(ctx)
 	s.drainTaskNotices(ctx)
@@ -934,6 +982,21 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.IdempotencyKey != "" {
+		// A retry of a send the relay already took gets that request back
+		// before any check that could refuse it now: the rate limit the
+		// first send spent, its attachments already bound, a target removed
+		// since.
+		if s.replaySend(w, r, req, fromGuest) {
+			return
+		}
+		// Retries racing each other go on one at a time, so only the first
+		// spends a rate-limit slot and queues; the rest find its request.
+		defer s.lockSendKey(from, req.IdempotencyKey)()
+		if s.replaySend(w, r, req, fromGuest) {
+			return
+		}
+	}
 	if len(req.Attachments) > 0 && s.blobs == "" {
 		writeErr(w, http.StatusBadRequest, errAttachmentsOff)
 		return
@@ -972,7 +1035,13 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	asked := req
 	if req, err = s.submit(r.Context(), req); err != nil {
+		// The store refuses a second request under one key whatever got
+		// past the lock; that send is a retry too.
+		if errors.Is(err, store.ErrDuplicateSend) && s.replaySend(w, r, asked, fromGuest) {
+			return
+		}
 		writeErr(w, statusFor(err), err)
 		return
 	}
@@ -982,6 +1051,66 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		res.Target = s.withProjectMatch(s.recipientTarget(r.Context(), req.To), req)
 	}
 	writeJSON(w, http.StatusCreated, res)
+}
+
+// replaySend answers asked, a send under an idempotency key, when its sender
+// already used that key, and reports whether it answered. The key is looked
+// up under asked.From, the sender WhoIs named, so one agent's key never
+// finds or reveals another agent's request. A retry of the same send gets
+// 200 with the request the key named and its current status, and the
+// target facts a first send would get; a different send under the key gets
+// 409. Either way nothing is queued, woken, held again or audited.
+func (s *Server) replaySend(w http.ResponseWriter, r *http.Request, asked envelope.Request, fromGuest bool) bool {
+	orig, err := s.store.SentWithKey(r.Context(), asked.From, asked.IdempotencyKey)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false
+	case err != nil:
+		writeErr(w, http.StatusInternalServerError, err)
+		return true
+	case orig.SendHash != asked.SendHash:
+		// A key reused by mistake (a counter reset, a per-job name) must not
+		// drop a new send while telling the caller it worked.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "idempotency key already used for a different send; use a new key for a new send",
+			"id":    orig.ID,
+		})
+		return true
+	}
+	res := envelope.SendResponse{Request: orig}
+	if !fromGuest {
+		res.Target = s.withProjectMatch(s.recipientTarget(r.Context(), orig.To), orig)
+	}
+	writeJSON(w, http.StatusOK, res)
+	return true
+}
+
+// lockSendKey waits until no other send under sender's key is in flight,
+// and returns the func that lets the next one go. Entries are counted, not
+// deleted on unlock, so a send already waiting keeps the same mutex and a
+// later one cannot make a second mutex for the key.
+func (s *Server) lockSendKey(sender, key string) func() {
+	k := sender + "\x00" + key
+	s.sendKeyMu.Lock()
+	if s.sendKeys == nil {
+		s.sendKeys = map[string]*sendKeyLock{}
+	}
+	l := s.sendKeys[k]
+	if l == nil {
+		l = &sendKeyLock{}
+		s.sendKeys[k] = l
+	}
+	l.refs++
+	s.sendKeyMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		s.sendKeyMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(s.sendKeys, k)
+		}
+		s.sendKeyMu.Unlock()
+	}
 }
 
 // withProjectMatch adds to t whether a session of the project req names is
@@ -1045,7 +1174,23 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 		return envelope.Request{}, err
 	}
 	prepared := req
-	req, err := s.store.Enqueue(ctx, req, s.requestTTL(ctx, req.To))
+	ttl := s.requestTTL(ctx, req.To)
+	var err error
+	if req.Kind == envelope.KindAsk && req.TaskID == 0 && (req.About != "" || store.HasTaskFollowupReference(req.Body)) {
+		view, viewErr := s.hostTaskView(ctx, req.From)
+		if viewErr != nil {
+			if rf, ok := prep.(Refunder); ok {
+				rf.Refund(prepared)
+			}
+			return envelope.Request{}, &StatusError{Code: http.StatusInternalServerError, Err: viewErr}
+		}
+		req.AboutHost = view.host
+	}
+	if s.cfg.FileAllAsks == "off" && req.About == "" {
+		req, err = s.store.Enqueue(ctx, req, ttl)
+	} else {
+		req, err = s.store.EnqueueFilingTasks(ctx, req, ttl, s.cfg.FileAllAsks != "on" && req.About == "")
+	}
 	if err != nil {
 		if rf, ok := prep.(Refunder); ok {
 			rf.Refund(prepared)
@@ -1053,8 +1198,12 @@ func (s *Server) submit(ctx context.Context, req envelope.Request) (envelope.Req
 		if errors.Is(err, store.ErrGroupFull) {
 			return envelope.Request{}, &StatusError{Code: http.StatusBadRequest, Err: err}
 		}
+		if errors.Is(err, store.ErrTaskRetries) || errors.Is(err, store.ErrTaskAssignLimit) {
+			return envelope.Request{}, &StatusError{Code: http.StatusConflict, Err: err}
+		}
 		return envelope.Request{}, &StatusError{Code: attachmentStatus(err, http.StatusInternalServerError), Err: err}
 	}
+	s.taskAsksCancelled(ctx, req.TaskID, req.TaskCancelled, "task_retried")
 	s.recordPassSent(ctx, req)
 	if req.Status == envelope.StatusHeld {
 		s.record(ctx, "held", req.ID, req.TraceID, req.From, store.DetailJSON(map[string]any{"to": req.To, "hop": req.Hop, "chain": req.Chain}))
@@ -1298,7 +1447,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		if len(reqs) > 0 || len(reps) > 0 {
 			for i := range reqs {
 				reqs[i].RedactFor(name)
-				markTaskNotice(&reqs[i])
+				s.renderTaskNotice(r.Context(), &reqs[i])
 			}
 			for _, q := range reqs {
 				s.record(r.Context(), "delivered", q.ID, q.TraceID, name, "")
@@ -1624,6 +1773,7 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.record(r.Context(), "claimed", req.ID, req.TraceID, name, detail)
+	s.renderTaskNotice(r.Context(), &req)
 	writeJSON(w, http.StatusOK, req)
 }
 
@@ -1794,15 +1944,28 @@ func (s *Server) recordReplyWith(ctx context.Context, id, agent string, rep enve
 	}
 	s.record(ctx, event, id, "", agent, store.DetailJSON(detail))
 	s.recordSuperseded(ctx, id, "replied", rep.Superseded)
+	if len(rep.CancelledFollowups) != 0 {
+		if ask, _, err := s.store.Request(ctx, id); err == nil {
+			s.taskAsksCancelled(ctx, ask.TaskID, rep.CancelledFollowups, "task_done")
+		}
+	}
 	// A reply to a task's ask returned the task, asked a question or
 	// released it.
 	s.drainTaskNotices(ctx)
 	// The asker learns of the reply from a held poll now, or from a wake
 	// once the waker's grace period shows it went unread.
-	if req, _, err := s.store.Request(ctx, id); err == nil {
+	if req, status, err := s.store.Request(ctx, id); err == nil {
+		req.Status = status
 		s.hub.notify(inboxKey(req.From))
-		if rp, ok := s.events.(Replier); ok && req.Kind != envelope.KindPing {
-			rp.Replied(ctx, req)
+		if req.Kind != envelope.KindPing {
+			if rep.Status == envelope.StatusNeedsInput {
+				if cl, ok := s.events.(Clarifier); ok {
+					cl.NeedsInput(ctx, req)
+				}
+			}
+			if rp, ok := s.events.(Replier); ok {
+				rp.Replied(ctx, req)
+			}
 		}
 		if req.RoomPostID != 0 {
 			s.auditMirror(ctx, rep)
@@ -2465,6 +2628,37 @@ func (s *Server) UnseenReplyIDs(agent string) ([]string, error) {
 	return s.store.UnseenReplyIDs(ctx, agent)
 }
 
+// IsReplyUnseen reports whether requestID still has an unread reply for agent.
+// On a store read error it returns true so a wake is not silently dropped.
+func (s *Server) IsReplyUnseen(agent, requestID string) bool {
+	ids, err := s.UnseenReplyIDs(agent)
+	if err != nil {
+		return true
+	}
+	return slices.Contains(ids, requestID)
+}
+
+// SetGatewayEvents installs the sanitized MCP Events subscription lister served
+// at GET /v1/admin/gateway/events when --chatgpt-gateway is enabled.
+func (s *Server) SetGatewayEvents(fn func(context.Context) (any, error)) { s.gatewayEvents = fn }
+
+func (s *Server) handleGatewayEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.isAdmin(r) {
+		writeErr(w, http.StatusForbidden, identity.ErrNotAdmin)
+		return
+	}
+	if s.gatewayEvents == nil {
+		writeErr(w, http.StatusNotFound, errors.New("the MCP gateway is not enabled on this relay (start the relay with --chatgpt-gateway)"))
+		return
+	}
+	subs, err := s.gatewayEvents(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": subs})
+}
+
 // LastPoll is agent's last inbox poll, including peek: the later of this
 // process's memory and the poll persisted for a restart. The waker uses it
 // as proof of life for request follow-up. The store is read only when this
@@ -3020,7 +3214,7 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	}
 	s.nonces.void(req.ID)
 	s.record(r.Context(), "denied", req.ID, req.TraceID, s.remote(r), s.deviceDetail(r))
-	// The owner's denial is told to no host; the drain clears its row.
+	// Only a newly surfaced quiet ask has status news after the owner's denial.
 	s.drainTaskNotices(r.Context())
 	s.hub.notify(requestKey(req.ID))
 	s.hub.notify(inboxKey(req.From))

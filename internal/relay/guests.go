@@ -274,8 +274,9 @@ var healthRoutes = map[string]bool{"GET /healthz": true, "GET /metrics": true}
 const healthLookup = time.Second
 
 // guestSendFields are the only send fields a guest may set. kind is checked
-// by value in guestSendRefusal.
-var guestSendFields = map[string]bool{"to": true, "body": true, "kind": true}
+// by value in guestSendRefusal. idempotency_key only makes a retry of the
+// guest's own send return that send, and the client sets it on every send.
+var guestSendFields = map[string]bool{"to": true, "body": true, "kind": true, "idempotency_key": true}
 
 // guestSendRefusal says why guest g may not send raw, parsed as req, nil when
 // it may. It reads the raw JSON, not only the parsed request, so a field this

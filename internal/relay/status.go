@@ -92,7 +92,7 @@ func stuckReason(f statusFacts, now time.Time) string {
 	// The relay wakes webhook and email agents, and a schedule agent that
 	// keeps its checks will find its queue, so only an agent-side wake
 	// that is offline has lost the process that would notice it.
-	relayWakes := relayWoken(f.wake) || f.wake == wake.Schedule
+	relayWakes := relayWoken(f.wake) || f.wake == wake.Schedule || f.wake == WakeMCPEvents
 	if !f.online && f.stat.Queued > 0 && !relayWakes {
 		return fmt.Sprintf("%d queued while offline", f.stat.Queued)
 	}
