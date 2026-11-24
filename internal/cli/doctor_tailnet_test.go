@@ -242,6 +242,10 @@ func TestTailnetChecksRole(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stubTailnet(t, tailnetSelf("1.104.4", false))
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/agents" {
+					fmt.Fprint(w, `{}`)
+					return
+				}
 				if r.URL.Path != "/v1/admin/held" {
 					t.Errorf("unexpected route %s", r.URL.Path)
 				}

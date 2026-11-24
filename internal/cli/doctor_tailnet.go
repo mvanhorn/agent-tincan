@@ -82,18 +82,18 @@ func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool)
 			running++
 		}
 	}
-	role := roleUnknown
+	role, adminTag := roleUnknown, ""
 	switch {
 	case guest:
 		role = roleGuest
 	case r != nil && running == 1 && !r.ThroughRemoteProxy():
 		role = deviceRoleOf(ctx, r)
-	}
-	// The relay's --admin-tag, when set, is how a tagged node stays an
-	// admin without a relay restart. It is reported to every caller, so
-	// the tag lines below can name it without needing admin rights.
-	adminTag := ""
-	if r != nil {
+		// The relay's --admin-tag, when set, is how a tagged node stays
+		// an admin without a relay restart. It is reported to every
+		// caller, so the tag lines below can name it without needing
+		// admin rights. It is read only here, where the relay is asked
+		// for the role anyway: with several daemons, a remote proxy, or
+		// a stopped daemon the relay is not asked at all.
 		adminTag = relayAdminTag(ctx, r)
 	}
 	// Only when the relay did not answer: a relay that answered is reached
