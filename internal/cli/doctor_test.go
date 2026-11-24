@@ -247,7 +247,7 @@ func TestVersionCheckRelayWithoutDist(t *testing.T) {
 	if c.Status != "warn" || !strings.Contains(c.Detail, "does not say which release is current") {
 		t.Fatalf("got %+v", c)
 	}
-	for _, w := range []string{"--dist", "--release-url", "relay"} {
+	for _, w := range []string{"--self-upgrade", "--dist", "--release-url", "relay"} {
 		if !strings.Contains(c.Fix, w) {
 			t.Errorf("fix lacks %q: %q", w, c.Fix)
 		}

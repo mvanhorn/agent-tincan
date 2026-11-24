@@ -93,6 +93,7 @@ func relayServiceDef(args []string) history.ServiceDef {
 func relayInstallCmd() *cobra.Command {
 	var f relayFlags
 	var binary string
+	var selfUpgrade bool
 	cmd := &cobra.Command{
 		Use:   "install [relay flags]",
 		Short: "Write the relay's service definition (launchd on macOS, systemd on Linux); does not start it",
@@ -106,6 +107,11 @@ On macOS a release build writes the plist so the service starts through
 Agent Tincan.app, and Login Items lists it as "Agent Tincan" rather than under
 the signing certificate's name. A relay plist written by hand moves over with
 tincan services refresh.
+
+With --self-upgrade the service also gets --dist <state-dir>/dist and
+--release-url ` + GitHubReleaseURL + `, unless you give them, so
+tincan relay-upgrade can update the relay. The relay still downloads only a
+release an admin names; nothing upgrades it on its own.
 
 The service never stores TS_AUTHKEY. If the relay has not joined the tailnet
 yet, run it once in a terminal with TS_AUTHKEY set, as install prints, before
@@ -138,6 +144,11 @@ starting the service.`,
 					}
 				}
 			}
+			if selfUpgrade {
+				if err := applySelfUpgrade(cmd.Flags(), f.stateDir); err != nil {
+					return err
+				}
+			}
 			args := relayServiceArgs(cmd.Flags())
 			if err := checkServiceArgs(args); err != nil {
 				return err
@@ -154,12 +165,23 @@ starting the service.`,
 				}
 				warnOtherRelayAgents(out, binary)
 			}
+			exe := binary
+			if exe == "" {
+				exe, _ = os.Executable()
+			}
 			if relayNeedsJoin(f) {
-				exe := binary
-				if exe == "" {
-					exe, _ = os.Executable()
-				}
 				fmt.Fprintf(out, "This relay has not joined your tailnet yet, and the service never stores TS_AUTHKEY. Run it once in a terminal first, stop it with Ctrl-C once it is up, then start the service:\n  TS_AUTHKEY=tskey-auth-... %s\n", shellCommand(append([]string{exe, "relay"}, args...)))
+			}
+			if f.dist == "" {
+				fmt.Fprint(out, selfUpgradeOffer())
+			} else {
+				// The running relay checks the file its symlinks lead to.
+				if real, err := filepath.EvalSymlinks(exe); err == nil {
+					exe = real
+				}
+				if msg := selfUpgradeWarning(exe, f.dist); msg != "" {
+					fmt.Fprintln(out, msg)
+				}
 			}
 			fmt.Fprintf(out, "start it with:\n  %s\n", res.Next)
 			return nil
@@ -167,6 +189,7 @@ starting the service.`,
 	}
 	addRelayFlags(cmd.Flags(), &f)
 	cmd.Flags().StringVar(&binary, "binary", "", "tincan binary the service runs (default: this executable)")
+	cmd.Flags().BoolVar(&selfUpgrade, "self-upgrade", false, "let tincan relay-upgrade update this relay: adds --dist <state-dir>/dist and --release-url "+GitHubReleaseURL+" unless you give them")
 	return cmd
 }
 
@@ -176,7 +199,7 @@ starting the service.`,
 func relayServiceArgs(fs *pflag.FlagSet) []string {
 	var args []string
 	fs.Visit(func(fl *pflag.Flag) {
-		if fl.Name == "binary" {
+		if fl.Name == "binary" || fl.Name == "self-upgrade" {
 			return
 		}
 		if sv, ok := fl.Value.(pflag.SliceValue); ok {

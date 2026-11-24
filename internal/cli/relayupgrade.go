@@ -50,7 +50,7 @@ const maxChecksumsBytes = 1 << 20
 
 func relayUpgradeCmd() *cobra.Command {
 	var relayURL, socket, fromGitHub string
-	var force bool
+	var force, latest bool
 	var wait time.Duration
 	cmd := &cobra.Command{
 		Use:   "relay-upgrade",
@@ -72,10 +72,24 @@ release's checksums.txt, so no one needs a shell on the relay host. The relay
 must have been started with --release-url (for this project,
 https://github.com/mvanhorn/agent-tincan/releases/download); it never downloads otherwise.
 
+With --latest, this machine asks GitHub for the newest stable release and
+uses its tag as --from-github would; the relay is sent only that tag.
+
 A release that is not newer than the relay's build is refused unless --force.
 The relay user must be able to replace its own binary.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if latest {
+				if fromGitHub != "" {
+					return errors.New("--latest looks up the tag itself; pass --latest or --from-github, not both")
+				}
+				tag, err := latestReleaseTag(cmd.Context(), latestReleaseURL)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "latest release: %s (looked up on this machine)\n", tag)
+				fromGitHub = tag
+			}
 			if fromGitHub != "" && !releaseTag.MatchString(fromGitHub) {
 				return fmt.Errorf("--from-github wants a release tag such as v0.8.0, got %q", fromGitHub)
 			}
@@ -90,6 +104,7 @@ The relay user must be able to replace its own binary.`,
 	cmd.Flags().StringVar(&socket, "socket", "", "relay admin socket (when running on the relay host)")
 	cmd.Flags().BoolVar(&force, "force", false, "install the release even when it is not newer than the relay's build")
 	cmd.Flags().StringVar(&fromGitHub, "from-github", "", "have the relay download this release tag (v0.8.0) from GitHub into its dist directory first")
+	cmd.Flags().BoolVar(&latest, "latest", false, "look up the newest stable release on GitHub from this machine and upgrade to it, as --from-github with its tag")
 	cmd.Flags().DurationVar(&wait, "wait", time.Minute, "how long to wait for the restarted relay to answer with the new build (0 to not wait)")
 	return cmd
 }
@@ -175,6 +190,9 @@ func withRelayUpgrader(ctx context.Context, srv *relay.Server, f relayFlags) (co
 		stop()
 		log.Printf("relay self-upgrade is off: %v", err)
 		return ctx, nil
+	}
+	if msg := selfUpgradeWarning(u.exe, f.dist); msg != "" {
+		log.Print(msg)
 	}
 	srv.SetSelfUpgrader(u)
 	return upCtx, u
