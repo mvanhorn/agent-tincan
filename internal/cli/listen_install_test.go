@@ -988,3 +988,77 @@ func TestSetCodexApprovalLaterSubTable(t *testing.T) {
 		})
 	}
 }
+
+// The claude-code wake drives cmux, which is macOS only, so a Linux install
+// refuses it before writing the script or the service.
+func TestListenInstallRefusesCmuxWakeOnLinux(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("listen install writes POSIX services")
+	}
+	w, err := examples.Wake("claude-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "claude-code.json")
+	home := t.TempDir()
+	o := listenInstallOptions{
+		GOOS: "linux", Home: home, Binary: "/opt/tincan", UID: 501, Launcher: "/A/agent-tincan",
+		ConfigPath: cfg, Agent: "claude-code", DefaultConfig: filepath.Join(home, "default", "client.json"), Out: &bytes.Buffer{},
+	}
+	err = installListener(o, w)
+	if err == nil {
+		t.Fatal("want a refusal on linux")
+	}
+	for _, want := range []string{"cmux", "macOS only", "codex, copilot-cli, cursor-cli"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	if _, err := os.Stat(listenServiceFile(home, "linux", "claude-code")); err == nil {
+		t.Error("wrote the service file")
+	}
+	if _, err := os.Stat(filepath.Join(listenDir(cfg), w.File)); err == nil {
+		t.Error("wrote the wake script")
+	}
+	if _, err := os.Stat(listenDir(cfg)); err == nil {
+		t.Error("made the wake folder")
+	}
+}
+
+// An approval key holding a multi-line string is not read as approve, and
+// is refused rather than half replaced, leaving the file as it was.
+func TestSetCodexApprovalRefusesMultilineValue(t *testing.T) {
+	cfg := "/home/o/.config/tincan/codex.json"
+	for name, val := range map[string]string{
+		"basic":   "\"\"\"\nprompt\"\"\"",
+		"literal": "'''\nprompt'''",
+		"approve": "\"\"\"\napprove\"\"\"",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			in := "[mcp_servers.agent-tincan]\ncommand = \"tincan\"\nenv = { TINCAN_CONFIG = \"" + cfg + "\" }\ndefault_tools_approval_mode = " + val + "\n\n[other]\nx = 1\n"
+			if err := os.WriteFile(path, []byte(in), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if e, ok := findCodexEntry(strings.Split(in, "\n")); !ok || e.approve || !e.multiline {
+				t.Errorf("entry = %+v ok=%v", e, ok)
+			}
+			if err := checkCodexEntry(path, cfg, "/def.json"); err == nil || !strings.Contains(err.Error(), path) {
+				t.Errorf("check err = %v", err)
+			}
+			changed, notice, err := setCodexApproval(path, "/opt/tincan", cfg, "/def.json")
+			if err == nil || changed || notice != "" {
+				t.Errorf("changed=%v notice=%q err=%v", changed, notice, err)
+			} else {
+				for _, want := range []string{path, `"approve" by hand`} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error lacks %q: %v", want, err)
+					}
+				}
+			}
+			if b, _ := os.ReadFile(path); string(b) != in {
+				t.Errorf("file changed:\n%s", b)
+			}
+		})
+	}
+}

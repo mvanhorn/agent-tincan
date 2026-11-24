@@ -37,9 +37,13 @@ var (
 // every sub-table such as [mcp_servers.agent-tincan.env], wherever in the
 // file they appear. unclear is set when TINCAN_CONFIG appears in a form
 // this reader cannot take, or more than once with different values.
+// multiline is set when the approval key's value opens a multi-line
+// string, triple double or triple single quotes, which this line-by-line
+// editor cannot replace safely.
 type codexEntry struct {
 	start, mainEnd  int
 	approve, hasKey bool
+	multiline       bool
 	config          string
 	unclear         bool
 }
@@ -195,7 +199,10 @@ func findCodexEntry(lines []string) (codexEntry, bool) {
 		if m := tomlApprovalKey.FindStringSubmatch(line); m != nil && inMain {
 			e.hasKey = true
 			v := strings.TrimSpace(m[1])
-			e.approve = v == `"approve"` || v == `'approve'`
+			if strings.HasPrefix(v, `"""`) || strings.HasPrefix(v, `'''`) {
+				e.multiline = true
+			}
+			e.approve = !e.multiline && (v == `"approve"` || v == `'approve'`)
 		}
 		if !strings.Contains(line, "TINCAN_CONFIG") {
 			continue
@@ -276,8 +283,18 @@ func checkCodexEntry(path, cfg, def string) error {
 		if msg := codexEntryMismatch(e, path, cfg, def); msg != "" {
 			return errors.New(msg + " Nothing was installed.")
 		}
+		if e.multiline {
+			return errors.New(codexMultilineMsg(path) + " Nothing was installed.")
+		}
 	}
 	return nil
+}
+
+// codexMultilineMsg is why an approval key holding a multi-line string is
+// left alone: replacing its first line would leave the rest behind as
+// invalid TOML.
+func codexMultilineMsg(path string) string {
+	return fmt.Sprintf("The agent-tincan entry in %s sets default_tools_approval_mode to a multi-line string, which tincan cannot edit safely, so it was left alone. Set it to \"approve\" by hand, on one line, and run this again.", path)
 }
 
 // setCodexApproval sets default_tools_approval_mode = "approve" on the
@@ -320,6 +337,9 @@ func setCodexApproval(path, binary, cfg, def string) (changed bool, notice strin
 	}
 	if msg := codexEntryMismatch(e, path, cfg, def); msg != "" {
 		return false, msg + " It was left alone.", nil
+	}
+	if e.multiline {
+		return false, "", errors.New(codexMultilineMsg(path))
 	}
 	if e.approve {
 		return false, "", nil

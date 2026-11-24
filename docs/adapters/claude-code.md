@@ -193,7 +193,7 @@ The rules:
 tincan listen --exec ~/bin/cmux-wake.sh
 ```
 
-Or let `tincan listen install --wake claude-code` write the script from the release and a login service that runs this listener; it prints the start command and never starts it.
+Or let `tincan listen install --wake claude-code` write the script from the release and a login service that runs this listener; it prints the start command and never starts it. It is macOS only, since the wake drives cmux, and refuses on Linux.
 
 It uses the same cmux control-plane calls as agentmail-to-claude-code, so cmux's `automation.socketControlMode` must allow it (see that repo's `setup_cmux.py`). The listener does not take the requests; the new session picks them up with `check_inbox`. Set this agent's wake to `command` in the relay's `wake.json`.
 

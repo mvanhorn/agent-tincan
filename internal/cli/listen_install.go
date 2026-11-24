@@ -205,6 +205,17 @@ func wakeFiles(w examples.WakeScript) map[string][]byte {
 	return files
 }
 
+// portableWakes are the installable wakes that run off macOS.
+func portableWakes() []string {
+	var names []string
+	for _, n := range examples.WakeNames() {
+		if w, err := examples.Wake(n); err == nil && !w.MacOS {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 type wakeFileState int
 
 const (
@@ -258,6 +269,9 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 	}
 	if o.GOOS != "darwin" && o.GOOS != "linux" {
 		return errors.New(listenService{Agent: o.Agent}.def().Unsupported)
+	}
+	if w.MacOS && o.GOOS != "darwin" {
+		return fmt.Errorf("the %s wake drives cmux, which is macOS only, so it cannot run on %s. The wakes that work there are %s. Nothing was installed", w.Name, o.GOOS, strings.Join(portableWakes(), ", "))
 	}
 	isCodex := w.Name == "codex"
 	if isCodex {

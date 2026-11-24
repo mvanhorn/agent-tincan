@@ -38,6 +38,7 @@ type WakeScript struct {
 	Script   []byte
 	NeedsLib bool   // sources WakeLibName from its own folder
 	Tool     string // the program the wake starts, looked up on the service's PATH
+	MacOS    bool   // drives a macOS-only app (cmux), so it is refused elsewhere
 	Notice   string // what a woken agent may do with nobody watching
 }
 
@@ -60,7 +61,7 @@ var wakes = map[string]WakeScript{
 			"It uses a private Cursor config folder, so your own ~/.cursor settings, servers and hooks do not apply.",
 	},
 	"claude-code": {
-		Name: "claude-code", File: "cmux-wake.sh", Source: "claude-code/cmux-wake.sh", Script: cmuxWake, Tool: "claude",
+		Name: "claude-code", File: "cmux-wake.sh", Source: "claude-code/cmux-wake.sh", Script: cmuxWake, Tool: "claude", MacOS: true,
 		Notice: "Each wake opens a Claude Code session in cmux with your own settings and permission mode. " +
 			"If your Claude launcher skips permissions, a teammate's request can run anything on this machine with no one confirming it.",
 	},
