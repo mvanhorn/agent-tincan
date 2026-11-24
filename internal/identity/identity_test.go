@@ -360,6 +360,26 @@ func TestAdminTagGrantsTaggedNode(t *testing.T) {
 	}
 }
 
+// A node that joined with a tagged auth key has no owning user: Tailscale
+// reports its tags and no login. With --admin-login set, the tag path
+// still needs a listed login, so such a node is denied until the owner
+// lists whatever login its tagged admin nodes report (check with
+// `tailscale whois`).
+func TestAdminTagNeedsListedLogin(t *testing.T) {
+	ctx := context.Background()
+	who := identitytest.New(map[string]identity.Node{
+		"100.0.2.9:1": {ID: "nK", Name: "kiosk", Tags: []string{"tag:tincan-admin"}},
+	})
+	dir := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{Admins: []string{"macbook-pro-44"}, AdminTag: "tag:tincan-admin", AdminLogins: []string{"mvanhorn@gmail.com"}})
+	if dir.IsAdmin(ctx, "100.0.2.9:1") {
+		t.Fatal("tagged node with no login must not pass a login list")
+	}
+	open := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{Admins: []string{"macbook-pro-44"}, AdminTag: "tag:tincan-admin"})
+	if !open.IsAdmin(ctx, "100.0.2.9:1") {
+		t.Fatal("tagged node with no login is admin when no login list is set")
+	}
+}
+
 // MachineFacts reports the verdict enforcement uses, with the node's live
 // tags, and nothing for nodes the tailnet does not report.
 func TestMachineFacts(t *testing.T) {
