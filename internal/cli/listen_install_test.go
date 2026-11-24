@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"html"
 	"os"
 	"os/exec"
@@ -1060,5 +1061,156 @@ func TestSetCodexApprovalRefusesMultilineValue(t *testing.T) {
 				t.Errorf("file changed:\n%s", b)
 			}
 		})
+	}
+}
+
+func geminiWake(t *testing.T) examples.WakeScript {
+	t.Helper()
+	w, err := examples.Wake("gemini-cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// writeAgyMCP writes agy's MCP config under home with the given servers.
+func writeAgyMCP(t *testing.T, home string, servers map[string]any) string {
+	t.Helper()
+	p := filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func agyTincanEntry(cfg string) map[string]any {
+	return map[string]any{"command": "/usr/local/bin/tincan", "args": []string{"mcp"}, "env": map[string]string{"TINCAN_CONFIG": cfg}, "disabled": false}
+}
+
+func geminiOptions(t *testing.T, goos string) listenInstallOptions {
+	t.Helper()
+	cfg := filepath.Join(t.TempDir(), "gemini-cli.json")
+	o := listenOptions(t, goos, cfg)
+	o.Agent = "gemini-cli"
+	return o
+}
+
+// The gemini-cli wake installs with its library and a service that adds no
+// opt-in and no key, after checking that agy's MCP config pins this agent.
+func TestListenInstallGeminiCLI(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			o := geminiOptions(t, goos)
+			writeAgyMCP(t, o.Home, map[string]any{"agent-tincan": agyTincanEntry(o.ConfigPath)})
+			var out bytes.Buffer
+			o.Out = &out
+			if err := installListener(o, geminiWake(t)); err != nil {
+				t.Fatal(err)
+			}
+			dir := listenDir(o.ConfigPath)
+			for _, f := range []string{"gemini-wake.sh", examples.WakeLibName} {
+				if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+					t.Errorf("%s not written: %v", f, err)
+				}
+			}
+			b, err := os.ReadFile(listenServiceFile(o.Home, goos, "gemini-cli"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, bad := range []string{"ALLOW_UNCONFINED", "API_KEY", "TINCAN_GEMINI_ENGINE"} {
+				if strings.Contains(string(b), bad) {
+					t.Errorf("service mentions %s:\n%s", bad, b)
+				}
+			}
+			for _, want := range []string{"sandbox", "read", "cannot write files or run commands", "TINCAN_GEMINI_ALLOW_UNCONFINED=1", `"gemini-cli": {"method": "command"}`} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output lacks %q:\n%s", want, out.String())
+				}
+			}
+		})
+	}
+}
+
+// Install refuses, before writing anything, when agy's MCP config would make
+// the wake refuse: missing, no tincan server, two of them, one pinned to
+// another agent, or one with no TINCAN_CONFIG.
+func TestListenInstallGeminiCLIRefusesBadAgyConfig(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		servers func(cfg string) map[string]any
+		want    string
+	}{
+		{"missing", nil, "agy mcp add"},
+		{"none", func(string) map[string]any { return map[string]any{"fs": map[string]any{"command": "npx"}} }, "agy mcp add"},
+		{"two", func(cfg string) map[string]any {
+			return map[string]any{"agent-tincan": agyTincanEntry(cfg), "tincan-2": agyTincanEntry(cfg)}
+		}, "exactly one"},
+		{"other agent", func(string) map[string]any {
+			return map[string]any{"agent-tincan": agyTincanEntry("/elsewhere/codex.json")}
+		}, "another agent"},
+		{"unpinned", func(string) map[string]any {
+			return map[string]any{"agent-tincan": map[string]any{"command": "tincan", "args": []string{"mcp"}}}
+		}, "TINCAN_CONFIG"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			o := geminiOptions(t, "linux")
+			if c.servers != nil {
+				writeAgyMCP(t, o.Home, c.servers(o.ConfigPath))
+			}
+			err := installListener(o, geminiWake(t))
+			if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "Nothing was installed") {
+				t.Fatalf("err = %v, want it to say %q and Nothing was installed", err, c.want)
+			}
+			if _, err := os.Stat(listenDir(o.ConfigPath)); err == nil {
+				t.Error("wake scripts written for a refused install")
+			}
+			if _, err := os.Stat(listenServiceFile(o.Home, "linux", "gemini-cli")); err == nil {
+				t.Error("service written for a refused install")
+			}
+		})
+	}
+}
+
+// The pin matches the same config through a symlinked directory, as the
+// wake's own check does.
+func TestListenInstallGeminiCLIPinThroughSymlink(t *testing.T) {
+	o := geminiOptions(t, "linux")
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(filepath.Dir(o.ConfigPath), link); err != nil {
+		t.Fatal(err)
+	}
+	writeAgyMCP(t, o.Home, map[string]any{"agent-tincan": agyTincanEntry(filepath.Join(link, "gemini-cli.json"))})
+	if err := installListener(o, geminiWake(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// What the owner added to the service, such as the unconfined opt-in or the
+// Gemini CLI engine, survives a reinstall.
+func TestListenInstallGeminiCLIKeepsOwnerOptIn(t *testing.T) {
+	o := geminiOptions(t, "linux")
+	writeAgyMCP(t, o.Home, map[string]any{"agent-tincan": agyTincanEntry(o.ConfigPath)})
+	if err := installListener(o, geminiWake(t)); err != nil {
+		t.Fatal(err)
+	}
+	f := listenServiceFile(o.Home, "linux", "gemini-cli")
+	b, _ := os.ReadFile(f)
+	edited := strings.Replace(string(b), "Restart=always", "Environment=\"TINCAN_GEMINI_ALLOW_UNCONFINED=1\"\nEnvironment=\"TINCAN_GEMINI_ENGINE=gemini\"\nRestart=always", 1)
+	if err := os.WriteFile(f, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installListener(o, geminiWake(t)); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(f)
+	if serviceEnv(b, "linux", "TINCAN_GEMINI_ALLOW_UNCONFINED") != "1" || serviceEnv(b, "linux", "TINCAN_GEMINI_ENGINE") != "gemini" {
+		t.Fatalf("owner's variables lost on reinstall:\n%s", b)
 	}
 }

@@ -279,6 +279,11 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 			return err
 		}
 	}
+	if w.Name == "gemini-cli" {
+		if err := checkAgyEntry(agyMCPConfigPath(o.Home), o.ConfigPath, o.Binary); err != nil {
+			return err
+		}
+	}
 	out := o.Out
 	fmt.Fprintf(out, "Before you start it: %s\n\n", w.Notice)
 	var toolDirs []string
