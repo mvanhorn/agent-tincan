@@ -724,6 +724,17 @@ func TestRelayAcceptsCouncilKind(t *testing.T) {
 	}
 }
 
+func TestRelayAcceptsManusCueKind(t *testing.T) {
+	h := newHarness(t, Config{})
+	var inv struct{ Code string }
+	h.do(macAddr, "POST", "/v1/admin/invite", `{"name":"researcher","kind":"manus-cue"}`, http.StatusOK, &inv)
+	h.do(strangerAddr, "POST", "/v1/join", `{"code":"`+inv.Code+`"}`, http.StatusOK, nil)
+	h.do(macAddr, "PUT", "/v1/agents/muse/kind", `{"kind":"manus-cue"}`, http.StatusOK, nil)
+	if k := kinds(t, h); k["researcher"] != "manus-cue" || k["muse"] != "manus-cue" {
+		t.Fatalf("kinds after join and in-place conversion = %v", k)
+	}
+}
+
 // The local admin socket can set a kind too.
 func TestLocalAdminSocketCanSetKind(t *testing.T) {
 	h := newHarness(t, Config{})

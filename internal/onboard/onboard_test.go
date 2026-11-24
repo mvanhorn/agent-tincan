@@ -10,6 +10,65 @@ import (
 
 const relayURL = "http://100.64.0.9:8787"
 
+func TestManusCueOnboarding(t *testing.T) {
+	k := build(t, Options{RelayURL: relayURL, Roster: []Member{
+		{Name: "researcher", Kind: "manus-cue"},
+		{Name: "existing", Kind: "proxy-sandbox", Wake: "wait"},
+	}})
+	a := block(t, k, "researcher")
+	if a.Kind != "manus-cue" || a.Wake != "webhook" {
+		t.Fatalf("Cue kind = %q, wake = %q; want manus-cue, webhook", a.Kind, a.Wake)
+	}
+	direct, conditional, ok := strings.Cut(a.Join, ". If using a local SOCKS5 proxy, add ")
+	if !ok || direct != "Direct tailnet: tincan join <code> --relay "+relayURL ||
+		!strings.HasPrefix(conditional, "--proxy socks5://127.0.0.1:1055") {
+		t.Errorf("Cue join should show a direct command and a conditional SOCKS5 flag: %q", a.Join)
+	}
+	if !strings.Contains(k.Operator, "researcher kind=manus-cue wake=webhook (may sleep or be off)") {
+		t.Error("operator instructions should treat a sleeping Cue as normal")
+	}
+	for _, want := range []string{"Catch Hook", "check_inbox", "stdio", "socks5://127.0.0.1:1055", "same Tailscale node"} {
+		if !strings.Contains(blockText(a), want) {
+			t.Errorf("Cue onboarding missing %q", want)
+		}
+	}
+	if strings.Contains(blockText(a), "tincan wait &") || !strings.Contains(blockText(block(t, k, "existing")), "tincan wait &") {
+		t.Fatal("Cue must not inherit the proxy-sandbox wait loop or change existing members")
+	}
+	steps := recipe(t, k, "manus-cue").Steps
+	if len(steps) < 3 || !strings.Contains(steps[0], "verify the relay is reachable") ||
+		!strings.Contains(steps[0], "separate TINCAN_CONFIG") ||
+		!strings.Contains(steps[1], "tincan invite") || !strings.Contains(steps[2], "tincan join") {
+		t.Fatalf("Cue recipe should verify connectivity before invite and join: %v", steps)
+	}
+	r := strings.Join(steps, "\n")
+	if !strings.Contains(strings.Join(a.Setup, "\n"), "absolute path of the config used to join") {
+		t.Error("Cue's MCP setup should use the same config as join")
+	}
+	for _, want := range []string{"including tincan doctor and tincan rejoin, set TINCAN_CONFIG", "use tincan inbox and tincan reply only with that config", "rather than using the default inbox"} {
+		if !strings.Contains(a.Instructions, want) {
+			t.Errorf("Cue shell fallback is missing %q", want)
+		}
+	}
+	for _, want := range []string{"--kind manus-cue", "socks5://127.0.0.1:1055", "max_per_hour"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("Cue recipe missing %q", want)
+		}
+	}
+	offline := build(t, Options{Offline: true})
+	if got := recipe(t, offline, "manus-cue").Title; !strings.Contains(got, "Manus Cue") {
+		t.Errorf("offline Cue recipe title = %q", got)
+	}
+	legacy := build(t, Options{
+		RelayURL:      relayURL,
+		Roster:        []Member{{Name: "researcher", Kind: KindProxySandbox, Wake: "webhook"}},
+		KindOverrides: map[string]string{"researcher": KindManusCue},
+	})
+	if a := block(t, legacy, "researcher"); a.Kind != KindManusCue || !strings.Contains(a.Instructions, "Catch Hook") {
+		t.Error("local kind override should provide Cue instructions on an older relay")
+	}
+}
+
 func matts() []Member {
 	return []Member{
 		{Name: "grokbot", Wake: "webhook", Online: true},

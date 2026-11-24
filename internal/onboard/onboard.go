@@ -28,6 +28,7 @@ const (
 	KindVMWebhook     = "vm-webhook"
 	KindE2BEmail      = "e2b-email"
 	KindProxySandbox  = "proxy-sandbox"
+	KindManusCue      = "manus-cue"
 	KindClaudeCode    = "claude-code"
 	KindChatGPT       = "chatgpt"
 	KindSesame        = "sesame"
@@ -58,7 +59,7 @@ const (
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindDuetWeb, KindPhone, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindManusCue, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindDuetWeb, KindPhone, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -82,6 +83,7 @@ var runtimeNames = map[string]string{
 	"chatgpt":        KindChatGPT,
 	"sesame":         KindSesame,
 	"hermes":         KindHermes,
+	"manus-cue":      KindManusCue,
 	"openclaw":       KindOpenClaw,
 	"codex":          KindCodex,
 	"gemini-cli":     KindGeminiCLI,
@@ -108,6 +110,7 @@ var defaultWake = map[string]string{
 	KindVMWebhook:     "webhook",
 	KindE2BEmail:      "email",
 	KindProxySandbox:  "wait",
+	KindManusCue:      "webhook",
 	KindClaudeCode:    "channel",
 	KindChatGPT:       "none",
 	KindSesame:        "schedule",
@@ -396,6 +399,8 @@ func resolveKind(m Member, overrides map[string]string) string {
 
 func expectOnline(kind, wake string) bool {
 	switch kind {
+	case KindManusCue:
+		return false // sleeping between runs is normal; the relay reports missed wakes
 	case KindVMWebhook, KindProxySandbox, KindHermes, KindOpenClaw:
 		return true
 	case KindGeneric:

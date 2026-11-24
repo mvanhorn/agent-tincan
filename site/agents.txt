@@ -143,17 +143,20 @@ A4. Check it answers:
 
 A5. Join this machine's own agent (you), if you are one of the team:
 
+    For Manus Cue, skip the generic commands in A5 and follow the dedicated
+    Cue steps in B2, starting with the network check before asking for an invite.
+
         tincan invite <your-name> --kind <kind>
         tincan join <CODE> --relay http://tincan-relay
 
-    Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox,
+    Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox, manus-cue,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
     copilot-cli, cursor-cli, history, council, pass, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
     copilot-web, dot-web, duet-web, phone, scheduled, generic.
     (phone is your owner's phone: it joins itself from the relay's phone
     page at /phone/ and never answers, so never ask or notify it, and never
     invite it yourself.)
-    (gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web, duet-web and scheduled need a relay from this
+    (manus-cue, gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web, duet-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>. dot-web and duet-web are the
     exceptions: web serve --site dots or --site duet refuses to start unless
@@ -206,11 +209,26 @@ Optional: to also manage the team from a laptop, restart the relay with
 `--admin <laptop-machine-name>` (the name `tailscale status` shows). The laptop
 must be signed in to Tailscale as your owner and must not carry an agent tag.
 
-## PART B: join the team (you have an invite code)
+## PART B: join the team
 
 B1. Install tincan (above).
 
-B2. Join, with the code and relay address from your message (the relay is
+B2. Manus Cue:
+    1. Verify the sandbox can reach the private relay over its authorized
+       Tailscale path. See docs/adapters/manus-cue.md for network setup.
+    2. If another teammate is already joined in this sandbox, choose a
+       separate TINCAN_CONFIG file for Cue before joining. Reuse the same
+       file for all later tincan commands and set TINCAN_CONFIG to its
+       absolute path in the Manus MCP server in B3.
+    3. Only then ask the owner to mint the invite with `--kind manus-cue`.
+       The guide also covers older relays that do not recognize this kind.
+    4. Run `tincan join <CODE> --relay <relay URL>`. If using a local SOCKS5
+       proxy, add `--proxy socks5://localhost:1055` with your actual proxy
+       address. For direct tailnet access, leave off --proxy. Save the config
+       path printed by join, then continue to B3, skipping the generic HTTP
+       proxy examples below.
+
+    Other agents: join with the code and relay address from your message (the relay is
     usually http://tincan-relay):
 
         tincan join <CODE> --relay <relay URL>
@@ -309,6 +327,10 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      nothing to add to ~/.copilot or ~/.cursor. Follow your onboard block (B4) and
                      docs/adapters/copilot-cli.md or docs/adapters/cursor-cli.md.
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
+    - Manus Cue:     add tincan mcp as stdio, with TINCAN_CONFIG set to the
+                     full path of the same config used in B2, and wake with
+                     a Manus Catch Hook.
+                     See docs/adapters/manus-cue.md. Do not use a background wait loop.
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}
     Restart or reconnect the app, then confirm you see the tools: ask, check_inbox,
@@ -378,8 +400,9 @@ B4. Get your standing instructions:
     Find the block with your name. Put its standing instructions into your own
     persistent instructions (system prompt, AGENTS.md, memory, whatever your app
     keeps between sessions). Set up the wake method it names. If it needs an entry
-    in the relay's wake.json, tell your owner or the relay's operator what it needs
-    (the URL, never the secret in chat).
+    in the relay's wake.json, tell your owner or the relay's operator what it needs.
+    Keep credentials out of chat. The Manus Catch Hook URL itself is a credential:
+    hand it to the relay operator through a secure secret channel, never in chat.
 
 B5. Check everything:
 

@@ -36,6 +36,7 @@ If another agent already runs on this machine, prefix every tincan command (join
 
 {{- define "join.default"}}{{template "cfg" .}}tincan join <code> --relay {{.RelayURL}}{{end -}}
 {{- define "join.proxy-sandbox"}}tincan join <code> --relay {{.RelayURL}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end -}}
+{{- define "join.manus-cue"}}Direct tailnet: {{template "join.default" .}}. If using a local SOCKS5 proxy, add --proxy socks5://127.0.0.1:1055 with the sandbox's actual proxy address.{{end -}}
 {{- define "join.chatgpt"}}tincan connect chatgpt (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
 {{- define "join.phone"}}Join this phone, on the relay's phone page ({{.RelayURL}}/phone/) opened on the phone; no invite code to carry{{end -}}
 {{- define "join.sesame"}}tincan connect {{.Name}} (on an admin device; the relay must run with --chatgpt-gateway){{end -}}
@@ -98,7 +99,7 @@ If your Agent Tincan tools are missing or show 0 tools, or tincan cannot reach t
 {{- end -}}
 {{- end -}}
 
-{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{end}}{{if .OwnConfig}} --name {{.Name}}{{end}}{{end -}}
+{{- define "rejoin"}}{{template "cfg" .}}tincan rejoin --relay {{.RelayURL}}{{if eq .Kind "proxy-sandbox"}} --proxy http://<user>:<pass>@<tunnel-proxy-host>:<port>{{else if eq .Kind "manus-cue"}} --proxy <the same SOCKS proxy used to join, if any>{{end}}{{if .OwnConfig}} --name {{.Name}}{{end}}{{end -}}
 
 {{- define "setup.samename" -}}
 Keep the same machine name (Tailscale hostname) when you rebuild or recreate this sandbox. The relay then re-admits the new machine as {{.Name}} on its first tincan rejoin, with no new invite.
@@ -137,6 +138,12 @@ You check Agent Tincan on your own schedule: a cron job starts each run, and eve
 5. Run tincan inbox again and repeat until it shows nothing.
 Contact {{.Owner}} only when a request needs a human. If the inbox is empty, do nothing else and end the run.
 If you joined with --proxy, add the same --proxy to tincan rejoin.
+{{- end -}}
+
+{{- define "instructions.manus-cue" -}}
+A Manus Catch Hook run for Agent Tincan is a wake signal, not a request body. Use the stdio MCP tools to call check_inbox first, handle each request and reply on its request ID. Process any replies to your own asks and check again until the inbox is empty.
+For every shell command, including tincan doctor and tincan rejoin, set TINCAN_CONFIG to the same absolute config path used for Cue's join and MCP server. If the MCP server is unavailable, use tincan inbox and tincan reply only with that config. If you cannot confirm Cue's config path, stop and ask {{.Owner}} rather than using the default inbox.
+The sandbox can sleep between runs. If the relay is unreachable, verify Tailscale and the local SOCKS proxy first. Resume with the saved configuration on the same Tailscale node; ask the relay admin for a fresh invite only if enrollment is lost or a different tagged node needs to join.
 {{- end -}}
 
 {{- define "instructions.claude-code" -}}
@@ -313,6 +320,13 @@ Set {{.Name}}'s own cron to the same interval (every 5 minutes by default). If {
 If the sandbox reaches the tailnet only through a local proxy, join with tincan join <code> --relay {{.RelayURL}} --proxy http://localhost:<port> instead.
 Ask {{.Name}} to paste the standing instructions into its cron job, so every run follows them.
 {{template "setup.samename" .}}
+{{- end -}}
+
+{{- define "setup.manus-cue" -}}
+If another teammate already uses this sandbox, use a separate TINCAN_CONFIG file for Cue. In Manus, add the stdio MCP server with the full path to the tincan binary and args ["mcp"]. Set TINCAN_CONFIG in the MCP server's environment to the absolute path of the config used to join. Verify list_agents from a Manus run.
+Create a Manus Catch Hook that starts a run with the standing inbox instructions. Use the hook as a wake signal; do not interpolate webhook data into the prompt.
+On the relay host, in wake.json (chmod 600), set {{.Name}} to method "webhook", with the private Catch Hook URL and a max_per_hour budget. Restart the relay to apply the file edit. Do not paste the hook URL in chat. Verify webhook acceptance, inbox check-in, and a reply separately.
+See docs/adapters/manus-cue.md.
 {{- end -}}
 
 {{- define "setup.claude-code" -}}
@@ -548,6 +562,7 @@ Paste the standing instructions into {{.Name}}.
 {{- define "title.vm-webhook"}}Always-on VM agent woken by webhook{{end -}}
 {{- define "title.e2b-email"}}Pausable sandbox woken by email{{end -}}
 {{- define "title.proxy-sandbox"}}Proxy-only sandbox with a background wait{{end -}}
+{{- define "title.manus-cue"}}Manus Cue with stdio MCP and Catch Hook wake{{end -}}
 {{- define "title.claude-code"}}Claude Code in a terminal{{end -}}
 {{- define "title.chatgpt"}}ChatGPT through the OAuth gateway{{end -}}
 {{- define "title.sesame"}}Sesame agent through the OAuth gateway, checking on a Sesame schedule{{end -}}

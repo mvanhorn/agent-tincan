@@ -1,6 +1,6 @@
 {{- /*
-Recipes for agents not yet on the roster: invite from an admin device first,
-then join on the agent's machine, then the kind's setup.<kind> steps from
+Recipes for agents not yet on the roster: prerequisites if any, invite from
+an admin device, then join on the agent's machine, then setup.<kind> steps from
 agent.tmpl, then recipe.tail. One step per line. Onboarding never mints codes;
 it only tells the reader to run tincan invite.
 */ -}}
@@ -12,6 +12,11 @@ On the agent's machine: {{template "join.default" .}}
 {{- define "recipe.invite.proxy-sandbox" -}}
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
 On the agent's machine: {{template "join.proxy-sandbox" .}}
+{{- end -}}
+{{- define "recipe.invite.manus-cue" -}}
+In the Cue sandbox, set up an authorized Tailscale path and verify the relay is reachable before asking for an invite. If another teammate already uses this sandbox, choose a separate TINCAN_CONFIG file for Cue before joining. See docs/adapters/manus-cue.md.
+On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite <name> --kind {{.Kind}}. The code is valid 10 minutes; hand it straight to the agent's machine, never through group chat or logs.
+On the agent's machine: {{template "join.manus-cue" .}}
 {{- end -}}
 {{- define "recipe.invite.notes" -}}
 On an admin device (or on the relay host with --socket <state-dir>/admin.sock): tincan invite notes --kind notes. The service only runs as the agent named notes. The code is valid 10 minutes; hand it straight to the Agent Notes Mac, never through group chat or logs.

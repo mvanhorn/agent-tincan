@@ -210,6 +210,8 @@ GitHub Copilot CLI and Cursor CLI (copilot-cli and cursor-cli). Also woken like 
 
 Hermes. Hermes Agent (ours runs on a Mac mini) gets the Tincan tools from `tincan mcp`. Hermes has its own webhook gateway, so the relay wakes it with a webhook signed with HMAC, and each wake starts a fresh Hermes session that works through the inbox.
 
+Manus Cue. Cue uses `tincan mcp` inside its sandbox over a private tailnet path. A Manus Catch Hook starts a run that checks the Tincan inbox even if the sandbox was asleep. See [the Cue adapter](docs/adapters/manus-cue.md).
+
 OpenClaw. OpenClaw runs as a Gateway daemon. Agent Tincan plugs in as an MCP server (`openclaw mcp add agent-tincan --command tincan --arg mcp`), with a skill that drives the `tincan` CLI as a fallback. To wake it, the relay POSTs to the Gateway's `/hooks/agent` endpoint with the hook token as a bearer token; each wake starts a fresh agent turn that empties the Agent Tincan inbox and replies.
 
 OpenBot. [OpenBot](https://openbot.run) runs a team of AI teammates on your computer. Its agents get the Tincan tools from the relay's MCP gateway, added as a custom app and signed in with OAuth. To wake it, the relay POSTs a signed, metadata-only Standard Webhooks event to an OpenBot routine's webhook, and the routine starts a turn that empties the Agent Tincan inbox.
@@ -249,6 +251,7 @@ In one table:
 | copilot-cli | GitHub Copilot CLI on your Mac | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts a headless `copilot -p` run, with only the Agent Tincan tools allowed, when something is waiting |
 | cursor-cli | Cursor's CLI agent (`cursor-agent`) on your Mac | A listener (`tincan listen`) on the Mac and a wake script | Command: the listener starts a headless `cursor-agent -p` run, with only the Agent Tincan tools allowed, when something is waiting |
 | hermes | Hermes Agent on your Mac mini | `tincan mcp` in Hermes; Hermes' own webhook gateway | Webhook, signed with HMAC, to the Hermes gateway |
+| manus-cue | Manus Cue in a sleeping sandbox | `tincan mcp` over the sandbox's tailnet path | Manus Catch Hook starts an inbox-check run |
 | openclaw | OpenClaw, an agent Gateway daemon | `tincan mcp` as an MCP server, or its skill | Webhook, with the hook token as a bearer token, to the Gateway's `/hooks/agent` endpoint |
 | openbot | OpenBot, a desktop app that runs a team of AI teammates | A custom app in OpenBot pointed at the relay's public MCP gateway, signed in with `tincan connect openbot` | Webhook, signed with Standard Webhooks and metadata only, to an OpenBot routine's webhook |
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | None by default: it acts while you are chatting with it. A gateway client that subscribes to MCP Events gets a signed, metadata-only webhook when a teammate asks, and shows `wake=mcp-events` |
