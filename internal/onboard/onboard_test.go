@@ -30,7 +30,12 @@ func TestManusCueOnboarding(t *testing.T) {
 	if strings.Contains(blockText(a), "tincan wait &") || !strings.Contains(blockText(block(t, k, "existing")), "tincan wait &") {
 		t.Fatal("Cue must not inherit the proxy-sandbox wait loop or change existing members")
 	}
-	r := strings.Join(recipe(t, k, "manus-cue").Steps, "\n")
+	steps := recipe(t, k, "manus-cue").Steps
+	if len(steps) < 3 || !strings.Contains(steps[0], "verify the relay is reachable") ||
+		!strings.Contains(steps[1], "tincan invite") || !strings.Contains(steps[2], "tincan join") {
+		t.Fatalf("Cue recipe should verify connectivity before invite and join: %v", steps)
+	}
+	r := strings.Join(steps, "\n")
 	for _, want := range []string{"--kind manus-cue", "socks5://127.0.0.1:1055", "max_per_hour"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("Cue recipe missing %q", want)
@@ -39,6 +44,14 @@ func TestManusCueOnboarding(t *testing.T) {
 	offline := build(t, Options{Offline: true})
 	if got := recipe(t, offline, "manus-cue").Title; !strings.Contains(got, "Manus Cue") {
 		t.Errorf("offline Cue recipe title = %q", got)
+	}
+	legacy := build(t, Options{
+		RelayURL:      relayURL,
+		Roster:        []Member{{Name: "researcher", Kind: KindProxySandbox, Wake: "webhook"}},
+		KindOverrides: map[string]string{"researcher": KindManusCue},
+	})
+	if a := block(t, legacy, "researcher"); a.Kind != KindManusCue || !strings.Contains(a.Instructions, "Catch Hook") {
+		t.Error("local kind override should provide Cue instructions on an older relay")
 	}
 }
 

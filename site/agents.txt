@@ -137,6 +137,8 @@ A4. Check it answers:
 
 A5. Join this machine's own agent (you), if you are one of the team:
 
+    For Manus Cue, follow the network preflight in B2 before minting the invite.
+
         tincan invite <your-name> --kind <kind>
         tincan join <CODE> --relay http://tincan-relay
 
@@ -204,7 +206,14 @@ must be signed in to Tailscale as your owner and must not carry an agent tag.
 
 B1. Install tincan (above).
 
-B2. Join, with the code and relay address from your message (the relay is
+B2. If you are Manus Cue, first verify the sandbox can reach the private relay
+    over its authorized Tailscale path. For userspace Tailscale with SOCKS5, use
+    `--proxy socks5://localhost:1055` with your actual local proxy address, not
+    the generic HTTP proxy below. Omit --proxy for direct tailnet access. Ask
+    the owner to mint the short-lived invite with `--kind manus-cue` only after
+    verifying connectivity. See docs/adapters/manus-cue.md for older relays.
+
+    Join, with the code and relay address from your message (the relay is
     usually http://tincan-relay):
 
         tincan join <CODE> --relay <relay URL>
@@ -303,8 +312,7 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      nothing to add to ~/.copilot or ~/.cursor. Follow your onboard block (B4) and
                      docs/adapters/copilot-cli.md or docs/adapters/cursor-cli.md.
     - Hermes:        hermes mcp add agent-tincan --command tincan --args mcp ; hermes gateway restart
-    - Manus Cue:     invite with --kind manus-cue; use the sandbox's tailnet path,
-                     add tincan mcp as stdio, and wake with a Manus Catch Hook.
+    - Manus Cue:     add tincan mcp as stdio and wake with a Manus Catch Hook.
                      See docs/adapters/manus-cue.md. Do not use a background wait loop.
     - OpenClaw:      openclaw mcp add agent-tincan --command tincan --arg mcp
     - Anything else: {"mcpServers":{"agent-tincan":{"command":"/full/path/to/tincan","args":["mcp"]}}}
@@ -375,8 +383,9 @@ B4. Get your standing instructions:
     Find the block with your name. Put its standing instructions into your own
     persistent instructions (system prompt, AGENTS.md, memory, whatever your app
     keeps between sessions). Set up the wake method it names. If it needs an entry
-    in the relay's wake.json, tell your owner or the relay's operator what it needs
-    (the URL, never the secret in chat).
+    in the relay's wake.json, tell your owner or the relay's operator what it needs.
+    Keep credentials out of chat. The Manus Catch Hook URL itself is a credential:
+    hand it to the relay operator through a secure secret channel, never in chat.
 
 B5. Check everything:
 
