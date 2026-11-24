@@ -1037,6 +1037,51 @@ on first load and removed. A list it cannot read, either one, refuses every
 asker's remembered thread. The pass service checks the destination's roster
 `version` and refuses one older than the first release with this refusal.
 
+## Relay health
+
+A relay whose store has locked up, or whose sweep loop has stopped, keeps its
+process and listener up, so from outside it looks like an idle relay. Two
+routes tell them apart. Neither hangs on a wedged store: the relay waits at
+most 1 second on its read of the caller for them.
+
+`GET /healthz` answers `200 {"status":"ok"}` while the relay process serves
+HTTP. It needs no join and says nothing else: no agent or machine name, no
+count, no version. It cannot tell a wedged relay from an idle one, by design,
+since anything that could would tell the same to any caller on the tailnet. A
+guest gets 403, as on every route not written for guests. The local admin
+socket serves it too.
+
+`GET /metrics` is for admin devices and the local admin socket; other callers
+get 403 with only an error. It holds counts and ages, never a request's text,
+id, sender, target or an agent name:
+
+- `healthy`, and `problems` in words (empty when healthy). The relay is not
+  healthy when its sweep loop (which expires requests, returns lapsed claims
+  to the queue and re-wakes their agents) has not completed a pass within
+  `sweep.stall_after_seconds` (six sweep intervals, 30 seconds by default), or
+  when the store did not answer within 2 seconds. Then the answer is 503 with
+  the same body, so `curl -f` fails on a stalled relay and passes on an idle
+  one.
+- `uptime_seconds`.
+- `sweep`: `last_ok_age_seconds`, `stall_after_seconds`, and `passes` and
+  `errors` (passes the store failed) since the process started.
+- `store`: `ok`, `probe_ms`, and `size_bytes`, the database file and its
+  write-ahead log (0 for an in-memory store).
+- `queue`: `queued`, `claimed` and `oldest_queued_age_seconds` across every
+  agent, from the roster's backlog query (0 when the store did not answer).
+- `wake_failed_agents`: webhook and email agents whose last wake since they
+  joined was not accepted. It is 0 and unknown when the agents read failed,
+  which sets `store.ok` to false and adds a problem.
+
+On the relay host: `curl -fsS --unix-socket <state-dir>/admin.sock http://tincan-relay/metrics`.
+
+When the store cannot read the caller's agents, `/healthz` still answers ok,
+but `/metrics` over the tailnet answers 500 with only an error, admin devices
+included: without that read the relay cannot rule out a guest on the device.
+The local admin socket needs no such read and still serves `/metrics`, so on
+a relay whose store is failing, read it there. Every other route answers 500,
+not 403, when that read fails: the relay failed, not the caller. Relays that
+predate these routes answer Go's plain-text `404 page not found`.
 
 ## MCP Events on the public gateway
 
