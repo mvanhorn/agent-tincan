@@ -151,6 +151,7 @@ The relay holds every ask to `pass` for your approval, with no `approval.json` n
 
 Newest first. Each line links the release notes.
 
+- [v0.32](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.32.0): OpenBot and Manus Cue teammates, a `standard-webhooks` wake format, `tincan listen install`, relay `/healthz` and admin-only `/metrics`, opt-in relay self-upgrade setup with `relay-upgrade --latest`, and a send the client retries itself, after a lost answer, queues one request.
 - [v0.31](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.31.0): MCP Events (SEP-3415) on the public `/mcp` gateway. A gateway client that subscribes gets a signed, metadata-only webhook when a teammate asks and shows `wake=mcp-events`. See [Wake methods](#wake-methods).
 - [v0.30](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.30.0) (through [v0.30.3](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.30.3)): with a task host named, each teammate ask is filed as a task. Small asks are quiet tasks. Quiet work gets a 15-minute nudge and a 30-minute host check, a host can retry twice or complete the work itself, and a result a host returns closes after an hour of asker silence. See [Tasks](#tasks).
 - [v0.29](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.29.0) (through [v0.29.3](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.29.3)): due dates and one-time reminders, a morning briefing for task hosts, a host assigns and reschedules on your words, and `tincan relay notify` sets where undelivered task news goes.
@@ -171,7 +172,7 @@ Older releases and full notes: [all releases](https://github.com/mvanhorn/agent-
 To upgrade, upgrade the relay first, from an admin device:
 
 ```bash
-tincan relay-upgrade --from-github v0.31.0
+tincan relay-upgrade --from-github v0.32.0
 ```
 
 Self-upgrade needs the relay started with `--dist <dir>` and `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`, which `tincan relay install --self-upgrade` writes for you (see [Upgrades](#upgrades)). Then run `tincan upgrade` on each machine and restart its MCP servers, listeners and web services (or reconnect through `/mcp`). Update the Chrome extension to 0.8.0. Run `tincan onboard --section agents` again for agents that read only their saved standing instructions.
