@@ -1158,6 +1158,12 @@ func TestListenInstallGeminiCLIRefusesBadAgyConfig(t *testing.T) {
 		{"unpinned", func(string) map[string]any {
 			return map[string]any{"agent-tincan": map[string]any{"command": "tincan", "args": []string{"mcp"}}}
 		}, "TINCAN_CONFIG"},
+		{"tincan by command", func(cfg string) map[string]any {
+			return map[string]any{"agent-tincan": agyTincanEntry(cfg), "tn": map[string]any{"command": "/usr/local/bin/tincan", "args": []string{"mcp"}}}
+		}, "exactly one"},
+		{"unallowed server", func(cfg string) map[string]any {
+			return map[string]any{"agent-tincan": agyTincanEntry(cfg), "fs": map[string]any{"command": "npx"}}
+		}, "TINCAN_WAKE_ALLOWED_SERVERS"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			o := geminiOptions(t, "linux")
@@ -1212,5 +1218,47 @@ func TestListenInstallGeminiCLIKeepsOwnerOptIn(t *testing.T) {
 	b, _ = os.ReadFile(f)
 	if serviceEnv(b, "linux", "TINCAN_GEMINI_ALLOW_UNCONFINED") != "1" || serviceEnv(b, "linux", "TINCAN_GEMINI_ENGINE") != "gemini" {
 		t.Fatalf("owner's variables lost on reinstall:\n%s", b)
+	}
+}
+
+func TestListenInstallGeminiCLIChecksWorkdirConfig(t *testing.T) {
+	o := geminiOptions(t, "linux")
+	writeAgyMCP(t, o.Home, map[string]any{"agent-tincan": agyTincanEntry(o.ConfigPath)})
+	wd := filepath.Join(o.Home, "tincan-gemini", ".agents", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(wd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"tincan-local": agyTincanEntry(o.ConfigPath)}})
+	if err := os.WriteFile(wd, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installListener(o, geminiWake(t)); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("err = %v, want the workdir's second tincan server refused", err)
+	}
+}
+
+func TestListenInstallGeminiCLIUsesServiceEnv(t *testing.T) {
+	o := geminiOptions(t, "linux")
+	writeAgyMCP(t, o.Home, map[string]any{"agent-tincan": agyTincanEntry(o.ConfigPath)})
+	if err := installListener(o, geminiWake(t)); err != nil {
+		t.Fatal(err)
+	}
+	alt := filepath.Join(t.TempDir(), "agy-mcp.json")
+	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
+		"agent-tincan": agyTincanEntry(o.ConfigPath), "fs": map[string]any{"command": "npx"}}})
+	if err := os.WriteFile(alt, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(agyMCPConfigPath(o.Home)); err != nil {
+		t.Fatal(err)
+	}
+	f := listenServiceFile(o.Home, "linux", "gemini-cli")
+	b, _ := os.ReadFile(f)
+	edited := strings.Replace(string(b), "Restart=always", "Environment=\"TINCAN_AGY_MCP_CONFIG="+alt+"\"\nEnvironment=\"TINCAN_WAKE_ALLOWED_SERVERS=fs\"\nRestart=always", 1)
+	if err := os.WriteFile(f, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installListener(o, geminiWake(t)); err != nil {
+		t.Fatalf("reinstall with the owner's agy config and allowed server: %v", err)
 	}
 }

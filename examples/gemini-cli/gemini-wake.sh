@@ -3,9 +3,11 @@
 # CLI (gemini), run headless by "tincan listen --exec".
 #
 # Neither CLI has a daemon, so an idle gemini-cli needs something to start a
-# fresh run when teammates' requests are waiting. Copy this script and
-# examples/lib/tincan-wake-lib.sh from the agent-tincan repo (they are not in
-# the release downloads) into one folder you keep, chmod +x this one, and run:
+# fresh run when teammates' requests are waiting. With the agy engine,
+# "tincan listen install --wake gemini-cli" installs this script, the wake
+# library and a listener service. To run it by hand instead, copy this script
+# and examples/lib/tincan-wake-lib.sh from the agent-tincan repo into one
+# folder you keep, chmod +x this one, and run:
 #
 #   TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen --exec ~/bin/gemini-wake.sh
 #
@@ -209,28 +211,56 @@ print(str(json.load(open(sys.argv[1])).get("agent") or ""))
   printf '%s\n' "$(dirname -- "$_cfg")/attachments/$_agent"
 }
 
+# gemini_agy_deny_reads prints, one per line, the paths a confined agy run
+# may not read: everything in the tincan config folder, which holds every
+# co-located teammate's key, except this teammate's own attachments folder,
+# and ~/.ssh. agy resolves symlinks and ./ before matching a deny rule, but
+# it matches case exactly, so on a case-insensitive volume these denies are
+# best effort.
+gemini_agy_deny_reads() {
+  _cfgdir=$(CDPATH='' cd -P -- "$(dirname -- "$cfg")" && pwd -P)
+  _own=$(basename -- "$(gemini_attachment_dir)")
+  for _e in "$_cfgdir"/* "$_cfgdir"/.[!.]* "$_cfgdir"/..?*; do
+    [ -e "$_e" ] || [ -L "$_e" ] || continue
+    if [ "$_e" = "$_cfgdir/attachments" ] && [ -d "$_e" ] && [ ! -L "$_e" ]; then
+      for _a in "$_e"/* "$_e"/.[!.]* "$_e"/..?*; do
+        [ -e "$_a" ] || [ -L "$_a" ] || continue
+        [ "$_a" = "$_e/$_own" ] || printf '%s\n' "$_a"
+      done
+    else
+      printf '%s\n' "$_e"
+    fi
+  done
+  printf '%s\n' "$(CDPATH='' cd -P -- "$HOME" && pwd -P)/.ssh"
+}
+
 # gemini_agy_settings prints the per-run agy settings for a confined run:
 # strict permission mode, where agy denies any tool call no rule allows
 # (headless runs cannot ask). Only whole-category allow rules take effect in
-# strict mode, so it allows MCP tools (the identity check above vouches for
-# every configured server) and file reads, which agy itself needs before
-# calling an MCP tool. Deny rules win over allow rules and also cover allow
-# rules merged in from the owner's own settings: no commands, no writes,
-# and no reads of the tincan config folder, which holds every co-located
-# teammate's key, or of ~/.ssh.
+# strict mode (agy 1.5.16), so it allows MCP tools (the identity check above
+# vouches for every configured server, and the plugin check below for the
+# rest) and file reads, which agy itself needs before calling an MCP tool.
+# Deny rules win over allow rules, including any merged in from the owner's
+# own settings.
 gemini_agy_settings() {
-  _cfgdir=$(CDPATH='' cd -P -- "$(dirname -- "$cfg")" && pwd -P)
-  _ssh=$(CDPATH='' cd -P -- "$HOME" && pwd -P)/.ssh
+  _deny=$(gemini_agy_deny_reads) || return 1
+  _old_ifs=$IFS
+  IFS='
+'
+  set -f
+  # shellcheck disable=SC2086 # one path per line
+  set -- $_deny
+  set +f
+  IFS=$_old_ifs
   case $(gemini_json_tool) in
-    jq) jq -cn --arg cfg "$_cfgdir" --arg ssh "$_ssh" \
-      '{toolPermission: "strict", permissions: {allow: ["mcp(*)", "read_file(/)"],
-        deny: ["command(*)", "write_file(/)", "read_file(\($cfg))", "read_file(\($ssh))"]}}' ;;
+    jq) jq -cn '{toolPermission: "strict", permissions: {allow: ["mcp(*)", "read_file(/)"],
+        deny: (["command(*)", "write_file(/)"] + ($ARGS.positional | map("read_file(\(.))")))}}' --args "$@" ;;
     python3) python3 -c '
 import json, sys
 print(json.dumps({"toolPermission": "strict", "permissions": {
     "allow": ["mcp(*)", "read_file(/)"],
-    "deny": ["command(*)", "write_file(/)", "read_file(%s)" % sys.argv[1], "read_file(%s)" % sys.argv[2]]}}))
-' "$_cfgdir" "$_ssh" ;;
+    "deny": ["command(*)", "write_file(/)"] + ["read_file(%s)" % p for p in sys.argv[1:]]}}))
+' "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -253,7 +283,7 @@ print(" ".join(str(a.get("action")) for a in (d.get("denied_actions") or []) if 
 }
 
 if [ "$ENGINE" = agy ] && [ -z "$AGY_UNCONFINED" ]; then
-  LIMITS="You can read files, except the tincan config folder and ~/.ssh, but you cannot write files or run commands in this run: if a request needs either, reply with status failed and say that this teammate runs read-only, rather than trying."
+  LIMITS="You can read files, except the tincan config folder (your own received attachments in it are readable) and ~/.ssh, but you cannot write files or run commands in this run: if a request needs either, reply with status failed and say that this teammate runs read-only, rather than trying."
 else
   LIMITS="You can read anywhere, but write only in your working directory and in write roots your operator has opened; if work needs to be written somewhere else, say so in your reply rather than writing there."
 fi
@@ -268,6 +298,13 @@ if [ "$ENGINE" = agy ]; then
     tincan_wake_log "running agy unconfined (TINCAN_GEMINI_ALLOW_UNCONFINED=1): tool approval is off and nothing limits its writes"
     set -- "$BIN" --output-format json --dangerously-skip-permissions
   else
+    # A plugin's MCP servers load in every agy run but are not in
+    # mcp_config.json, so the identity check cannot vet them, and mcp(*)
+    # would allow their tools, including ones that write or run commands.
+    plugins=$("$BIN" plugin list --json 2>/dev/null) || tincan_wake_refuse "could not list agy's plugins (agy plugin list --json failed)"
+    if [ "$(printf '%s' "$plugins" | tr -d ' \t\r\n')" != '[]' ]; then
+      tincan_wake_refuse "agy has plugins installed, and a confined wake cannot vet their MCP servers; remove them with agy plugin uninstall, or set TINCAN_GEMINI_ALLOW_UNCONFINED=1"
+    fi
     settings=$(gemini_agy_settings) || tincan_wake_refuse "could not build agy's per-run settings (needs jq or python3)"
     set -- "$BIN" --sandbox --output-format json --settings "$settings"
   fi

@@ -64,8 +64,9 @@ var wakes = map[string]WakeScript{
 	},
 	"gemini-cli": {
 		Name: "gemini-cli", File: "gemini-wake.sh", Source: "gemini-cli/gemini-wake.sh", Script: geminiWake, NeedsLib: true, Tool: "agy",
-		Notice: "Each wake runs Antigravity CLI (agy) headless in its terminal sandbox, with per-run settings in strict permission mode: it may call MCP tools and read files, except the tincan config folder and ~/.ssh, and it cannot write files or run commands. " +
-			"A teammate's request can still make it read any other file this user can read and pass what it reads on in a reply. " +
+		Notice: "Each wake runs Antigravity CLI (agy) headless in its terminal sandbox, with per-run settings in strict permission mode: it may call MCP tools and read files, except the tincan config folder (apart from its own attachments) and ~/.ssh, and it cannot write files or run commands. " +
+			"A teammate's request can still make it read any other file this user can read and pass what it reads on in a reply, and on a case-insensitive volume the read denies are best effort. " +
+			"It refuses to run while agy has plugins installed. " +
 			"Adding TINCAN_GEMINI_ALLOW_UNCONFINED=1 to the service turns tool approval off with nothing limiting what a run does.",
 	},
 	"claude-code": {

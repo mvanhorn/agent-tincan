@@ -280,7 +280,11 @@ func installListener(o listenInstallOptions, w examples.WakeScript) error {
 		}
 	}
 	if w.Name == "gemini-cli" {
-		if err := checkAgyEntry(agyMCPConfigPath(o.Home), o.ConfigPath, o.Binary); err != nil {
+		var owner []envVar
+		if b, err := os.ReadFile(listenServiceFile(o.Home, o.GOOS, o.Agent)); err == nil {
+			owner = ownerEnv(serviceEnvVars(b, o.GOOS))
+		}
+		if err := checkAgyEntry(newAgyWakeEnv(o.Home, owner), o.ConfigPath, o.Binary); err != nil {
 			return err
 		}
 	}
