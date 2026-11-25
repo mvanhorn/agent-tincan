@@ -130,6 +130,36 @@ func TestAdminVerdictOnRoster(t *testing.T) {
 	}
 }
 
+// A rename after joining shows the live machine name: the roster carries
+// it alongside the saved name, so the console tells the owner to tag the
+// name Tailscale shows now.
+func TestAdminVerdictShowsLiveNameAfterRename(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	m.Who.Set(m.Addr("grokbot"), identity.Node{ID: "nGROK", Name: "grok-box", User: "someone-else@example.com", Tags: []string{"tag:agent"}})
+	admin := hardened(t, m, "admin")
+	code, body, _ := browserCall(t, "GET", admin, "/v1/agents", "127.0.0.1", "", sameSite)
+	if code != http.StatusOK {
+		t.Fatalf("agents: %d %s", code, body)
+	}
+	var out struct {
+		Agents []client.AgentInfo `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]client.AgentInfo{}
+	for _, a := range out.Agents {
+		byName[a.Name] = a
+	}
+	got := byName["grokbot"]
+	if got.NodeName != "grok-bot" || got.NodeLiveName != "grok-box" {
+		t.Errorf("grokbot: saved=%q live=%q, want saved grok-bot and live grok-box", got.NodeName, got.NodeLiveName)
+	}
+	if got.NodeUser != testrelay.Login || got.NodeLiveUser != "someone-else@example.com" {
+		t.Errorf("grokbot: saved owner=%q live owner=%q", got.NodeUser, got.NodeLiveUser)
+	}
+}
+
 // The peer list names every tailnet node with its live tags and online
 // state, for admin eyes only.
 func TestAdminPeersListsTailnet(t *testing.T) {

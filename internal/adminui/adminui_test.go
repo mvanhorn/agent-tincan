@@ -103,3 +103,16 @@ func TestPageUnknownVerdictTokenClearAndRefresh(t *testing.T) {
 		t.Error("page has no refresh button")
 	}
 }
+
+// A rename after joining shows the live machine name and labels the saved
+// one as last known, and the printed join command follows the relay
+// addresses once they load instead of guessing.
+func TestPageShowsLiveNameAndInviteAddress(t *testing.T) {
+	w := get(t, Prefix+"app.js")
+	body := w.Body.String()
+	for _, key := range []string{"node_live_name", "last known as", "relayURLForInvite", "lastInvite"} {
+		if !strings.Contains(body, key) {
+			t.Errorf("page does not show %q", key)
+		}
+	}
+}

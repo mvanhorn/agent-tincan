@@ -917,13 +917,24 @@ func (d *Directory) adminNode(n Node) error {
 }
 
 // MachineFacts reports the live Tailscale facts the setup console shows
-// for an agent's machine: whether it may run admin commands now, and its
-// current tags. It uses the same check as a live admin call, so the
-// verdict matches enforcement. Nodes the tailnet does not report, and
-// resolvers without node lookup, report nothing: ok is false.
-func (d *Directory) MachineFacts(ctx context.Context, id, name string) (admin bool, tags []string, ok bool) {
+// for an agent's machine: whether it may run admin commands now, its
+// current tags, and its live name and owning login, which may differ
+// from what the relay recorded at join after a rename. It uses the same
+// check as a live admin call, so the verdict matches enforcement. Nodes
+// the tailnet does not report, and resolvers without node lookup,
+// report nothing: ok is false.
+type MachineFacts struct {
+	// Admin is whether the machine may run admin commands now.
+	Admin bool
+	// Tags are the machine's current Tailscale tags.
+	Tags []string
+	// Name and User are the machine's live tailnet name and owning login.
+	Name, User string
+}
+
+func (d *Directory) MachineFacts(ctx context.Context, id string) (MachineFacts, bool) {
 	if id == LocalAdmin {
-		return true, nil, true
+		return MachineFacts{Admin: true}, true
 	}
 	who := d.who
 	if v, ok := who.(virtualResolver); ok {
@@ -931,13 +942,13 @@ func (d *Directory) MachineFacts(ctx context.Context, id, name string) (admin bo
 	}
 	lk, ok := who.(NodeLookup)
 	if !ok {
-		return false, nil, false
+		return MachineFacts{}, false
 	}
 	n, found, err := lk.LookupNode(ctx, id)
 	if err != nil || !found {
-		return false, nil, false
+		return MachineFacts{}, false
 	}
-	return d.adminCaller(ctx, n) == nil, n.Tags, true
+	return MachineFacts{Admin: d.adminCaller(ctx, n) == nil, Tags: n.Tags, Name: n.Name, User: n.User}, true
 }
 
 // codeAlphabet drops 0, 1, I, and O so codes read cleanly aloud.

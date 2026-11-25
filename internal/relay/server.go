@@ -2286,6 +2286,8 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 	type nodeVerdict struct {
 		admin *bool
 		tags  []string
+		name  string
+		user  string
 	}
 	verdicts := map[string]nodeVerdict{}
 	if admin {
@@ -2293,9 +2295,9 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 			if strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
 				continue
 			}
-			if adminNow, tags, ok := s.dir.MachineFacts(ctx, a.NodeID, a.NodeName); ok {
-				adminNow := adminNow
-				verdicts[a.NodeID] = nodeVerdict{admin: &adminNow, tags: tags}
+			if facts, ok := s.dir.MachineFacts(ctx, a.NodeID); ok {
+				admin := facts.Admin
+				verdicts[a.NodeID] = nodeVerdict{admin: &admin, tags: facts.Tags, name: facts.Name, user: facts.User}
 			}
 		}
 	}
@@ -2321,6 +2323,15 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 			info.NodeID, info.NodeName, info.NodeUser = a.NodeID, a.NodeName, a.NodeUser
 			if v, ok := verdicts[a.NodeID]; ok {
 				info.NodeAdmin, info.NodeTags = v.admin, v.tags
+				// Names are saved at join and go stale on a rename: carry
+				// the live ones when they differ, so the console tells the
+				// owner to tag the name Tailscale shows now.
+				if v.name != "" && v.name != a.NodeName {
+					info.NodeLiveName = v.name
+				}
+				if v.user != "" && v.user != a.NodeUser {
+					info.NodeLiveUser = v.user
+				}
 			}
 		}
 		stat := stats[a.Name]

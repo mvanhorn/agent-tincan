@@ -152,6 +152,13 @@ type AgentInfo struct {
 	// unknown; omitted when nil, so guest rosters never carry it.
 	NodeTags  []string `json:"node_tags,omitempty"`
 	NodeAdmin *bool    `json:"node_admin,omitempty"`
+	// NodeLiveName and NodeLiveUser are the machine's current tailnet name
+	// and owning login, sent only for admin callers and only when they
+	// differ from the saved NodeName/NodeUser (a rename after joining).
+	// The console shows the live values and labels the saved ones as
+	// last known.
+	NodeLiveName string `json:"node_live_name,omitempty"`
+	NodeLiveUser string `json:"node_live_user,omitempty"`
 	// Self marks the caller's own entry, so an agent can tell itself from a
 	// teammate when several of its windows share its name. The relay sets
 	// it only on the entry of the agent the caller resolves to. False from

@@ -37,9 +37,9 @@ func TestTailnetResolverSeesTailnet(t *testing.T) {
 		identity.WithVirtual(tailnetResolver{fakeTailnet{who}, nil, nil}),
 		identity.Config{AdminTag: "tag:tincan-admin"})
 
-	admin, tags, ok := dir.MachineFacts(ctx, "nT", "tablet")
-	if !ok || !admin || len(tags) != 1 || tags[0] != "tag:tincan-admin" {
-		t.Fatalf("facts through wrappers: %v %q %v", admin, tags, ok)
+	facts, ok := dir.MachineFacts(ctx, "nT")
+	if !ok || !facts.Admin || len(facts.Tags) != 1 || facts.Tags[0] != "tag:tincan-admin" {
+		t.Fatalf("facts through wrappers: %+v %v", facts, ok)
 	}
 	peers, err := dir.Peers(ctx)
 	if err != nil || len(peers) != 1 || peers[0].Name != "tablet" || !peers[0].Online {

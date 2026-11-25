@@ -388,14 +388,17 @@ func TestMachineFacts(t *testing.T) {
 		"100.0.2.1:1": {ID: "nT", Name: "tablet", User: "mvanhorn@gmail.com", Tags: []string{"tag:tincan-admin"}},
 	})
 	dir := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{AdminTag: "tag:tincan-admin"})
-	admin, tags, ok := dir.MachineFacts(ctx, "nT", "tablet")
-	if !ok || !admin {
-		t.Fatalf("facts: %v %q %v, want admin with tags", admin, tags, ok)
+	facts, ok := dir.MachineFacts(ctx, "nT")
+	if !ok || !facts.Admin {
+		t.Fatalf("facts: %+v %v, want admin with tags", facts, ok)
 	}
-	if len(tags) != 1 || tags[0] != "tag:tincan-admin" {
-		t.Fatalf("facts tags: %q, want the admin tag", tags)
+	if len(facts.Tags) != 1 || facts.Tags[0] != "tag:tincan-admin" {
+		t.Fatalf("facts tags: %q, want the admin tag", facts.Tags)
 	}
-	if _, _, ok := dir.MachineFacts(ctx, "nGONE", "gone"); ok {
+	if facts.Name != "tablet" || facts.User != "mvanhorn@gmail.com" {
+		t.Fatalf("facts identity: %+v, want the live name and login", facts)
+	}
+	if _, ok := dir.MachineFacts(ctx, "nGONE"); ok {
 		t.Fatal("unknown node should report nothing")
 	}
 }

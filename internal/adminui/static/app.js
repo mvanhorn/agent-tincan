@@ -17,6 +17,7 @@ const state = {
   peersLoaded: false,
   offline: false,
   loaded: false,
+  lastInvite: null,
 };
 
 // TAILSCALE_MACHINES is the device list in the Tailscale admin panel,
@@ -107,6 +108,19 @@ function fillKinds() {
   if (state.kinds.includes(current)) sel.value = current;
 }
 
+// relayURLForInvite is the address the printed join command reaches the
+// relay at: the first address the relay reported, once loaded. Minting
+// before the addresses load falls back to the plain hostname; the command
+// is rewritten when they arrive (see renderInviteCommand).
+function relayURLForInvite() {
+  return state.relayURLs.length > 0 ? state.relayURLs[0] : "http://tincan-relay";
+}
+
+function renderInviteCommand() {
+  if (!state.lastInvite) return;
+  $("invite-command").textContent = "tincan join " + state.lastInvite.code + " --relay " + relayURLForInvite();
+}
+
 async function invite() {
   const err = $("add-error");
   err.hidden = true;
@@ -124,11 +138,11 @@ async function invite() {
     if (res.status !== 200 || !res.data || !res.data.code) {
       throw new Error((res.data && res.data.error) || ("invite failed (" + res.status + ")"));
     }
-    const relay = state.relayURLs.length > 0 ? state.relayURLs[0] : "http://tincan-relay";
+    state.lastInvite = { name: res.data.name, code: res.data.code };
     $("invite-name").textContent = res.data.name;
     $("invite-expires").textContent = res.data.expires_in || "10m";
     $("invite-install").textContent = INSTALL_CMD;
-    $("invite-command").textContent = "tincan join " + res.data.code + " --relay " + relay;
+    renderInviteCommand();
     $("invite-result").hidden = false;
     $("invite-copied").hidden = true;
     announce("Invite minted for " + res.data.name + ".");
@@ -179,13 +193,22 @@ function statusLine(a) {
 // node, tags, and whether it may run admin commands. Agents without a
 // node run in a connected app, not on a tailnet machine, so admin does
 // not apply to them. When the roster omits node_admin the relay could
-// not check: unknown, never "no".
+// not check: unknown, never "no". Names come live when the machine was
+// renamed after joining; the saved ones are shown as last known.
 function adminVerdict(a) {
   if (!a.node_name) return { known: false };
   if (!("node_admin" in a)) {
     return { known: false, unknown: true, machine: a.node_name, owner: a.node_user || "", tags: a.node_tags || [] };
   }
-  return { known: true, admin: !!a.node_admin, machine: a.node_name, owner: a.node_user || "", tags: a.node_tags || [] };
+  const renamed = !!a.node_live_name;
+  const reowned = "node_live_user" in a;
+  return {
+    known: true, admin: !!a.node_admin,
+    machine: a.node_live_name || a.node_name,
+    owner: (reowned ? a.node_live_user : a.node_user) || "",
+    tags: a.node_tags || [],
+    saved: (renamed || reowned) ? { name: a.node_name, owner: a.node_user || "" } : null,
+  };
 }
 
 function renderAgents() {
@@ -202,7 +225,11 @@ function renderAgents() {
     const v = adminVerdict(a);
     if (v.known || v.unknown) {
       facts.append(el("dt", "", "Machine"));
-      facts.append(el("dd", "", v.machine + (v.owner ? " (" + v.owner + ")" : "")));
+      let where = v.machine + (v.owner ? " (" + v.owner + ")" : "");
+      if (v.known && v.saved) {
+        where += "; last known as " + v.saved.name + (v.saved.owner ? " (" + v.saved.owner + ")" : "");
+      }
+      facts.append(el("dd", "", where));
       facts.append(el("dt", "", "Admin"));
       facts.append(el("dd", "", v.unknown ? "unknown — the relay could not check" : (v.admin ? "yes" : "no")));
     }
@@ -531,6 +558,7 @@ async function refreshAll() {
     if (urls.status === 200 && urls.data) state.relayURLs = urls.data.relay_urls || [];
     if (kinds.status === 200 && kinds.data) state.kinds = ["", ...(kinds.data.kinds || [])];
     else state.kinds = [""];
+    renderInviteCommand();
     state.loaded = true;
     state.offline = false;
     banner.hidden = true;
