@@ -393,14 +393,13 @@ func TestFindMCPConfigsReadsGeminiEngines(t *testing.T) {
 	}
 }
 
-// Doctor reads the same gemini-cli engine configs the wake does: the files
-// TINCAN_AGY_MCP_CONFIG and TINCAN_GEMINI_SETTINGS point at, and the
+// Doctor reads the same gemini-cli engine configs the wake does: the file
+// TINCAN_GEMINI_SETTINGS points at, and the
 // workdir-scoped ones in TINCAN_GEMINI_WORKDIR (~/tincan-gemini by default).
 func TestFindMCPConfigsReadsGeminiWakeLocations(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	setHome(t, home)
-	t.Setenv("TINCAN_AGY_MCP_CONFIG", "")
 	t.Setenv("TINCAN_GEMINI_SETTINGS", "")
 	t.Setenv("TINCAN_GEMINI_WORKDIR", "")
 	body := []byte(`{"mcpServers":{"agent-tincan":{"command":"tincan","args":["mcp"]}}}`)
@@ -436,12 +435,9 @@ func TestFindMCPConfigsReadsGeminiWakeLocations(t *testing.T) {
 	// Overridden locations.
 	wd := filepath.Join(dir, "wd")
 	t.Setenv("TINCAN_GEMINI_WORKDIR", wd)
-	agy := write(filepath.Join(dir, "agy", "mcp.json"))
-	t.Setenv("TINCAN_AGY_MCP_CONFIG", agy)
 	settings := write(filepath.Join(dir, "gem", "settings.json"))
 	t.Setenv("TINCAN_GEMINI_SETTINGS", settings)
 	for _, f := range []string{
-		agy,
 		settings,
 		write(filepath.Join(wd, ".agents", "mcp_config.json")),
 		write(filepath.Join(wd, ".gemini", "settings.json")),

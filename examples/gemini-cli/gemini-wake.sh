@@ -47,9 +47,6 @@
 #   TINCAN_GEMINI_ALLOW_UNCONFINED  1 runs agy unconfined: tool approval off,
 #                                   no per-run permission limits
 #   TINCAN_GEMINI_VERSION_PATTERN   what "<engine> --version" must print
-#   TINCAN_AGY_MCP_CONFIG           one more agy MCP config to check;
-#                                   ~/.gemini/config/mcp_config.json, the
-#                                   file agy loads, is always checked
 #   TINCAN_AGY_PRINT_TIMEOUT        passed to agy --print-timeout when set
 #                                   (agy sets no limit by default; the wake's
 #                                   own TINCAN_WAKE_TIMEOUT still applies)
@@ -85,7 +82,6 @@ ENGINE=${TINCAN_GEMINI_ENGINE:-agy}
 WORKDIR=${TINCAN_GEMINI_WORKDIR:-$HOME/tincan-gemini}
 ALLOWED_ROOTS=${TINCAN_GEMINI_ALLOWED_ROOTS:-$HOME/code:$HOME/tincan-gemini}
 WRITE_ROOTS=${TINCAN_GEMINI_WRITE_ROOTS:-}
-AGY_MCP_CONFIG=${TINCAN_AGY_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}
 GEMINI_SETTINGS=${TINCAN_GEMINI_SETTINGS:-$HOME/.gemini/settings.json}
 
 tincan_wake_init gemini-cli
@@ -96,14 +92,12 @@ case $ENGINE in
     BIN=${AGY_BIN:-agy}
     VERSION_PATTERN=${TINCAN_GEMINI_VERSION_PATTERN:-[Aa]ntigravity|agy|[0-9]+\.[0-9]+}
     # The global config agy mcp add writes, and the workspace one agy reads
-    # from the directory it runs in. agy has no way to point it at another
-    # file, so its default stays checked when TINCAN_AGY_MCP_CONFIG names
-    # one more.
+    # from the directory it runs in: the only files agy loads (it has no way
+    # to point it at another).
     MCP_FILES="$HOME/.gemini/config/mcp_config.json
 $WORKDIR/.agents/mcp_config.json"
-    if [ "$AGY_MCP_CONFIG" != "$HOME/.gemini/config/mcp_config.json" ]; then
-      MCP_FILES="$MCP_FILES
-$AGY_MCP_CONFIG"
+    if [ -n "${TINCAN_AGY_MCP_CONFIG:-}" ]; then
+      tincan_wake_log "ignoring TINCAN_AGY_MCP_CONFIG: agy only loads ~/.gemini/config/mcp_config.json and the workdir's .agents/mcp_config.json, so those are the files checked"
     fi
     ;;
   gemini)

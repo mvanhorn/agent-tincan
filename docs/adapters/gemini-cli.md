@@ -43,7 +43,7 @@ agy mcp add -e TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" agent-tincan
 agy mcp list
 ```
 
-The flags go before the server name. `agy mcp add` writes `~/.gemini/config/mcp_config.json` in the usual `{"mcpServers": {...}}` shape. The wake reads that file, and `.agents/mcp_config.json` in its working directory, for its identity check. agy itself always loads that default file. `TINCAN_AGY_MCP_CONFIG` in the listener service's environment adds one more file for the wake to check; it never replaces the default.
+The flags go before the server name. `agy mcp add` writes `~/.gemini/config/mcp_config.json` in the usual `{"mcpServers": {...}}` shape. The wake reads that file, and `.agents/mcp_config.json` in its working directory, for its identity check. agy loads only those two files, so those are what the wake checks; an older `TINCAN_AGY_MCP_CONFIG` setting is ignored, with a note in the log.
 
 The identity check also refuses to start agy while that file lists any other MCP server, unless you name it in `TINCAN_WAKE_ALLOWED_SERVERS`. A confined run allows every MCP tool agy has, so each configured server is one you trust with a teammate's request.
 
@@ -136,7 +136,7 @@ Each nudge, the script:
 
 1. Logs the relay's upgrade notice when `tincan listen` passes one in `TINCAN_UPGRADE_AVAILABLE`, and exits without a run when that notice is all the nudge is for (`TINCAN_WAITING` is 0). Otherwise it takes the wake lock (a second nudge during a run exits and leaves requests queued; a lock left by a killed run is broken) and exits early while a backoff is in force.
 2. Checks the engine: `agy` or `gemini` on PATH (`AGY_BIN`, `GEMINI_BIN` to override), answering `--version` in the expected shape (`TINCAN_GEMINI_VERSION_PATTERN` to override), and `GEMINI_API_KEY` for the gemini engine.
-3. Pins identity: it reads the chosen engine's MCP config (agy: `~/.gemini/config/mcp_config.json`, `.agents/mcp_config.json` in the workdir, and `TINCAN_AGY_MCP_CONFIG` when it names another file; gemini: `TINCAN_GEMINI_SETTINGS`, default `~/.gemini/settings.json`, plus `.gemini/settings.json` in the workdir) and refuses to run unless there is exactly one agent-tincan server, its `TINCAN_CONFIG` is the wake's own, and every other server is listed in `TINCAN_WAKE_ALLOWED_SERVERS`. The engine runs with tool approval off, so every server it loads is trusted. Reading these JSON files needs `jq` or `python3` on the listener's PATH.
+3. Pins identity: it reads the chosen engine's MCP config (agy: `~/.gemini/config/mcp_config.json` and `.agents/mcp_config.json` in the workdir, the files agy loads; gemini: `TINCAN_GEMINI_SETTINGS`, default `~/.gemini/settings.json`, plus `.gemini/settings.json` in the workdir) and refuses to run unless there is exactly one agent-tincan server, its `TINCAN_CONFIG` is the wake's own, and every other server is listed in `TINCAN_WAKE_ALLOWED_SERVERS`. The engine runs with tool approval off, so every server it loads is trusted. Reading these JSON files needs `jq` or `python3` on the listener's PATH.
 4. Runs the engine in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`) with a prompt that tells it to call check_inbox, finish work waiting on replies, handle and reply to every request, and repeat until the inbox is empty:
    - agy, confined (the default): `agy --sandbox --output-format json --settings <per-run settings> -p <prompt>`. The settings are described under [Security posture](#security-posture), and the prompt tells agy it is read-only.
    - agy, unconfined (`TINCAN_GEMINI_ALLOW_UNCONFINED=1`): `agy --output-format json --dangerously-skip-permissions -p <prompt>`
@@ -160,7 +160,7 @@ In both cases the identity check starts the engine wired only to this teammate: 
 
 ## Doctor
 
-`tincan doctor` reads `~/.gemini/settings.json` (Gemini CLI) and `~/.gemini/config/mcp_config.json` (agy) along with the other apps' MCP configs, plus the other files the wake checks: `TINCAN_AGY_MCP_CONFIG` and `TINCAN_GEMINI_SETTINGS` when set, and `.agents/mcp_config.json` and `.gemini/settings.json` in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`). Those settings usually live in the listener's environment, so run doctor with the same ones when you changed them. It checks that the tincan entry runs this tincan with `mcp` and flags two tincan servers loaded together in one file.
+`tincan doctor` reads `~/.gemini/settings.json` (Gemini CLI) and `~/.gemini/config/mcp_config.json` (agy) along with the other apps' MCP configs, plus the other files the wake checks: `TINCAN_GEMINI_SETTINGS` when set, and `.agents/mcp_config.json` and `.gemini/settings.json` in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`). Those settings usually live in the listener's environment, so run doctor with the same ones when you changed them. It checks that the tincan entry runs this tincan with `mcp` and flags two tincan servers loaded together in one file.
 
 ## Limits
 

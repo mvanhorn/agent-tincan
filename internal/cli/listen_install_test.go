@@ -1243,23 +1243,15 @@ func TestListenInstallGeminiCLIUsesServiceEnv(t *testing.T) {
 	if err := installListener(o, geminiWake(t)); err != nil {
 		t.Fatal(err)
 	}
-	alt := filepath.Join(t.TempDir(), "agy-mcp.json")
-	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{
-		"agent-tincan": agyTincanEntry(o.ConfigPath), "fs": map[string]any{"command": "npx"}}})
-	if err := os.WriteFile(alt, raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(agyMCPConfigPath(o.Home)); err != nil {
-		t.Fatal(err)
-	}
+	writeAgyMCP(t, o.Home, map[string]any{"agent-tincan": agyTincanEntry(o.ConfigPath), "fs": map[string]any{"command": "npx"}})
 	f := listenServiceFile(o.Home, "linux", "gemini-cli")
 	b, _ := os.ReadFile(f)
-	edited := strings.Replace(string(b), "Restart=always", "Environment=\"TINCAN_AGY_MCP_CONFIG="+alt+"\"\nEnvironment=\"TINCAN_WAKE_ALLOWED_SERVERS=fs\"\nRestart=always", 1)
+	edited := strings.Replace(string(b), "Restart=always", "Environment=\"TINCAN_AGY_MCP_CONFIG=/nowhere/agy.json\"\nEnvironment=\"TINCAN_WAKE_ALLOWED_SERVERS=fs\"\nRestart=always", 1)
 	if err := os.WriteFile(f, []byte(edited), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := installListener(o, geminiWake(t)); err != nil {
-		t.Fatalf("reinstall with the owner's agy config and allowed server: %v", err)
+		t.Fatalf("reinstall with the owner's allowed server (and an ignored TINCAN_AGY_MCP_CONFIG): %v", err)
 	}
 }
 

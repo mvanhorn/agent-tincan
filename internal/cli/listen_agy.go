@@ -26,18 +26,14 @@ type agyServer struct {
 // and the servers the owner allowed: the owner's values kept in an
 // installed service, else the wake's defaults.
 type agyWakeEnv struct {
-	home, global, workdir string
-	allowed               []string
+	global, workdir string
+	allowed         []string
 }
 
 func newAgyWakeEnv(home string, owner []envVar) agyWakeEnv {
-	e := agyWakeEnv{home: home, global: agyMCPConfigPath(home), workdir: filepath.Join(home, "tincan-gemini")}
+	e := agyWakeEnv{global: agyMCPConfigPath(home), workdir: filepath.Join(home, "tincan-gemini")}
 	for _, v := range owner {
 		switch v.Key {
-		case "TINCAN_AGY_MCP_CONFIG":
-			if v.Value != "" {
-				e.global = v.Value
-			}
 		case "TINCAN_GEMINI_WORKDIR":
 			if v.Value != "" {
 				e.workdir = v.Value
@@ -50,9 +46,8 @@ func newAgyWakeEnv(home string, owner []envVar) agyWakeEnv {
 }
 
 // checkAgyEntry stops a gemini-cli install that the wake would refuse at
-// its first run. Across agy's MCP config (its default file, plus the
-// owner's TINCAN_AGY_MCP_CONFIG when that names another) and the workdir's
-// .agents/mcp_config.json there must be exactly one agent-tincan server,
+// its first run. Across the two MCP configs agy loads, its own and the
+// workdir's .agents/mcp_config.json, there must be exactly one agent-tincan server,
 // pinned to this agent's TINCAN_CONFIG, and every other server must be one
 // the owner allowed. A server is agent-tincan when its name contains tincan
 // or its command is a tincan binary, the same rule as the wake library's
@@ -62,10 +57,7 @@ func checkAgyEntry(e agyWakeEnv, cfg, binary string) error {
 	add := "Add it with: " + addCmd
 	servers := map[string]agyServer{}
 	var tincan, extra []string
-	paths := []string{agyMCPConfigPath(e.home), filepath.Join(e.workdir, ".agents", "mcp_config.json")}
-	if e.global != paths[0] {
-		paths = append(paths, e.global)
-	}
+	paths := []string{e.global, filepath.Join(e.workdir, ".agents", "mcp_config.json")}
 	found := 0
 	for _, path := range paths {
 		raw, err := os.ReadFile(path)

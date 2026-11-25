@@ -62,7 +62,6 @@ func mcpConfigFiles(extra []string) []string {
 		// Antigravity CLI (agy), the gemini-cli teammate's default engine:
 		// where agy mcp add writes (checked against agy 1.5.16).
 		agyMCPConfigPath(home),
-		os.Getenv("TINCAN_AGY_MCP_CONFIG"),
 		os.Getenv("TINCAN_GEMINI_SETTINGS"),
 		filepath.Join(geminiWorkdir, ".agents", "mcp_config.json"),
 		filepath.Join(geminiWorkdir, ".gemini", "settings.json"),

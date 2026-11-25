@@ -532,12 +532,13 @@ func TestGeminiWakeReadsOnlyTheChosenEngineConfig(t *testing.T) {
 	if r := h.run("TINCAN_GEMINI_ENGINE=gemini", "GEMINI_API_KEY=dummy"); r.err != nil || len(h.runs()) != 1 {
 		t.Fatalf("gemini engine judged by agy's config: %v\nstderr:\n%s", r.err, r.stderr)
 	}
+	// agy loads only its own file, so a TINCAN_AGY_MCP_CONFIG elsewhere is
+	// ignored rather than trusted.
 	moved := filepath.Join(h.dir, "agy-mcp.json")
-	h.servers(moved, map[string]any{"agent-tincan": h.tincanEntry(h.config)})
-	if err := os.Remove(h.agyMCP); err != nil {
-		t.Fatal(err)
-	}
-	if r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1", "TINCAN_AGY_MCP_CONFIG="+moved); r.err != nil || len(h.runs()) != 2 {
+	h.servers(moved, map[string]any{"a-tincan": h.tincanEntry(h.config), "b-tincan": h.tincanEntry(h.config)})
+	h.servers(h.agyMCP, map[string]any{"agent-tincan": h.tincanEntry(h.config)})
+	r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1", "TINCAN_AGY_MCP_CONFIG="+moved)
+	if r.err != nil || len(h.runs()) != 2 || !strings.Contains(r.stderr, "ignoring TINCAN_AGY_MCP_CONFIG") {
 		t.Fatalf("agy with TINCAN_AGY_MCP_CONFIG: %v\nstderr:\n%s", r.err, r.stderr)
 	}
 }
@@ -783,7 +784,7 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func TestGeminiWakeAgyChecksDefaultConfigUnderOverride(t *testing.T) {
+func TestGeminiWakeAgyOverrideCannotHideDefaultConfig(t *testing.T) {
 	h := newGeminiHarness(t)
 	alt := filepath.Join(h.home, "alt-mcp.json")
 	h.servers(alt, map[string]any{"agent-tincan": h.tincanEntry(h.config)})
