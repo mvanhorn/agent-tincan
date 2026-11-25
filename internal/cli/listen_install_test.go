@@ -1262,3 +1262,20 @@ func TestListenInstallGeminiCLIUsesServiceEnv(t *testing.T) {
 		t.Fatalf("reinstall with the owner's agy config and allowed server: %v", err)
 	}
 }
+
+func TestListenInstallGeminiCLIRefusesInvalidAgyJSON(t *testing.T) {
+	o := geminiOptions(t, "linux")
+	p := agyMCPConfigPath(o.Home)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installListener(o, geminiWake(t)); err == nil || !strings.Contains(err.Error(), "not valid JSON") || !strings.Contains(err.Error(), "Nothing was installed") {
+		t.Fatalf("err = %v, want not valid JSON and Nothing was installed", err)
+	}
+	if _, err := os.Stat(listenDir(o.ConfigPath)); err == nil {
+		t.Error("wake scripts written for a refused install")
+	}
+}
