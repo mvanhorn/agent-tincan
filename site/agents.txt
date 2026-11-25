@@ -309,13 +309,11 @@ B3. Give yourself the tools. Add `tincan mcp` as an MCP server in your app:
                      (then set default_tools_approval_mode for it; see docs/adapters/codex.md)
     - Antigravity:   agy mcp add a server agent-tincan running tincan mcp with env
                      TINCAN_CONFIG=<full path of your config>. This is the gemini-cli
-                     teammate's normal setup (a Google account, no API key). Its wake
-                     runs agy only when the listener is started with the opt-in on its
-                     command line, since agy has no sandbox and nothing limits its writes:
-                     TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=<your config> \
-                       tincan listen --exec ~/bin/gemini-wake.sh
-                     (see "Set up with a Google account (no API key)" in
-                     docs/adapters/gemini-cli.md)
+                     teammate's normal setup (a Google account, no API key). Then:
+                     TINCAN_CONFIG=<your config> tincan listen install --wake gemini-cli
+                     Its wake runs agy confined and read-only: MCP tools and file reads,
+                     no writes, no commands (see "Set up with a Google account (no API
+                     key)" in docs/adapters/gemini-cli.md)
     - Gemini CLI:    gemini mcp add -s user -e TINCAN_CONFIG=<full path of your config> --trust agent-tincan tincan mcp
                      (only with a paid Gemini API key)
     - Grok Build CLI (grok-cli teammate): not in ~/.grok. It runs in a wake home of

@@ -474,19 +474,19 @@ func TestGeminiCLIBlock(t *testing.T) {
 		"agy mcp add", "gemini mcp add", "TINCAN_CONFIG", "~/.config/tincan/gemini-cli.json",
 		"GEMINI_API_KEY", "TINCAN_GEMINI_ENGINE", "2026-06-18", "trust",
 		"examples/gemini-cli/gemini-wake.sh", "examples/lib/tincan-wake-lib.sh", "chmod +x",
+		"TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen install --wake gemini-cli",
 		"TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen --exec ~/bin/gemini-wake.sh",
-		"TINCAN_GEMINI_ALLOW_UNCONFINED", "--sandbox",
-		"TINCAN_GEMINI_ALLOW_UNCONFINED=1 TINCAN_CONFIG=~/.config/tincan/gemini-cli.json tincan listen --exec ~/bin/gemini-wake.sh",
-		"Set up with a Google account (no API key)", "tincan-gemini-cli-wake/backoff", "tincan ask gemini-cli",
+		"TINCAN_GEMINI_ALLOW_UNCONFINED=1", "--sandbox", "strict permission mode", "replies failed",
+		"Set up with a Google account (no API key)", "tincan ask gemini-cli",
 		`method "command"`, "docs/adapters/gemini-cli.md",
 	} {
 		if !strings.Contains(setup, want) {
 			t.Errorf("gemini-cli setup missing %q:\n%s", want, setup)
 		}
 	}
-	// The Google-account path (agy and its opt-in) comes before the API-key one.
+	// The Google-account path (agy, installed as a service) comes before the API-key one.
 	if strings.Index(setup, "agy mcp add") > strings.Index(setup, "gemini mcp add") ||
-		strings.Index(setup, "TINCAN_GEMINI_ALLOW_UNCONFINED=1") > strings.Index(setup, "GEMINI_API_KEY") {
+		strings.Index(setup, "listen install --wake gemini-cli") > strings.Index(setup, "GEMINI_API_KEY") {
 		t.Errorf("gemini-cli setup does not lead with the agy path:\n%s", setup)
 	}
 	// The runtime name alone maps to the kind, and the recipe invites with it.

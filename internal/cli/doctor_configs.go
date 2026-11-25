@@ -59,10 +59,8 @@ func mcpConfigFiles(extra []string) []string {
 		filepath.Join(grokHome, "config.toml"),
 		filepath.Join(copilotHome, "mcp-config.json"),
 		filepath.Join(home, ".gemini", "settings.json"),
-		// Antigravity CLI (agy), the gemini-cli teammate's default engine.
-		// agy mcp add is reported to write here; the location comes from
-		// one secondary source, so the gemini-cli docs say to confirm it
-		// with agy mcp list.
+		// Antigravity CLI (agy), the gemini-cli teammate's default engine:
+		// where agy mcp add writes (checked against agy 1.5.16).
 		filepath.Join(home, ".gemini", "config", "mcp_config.json"),
 		os.Getenv("TINCAN_AGY_MCP_CONFIG"),
 		os.Getenv("TINCAN_GEMINI_SETTINGS"),
