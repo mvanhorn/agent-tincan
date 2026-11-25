@@ -177,18 +177,18 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	}
 
 	// 2c. This host's Tailscale, which matters joined or not.
-	var joinedRelay, configuredRelay *client.Relay
+	var joinedRelay *client.Relay
 	if joined {
 		joinedRelay = r
 	}
-	// The configured relay is worth a display-only read only when the
-	// last call got a definitive answer: joined, or answered but unknown
-	// (IsNotJoined). After a timeout or an unreachable relay, asking it
-	// again only adds a second wait to the outage.
-	if joined || client.IsNotJoined(err) {
-		configuredRelay = r
-	}
-	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, configuredRelay, guest)...)
+	// The configured relay rides along so the stopped and proxy checks
+	// below see it. The tag read is best-effort and costs a round trip,
+	// so it runs only when the last call got a definitive answer:
+	// joined, or answered but unknown (IsNotJoined). After a timeout or
+	// an unreachable relay, asking it again only adds a second wait to
+	// the outage.
+	tagLookup := joined || client.IsNotJoined(err)
+	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, r, guest, tagLookup)...)
 
 	// 3. Self-test of tincan mcp in both framings.
 	if exe != "" {

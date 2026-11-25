@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -49,15 +50,26 @@ func deviceRoleOf(ctx context.Context, r *client.Relay) deviceRole {
 // relay predates it, has none set, or cannot be asked. The relay reports it
 // to every caller, so no admin rights are needed.
 func relayAdminTag(ctx context.Context, r *client.Relay) string {
+	tag, _ := relayAdminFacts(ctx, r)
+	return tag
+}
+
+// relayAdminFacts reads the relay's configured --admin-tag and whether
+// the caller passes the admin check, from one /v1/agents read. The roster
+// carries the tag for every caller and the task fallback only for admin
+// devices, so one read answers both. Best-effort: "" and false when the
+// relay predates the tag, has none set, refuses, or cannot be asked.
+func relayAdminFacts(ctx context.Context, r *client.Relay) (tag string, admin bool) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var out struct {
-		AdminTag string `json:"admin_tag"`
+		AdminTag     string          `json:"admin_tag"`
+		TaskFallback json.RawMessage `json:"task_fallback"`
 	}
 	if err := r.Raw(ctx, "GET", "/v1/agents", nil, &out); err != nil {
-		return ""
+		return "", false
 	}
-	return out.AdminTag
+	return out.AdminTag, len(out.TaskFallback) > 0
 }
 
 // tailnetChecks reports each tailscaled on this machine, or one skip line when
@@ -71,7 +83,7 @@ func relayAdminTag(ctx context.Context, r *client.Relay) string {
 // guest need not ask: the relay refuses it the admin route as it does an
 // agent, but its machine is on another account's tailnet, out of the owner's
 // tag rule.
-func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool) []check {
+func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool, tagLookup bool) []check {
 	selves := tailnetSelves(ctx)
 	if len(selves) == 0 {
 		return []check{{"tailnet", "ok", "skipped: no tailscaled tincan can reach on this machine", ""}}
@@ -97,11 +109,17 @@ func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool)
 		adminTag = relayAdminTag(ctx, r)
 	}
 	// An admin device that never joined still names a relay: read the tag
-	// through it for display, without taking its word for the role (it
-	// answers for whatever node reached it, which may not be this
-	// machine). Guests and remote proxies are still never asked.
-	if adminTag == "" && !guest && r == nil && configured != nil && !configured.ThroughRemoteProxy() && running == 1 {
-		adminTag = relayAdminTag(ctx, configured)
+	// through it for display, and take the roster's word for whether this
+	// machine passes the admin check (it carries the admin-only task
+	// fallback exactly then, in the same read). Guests and remote proxies
+	// are still never asked, and a dead relay is never asked twice: the
+	// caller enables this only after a definitive answer.
+	if tagLookup && adminTag == "" && !guest && r == nil && configured != nil && !configured.ThroughRemoteProxy() && running == 1 {
+		var isAdmin bool
+		adminTag, isAdmin = relayAdminFacts(ctx, configured)
+		if isAdmin {
+			role = roleAdmin
+		}
 	}
 	// Only when the relay did not answer: a relay that answered is reached
 	// some other way (a managed connector, another daemon), and a remote
