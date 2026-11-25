@@ -438,6 +438,26 @@ func TestSetupConsoleCheck(t *testing.T) {
 	}
 }
 
+// The setup-console check also runs for an admin device that never
+// joined: the console answers the same admin routes, so a configured
+// relay is enough.
+func TestSetupConsoleForUnjoinedAdmin(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{Relay: m.URL("admin")})
+	stubTailnet(t, tailnetSelf("1.104.4", false))
+	var found *check
+	for _, c := range runDoctor(t.Context(), "", nil).Checks {
+		if c.Name == "setup console" {
+			got := c
+			found = &got
+			break
+		}
+	}
+	if found == nil || found.Status != "ok" || !strings.Contains(found.Detail, "/admin/") {
+		t.Fatalf("setup console check: %+v", found)
+	}
+}
+
 // doctor lists each running native host with its profile and build, and
 // warns when one waits because another host holds its socket.
 func TestNativeHostsCheck(t *testing.T) {

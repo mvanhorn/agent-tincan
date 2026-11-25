@@ -161,13 +161,11 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		add(versionCheck(ctx, r, exe))
 	}
 
-	// 2b. Relay-woken agents that did not check in after a wake, and the
-	// setup console an admin device opens at /admin/.
+	// 2b. Relay-woken agents that did not check in after a wake.
 	if joined {
 		add(unansweredCheck(ctx, r, time.Now()))
 		add(webStatusCheck(ctx, r))
 		add(webLimitCheck(ctx, r, time.Now()))
-		add(setupConsoleCheck(ctx, r))
 	}
 	// An admin device can read the roster without joining as an agent.
 	if !guest && (joined || client.IsNotJoined(err)) {
@@ -177,6 +175,10 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		if gw := gatewayEventsCheck(ctx, r); gw != nil {
 			add(*gw)
 		}
+		// The setup console an admin device opens at /admin/: it answers
+		// the same admin routes, so a never-joined admin laptop with a
+		// configured relay gets the check too.
+		add(setupConsoleCheck(ctx, r))
 	}
 
 	// 2c. This host's Tailscale, which matters joined or not.
