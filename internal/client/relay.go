@@ -146,11 +146,12 @@ type AgentInfo struct {
 	// NodeTags are the Tailscale tags on the agent's machine, and NodeAdmin
 	// whether it may run admin commands now. The relay fills both only for
 	// admin callers, best-effort like the rest of the display data, and
-	// never for a virtual agent. Absent from older relays, where the
-	// console shows the verdict as unknown; omitted when false, so guest
-	// rosters never carry it.
+	// never for a virtual agent. A nil NodeAdmin means the relay could not
+	// check (absent from the roster), distinct from a checked false.
+	// Absent from older relays, where the console shows the verdict as
+	// unknown; omitted when nil, so guest rosters never carry it.
 	NodeTags  []string `json:"node_tags,omitempty"`
-	NodeAdmin bool     `json:"node_admin,omitempty"`
+	NodeAdmin *bool    `json:"node_admin,omitempty"`
 	// Self marks the caller's own entry, so an agent can tell itself from a
 	// teammate when several of its windows share its name. The relay sets
 	// it only on the entry of the agent the caller resolves to. False from

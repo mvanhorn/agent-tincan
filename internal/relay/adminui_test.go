@@ -108,14 +108,25 @@ func TestAdminVerdictOnRoster(t *testing.T) {
 	for _, a := range out.Agents {
 		byName[a.Name] = a
 	}
-	if got := byName["grokbot"]; !got.NodeAdmin || len(got.NodeTags) != 1 || got.NodeTags[0] != tag {
-		t.Errorf("grokbot: admin=%v tags=%q, want admin with the tag", got.NodeAdmin, got.NodeTags)
+	adminStr := func(b *bool) string {
+		if b == nil {
+			return "unknown"
+		}
+		if *b {
+			return "true"
+		}
+		return "false"
 	}
-	if got := byName["laptop-agent"]; !got.NodeAdmin || got.NodeName != "macbook-pro-44" {
-		t.Errorf("laptop-agent: admin=%v node=%q, want admin by machine name", got.NodeAdmin, got.NodeName)
+	if got := byName["grokbot"]; got.NodeAdmin == nil || !*got.NodeAdmin || len(got.NodeTags) != 1 || got.NodeTags[0] != tag {
+		t.Errorf("grokbot: admin=%s tags=%q, want admin with the tag", adminStr(got.NodeAdmin), got.NodeTags)
 	}
-	if got := byName["muse"]; got.NodeAdmin {
-		t.Error("muse: admin=true, want false")
+	if got := byName["laptop-agent"]; got.NodeAdmin == nil || !*got.NodeAdmin || got.NodeName != "macbook-pro-44" {
+		t.Errorf("laptop-agent: admin=%s node=%q, want admin by machine name", adminStr(got.NodeAdmin), got.NodeName)
+	}
+	// muse's machine answers the check and is not an admin: an explicit
+	// false, distinct from a lookup failure, which omits the field.
+	if got := byName["muse"]; got.NodeAdmin == nil || *got.NodeAdmin {
+		t.Errorf("muse: admin=%s, want an explicit false", adminStr(got.NodeAdmin))
 	}
 }
 

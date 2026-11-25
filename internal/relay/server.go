@@ -2279,6 +2279,26 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		}
 	}
 	quietUntil := s.started.Add(s.cfg.ClaimLease)
+	// The live admin verdict per node, read before taking s.mu: each
+	// lookup can cost a tailnet Status call, which must not block sends,
+	// polls and claims waiting on the lock. Keyed by node id, so agents
+	// sharing a machine share one lookup.
+	type nodeVerdict struct {
+		admin *bool
+		tags  []string
+	}
+	verdicts := map[string]nodeVerdict{}
+	if admin {
+		for _, a := range agents {
+			if strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
+				continue
+			}
+			if adminNow, tags, ok := s.dir.MachineFacts(ctx, a.NodeID, a.NodeName); ok {
+				adminNow := adminNow
+				verdicts[a.NodeID] = nodeVerdict{admin: &adminNow, tags: tags}
+			}
+		}
+	}
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -2299,8 +2319,8 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		// agent has none to show.
 		if admin && !strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
 			info.NodeID, info.NodeName, info.NodeUser = a.NodeID, a.NodeName, a.NodeUser
-			if adminNow, tags, ok := s.dir.MachineFacts(ctx, a.NodeID, a.NodeName); ok {
-				info.NodeAdmin, info.NodeTags = adminNow, tags
+			if v, ok := verdicts[a.NodeID]; ok {
+				info.NodeAdmin, info.NodeTags = v.admin, v.tags
 			}
 		}
 		stat := stats[a.Name]
