@@ -18,7 +18,7 @@ func (s *Server) JoinNoncesLive(id string) int {
 	s.nonces.mu.Lock()
 	defer s.nonces.mu.Unlock()
 	n := 0
-	for _, hs := range s.nonces.byID[joinNonceID(id)] {
+	for _, hs := range s.nonces.byID[joinKey(id)] {
 		n += len(hs)
 	}
 	return n

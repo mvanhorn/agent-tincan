@@ -327,7 +327,7 @@ func (d *Directory) claimRefusal(ctx context.Context, r JoinRequest, now time.Ti
 			}
 			return &JoinRefusedError{Name: a.Name, Err: err}, nil
 		}
-		if carriesGuest(others) {
+		if CarriesGuest(others) {
 			return &JoinRefusedError{Name: a.Name, Err: fmt.Errorf("%s runs %s: %w", r.NodeName, others[0].Name, ErrGuestNode)}, nil
 		}
 	}
@@ -336,20 +336,7 @@ func (d *Directory) claimRefusal(ctx context.Context, r JoinRequest, now time.Ti
 
 // NewMatchCode returns a matching code shaped XXX-XXX: six characters from
 // the 32-character code alphabet, 30 bits from crypto/rand.
-func NewMatchCode() (string, error) {
-	b := make([]byte, 6)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	out := make([]byte, 0, 7)
-	for i, c := range b {
-		if i == 3 {
-			out = append(out, '-')
-		}
-		out = append(out, codeAlphabet[int(c)%len(codeAlphabet)])
-	}
-	return string(out), nil
-}
+func NewMatchCode() (string, error) { return randomCode(6) }
 
 func newJoinID() (string, error) {
 	b := make([]byte, 10)

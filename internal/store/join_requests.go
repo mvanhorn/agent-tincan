@@ -326,9 +326,11 @@ func (s *Store) SweepJoinRequests(ctx context.Context, now time.Time) ([]identit
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE join_requests SET status = ?, closed_at = ?, agents = '[]', code = '' WHERE status IN (?, ?) AND expires_at <= ?`,
-		identity.JoinExpired, nowMS, identity.JoinPending, identity.JoinApproved, nowMS); err != nil {
-		return nil, err
+	if len(expired) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE join_requests SET status = ?, closed_at = ?, agents = '[]', code = '' WHERE status IN (?, ?) AND expires_at <= ?`,
+			identity.JoinExpired, nowMS, identity.JoinPending, identity.JoinApproved, nowMS); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM join_requests WHERE status NOT IN (?, ?) AND closed_at <= ?`,
 		identity.JoinPending, identity.JoinApproved, now.Add(-identity.JoinFinalKeep).UnixMilli()); err != nil {

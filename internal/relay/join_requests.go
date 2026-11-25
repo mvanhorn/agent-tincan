@@ -1,19 +1,11 @@
 package relay
 
-// Join requests (#227): an unjoined machine asks to join under new names,
-// and the owner approves on the phone page or over the admin socket. The
-// requesting machine gains nothing until then, and what the owner approves
-// is bound to the node the relay recorded at filing: only that node, with
-// the same node key, can read the request or collect its agents. See
-// docs/trust-model.md.
-
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -53,11 +45,9 @@ var (
 	errJoinRelayHost = errors.New("this join request came from the relay host itself; approve or deny it on the phone page from another device")
 )
 
+// joinKey names join request id in the hub and in the shared nonce book,
+// where the prefix keeps its nonces from ever matching a held request's.
 func joinKey(id string) string { return "join:" + id }
-
-// joinNonceID is the id a join request's decision nonces are bound to in
-// the shared nonce book, so they never match a held request's.
-func joinNonceID(id string) string { return "join:" + id }
 
 // joinAnswer is what the requester's routes answer: the request's status,
 // and while it is open its code and names. Agents on a claim's answer are
@@ -135,7 +125,7 @@ func (s *Server) fileRefusal(ctx context.Context, c identity.Caller) (int, error
 	switch {
 	case strings.HasPrefix(n.ID, identity.VirtualPrefix):
 		return http.StatusForbidden, errJoinVirtual
-	case slices.ContainsFunc(c.Agents, func(a identity.Agent) bool { return a.Guest.Set() }):
+	case identity.CarriesGuest(c.Agents):
 		return http.StatusForbidden, errJoinGuestNode
 	case n.SharedIn:
 		return http.StatusForbidden, errJoinSharedIn
@@ -221,7 +211,7 @@ func (s *Server) readOwnJoinRequest(ctx context.Context, id string, n identity.N
 // joinVoided records a request voided by a key change and wakes its
 // waiters.
 func (s *Server) joinVoided(ctx context.Context, jr identity.JoinRequest) {
-	s.nonces.void(joinNonceID(jr.ID))
+	s.nonces.void(joinKey(jr.ID))
 	s.record(ctx, "join_voided", "", "", "relay", joinDetail(jr, map[string]any{"reason": "node key changed"}))
 	s.hub.notify(joinKey(jr.ID))
 }
@@ -274,7 +264,7 @@ func (s *Server) handleClaimJoinRequest(w http.ResponseWriter, r *http.Request) 
 	var refused *identity.JoinRefusedError
 	switch {
 	case errors.As(err, &refused):
-		s.nonces.void(joinNonceID(id))
+		s.nonces.void(joinKey(id))
 		s.record(r.Context(), "join_failed", "", "", "relay", joinDetail(jr, map[string]any{"refused": refused.Name, "reason": refused.Err.Error()}))
 		s.hub.notify(joinKey(id))
 		writeJSON(w, http.StatusConflict, map[string]string{"id": id, "status": identity.JoinFailed, "name": refused.Name, "error": err.Error()})
@@ -365,8 +355,8 @@ func (s *Server) handleJoinRequests(w http.ResponseWriter, r *http.Request) {
 			log.Printf("join requests: agents on %s: %v", jr.NodeName, err)
 		}
 		if node != "" {
-			e.ApproveNonce, e.NonceExpiresAt = s.nonces.issue(nonceKey{id: joinNonceID(jr.ID), decision: decisionApprove, node: node}, now)
-			e.DenyNonce, _ = s.nonces.issue(nonceKey{id: joinNonceID(jr.ID), decision: decisionDeny, node: node}, now)
+			e.ApproveNonce, e.NonceExpiresAt = s.nonces.issue(nonceKey{id: joinKey(jr.ID), decision: decisionApprove, node: node}, now)
+			e.DenyNonce, _ = s.nonces.issue(nonceKey{id: joinKey(jr.ID), decision: decisionDeny, node: node}, now)
 		}
 		out = append(out, e)
 	}
@@ -434,7 +424,7 @@ func (s *Server) decideJoinRequest(w http.ResponseWriter, r *http.Request, decis
 		}
 		by = joinByPage + ":" + n.Name
 		extra = map[string]any{"via": joinByPage, "device": n.Name}
-		if !s.takeDecisionNonce(r, joinNonceID(id), decision, in.Nonce) {
+		if !s.takeDecisionNonce(r, joinKey(id), decision, in.Nonce) {
 			if jr.Status != identity.JoinPending {
 				writeJSON(w, http.StatusOK, joinDecision{ID: id, Status: jr.Status, AlreadyDecided: true})
 				return
@@ -462,7 +452,7 @@ func (s *Server) decideJoinRequest(w http.ResponseWriter, r *http.Request, decis
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.nonces.void(joinNonceID(id))
+	s.nonces.void(joinKey(id))
 	s.record(r.Context(), event, "", "", s.remote(r), joinDetail(got, extra))
 	s.hub.notify(joinKey(id))
 	writeJSON(w, http.StatusOK, joinDecision{ID: id, Status: got.Status})
@@ -477,7 +467,7 @@ func (s *Server) sweepJoinRequests(ctx context.Context) {
 		return
 	}
 	for _, jr := range expired {
-		s.nonces.void(joinNonceID(jr.ID))
+		s.nonces.void(joinKey(jr.ID))
 		s.record(ctx, "join_expired", "", "", "relay", joinDetail(jr, nil))
 		s.hub.notify(joinKey(jr.ID))
 	}

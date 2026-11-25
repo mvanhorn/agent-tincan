@@ -25,6 +25,9 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 )
 
+// joinRequestLifetime is identity.JoinRequestTTL as the CLI says it.
+var joinRequestLifetime = fmt.Sprintf("%d minutes", int(identity.JoinRequestTTL.Minutes()))
+
 // defaultJoinStatusHold is how long one status read waits for the owner.
 // The relay caps it at its own long-poll hold.
 const defaultJoinStatusHold = 25 * time.Second
@@ -198,7 +201,8 @@ func fileJoinError(err error, relay string, agents []client.JoinRequestAgent) er
 	case client.IsOlderRelay(err):
 		return olderRelayJoin(err, relay, agents)
 	case client.IsStatus(err, http.StatusTooManyRequests):
-		return fmt.Errorf("%w. A machine may have one open join request and file 5 an hour, and the relay holds 10 at a time: wait for the open ones to finish or expire (10 minutes after filing)", err)
+		return fmt.Errorf("%w. A machine may have %d open join request and file %d an hour, and the relay holds %d at a time: wait for the open ones to finish or expire (%s after filing)",
+			err, identity.MaxOpenJoinRequestsPerNode, identity.MaxJoinRequestsPerHour, identity.MaxPendingJoinRequests, joinRequestLifetime)
 	}
 	return err
 }
@@ -438,7 +442,7 @@ func finishJoinRequest(st client.JoinRequestState, p client.PendingJoinRequest, 
 	case client.JoinDenied:
 		return fmt.Errorf("the owner denied join request %s, so nothing was joined. Ask the owner before filing again", p.ID)
 	case client.JoinExpired:
-		return fmt.Errorf("join request %s expired before it was approved and collected (a request lasts 10 minutes), so nothing was joined. File again: %s", p.ID, again)
+		return fmt.Errorf("join request %s expired before it was approved and collected (a request lasts %s), so nothing was joined. File again: %s", p.ID, joinRequestLifetime, again)
 	case client.JoinVoided:
 		return fmt.Errorf("join request %s was voided: this machine's Tailscale node key changed after it filed, so the relay no longer trusts it as the machine that asked. Nothing was joined. File again: %s", p.ID, again)
 	case client.JoinFailed:
@@ -645,7 +649,8 @@ func joinRequestCheck(ctx context.Context) (check, bool) {
 	}
 	what := fmt.Sprintf("join request %s with %s for %s", p.ID, p.Relay, describeJoinAgents(p.Agents))
 	again := joinRequestCommand(p.Agents, p.Relay)
-	fileAgain := "Remove " + path + ", then file again: " + again
+	removeAndFile := path + ", then file again: " + again
+	fileAgain := "Remove " + removeAndFile
 	r, err := client.NewRelay(p.Relay, "")
 	if err != nil {
 		return check{name, "warn", what + ": " + err.Error(), "Remove " + path + " and file again with a working relay URL."}, true
@@ -662,7 +667,7 @@ func joinRequestCheck(ctx context.Context) (check, bool) {
 			fmt.Sprintf("Remove %s. If its agents were delivered to this machine, save each with %s; otherwise file again: %s", path, rejoinLines(p, joinConfigPaths(p.Agents)), again)}, true
 	case client.IsStatus(err, http.StatusForbidden):
 		return check{name, "warn", what + ": the relay refuses to show it to this machine: " + err.Error(),
-			"If this machine was rebuilt since it filed, " + strings.ToLower(fileAgain[:1]) + fileAgain[1:]}, true
+			"If this machine was rebuilt since it filed, remove " + removeAndFile}, true
 	case err != nil:
 		return check{name, "warn", what + ": cannot read its status: " + err.Error(), "Check that the relay at " + p.Relay + " is reachable, then run tincan doctor again."}, true
 	}
@@ -675,7 +680,7 @@ func joinRequestCheck(ctx context.Context) (check, bool) {
 		return check{name, "warn", what + " is pending, waiting for the owner. Matching code: " + code,
 			fmt.Sprintf("Ask the owner to approve it on the phone page, or with tincan join-requests and tincan approve-join %s on the relay host, if the code there is %s. Keep %s running to collect the agents (run it again if it stopped).", p.ID, code, again)}, true
 	case client.JoinApproved:
-		return check{name, "warn", what + " is approved but its agents are not collected yet; it expires 10 minutes after filing",
+		return check{name, "warn", what + " is approved but its agents are not collected yet; it expires " + joinRequestLifetime + " after filing",
 			"Run " + again + " now to collect the agents and save their configs."}, true
 	case client.JoinDelivered:
 		return check{name, "warn", what + " was delivered: the relay joined the names, but their configs were not saved on this machine",

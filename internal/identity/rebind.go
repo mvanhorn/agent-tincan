@@ -199,7 +199,7 @@ func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Re
 	if err != nil {
 		return Resolved{}, false, err
 	}
-	if carriesGuest(others) {
+	if CarriesGuest(others) {
 		return Resolved{}, false, nil
 	}
 	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name, TaskHostCleared: a.TaskHost}

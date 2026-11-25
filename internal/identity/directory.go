@@ -335,7 +335,7 @@ func (d *Directory) ResolveCaller(ctx context.Context, c Caller, claimed string)
 				return d.resolved(ctx, n, a)
 			}
 		}
-		if !carriesGuest(agents) {
+		if !CarriesGuest(agents) {
 			if res, ok, err := d.readmit(ctx, n, claimed); ok || err != nil {
 				return res, err
 			}
@@ -349,7 +349,7 @@ func (d *Directory) ResolveCaller(ctx context.Context, c Caller, claimed string)
 		}
 		return Resolved{}, fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
 	case 1:
-		if carriesGuest(agents) {
+		if CarriesGuest(agents) {
 			return d.resolved(ctx, n, agents[0])
 		}
 		// Another agent from the same rebuilt machine may still be waiting to
@@ -825,14 +825,14 @@ func (d *Directory) adminCaller(ctx context.Context, n Node) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w: %w", n.Name, ErrNotAdmin, err)
 	}
-	if carriesGuest(agents) {
+	if CarriesGuest(agents) {
 		return fmt.Errorf("%s carries a guest: %w", n.Name, ErrNotAdmin)
 	}
 	return nil
 }
 
-// carriesGuest reports whether any of a node's agents is a guest.
-func carriesGuest(agents []Agent) bool {
+// CarriesGuest reports whether any of a node's agents is a guest.
+func CarriesGuest(agents []Agent) bool {
 	return slices.ContainsFunc(agents, func(a Agent) bool { return a.Guest.Set() })
 }
 
@@ -841,7 +841,7 @@ func carriesGuest(agents []Agent) bool {
 // carries one, and then a failure means the claim named no guest of this
 // node, or named none on a node with several.
 func (c Caller) Guest(claimed string) (a Agent, guest bool, err error) {
-	if !carriesGuest(c.Agents) {
+	if !CarriesGuest(c.Agents) {
 		return Agent{}, false, nil
 	}
 	if claimed == "" && len(c.Agents) > 1 {
@@ -905,14 +905,18 @@ func (d *Directory) adminNode(n Node) error {
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // NewCode returns a random one-time code shaped XXXX-XXXX.
-func NewCode() (string, error) {
-	b := make([]byte, 8)
+func NewCode() (string, error) { return randomCode(8) }
+
+// randomCode returns n characters from codeAlphabet, drawn from crypto/rand,
+// with a dash after the first half.
+func randomCode(n int) (string, error) {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	out := make([]byte, 0, 9)
+	out := make([]byte, 0, n+1)
 	for i, c := range b {
-		if i == 4 {
+		if i == n/2 {
 			out = append(out, '-')
 		}
 		out = append(out, codeAlphabet[int(c)%len(codeAlphabet)])
