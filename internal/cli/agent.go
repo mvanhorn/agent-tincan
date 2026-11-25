@@ -124,17 +124,51 @@ func setRelay(cfg *client.Config, url string) {
 }
 
 func agentCmds() []*cobra.Command {
-	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd(), watchCmd(), schedulesCmd(), unscheduleCmd()}
+	return []*cobra.Command{heldCmd(), approvalCmd("approve"), approvalCmd("deny"), joinCmd(), joinRequestsCmd(), joinDecisionCmd(true), joinDecisionCmd(false), inviteCmd(), kindCmd(), goodAtCmd(), removeCmd(), agentsCmd(), askCmd(), getCmd(), inboxCmd(), progressCmd(), replyCmd(), answerCmd(), cancelCmd(), waitCmd(), watchCmd(), schedulesCmd(), unscheduleCmd()}
 }
 
 func joinCmd() *cobra.Command {
 	var relayURL, proxy string
 	var replace, credsFromEnv bool
+	var request []string
 	cmd := &cobra.Command{
-		Use:   "join <code>",
-		Short: "Join this machine to the mesh with an invite code",
-		Args:  cobra.ExactArgs(1),
+		Use:   "join <code> | join --request <name>[:kind][,...] --relay <url>",
+		Short: "Join this machine to the mesh with an invite code, or ask the owner to let it join",
+		Long: `Join this machine to the mesh with an invite code from an admin:
+
+  tincan join <code> --relay http://tincan-relay
+
+Or, with no invite, ask the owner to let this machine join under new names:
+
+  tincan join --request codex --relay http://tincan-relay
+  tincan join --request codex,helper:hermes --relay http://tincan-relay
+
+Each entry is a name, or name:kind; a bare name that is a known kind (codex,
+claude-code, hermes, ...) gets that kind. The command prints a matching code
+and waits. The owner sees the request with the same code on the phone page,
+or with tincan join-requests on the relay host, and approves it there; this
+machine then collects its agents and saves their configs. One name is saved
+to the usual config (TINCAN_CONFIG when set); several are saved to
+<name>.json each in the same folder, and the command prints the
+TINCAN_CONFIG= line for each. Stopped while waiting, the same command picks
+the request up again. A request expires 10 minutes after filing. A machine
+that reaches the relay through a proxy joins with an invite instead.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("request") {
+				if len(args) > 0 {
+					return errors.New("tincan join --request takes no invite code")
+				}
+				return nil
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("request") {
+				if replace {
+					return errors.New("--replace does not apply to --request: a join request never repoints a config that names another agent (give a second agent its own TINCAN_CONFIG instead)")
+				}
+				return runJoinRequest(cmd, relayURL, request, proxy)
+			}
 			cfg, _ := client.LoadConfig()
 			if relayURL != "" {
 				setRelay(&cfg, relayURL)
@@ -178,6 +212,7 @@ func joinCmd() *cobra.Command {
 	cmd.Flags().StringVar(&proxy, "proxy", "", "proxy for relay traffic (for sandboxes whose default proxy cannot reach the tailnet)")
 	cmd.Flags().BoolVar(&credsFromEnv, proxyCredsFlag, false, proxyCredsUsage)
 	cmd.Flags().BoolVar(&replace, "replace", false, "repoint a config that already names a different agent (use TINCAN_CONFIG=<new file> for a second agent instead)")
+	cmd.Flags().StringSliceVar(&request, "request", nil, "with no invite: ask the owner to let this machine join as these agents, each name or name:kind (comma-separated)")
 	return cmd
 }
 
