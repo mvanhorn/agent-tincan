@@ -203,6 +203,10 @@ type Store interface {
 	// TakeInvite removes and returns the invite, so a code works once.
 	// Callers pass the digest produced by hashInviteCode, not the raw code.
 	TakeInvite(ctx context.Context, code string) (Invite, bool, error)
+	// LiveInviteNamed reports whether an unredeemed invite for name has not
+	// expired at now.
+	LiveInviteNamed(ctx context.Context, name string, now time.Time) (bool, error)
+	JoinRequestStore
 }
 
 // Config tunes a Directory.
@@ -472,12 +476,16 @@ func (d *Directory) refuseGuestName(ctx context.Context, name string) error {
 }
 
 // mint stores inv under a fresh code and returns the raw code. The caller
-// has checked admin rights.
+// has checked admin rights. A name an open join request holds is refused
+// with ErrNameTaken.
 func (d *Directory) mint(ctx context.Context, inv Invite) (string, error) {
 	if !nameRE.MatchString(inv.Name) {
 		return "", fmt.Errorf("agent name %q must be 1-32 lowercase letters, digits, or dashes", inv.Name)
 	}
 	if err := checkKind(inv.Kind); err != nil {
+		return "", err
+	}
+	if err := d.refuseHeld(ctx, inv.Name, "", d.cfg.Now()); err != nil {
 		return "", err
 	}
 	code, err := NewCode()
@@ -560,7 +568,8 @@ func newOnlyRefusal(a Agent, found bool, mintNode string) error {
 // the new machine; other agents on the old machine stay. A code minted by
 // InviteNew is refused with ErrNameTaken if the name has since come to be
 // bound to a machine other than the minting one; the check runs under the
-// same lock as the join, so no other join can slip in between.
+// same lock as the join, so no other join can slip in between. A name an
+// open join request holds is refused with ErrNameTaken.
 func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, error) {
 	j, err := d.JoinAgent(ctx, remoteAddr, code)
 	return j.Name, err
@@ -591,6 +600,11 @@ func (d *Directory) JoinAgent(ctx context.Context, remoteAddr, code string) (Joi
 	}
 	if !ok || d.cfg.Now().After(inv.Expires) {
 		return Joined{}, ErrBadInvite
+	}
+	// A code minted before a join request came to hold the name loses to
+	// the request.
+	if err := d.refuseHeld(ctx, inv.Name, "", d.cfg.Now()); err != nil {
+		return Joined{}, err
 	}
 	prev, found, err := d.Agent(ctx, inv.Name)
 	if err != nil {

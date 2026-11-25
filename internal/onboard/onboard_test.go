@@ -1193,3 +1193,18 @@ func TestClaudeCodeOnboardingMentionsSocketWake(t *testing.T) {
 		t.Errorf("onboarding output adds --share-title:\n%s", b)
 	}
 }
+
+// A join request may name any kind an invite accepts except proxy-sandbox,
+// which stays on invites.
+func TestRequestableKind(t *testing.T) {
+	for _, k := range []string{"", KindCodex, KindClaudeCode, KindHermes, KindPhone} {
+		if !RequestableKind(k) {
+			t.Errorf("RequestableKind(%q) = false", k)
+		}
+	}
+	for _, k := range []string{KindProxySandbox, "sesame-x", "not-a-kind"} {
+		if RequestableKind(k) {
+			t.Errorf("RequestableKind(%q) = true", k)
+		}
+	}
+}
