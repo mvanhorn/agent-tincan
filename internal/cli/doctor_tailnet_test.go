@@ -448,6 +448,33 @@ func TestTailnetChecksUnjoinedStillReadsTag(t *testing.T) {
 	}
 }
 
+// After a timeout or an unreachable relay, doctor must not spend a second
+// 15s asking it for the tag: the configured relay is passed on only when
+// the last call got a definitive answer.
+func TestRunDoctorDeadRelaySkipsTagLookup(t *testing.T) {
+	useConfig(t, client.Config{Relay: "http://tincan-relay"})
+	old := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/v1/whoami" {
+			return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(`{"error":"down"}`)), Request: req}, nil
+		}
+		t.Errorf("unexpected relay call after an unreachable relay: %s", req.URL.Path)
+		return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(`{"error":"down"}`)), Request: req}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = old })
+	stubTailnet(t, tailnetSelf("1.104.4", false))
+	var tailnet *check
+	for _, c := range runDoctor(t.Context(), "", nil).Checks {
+		if c.Name == "tailnet" {
+			tailnet = &c
+			break
+		}
+	}
+	if tailnet == nil || tailnet.Status != "ok" || !strings.Contains(tailnet.Detail, "tag check skipped") {
+		t.Fatalf("tailnet check: %+v", tailnet)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
