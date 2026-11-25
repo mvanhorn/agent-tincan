@@ -57,6 +57,12 @@ func NewWithAdminTag(t *testing.T, cfg relay.Config, tag string) *Mesh {
 	return start(t, cfg, nil, tag, nil)
 }
 
+// NewWithAdminLoginAndTag is NewWithAdminLogin with --admin-tag set too,
+// for rosters that must hide the tag from guests while admins see it.
+func NewWithAdminLoginAndTag(t *testing.T, cfg relay.Config, tag string) *Mesh {
+	return start(t, cfg, []string{Login}, tag, nil)
+}
+
 func start(t *testing.T, cfg relay.Config, adminLogins []string, adminTag string, wrap func(identity.Store) identity.Store) *Mesh {
 	t.Helper()
 	st, err := store.Open(":memory:")
