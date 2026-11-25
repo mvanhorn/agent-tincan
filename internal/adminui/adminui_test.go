@@ -87,3 +87,19 @@ func TestPageShowsAdminVerdict(t *testing.T) {
 		}
 	}
 }
+
+// A lookup the relay could not make renders as unknown, never "no"; a
+// saved bearer token can be cleared without retyping a new one; and the
+// roster refreshes on demand, so tag changes show up without a save.
+func TestPageUnknownVerdictTokenClearAndRefresh(t *testing.T) {
+	w := get(t, Prefix+"app.js")
+	body := w.Body.String()
+	for _, key := range []string{"unknown — the relay could not check", "Clear the saved bearer token", "manualRefresh", "visibilitychange"} {
+		if !strings.Contains(body, key) {
+			t.Errorf("page does not show %q", key)
+		}
+	}
+	if h := get(t, Prefix); !strings.Contains(h.Body.String(), `id="refresh"`) {
+		t.Error("page has no refresh button")
+	}
+}

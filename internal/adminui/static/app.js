@@ -178,9 +178,13 @@ function statusLine(a) {
 // adminVerdict is the machine story the console shows for an agent: its
 // node, tags, and whether it may run admin commands. Agents without a
 // node run in a connected app, not on a tailnet machine, so admin does
-// not apply to them.
+// not apply to them. When the roster omits node_admin the relay could
+// not check: unknown, never "no".
 function adminVerdict(a) {
   if (!a.node_name) return { known: false };
+  if (!("node_admin" in a)) {
+    return { known: false, unknown: true, machine: a.node_name, owner: a.node_user || "", tags: a.node_tags || [] };
+  }
   return { known: true, admin: !!a.node_admin, machine: a.node_name, owner: a.node_user || "", tags: a.node_tags || [] };
 }
 
@@ -196,11 +200,11 @@ function renderAgents() {
 
     const facts = el("dl", "grid");
     const v = adminVerdict(a);
-    if (v.known) {
+    if (v.known || v.unknown) {
       facts.append(el("dt", "", "Machine"));
       facts.append(el("dd", "", v.machine + (v.owner ? " (" + v.owner + ")" : "")));
       facts.append(el("dt", "", "Admin"));
-      facts.append(el("dd", "", v.admin ? "yes" : "no"));
+      facts.append(el("dd", "", v.unknown ? "unknown — the relay could not check" : (v.admin ? "yes" : "no")));
     }
     if (a.last_active) {
       facts.append(el("dt", "", "Last active"));
@@ -228,8 +232,12 @@ function renderAgents() {
 function adminSection(a) {
   const wrap = el("div", "");
   const v = adminVerdict(a);
-  if (!v.known) {
+  if (!v.known && !v.unknown) {
     wrap.append(el("p", "meta", "This agent runs in a connected app, not on a tailnet machine, so admin does not apply to it."));
+    return wrap;
+  }
+  if (v.unknown) {
+    wrap.append(el("p", "meta", "The relay could not check this machine just now — refresh and try again."));
     return wrap;
   }
   const tags = v.tags.length > 0 ? v.tags.join(", ") : "no tags";
@@ -288,7 +296,7 @@ function configDetails(a) {
   goodIn.value = a.good_at || "";
   goodIn.placeholder = "What this agent is good at";
 
-  const saveMeta = el("p", "meta", "Kind and good-at save together.");
+  const saveMeta = el("p", "meta", "Kind always saves; good-at saves only when edited, so changing kind alone never files the old kind's stock text as a custom line.");
   const saveBtn = el("button", "primary", "Save kind and good-at");
   saveBtn.type = "button";
   const saveErr = el("p", "error", "");
@@ -300,8 +308,12 @@ function configDetails(a) {
     try {
       const k = await api("PUT", "/v1/agents/" + encodeURIComponent(a.name) + "/kind", { kind: kindSel.value });
       if (k.status !== 200) throw new Error((k.data && k.data.error) || ("saving kind failed (" + k.status + ")"));
-      const g = await api("PUT", "/v1/agents/" + encodeURIComponent(a.name) + "/good-at", { good_at: goodIn.value });
-      if (g.status !== 200) throw new Error((g.data && g.data.error) || ("saving good-at failed (" + g.status + ")"));
+      // The roster returns the effective good-at, so an untouched field
+      // still shows the old kind's stock text: only send it when edited.
+      if (goodIn.value !== (a.good_at || "")) {
+        const g = await api("PUT", "/v1/agents/" + encodeURIComponent(a.name) + "/good-at", { good_at: goodIn.value });
+        if (g.status !== 200) throw new Error("kind saved, but " + ((g.data && g.data.error) || ("saving good-at failed (" + g.status + ")")));
+      }
       announce(a.name + " updated.");
       await refreshAgents();
     } catch (e) {
@@ -322,6 +334,7 @@ function configDetails(a) {
   wakeIn.autocomplete = "off";
   wakeIn.spellcheck = false;
   wakeIn.placeholder = "https://agent-machine:8787/wake";
+  const wakeCurrent = el("p", "meta", "Current wake: " + (a.wake && a.wake !== "none" ? a.wake : "none") + ". The console never shows the current URL or the saved token.");
   const tokenLabel = el("label", "", "Bearer token (optional)");
   tokenLabel.htmlFor = "token-" + a.name;
   const tokenIn = document.createElement("input");
@@ -329,7 +342,12 @@ function configDetails(a) {
   tokenIn.className = "field";
   tokenIn.type = "password";
   tokenIn.autocomplete = "off";
-  const wakeMeta = el("p", "meta", "Sets a webhook wake for this agent. Leave the token blank to keep the current one.");
+  const clearLabel = el("label", "check", "");
+  const clearBox = document.createElement("input");
+  clearBox.type = "checkbox";
+  clearBox.id = "token-clear-" + a.name;
+  clearLabel.append(clearBox, " Clear the saved bearer token");
+  const wakeMeta = el("p", "meta", "Sets a webhook wake for this agent. Re-enter the URL to change it. Leave the token blank to keep the current one, or check the box to clear it.");
   const wakeBtn = el("button", "", "Save webhook");
   wakeBtn.type = "button";
   const wakeErr = el("p", "error", "");
@@ -341,10 +359,15 @@ function configDetails(a) {
     try {
       if (!wakeIn.value.trim()) throw new Error("a webhook URL is required");
       const body = { webhook: wakeIn.value.trim() };
-      if (tokenIn.value) body.bearer_token = tokenIn.value;
+      if (clearBox.checked) {
+        body.bearer_token = "";
+      } else if (tokenIn.value) {
+        body.bearer_token = tokenIn.value;
+      }
       const res = await api("PUT", "/v1/admin/wake-config/" + encodeURIComponent(a.name), body);
       if (res.status !== 200) throw new Error((res.data && res.data.error) || ("saving webhook failed (" + res.status + ")"));
       tokenIn.value = "";
+      clearBox.checked = false;
       announce("Webhook saved for " + a.name + ".");
       await refreshAgents();
     } catch (e) {
@@ -382,7 +405,7 @@ function configDetails(a) {
 
   wrap.append(kindLabel, kindSel, goodLabel, goodIn, saveMeta, saveBtn, saveErr);
   wrap.append(el("h3", "", "Wake"));
-  wrap.append(wakeLabel, wakeIn, tokenLabel, tokenIn, wakeMeta, wakeBtn, wakeErr);
+  wrap.append(wakeCurrent, wakeLabel, wakeIn, tokenLabel, tokenIn, clearLabel, wakeMeta, wakeBtn, wakeErr);
   wrap.append(el("h3", "", "Danger"));
   wrap.append(removeBtn, removeErr);
   d.append(wrap);
@@ -437,7 +460,10 @@ function renderDevices() {
       const btn = el("button", "", "Invite " + p.name);
       btn.type = "button";
       btn.addEventListener("click", () => {
-        $("add-name").value = p.name;
+        // Tailnet machine names may carry uppercase and dots, which agent
+        // names forbid: prefill the closest valid shape, and the invite
+        // form still validates before minting.
+        $("add-name").value = p.name.toLowerCase().replace(/\./g, "-");
         $("add-name").scrollIntoView({ block: "center" });
         $("add-name").focus();
       });
@@ -524,4 +550,21 @@ async function refreshAll() {
 $("add-button").addEventListener("click", invite);
 $("invite-install-copy").addEventListener("click", () => copyId("invite-install"));
 $("invite-copy").addEventListener("click", () => copyId("invite-command"));
+
+// manualRefresh re-reads the roster (and the device list, when loaded),
+// so tag changes in the Tailscale admin panel show up without a save.
+async function manualRefresh() {
+  try {
+    await refreshAgents();
+    if (state.peersLoaded) await loadDevices();
+  } catch (e) {
+    const banner = $("banner");
+    banner.textContent = fail("Could not refresh", e);
+    banner.hidden = false;
+  }
+}
+$("refresh").addEventListener("click", manualRefresh);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.loaded) manualRefresh();
+});
 refreshAll();
