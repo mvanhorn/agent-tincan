@@ -28,6 +28,7 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = plugin ]; then
+  [ -z "${FAKE_PLUGINS_SLEEP:-}" ] || sleep "$FAKE_PLUGINS_SLEEP"
   echo "${FAKE_PLUGINS:-[]}"
   exit "${FAKE_PLUGINS_EXIT:-0}"
 fi
@@ -331,6 +332,7 @@ func TestGeminiWakeAgyRefusesPlugins(t *testing.T) {
 	for name, env := range map[string][]string{
 		"installed":   {`FAKE_PLUGINS=[{"name":"files"}]`},
 		"list failed": {"FAKE_PLUGINS_EXIT=3"},
+		"list hangs":  {"FAKE_PLUGINS_SLEEP=30", "TINCAN_WAKE_PREFLIGHT_TIMEOUT=1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newGeminiHarness(t)
@@ -532,6 +534,9 @@ func TestGeminiWakeReadsOnlyTheChosenEngineConfig(t *testing.T) {
 	}
 	moved := filepath.Join(h.dir, "agy-mcp.json")
 	h.servers(moved, map[string]any{"agent-tincan": h.tincanEntry(h.config)})
+	if err := os.Remove(h.agyMCP); err != nil {
+		t.Fatal(err)
+	}
 	if r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1", "TINCAN_AGY_MCP_CONFIG="+moved); r.err != nil || len(h.runs()) != 2 {
 		t.Fatalf("agy with TINCAN_AGY_MCP_CONFIG: %v\nstderr:\n%s", r.err, r.stderr)
 	}
@@ -775,5 +780,31 @@ func writeFile(t *testing.T, path, content string) {
 	mkdirs(t, filepath.Dir(path))
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGeminiWakeAgyChecksDefaultConfigUnderOverride(t *testing.T) {
+	h := newGeminiHarness(t)
+	alt := filepath.Join(h.home, "alt-mcp.json")
+	h.servers(alt, map[string]any{"agent-tincan": h.tincanEntry(h.config)})
+	h.servers(h.agyMCP, map[string]any{"agent-tincan": h.tincanEntry(filepath.Join(filepath.Dir(h.config), "codex.json"))})
+	r := h.run("TINCAN_AGY_MCP_CONFIG=" + alt)
+	if r.err == nil || len(h.runs()) != 0 {
+		t.Fatalf("wake ran though agy's own config pins another agent\nstderr:\n%s", r.stderr)
+	}
+}
+
+func TestGeminiWakeAgyBlankWorkspaceConfig(t *testing.T) {
+	for _, tool := range []string{"jq", "python3"} {
+		t.Run(tool, func(t *testing.T) {
+			if _, err := exec.LookPath(tool); err != nil {
+				t.Skip(tool + " not on PATH")
+			}
+			h := newGeminiHarness(t)
+			writeFile(t, filepath.Join(h.wd, ".agents", "mcp_config.json"), "\n")
+			if r := h.run("TINCAN_GEMINI_JSON_TOOL=" + tool); r.err != nil || len(h.runs()) != 1 {
+				t.Fatalf("blank workspace config refused with %s: %v\nstderr:\n%s", tool, r.err, r.stderr)
+			}
+		})
 	}
 }

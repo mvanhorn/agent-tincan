@@ -1279,3 +1279,18 @@ func TestListenInstallGeminiCLIRefusesInvalidAgyJSON(t *testing.T) {
 		t.Error("wake scripts written for a refused install")
 	}
 }
+
+func TestListenInstallGeminiCLIWorkspaceConfigOnly(t *testing.T) {
+	o := geminiOptions(t, "linux")
+	wd := filepath.Join(o.Home, "tincan-gemini", ".agents", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(wd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"agent-tincan": agyTincanEntry(o.ConfigPath)}})
+	if err := os.WriteFile(wd, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := installListener(o, geminiWake(t)); err != nil {
+		t.Fatalf("install with the tincan server only in the workspace config: %v", err)
+	}
+}

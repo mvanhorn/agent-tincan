@@ -47,8 +47,9 @@
 #   TINCAN_GEMINI_ALLOW_UNCONFINED  1 runs agy unconfined: tool approval off,
 #                                   no per-run permission limits
 #   TINCAN_GEMINI_VERSION_PATTERN   what "<engine> --version" must print
-#   TINCAN_AGY_MCP_CONFIG           agy's MCP config (default
-#                                   ~/.gemini/config/mcp_config.json)
+#   TINCAN_AGY_MCP_CONFIG           one more agy MCP config to check;
+#                                   ~/.gemini/config/mcp_config.json, the
+#                                   file agy loads, is always checked
 #   TINCAN_AGY_PRINT_TIMEOUT        passed to agy --print-timeout when set
 #                                   (agy sets no limit by default; the wake's
 #                                   own TINCAN_WAKE_TIMEOUT still applies)
@@ -95,9 +96,15 @@ case $ENGINE in
     BIN=${AGY_BIN:-agy}
     VERSION_PATTERN=${TINCAN_GEMINI_VERSION_PATTERN:-[Aa]ntigravity|agy|[0-9]+\.[0-9]+}
     # The global config agy mcp add writes, and the workspace one agy reads
-    # from the directory it runs in.
-    MCP_FILES="$AGY_MCP_CONFIG
+    # from the directory it runs in. agy has no way to point it at another
+    # file, so its default stays checked when TINCAN_AGY_MCP_CONFIG names
+    # one more.
+    MCP_FILES="$HOME/.gemini/config/mcp_config.json
 $WORKDIR/.agents/mcp_config.json"
+    if [ "$AGY_MCP_CONFIG" != "$HOME/.gemini/config/mcp_config.json" ]; then
+      MCP_FILES="$MCP_FILES
+$AGY_MCP_CONFIG"
+    fi
     ;;
   gemini)
     BIN=${GEMINI_BIN:-gemini}
@@ -156,7 +163,8 @@ gemini_mcp_json() {
     elif [ "$_tool" = python3 ] && command -v python3 >/dev/null 2>&1; then
       python3 -c '
 import json, sys
-servers = json.load(open(sys.argv[1])).get("mcpServers") or {}
+raw = open(sys.argv[1]).read()
+servers = (json.loads(raw) if raw.strip() else {}).get("mcpServers") or {}
 for name, v in servers.items():
     env = v.get("env") or {}
     cmd = [v.get("command") or v.get("url") or v.get("httpUrl") or v.get("serverUrl") or ""]
@@ -301,7 +309,15 @@ if [ "$ENGINE" = agy ]; then
     # A plugin's MCP servers load in every agy run but are not in
     # mcp_config.json, so the identity check cannot vet them, and mcp(*)
     # would allow their tools, including ones that write or run commands.
-    plugins=$("$BIN" plugin list --json 2>/dev/null) || tincan_wake_refuse "could not list agy's plugins (agy plugin list --json failed)"
+    prc=0
+    _tw_preflight "$TINCAN_WAKE_STATE_DIR/plugins.$$" "$BIN" plugin list --json || prc=$?
+    plugins=$(cat "$TINCAN_WAKE_STATE_DIR/plugins.$$" 2>/dev/null) || plugins=
+    rm -f "$TINCAN_WAKE_STATE_DIR/plugins.$$"
+    if [ "$prc" -eq 124 ]; then
+      tincan_wake_refuse "listing agy's plugins timed out after $TINCAN_WAKE_PREFLIGHT_TIMEOUT seconds"
+    elif [ "$prc" -ne 0 ]; then
+      tincan_wake_refuse "could not list agy's plugins (agy plugin list --json failed)"
+    fi
     if [ "$(printf '%s' "$plugins" | tr -d ' \t\r\n')" != '[]' ]; then
       tincan_wake_refuse "agy has plugins installed, and a confined wake cannot vet their MCP servers; remove them with agy plugin uninstall, or set TINCAN_GEMINI_ALLOW_UNCONFINED=1"
     fi

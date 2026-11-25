@@ -43,7 +43,7 @@ agy mcp add -e TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" agent-tincan
 agy mcp list
 ```
 
-The flags go before the server name. `agy mcp add` writes `~/.gemini/config/mcp_config.json` in the usual `{"mcpServers": {...}}` shape. The wake reads that file, and `.agents/mcp_config.json` in its working directory, for its identity check. If you keep agy's config elsewhere, set `TINCAN_AGY_MCP_CONFIG` in the listener service's environment.
+The flags go before the server name. `agy mcp add` writes `~/.gemini/config/mcp_config.json` in the usual `{"mcpServers": {...}}` shape. The wake reads that file, and `.agents/mcp_config.json` in its working directory, for its identity check. agy itself always loads that default file. `TINCAN_AGY_MCP_CONFIG` in the listener service's environment adds one more file for the wake to check; it never replaces the default.
 
 The identity check also refuses to start agy while that file lists any other MCP server, unless you name it in `TINCAN_WAKE_ALLOWED_SERVERS`. A confined run allows every MCP tool agy has, so each configured server is one you trust with a teammate's request.
 
@@ -97,7 +97,7 @@ The wake reads the variable only from its own environment, which it gets from `t
 
 ## If you have a Gemini API key
 
-With a paid Gemini API key you can run Gemini CLI instead of agy. It runs in its own sandbox and can write in its working directory (see [Security posture](#security-posture)). Join and set `wake.json` as in steps 1 and 5 above, and install the listener as in step 4 or copy the wake script by hand. Then install Gemini CLI and add the tincan server to your user settings with trust on:
+With a paid Gemini API key you can run Gemini CLI instead of agy. It runs in its own sandbox and can write in its working directory (see [Security posture](#security-posture)). Join and set `wake.json` as in steps 1 and 5 above. Step 4's install command checks for an agy setup, so copy the wake script and shared library by hand as described in [Without the service](#without-the-service). Then install Gemini CLI and add the tincan server to your user settings with trust on:
 
 ```bash
 gemini mcp add -s user -e TINCAN_CONFIG="$HOME/.config/tincan/gemini-cli.json" --trust agent-tincan tincan mcp
@@ -136,7 +136,7 @@ Each nudge, the script:
 
 1. Logs the relay's upgrade notice when `tincan listen` passes one in `TINCAN_UPGRADE_AVAILABLE`, and exits without a run when that notice is all the nudge is for (`TINCAN_WAITING` is 0). Otherwise it takes the wake lock (a second nudge during a run exits and leaves requests queued; a lock left by a killed run is broken) and exits early while a backoff is in force.
 2. Checks the engine: `agy` or `gemini` on PATH (`AGY_BIN`, `GEMINI_BIN` to override), answering `--version` in the expected shape (`TINCAN_GEMINI_VERSION_PATTERN` to override), and `GEMINI_API_KEY` for the gemini engine.
-3. Pins identity: it reads the chosen engine's MCP config (agy: `TINCAN_AGY_MCP_CONFIG`, default `~/.gemini/config/mcp_config.json`, plus `.agents/mcp_config.json` in the workdir; gemini: `TINCAN_GEMINI_SETTINGS`, default `~/.gemini/settings.json`, plus `.gemini/settings.json` in the workdir) and refuses to run unless there is exactly one agent-tincan server, its `TINCAN_CONFIG` is the wake's own, and every other server is listed in `TINCAN_WAKE_ALLOWED_SERVERS`. The engine runs with tool approval off, so every server it loads is trusted. Reading these JSON files needs `jq` or `python3` on the listener's PATH.
+3. Pins identity: it reads the chosen engine's MCP config (agy: `~/.gemini/config/mcp_config.json`, `.agents/mcp_config.json` in the workdir, and `TINCAN_AGY_MCP_CONFIG` when it names another file; gemini: `TINCAN_GEMINI_SETTINGS`, default `~/.gemini/settings.json`, plus `.gemini/settings.json` in the workdir) and refuses to run unless there is exactly one agent-tincan server, its `TINCAN_CONFIG` is the wake's own, and every other server is listed in `TINCAN_WAKE_ALLOWED_SERVERS`. The engine runs with tool approval off, so every server it loads is trusted. Reading these JSON files needs `jq` or `python3` on the listener's PATH.
 4. Runs the engine in `TINCAN_GEMINI_WORKDIR` (default `~/tincan-gemini`) with a prompt that tells it to call check_inbox, finish work waiting on replies, handle and reply to every request, and repeat until the inbox is empty:
    - agy, confined (the default): `agy --sandbox --output-format json --settings <per-run settings> -p <prompt>`. The settings are described under [Security posture](#security-posture), and the prompt tells agy it is read-only.
    - agy, unconfined (`TINCAN_GEMINI_ALLOW_UNCONFINED=1`): `agy --output-format json --dangerously-skip-permissions -p <prompt>`

@@ -26,12 +26,12 @@ type agyServer struct {
 // and the servers the owner allowed: the owner's values kept in an
 // installed service, else the wake's defaults.
 type agyWakeEnv struct {
-	global, workdir string
-	allowed         []string
+	home, global, workdir string
+	allowed               []string
 }
 
 func newAgyWakeEnv(home string, owner []envVar) agyWakeEnv {
-	e := agyWakeEnv{global: agyMCPConfigPath(home), workdir: filepath.Join(home, "tincan-gemini")}
+	e := agyWakeEnv{home: home, global: agyMCPConfigPath(home), workdir: filepath.Join(home, "tincan-gemini")}
 	for _, v := range owner {
 		switch v.Key {
 		case "TINCAN_AGY_MCP_CONFIG":
@@ -50,7 +50,8 @@ func newAgyWakeEnv(home string, owner []envVar) agyWakeEnv {
 }
 
 // checkAgyEntry stops a gemini-cli install that the wake would refuse at
-// its first run. Across agy's MCP config and the workdir's
+// its first run. Across agy's MCP config (its default file, plus the
+// owner's TINCAN_AGY_MCP_CONFIG when that names another) and the workdir's
 // .agents/mcp_config.json there must be exactly one agent-tincan server,
 // pinned to this agent's TINCAN_CONFIG, and every other server must be one
 // the owner allowed. A server is agent-tincan when its name contains tincan
@@ -61,14 +62,17 @@ func checkAgyEntry(e agyWakeEnv, cfg, binary string) error {
 	add := "Add it with: " + addCmd
 	servers := map[string]agyServer{}
 	var tincan, extra []string
-	for i, path := range []string{e.global, filepath.Join(e.workdir, ".agents", "mcp_config.json")} {
+	paths := []string{agyMCPConfigPath(e.home), filepath.Join(e.workdir, ".agents", "mcp_config.json")}
+	if e.global != paths[0] {
+		paths = append(paths, e.global)
+	}
+	found := 0
+	for _, path := range paths {
 		raw, err := os.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) {
-			if i == 0 {
-				return fmt.Errorf("agy has no MCP config at %s, so a woken agy could not reach the team. %s Nothing was installed", path, add)
-			}
 			continue
 		}
+		found++
 		if err != nil {
 			return fmt.Errorf("read agy's MCP config: %w. Nothing was installed", err)
 		}
@@ -92,12 +96,12 @@ func checkAgyEntry(e agyWakeEnv, cfg, binary string) error {
 	}
 	slices.Sort(tincan)
 	slices.Sort(extra)
-	where := e.global
-	switch len(tincan) {
-	case 0:
-		return fmt.Errorf("agy's MCP config %s has no agent-tincan server, so a woken agy could not reach the team. %s Nothing was installed", where, add)
-	case 1:
-	default:
+	switch {
+	case found == 0:
+		return fmt.Errorf("agy has no MCP config at %s, so a woken agy could not reach the team. %s Nothing was installed", e.global, add)
+	case len(tincan) == 0:
+		return fmt.Errorf("agy's MCP configs (%s) have no agent-tincan server, so a woken agy could not reach the team. %s Nothing was installed", strings.Join(paths, ", "), add)
+	case len(tincan) > 1:
 		return fmt.Errorf("agy's MCP configs have %d agent-tincan servers (%s); the wake needs exactly one, pinned to %s. Remove the others with agy mcp remove. Nothing was installed", len(tincan), strings.Join(tincan, ", "), cfg)
 	}
 	if len(extra) > 0 {

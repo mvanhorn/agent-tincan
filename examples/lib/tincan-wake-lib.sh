@@ -190,13 +190,14 @@ tincan_wake_lock() {
 }
 
 # _tw_lock_max_minutes prints how many minutes a live wake may hold the
-# lock: the CLI run, the version probe, the MCP listing and one operator
-# notice, each with the time it takes to stop it and whatever it left
+# lock: the CLI run, the version probe, the MCP listing, one more preflight
+# check a wake may add (the gemini wake's agy plugin listing) and one
+# operator notice, each with the time it takes to stop it and whatever it left
 # running (a second tick, five seconds from TERM to KILL, five more to reap
 # leftovers, with room to spare: fifteen seconds), rounded up, plus five
 # minutes. A lock older than this is broken even if its pid is alive.
 _tw_lock_max_minutes() {
-  _tw_secs=$((TINCAN_WAKE_TIMEOUT + 3 * TINCAN_WAKE_PREFLIGHT_TIMEOUT + 4 * 15))
+  _tw_secs=$((TINCAN_WAKE_TIMEOUT + 4 * TINCAN_WAKE_PREFLIGHT_TIMEOUT + 5 * 15))
   echo $(((_tw_secs + 59) / 60 + 5))
 }
 

@@ -848,8 +848,8 @@ cat "$TINCAN_WAKE_STATE_DIR/lock/max" >"$STATE_OUT/max.out"
 		t.Fatalf("wake: %v\nstderr:\n%s", r.err, r.stderr)
 	}
 	raw, err := os.ReadFile(filepath.Join(h.dir, "max.out"))
-	// (600 + 3*30 + 4*15) seconds is 12.5 minutes, rounded up, plus five.
-	if err != nil || strings.TrimSpace(string(raw)) != "18" {
-		t.Fatalf("recorded bound = %q, %v; want 18", raw, err)
+	// (600 + 4*30 + 5*15) seconds is 13.25 minutes, rounded up, plus five.
+	if err != nil || strings.TrimSpace(string(raw)) != "19" {
+		t.Fatalf("recorded bound = %q, %v; want 19", raw, err)
 	}
 }
