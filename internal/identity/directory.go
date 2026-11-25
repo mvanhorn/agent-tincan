@@ -477,7 +477,9 @@ func (d *Directory) refuseGuestName(ctx context.Context, name string) error {
 
 // mint stores inv under a fresh code and returns the raw code. The caller
 // has checked admin rights. A name an open join request holds is refused
-// with ErrNameTaken.
+// with ErrNameTaken. The check and the write run under d.mu, the lock
+// filing a join request holds, so an invite and a request for the same name
+// cannot both be made.
 func (d *Directory) mint(ctx context.Context, inv Invite) (string, error) {
 	if !nameRE.MatchString(inv.Name) {
 		return "", fmt.Errorf("agent name %q must be 1-32 lowercase letters, digits, or dashes", inv.Name)
@@ -485,6 +487,8 @@ func (d *Directory) mint(ctx context.Context, inv Invite) (string, error) {
 	if err := checkKind(inv.Kind); err != nil {
 		return "", err
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if err := d.refuseHeld(ctx, inv.Name, "", d.cfg.Now()); err != nil {
 		return "", err
 	}

@@ -389,8 +389,8 @@ func TestJoinRequestConcurrentFilings(t *testing.T) {
 	}
 }
 
-// Filing and minting an invite for the same name at once: however the two
-// land, the name ends up bound at most once.
+// Filing and minting an invite for the same name at once: exactly one of
+// them succeeds, and the name ends up bound at most once.
 func TestJoinRequestRacesInvite(t *testing.T) {
 	for range 5 {
 		m := testrelay.New(t, relay.Config{})
@@ -401,6 +401,9 @@ func TestJoinRequestRacesInvite(t *testing.T) {
 		wg.Go(func() { inviteCode, _ = m.Client(t, "admin").Invite(t.Context(), "racer") })
 		wg.Go(func() { fileStatus, filed = fileJoin(t, m.URL("stranger"), "racer") })
 		wg.Wait()
+		if inviteCode != "" && fileStatus == http.StatusOK {
+			t.Fatal("both the invite and the request took the name")
+		}
 		bound := 0
 		if inviteCode != "" {
 			taker := m.AddMachine(t, "taker", testrelay.TailnetNode("nTAKER", "taker", testrelay.Login))

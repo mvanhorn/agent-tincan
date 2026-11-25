@@ -3,6 +3,7 @@ package identity_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,70 @@ func TestApprovedRequestStillHoldsNames(t *testing.T) {
 	}
 	if _, err := f.dir.InviteKind(ctx, "100.0.0.1:1", "codex", ""); !errors.Is(err, identity.ErrNameTaken) {
 		t.Fatalf("invite for a name an approved request holds = %v", err)
+	}
+}
+
+// heldGateStore answers the first held-name lookup, then stops until release
+// closes, so a test can hold minting between its check and its write and see
+// whether filing slips in.
+type heldGateStore struct {
+	*identity.MemoryStore
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *heldGateStore) JoinNameHeld(ctx context.Context, name, exceptID string, now time.Time) (bool, error) {
+	held, err := s.MemoryStore.JoinNameHeld(ctx, name, exceptID, now)
+	first := false
+	s.once.Do(func() { first = true })
+	if first {
+		close(s.entered)
+		<-s.release
+	}
+	return held, err
+}
+
+// Minting an invite and filing a request for the same name at the same
+// moment: minting checks and stores under the lock filing holds, so exactly
+// one of them takes the name.
+func TestMintAndFileForOneNameAtOnce(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_790_000_000, 0)
+	st := &heldGateStore{MemoryStore: identity.NewMemoryStore(), entered: make(chan struct{}), release: make(chan struct{})}
+	who := identitytest.New(map[string]identity.Node{"100.0.0.1:1": macNode, "100.0.0.9:1": newNode})
+	dir := identity.NewDirectory(st, who, identity.Config{
+		Admins: []string{"macbook-pro-44"}, AdminLogins: []string{"mvanhorn@gmail.com"},
+		Now: func() time.Time { return now },
+	})
+
+	var mintErr error
+	minted := make(chan struct{})
+	go func() {
+		defer close(minted)
+		_, mintErr = dir.InviteKind(ctx, "100.0.0.1:1", "racer", "")
+	}()
+	<-st.entered // minting is paused at its held-name check
+
+	var fileErr error
+	filed := make(chan struct{})
+	go func() {
+		defer close(filed)
+		_, fileErr = dir.FileJoinRequest(ctx, newNode, []identity.RequestedAgent{{Name: "racer"}})
+	}()
+	select {
+	case <-filed: // filing did not wait for minting
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(st.release)
+	<-minted
+	<-filed
+
+	if mintErr != nil {
+		t.Fatalf("mint = %v, want it to win: it reached the name first", mintErr)
+	}
+	if !errors.Is(fileErr, identity.ErrNameTaken) {
+		t.Fatalf("filing while an invite for the name was being minted = %v, want ErrNameTaken", fileErr)
 	}
 }
 
