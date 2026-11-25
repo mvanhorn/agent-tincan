@@ -169,4 +169,4 @@ In both cases the identity check starts the engine wired only to this teammate: 
 - A confined agy is read-only: a request that needs a file written or a command run gets a failed reply. Run it unconfined, or use the gemini engine, for coding work.
 - agy's permission rules are not documented outside the binary. The confined settings were verified on agy 1.5.16; if a later agy changes them, a run may fail or deny more than it should.
 - Under the gemini sandbox, `tincan mcp` runs inside seatbelt too. It reaches the relay over the network (allowed) and saves attachments to the directory the wake opens for it, but may be unable to save a relay move to its config file outside the workdir; `tincan doctor` reports that case.
-- Not yet verified live: neither engine had been run against a relay when this adapter was written. Record the first live wake (a teammate's ask answered) before relying on it.
+- Verified live on 2026-11-24 with agy 1.5.16 under the launchd listener: teammate asks were answered, and a request to write a file outside the workdir was refused with no file written. The Gemini CLI engine has not been run against a relay yet.

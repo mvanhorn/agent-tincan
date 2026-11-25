@@ -1185,7 +1185,7 @@ Install agy and log in once with your Google account, add the MCP server with `a
 - A confined agy cannot write files or run commands; a request that needs either gets a failed reply. Its permission settings were verified on agy 1.5.16.
 - The wake needs `jq` or `python3` on the listener's PATH to read the engines' JSON configs.
 - The history agent cannot read gemini-cli runs yet.
-- Not yet verified live end to end against a relay.
+- Verified live with agy 1.5.16 (answered asks, refused a write); the Gemini CLI engine is not yet verified live.
 
 #### Adapter doc
 
