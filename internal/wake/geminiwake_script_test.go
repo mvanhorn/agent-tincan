@@ -167,10 +167,6 @@ func checkDrainPrompt(t *testing.T, p string) {
 	}
 }
 
-// The default engine is Antigravity: headless, JSON output, tool approval
-// skipped, the drain prompt, run in the wake's workdir. agy has no
-// documented sandbox, so it only runs when the owner opts in to running it
-// unconfined.
 func TestGeminiWakeAgyEngineArgv(t *testing.T) {
 	h := newGeminiHarness(t)
 	r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1")
@@ -204,7 +200,6 @@ func TestGeminiWakeAgyEngineArgv(t *testing.T) {
 	}
 }
 
-// agySettings decodes the --settings JSON an agy run was given.
 type agySettings struct {
 	ToolPermission string `json:"toolPermission"`
 	Permissions    struct {
@@ -226,10 +221,6 @@ func (r wakeRun) agySettings(t *testing.T) agySettings {
 	return s
 }
 
-// Without the opt-in, agy runs confined: in its terminal sandbox, with a
-// per-run strict permission mode that allows only MCP tools and file reads,
-// and denies every command, every write, and reads of the tincan configs
-// (teammates' keys) and ~/.ssh. Nothing is written to agy's own settings.
 func TestGeminiWakeAgyConfinedByDefault(t *testing.T) {
 	h := newGeminiHarness(t)
 	r := h.run()
@@ -284,8 +275,6 @@ func TestGeminiWakeAgyConfinedByDefault(t *testing.T) {
 	}
 }
 
-// The unconfined opt-in keeps the full-agent run: tool approval skipped,
-// no per-run settings, and the usual drain prompt.
 func TestGeminiWakeAgyUnconfinedOptIn(t *testing.T) {
 	h := newGeminiHarness(t)
 	r := h.run("TINCAN_GEMINI_ALLOW_UNCONFINED=1")
@@ -301,7 +290,6 @@ func TestGeminiWakeAgyUnconfinedOptIn(t *testing.T) {
 	}
 }
 
-// Paths with quotes and spaces still produce valid --settings JSON.
 func TestGeminiWakeAgySettingsEscapePaths(t *testing.T) {
 	for _, tool := range []string{"jq", "python3"} {
 		t.Run(tool, func(t *testing.T) {
@@ -324,8 +312,6 @@ func TestGeminiWakeAgySettingsEscapePaths(t *testing.T) {
 	}
 }
 
-// A run whose JSON lists denied actions logs their names; the exit status
-// still decides failure accounting.
 func TestGeminiWakeAgyLogsDeniedActions(t *testing.T) {
 	h := newGeminiHarness(t)
 	out := `FAKE_STDOUT={"conversation_id":"c1","status":"SUCCESS","response":"","denied_actions":[{"action":"write_file","display_name":"Edit"},{"action":"command","display_name":"Run"}]}`

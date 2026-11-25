@@ -11,8 +11,6 @@ import (
 	"strings"
 )
 
-// agyMCPConfigPath is the MCP config "agy mcp add" writes, which the
-// gemini-cli wake reads by default.
 func agyMCPConfigPath(home string) string {
 	return filepath.Join(home, ".gemini", "config", "mcp_config.json")
 }
@@ -30,7 +28,8 @@ type agyServer struct {
 // when its name contains tincan or its command is a tincan binary, the
 // same rule as the wake library's identity check.
 func checkAgyEntry(path, cfg, binary string) error {
-	add := fmt.Sprintf("Add it with: agy mcp add -e TINCAN_CONFIG=%s agent-tincan %s mcp", shellQuote(cfg), shellQuote(binary))
+	addCmd := fmt.Sprintf("agy mcp add -e TINCAN_CONFIG=%s agent-tincan %s mcp", shellQuote(cfg), shellQuote(binary))
+	add := "Add it with: " + addCmd
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("agy has no MCP config at %s, so a woken agy could not reach the team. %s Nothing was installed", path, add)
@@ -62,7 +61,7 @@ func checkAgyEntry(path, cfg, binary string) error {
 	}
 	pin := doc.Servers[names[0]].Env["TINCAN_CONFIG"]
 	if pin == "" {
-		return fmt.Errorf("the %s server in %s sets no TINCAN_CONFIG, so it would run as this machine's default agent. Remove it with agy mcp remove %s, then %s Nothing was installed", names[0], path, names[0], strings.TrimPrefix(add, "Add it with: "))
+		return fmt.Errorf("the %s server in %s sets no TINCAN_CONFIG, so it would run as this machine's default agent. Remove it with agy mcp remove %s, then %s Nothing was installed", names[0], path, names[0], addCmd)
 	}
 	if !sameConfigFile(pin, cfg) {
 		return fmt.Errorf("the %s server in %s runs tincan with TINCAN_CONFIG=%s, which is another agent's config, so a woken agy would act as that agent. Point it at %s. Nothing was installed", names[0], path, pin, cfg)
@@ -70,8 +69,6 @@ func checkAgyEntry(path, cfg, binary string) error {
 	return nil
 }
 
-// sameConfigFile reports whether a and b name the same file once their
-// directories' symlinks are resolved, as the wake compares them.
 func sameConfigFile(a, b string) bool {
 	if a == b {
 		return true
