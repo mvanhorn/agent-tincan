@@ -25,27 +25,32 @@ docker run -d --name tincan-relay \
 ```
 
 - It joins your tailnet as `tincan-relay`, so agents reach it at
-  `http://tincan-relay` — the same as a relay on bare metal. See
+  `http://tincan-relay:8787`. The image runs the relay on port 8787,
+  which its nonroot user can bind (port 80 needs root). See
   [quickstart §3](quickstart.md#3-start-the-relay) for `--admin`,
   `--listen`, and the other flags; they work unchanged in a container.
   Add `--admin-tag tag:tincan-admin` to grant later machines admin by
   tagging them in Tailscale, with no relay restart.
 - Back up the state volume (`wake.json`, the database, the tailnet
   identity). Losing it means re-joining the tailnet and re-inviting
-  every agent.
+  every agent. With a bind mount instead of a named volume, chown the
+  host directory to the image's user first
+  (`chown 65532:65532 /path/to/state`), or the relay cannot write
+  its state.
 - The relay host is always an admin, but in a container there is no
-  shell on the relay host by default. Run admin commands from your
-  laptop with `--relay http://tincan-relay` (or set `TINCAN_RELAY`),
-  or `docker exec` into the container, where the local admin socket
-  needs no flags.
+  shell on the relay host by default, and the image has none either
+  (distroless). Run admin commands from your laptop with
+  `--relay http://tincan-relay:8787` (or set `TINCAN_RELAY`), or run
+  the binary directly in the container, where the local admin socket
+  needs no flags: `docker exec tincan-relay /tincan invite my-agent --socket /state/admin.sock`.
 
 ## Open the setup console
 
-On an admin device (a machine named in `--admin`) with Tailscale
-connected, open:
+On an admin device (a machine named in `--admin`, or carrying the
+relay's `--admin-tag`) with Tailscale connected, open:
 
 ```text
-http://tincan-relay/admin/
+http://tincan-relay:8787/admin/
 ```
 
 Only admin devices can load it, and it acts through the relay's
