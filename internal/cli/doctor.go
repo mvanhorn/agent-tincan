@@ -365,13 +365,11 @@ func setupConsoleCheck(ctx context.Context, r *client.Relay) check {
 	var peers struct {
 		Peers []json.RawMessage `json:"peers"`
 	}
-	peerNote := ""
 	if err := r.Raw(ctx, "GET", "/v1/admin/peers", nil, &peers); err != nil {
-		peerNote = "; device list unavailable: " + err.Error()
-	} else {
-		peerNote = fmt.Sprintf("; tailnet devices section lists %d peers", len(peers.Peers))
+		return check{name, "warn", fmt.Sprintf("setup console at /admin/ serves %d agent kinds, but the tailnet devices section cannot load: %s", len(kinds.Kinds), err.Error()),
+			"Check that the relay can read the tailnet peer list, then run tincan doctor again."}
 	}
-	return check{name, "ok", fmt.Sprintf("setup console at /admin/ serves %d agent kinds%s", len(kinds.Kinds), peerNote), ""}
+	return check{name, "ok", fmt.Sprintf("setup console at /admin/ serves %d agent kinds; tailnet devices section lists %d peers", len(kinds.Kinds), len(peers.Peers)), ""}
 }
 
 // relayUnreachableCheck explains a failed whoami: no key, an error that

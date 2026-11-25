@@ -401,7 +401,7 @@ func TestSetupConsoleCheck(t *testing.T) {
 		want      []string
 	}{
 		{"console", 200, `{"kinds":["hermes","codex"]}`, 200, `{"peers":[{},{},{}]}`, "ok", []string{"setup console at /admin/", "2 agent kinds", "lists 3 peers"}},
-		{"no peers route", 200, `{"kinds":["hermes"]}`, 404, `{"error":"no"}`, "ok", []string{"1 agent kinds", "device list unavailable"}},
+		{"no peers route", 200, `{"kinds":["hermes"]}`, 404, `{"error":"no"}`, "warn", []string{"1 agent kinds", "devices section cannot load"}},
 		{"empty kinds", 200, `{"kinds":[]}`, 200, `{"peers":[]}`, "warn", []string{"no agent kinds"}},
 		{"not admin", 403, `{"error":"no"}`, 403, `{"error":"no"}`, "ok", []string{"skipped", "admin device"}},
 		{"old relay", 404, `{"error":"no"}`, 404, `{"error":"no"}`, "ok", []string{"skipped", "predates"}},

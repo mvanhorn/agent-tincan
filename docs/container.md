@@ -21,7 +21,7 @@ docker run -d --name tincan-relay \
   -e TS_AUTHKEY=tskey-auth-... \
   -v tincan-state:/state \
   tincan-relay \
-  relay --admin my-laptop --state-dir /state
+  relay --admin my-laptop --state-dir /state --port 8787
 ```
 
 - It joins your tailnet as `tincan-relay`, so agents reach it at
