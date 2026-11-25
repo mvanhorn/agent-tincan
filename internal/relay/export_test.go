@@ -13,6 +13,17 @@ import (
 // WebSendBudget is the budget a web member's mention ask is packed to.
 const WebSendBudget = webSendBudget
 
+// JoinNoncesLive counts the live decision nonces for join request id.
+func (s *Server) JoinNoncesLive(id string) int {
+	s.nonces.mu.Lock()
+	defer s.nonces.mu.Unlock()
+	n := 0
+	for _, hs := range s.nonces.byID[joinNonceID(id)] {
+		n += len(hs)
+	}
+	return n
+}
+
 // KeyForTest exposes the relay key to tests.
 func KeyForTest(s *Server) string { return s.key }
 

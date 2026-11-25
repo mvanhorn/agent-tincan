@@ -328,6 +328,10 @@ type Server struct {
 	// nonces are the decision nonces handed to the phone page with each
 	// held request (see phone.go).
 	nonces *nonceBook
+	// self is the relay's own tailnet node (SetSelfNode), guarded by mu.
+	// Join requests must come from its tailnet, and one filed from it is
+	// not approved over the admin socket on the same host.
+	self identity.Node
 	// push sends held-ask alerts to subscribed admin phones; nil when off.
 	push *Pusher
 
@@ -531,6 +535,9 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	mux.HandleFunc("GET /v1/hello", s.handleHello)
 	mux.HandleFunc("POST /v1/join", s.handleJoin)
+	mux.HandleFunc("POST /v1/join-requests", s.handleFileJoinRequest)
+	mux.HandleFunc("GET /v1/join-requests/{id}", s.handleJoinRequestStatus)
+	mux.HandleFunc("POST /v1/join-requests/{id}/claim", s.handleClaimJoinRequest)
 	mux.HandleFunc("GET /v1/dist", s.handleDistManifest)
 	mux.HandleFunc("GET /v1/dist/{name}", s.handleDistFile)
 	mux.HandleFunc("POST "+uploadPath, s.handleUpload)
@@ -550,6 +557,9 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("POST /v1/admin/requests/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/deny", s.handleDeny)
 	mux.HandleFunc("POST /v1/admin/invite", s.handleInvite)
+	mux.HandleFunc("GET /v1/admin/join-requests", s.handleJoinRequests)
+	mux.HandleFunc("POST /v1/admin/join-requests/{id}/approve", s.handleApproveJoinRequest)
+	mux.HandleFunc("POST /v1/admin/join-requests/{id}/deny", s.handleDenyJoinRequest)
 	mux.HandleFunc("GET /v1/admin/urls", s.handleAdminURLs)
 	mux.HandleFunc("POST /v1/admin/remove", s.handleRemove)
 	mux.HandleFunc("PUT /v1/agents/{name}/kind", s.handleSetKind)
@@ -701,6 +711,7 @@ func (s *Server) Sweep(ctx context.Context) {
 	s.wakeFallenBack(ctx)
 	s.tellUntaken(ctx)
 	s.sweepGuests(ctx)
+	s.sweepJoinRequests(ctx)
 	s.failoverSweep(ctx)
 	s.sweepFollowOns(ctx)
 	if err := s.store.ExpireWatches(ctx); err != nil {
@@ -2760,13 +2771,16 @@ func statusFor(err error) int {
 		return se.Code
 	case errors.Is(err, identity.ErrRebindCheckFailed):
 		return http.StatusServiceUnavailable
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent), errors.Is(err, store.ErrNoRoom):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrUnknownAgent), errors.Is(err, store.ErrNoRoom),
+		errors.Is(err, identity.ErrJoinNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, identity.ErrJoinCap):
+		return http.StatusTooManyRequests
 	case errors.Is(err, store.ErrForbidden), errors.Is(err, identity.ErrNotAdmin), errors.Is(err, identity.ErrNotJoined),
-		errors.Is(err, identity.ErrAgentAmbiguous), errors.Is(err, store.ErrNotRoomMember):
+		errors.Is(err, identity.ErrAgentAmbiguous), errors.Is(err, store.ErrNotRoomMember), errors.Is(err, identity.ErrJoinWrongNode):
 		return http.StatusForbidden
 	case errors.Is(err, store.ErrWrongState), errors.Is(err, store.ErrRoomExists), errors.Is(err, identity.ErrNameTaken),
-		errors.Is(err, identity.ErrGuestTier), errors.Is(err, identity.ErrGuestNode):
+		errors.Is(err, identity.ErrGuestTier), errors.Is(err, identity.ErrGuestNode), errors.Is(err, identity.ErrJoinState):
 		return http.StatusConflict
 	case errors.Is(err, identity.ErrBadInvite):
 		return http.StatusBadRequest

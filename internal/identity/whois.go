@@ -152,6 +152,19 @@ func peerNode(st *ipnstate.Status, p *ipnstate.PeerStatus) Node {
 	return n
 }
 
+// SelfNode is this tailnet node (the relay's own), with the same fields
+// WhoIs fills.
+func (r *LocalResolver) SelfNode(ctx context.Context) (Node, error) {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil {
+		return Node{}, fmt.Errorf("tailnet status: %w", err)
+	}
+	if st.Self == nil {
+		return Node{}, fmt.Errorf("tailnet status: no self node")
+	}
+	return peerNode(st, st.Self), nil
+}
+
 // Probe fails when the LocalAPI is unreachable. --listen mode calls it at
 // startup and refuses to run rather than skip attribution.
 func (r *LocalResolver) Probe(ctx context.Context) error {
