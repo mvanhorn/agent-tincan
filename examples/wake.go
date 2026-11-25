@@ -23,6 +23,8 @@ var (
 	copilotWake []byte
 	//go:embed cursor-cli/cursor-wake.sh
 	cursorWake []byte
+	//go:embed gemini-cli/gemini-wake.sh
+	geminiWake []byte
 	//go:embed claude-code/cmux-wake.sh
 	cmuxWake []byte
 	//go:embed lib/tincan-wake-lib.sh
@@ -60,6 +62,13 @@ var wakes = map[string]WakeScript{
 		Notice: "Each wake runs Cursor's CLI agent headless with tool approval on and only the Agent Tincan tools allowed, so any other tool call is denied. " +
 			"It uses a private Cursor config folder, so your own ~/.cursor settings, servers and hooks do not apply.",
 	},
+	"gemini-cli": {
+		Name: "gemini-cli", File: "gemini-wake.sh", Source: "gemini-cli/gemini-wake.sh", Script: geminiWake, NeedsLib: true, Tool: "agy",
+		Notice: "Each wake runs Antigravity CLI (agy) headless in its terminal sandbox, with per-run settings in strict permission mode: it may call MCP tools and read files, except the tincan config folder (apart from its own attachments) and ~/.ssh, and it cannot write files or run commands. " +
+			"A teammate's request can still make it read any other file this user can read and pass what it reads on in a reply, and on a case-insensitive volume the read denies are best effort. " +
+			"It refuses to run while agy has plugins installed. " +
+			"Adding TINCAN_GEMINI_ALLOW_UNCONFINED=1 to the service turns tool approval off with nothing limiting what a run does.",
+	},
 	"claude-code": {
 		Name: "claude-code", File: "cmux-wake.sh", Source: "claude-code/cmux-wake.sh", Script: cmuxWake, Tool: "claude", MacOS: true,
 		Notice: "Each wake opens a Claude Code session in cmux with your own settings and permission mode. " +
@@ -72,13 +81,13 @@ func WakeNames() []string {
 	return slices.Sorted(maps.Keys(wakes))
 }
 
-// Wake returns the named wake. Gemini CLI and Grok wakes are not offered:
-// they need an API key or an unconfined opt-in in the listener's
-// environment, and an installed service must not store either.
+// Wake returns the named wake. The Grok wake is not offered: it needs an API
+// key in the listener's environment, and an installed service must not
+// store one.
 func Wake(name string) (WakeScript, error) {
 	w, ok := wakes[name]
 	if !ok {
-		return WakeScript{}, fmt.Errorf("no installable wake %q; choose one of %s (gemini-cli and grok-cli are set up by hand, see their adapter docs)", name, strings.Join(WakeNames(), ", "))
+		return WakeScript{}, fmt.Errorf("no installable wake %q; choose one of %s (grok-cli is set up by hand, see its adapter doc)", name, strings.Join(WakeNames(), ", "))
 	}
 	return w, nil
 }

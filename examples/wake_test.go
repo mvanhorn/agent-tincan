@@ -45,7 +45,7 @@ func TestWakeNeedsLib(t *testing.T) {
 }
 
 func TestWakeUnsupported(t *testing.T) {
-	for _, name := range []string{"gemini-cli", "grok-cli", "nope", ""} {
+	for _, name := range []string{"grok-cli", "nope", ""} {
 		_, err := Wake(name)
 		if err == nil {
 			t.Fatalf("%q: want an error", name)
