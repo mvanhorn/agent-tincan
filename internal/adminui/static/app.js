@@ -124,31 +124,38 @@ function renderInviteCommand() {
 async function invite() {
   const err = $("add-error");
   err.hidden = true;
-  const name = $("add-name").value.trim().toLowerCase();
-  if (!NAME_RE.test(name)) {
-    err.textContent = "Agent names are 1-32 lowercase letters, digits and dashes, starting with a letter or digit.";
-    err.hidden = false;
-    return;
-  }
-  if ($("add-new-only").checked) {
-    // Ask the relay for the current roster first: another admin may
-    // have removed the agent since this page loaded, freeing the name.
-    // If the refresh fails, fall back to the loaded roster; the relay
-    // still enforces new_only for names bound to other machines.
-    try { await refreshAgents(); } catch (e) { /* use the loaded roster */ }
-    if (state.agents.some((a) => a.name === name)) {
-      // The relay excuses the minting machine from new_only, so a code
-      // for a name already joined here would move that agent if another
-      // machine redeemed it. The roster is in hand: refuse here.
-      err.textContent = "\"" + name + "\" has already joined. Uncheck the box to mint an invite that moves it, or pick a new name.";
-      err.hidden = false;
-      return;
-    }
-  }
-  const kind = $("add-kind").value;
+  // Disable up front: the roster check below awaits the relay, and a
+  // second click in that window would mint a second code for the same
+  // name. The relay cancels the older code, so if that response arrived
+  // last the page would show a code that no longer works.
   const btn = $("add-button");
   btn.disabled = true;
   try {
+    const name = $("add-name").value.trim().toLowerCase();
+    if (!NAME_RE.test(name)) {
+      err.textContent = "Agent names are 1-32 lowercase letters, digits and dashes, starting with a letter or digit.";
+      err.hidden = false;
+      return;
+    }
+    if ($("add-new-only").checked) {
+      // Ask the relay for the current roster first: another admin may
+      // have removed the agent since this page loaded, freeing the name.
+      // Read it without re-rendering: refreshAgents() rebuilds every
+      // agent editor, which would erase unsaved kind, good-at, or
+      // webhook edits. If the fetch fails, fall back to the loaded
+      // roster; the relay still enforces new_only for names bound to
+      // other machines.
+      try { await fetchAgents(); } catch (e) { /* use the loaded roster */ }
+      if (state.agents.some((a) => a.name === name)) {
+        // The relay excuses the minting machine from new_only, so a code
+        // for a name already joined here would move that agent if another
+        // machine redeemed it. The roster is in hand: refuse here.
+        err.textContent = "\"" + name + "\" has already joined. Uncheck the box to mint an invite that moves it, or pick a new name.";
+        err.hidden = false;
+        return;
+      }
+    }
+    const kind = $("add-kind").value;
     const res = await api("POST", "/v1/admin/invite", { name, kind, new_only: $("add-new-only").checked });
     if (res.status !== 200 || !res.data || !res.data.code) {
       throw new Error((res.data && res.data.error) || ("invite failed (" + res.status + ")"));
@@ -564,12 +571,19 @@ $("devices-filter").addEventListener("input", renderDevices);
 
 // ---- Loading ----
 
-async function refreshAgents() {
+// fetchAgents reads the roster into state without re-rendering. The
+// invite check uses it so a rejected invite does not rebuild the agent
+// editors and erase unsaved kind, good-at, or webhook edits.
+async function fetchAgents() {
   const res = await api("GET", "/v1/agents");
   if (res.status !== 200 || !res.data) throw new Error((res.data && res.data.error) || ("agents (" + res.status + ")"));
   state.agents = res.data.agents || [];
   if (res.data.relay_version) state.relayVersion = res.data.relay_version;
   state.adminTag = typeof res.data.admin_tag === "string" ? res.data.admin_tag : "";
+}
+
+async function refreshAgents() {
+  await fetchAgents();
   renderAgents();
   if (state.peersLoaded) renderDevices();
   renderRelay();
