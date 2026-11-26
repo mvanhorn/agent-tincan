@@ -7,9 +7,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mvanhorn/agent-tincan/internal/client"
 )
 
 func TestWakeCommandsRedactAndUseStdin(t *testing.T) {
+	// Isolate from the machine's saved tincan config: without this,
+	// LoadConfig picks up a saved proxy and the loopback PUT below
+	// goes through it instead of straight to the test server.
+	useConfig(t, client.Config{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
