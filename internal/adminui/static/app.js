@@ -140,13 +140,15 @@ async function invite() {
     if ($("add-new-only").checked) {
       // Ask the relay for the current roster first: another admin may
       // have removed the agent since this page loaded, freeing the name.
-      // Read it without re-rendering: refreshAgents() rebuilds every
-      // agent editor, which would erase unsaved kind, good-at, or
-      // webhook edits. If the fetch fails, fall back to the loaded
-      // roster; the relay still enforces new_only for names bound to
-      // other machines.
-      try { await fetchAgents(); } catch (e) { /* use the loaded roster */ }
-      if (state.agents.some((a) => a.name === name)) {
+      // Read it into a local roster, not shared state: updating
+      // state.agents without redrawing would leave the Agents list and
+      // the device filter disagreeing, and rebuilding the editors
+      // would erase unsaved kind, good-at, or webhook edits. If the
+      // fetch fails, fall back to the loaded roster; the relay still
+      // enforces new_only for names bound to other machines.
+      let roster = state.agents;
+      try { roster = (await fetchAgents()).agents; } catch (e) { /* use the loaded roster */ }
+      if (roster.some((a) => a.name === name)) {
         // The relay excuses the minting machine from new_only, so a code
         // for a name already joined here would move that agent if another
         // machine redeemed it. The roster is in hand: refuse here.
@@ -571,19 +573,26 @@ $("devices-filter").addEventListener("input", renderDevices);
 
 // ---- Loading ----
 
-// fetchAgents reads the roster into state without re-rendering. The
-// invite check uses it so a rejected invite does not rebuild the agent
-// editors and erase unsaved kind, good-at, or webhook edits.
+// fetchAgents reads the roster without touching shared state. The
+// invite check uses it so a rejected invite neither rebuilds the agent
+// editors (erasing unsaved edits) nor updates state.agents without a
+// redraw (which would leave the Agents list and the device filter
+// disagreeing). Callers that redraw assign the result to state.
 async function fetchAgents() {
   const res = await api("GET", "/v1/agents");
   if (res.status !== 200 || !res.data) throw new Error((res.data && res.data.error) || ("agents (" + res.status + ")"));
-  state.agents = res.data.agents || [];
-  if (res.data.relay_version) state.relayVersion = res.data.relay_version;
-  state.adminTag = typeof res.data.admin_tag === "string" ? res.data.admin_tag : "";
+  return {
+    agents: res.data.agents || [],
+    relayVersion: res.data.relay_version,
+    adminTag: typeof res.data.admin_tag === "string" ? res.data.admin_tag : "",
+  };
 }
 
 async function refreshAgents() {
-  await fetchAgents();
+  const roster = await fetchAgents();
+  state.agents = roster.agents;
+  if (roster.relayVersion) state.relayVersion = roster.relayVersion;
+  state.adminTag = roster.adminTag;
   renderAgents();
   if (state.peersLoaded) renderDevices();
   renderRelay();
