@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -79,9 +80,7 @@ func joinDetail(r identity.JoinRequest, extra map[string]any) string {
 	if len(r.Agents) > 0 {
 		d["agents"] = r.Agents
 	}
-	for k, v := range extra {
-		d[k] = v
-	}
+	maps.Copy(d, extra)
 	return store.DetailJSON(d)
 }
 
