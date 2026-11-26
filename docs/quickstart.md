@@ -115,7 +115,7 @@ The relay URL is the one `tincan invite` printed. A default relay answers at `ht
 
 ### Tagging machines
 
-To grant a machine admin without restarting the relay, start it with `--admin-tag tag:tincan-admin` (any tag name works) and add that tag to the machine as below. The relay honors the tag on the next call; `--admin-login`, if set, still applies. A machine carrying a guest is never admin, whatever its tags. Tags are controlled by `tagOwners` in the tailnet ACL, so granting admin through a tag is still the owner's decision. A node that joins with a tagged auth key has no owning user (Tailscale reports its tags and no login), so with `--admin-login` set, pair the tag with nodes whose reported login is listed — check with `tailscale whois`.
+To grant a machine admin without restarting the relay, start it with `--admin-tag` naming a tag reserved for admins, for example `--admin-tag tag:tincan-admin`, and add that tag to the machine. The relay honors the tag on the next call; `--admin-login`, if set, still applies. A machine carrying a guest is never admin, whatever its tags. Never reuse an ordinary agent tag such as `tag:agent` for `--admin-tag`: every machine carrying the named tag may run admin commands. Tags are controlled by `tagOwners` in the tailnet ACL, so granting admin through a tag is still the owner's decision — restrict who may apply the admin tag there. A node that joins with a tagged auth key has no owning user (Tailscale reports its tags and no login), so with `--admin-login` set, pair the tag with nodes whose reported login is listed — check with `tailscale whois`.
 
 - A machine named in `--admin` must otherwise stay untagged: any other tag removes its admin status.
 - A machine that hosts an agent and is not in `--admin` should be tagged, for example `tag:agent`, even a personal laptop. Tailscale advises against tagging user devices, and the costs are real: the device is identified by its tags instead of your user, so access rules written for your user may no longer cover it, key expiry is turned off when a device signs in with a tag (tagging it in the admin console leaves expiry as it was), tagged devices can use Tailscale SSH only to other tagged devices, and tincan cannot re-admit a tagged machine on its own after a rebuild, so it needs a new invite. See [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
@@ -127,6 +127,8 @@ To tag a machine:
 1. In the Tailscale admin console, open Access controls and add the tag to the policy file, for example `"tagOwners": {"tag:agent": []}`. An empty list lets tailnet admins apply it.
 2. Open Machines, find the machine, choose Edit tags from its menu, add `tag:agent` and save.
 3. Run `tincan doctor` on that machine. To undo, run `tailscale up --force-reauth --advertise-tags=` on that machine and sign in as your user. A machine that joined with a tagged auth key cannot drop its tags that way and needs a fresh login; see [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
+
+To tag a machine as an admin instead, follow the same steps with the admin tag, and list only the owners who may grant admin in its `tagOwners`, for example `"tagOwners": {"tag:tincan-admin": ["you@example.com"]}`.
 
 ## Rebuilt machines
 
