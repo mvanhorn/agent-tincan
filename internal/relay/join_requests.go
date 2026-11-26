@@ -432,11 +432,11 @@ func (s *Server) decideJoinRequest(w http.ResponseWriter, r *http.Request, decis
 	if socket {
 		// Fail closed: a relay that does not know its own node cannot
 		// tell whether the request came from its own host.
-		switch self := s.selfNode(); {
-		case self.ID == "":
+		switch s.selfNode().ID {
+		case "":
 			writeErr(w, http.StatusForbidden, errJoinNoSelf)
 			return
-		case self.ID == jr.NodeID:
+		case jr.NodeID:
 			writeErr(w, http.StatusForbidden, errJoinRelayHost)
 			return
 		}
