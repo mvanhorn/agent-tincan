@@ -130,6 +130,14 @@ async function invite() {
     err.hidden = false;
     return;
   }
+  if ($("add-new-only").checked && state.agents.some((a) => a.name === name)) {
+    // The relay excuses the minting machine from new_only, so a code
+    // for a name already joined here would move that agent if another
+    // machine redeemed it. The roster is in hand: refuse here.
+    err.textContent = "\"" + name + "\" has already joined. Uncheck the box to mint an invite that moves it, or pick a new name.";
+    err.hidden = false;
+    return;
+  }
   const kind = $("add-kind").value;
   const btn = $("add-button");
   btn.disabled = true;
@@ -271,17 +279,34 @@ function adminSection(a) {
   wrap.append(el("p", "", "Machine " + v.machine + " (" + tags + ")" + (v.admin ? " can run admin commands." : " cannot run admin commands.")));
   if (v.admin) return wrap;
   if (state.adminTag) {
-    const how = el("p", "meta", "To grant it, add the tag ");
-    const tag = el("code", "", state.adminTag);
-    how.append(tag);
-    how.append(" to " + v.machine + " in the ");
-    const link = el("a", "", "Tailscale admin panel");
-    link.href = TAILSCALE_MACHINES;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    how.append(link);
-    how.append(", then re-check here. The tag applies immediately.");
-    wrap.append(how);
+    if (v.tags.includes(state.adminTag)) {
+      // The tag is already on the machine, so adding it again changes
+      // nothing. What still blocks admin is a guest on the machine, or
+      // an --admin-login list that omits its owner.
+      if (a.guest_until) {
+        const why = el("p", "meta", "This agent is a guest, so it cannot run admin commands even though its machine already carries the tag ");
+        why.append(el("code", "", state.adminTag));
+        why.append(".");
+        wrap.append(why);
+      } else {
+        const why = el("p", "meta", "This machine already carries the tag ");
+        why.append(el("code", "", state.adminTag));
+        why.append(", so the tag is not what blocks it. When the relay runs with --admin-login, the machine must also be owned by a listed login.");
+        wrap.append(why);
+      }
+    } else {
+      const how = el("p", "meta", "To grant it, add the tag ");
+      const tag = el("code", "", state.adminTag);
+      how.append(tag);
+      how.append(" to " + v.machine + " in the ");
+      const link = el("a", "", "Tailscale admin panel");
+      link.href = TAILSCALE_MACHINES;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      how.append(link);
+      how.append(", then re-check here. The tag applies immediately.");
+      wrap.append(how);
+    }
   } else {
     wrap.append(el("p", "meta", "This relay names no admin tag: restart it with --admin-tag tag:name (or add " + v.machine + " to --admin) to grant admin without touching the relay again."));
   }
