@@ -30,6 +30,26 @@ func (v virtualResolver) WhoIs(ctx context.Context, addr string) (Node, error) {
 	return v.Resolver.WhoIs(ctx, addr)
 }
 
+// LookupNode forwards to the wrapped resolver when it implements
+// NodeLookup, so wrapping never hides the tailnet's node list from the
+// directory's live checks.
+
+func (v virtualResolver) LookupNode(ctx context.Context, id string) (Node, bool, error) {
+	if lk, ok := v.Resolver.(NodeLookup); ok {
+		return lk.LookupNode(ctx, id)
+	}
+	return Node{}, false, nil
+}
+
+// Peers forwards to the wrapped resolver when it implements PeerLister,
+// so wrapping never hides the peer list from the setup console.
+func (v virtualResolver) Peers(ctx context.Context) ([]Peer, error) {
+	if pl, ok := v.Resolver.(PeerLister); ok {
+		return pl.Peers(ctx)
+	}
+	return nil, errors.New("resolver has no tailnet peer list")
+}
+
 // ErrRealNodeBound refuses a virtual bind that would take over the name of
 // an agent joined from a real tailnet node.
 var ErrRealNodeBound = errors.New("connecting would take its name from that machine; pass --replace to move it to the gateway")

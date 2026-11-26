@@ -18,10 +18,10 @@ import (
 // each, and a slice flag becomes one argument per element.
 func TestRelayServiceArgsCarryOnlyChangedFlags(t *testing.T) {
 	cmd := relayInstallCmd()
-	if err := cmd.Flags().Parse([]string{"--admin", "macbook,iphone", "--admin-login", "me@example.com", "--wake-grace", "5m", "--no-auto-rebind", "--binary", "/opt/tincan"}); err != nil {
+	if err := cmd.Flags().Parse([]string{"--admin", "macbook,iphone", "--admin-login", "me@example.com", "--admin-tag", "tag:tincan-admin", "--wake-grace", "5m", "--no-auto-rebind", "--binary", "/opt/tincan"}); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--admin=macbook", "--admin=iphone", "--admin-login=me@example.com", "--no-auto-rebind=true", "--wake-grace=5m0s"}
+	want := []string{"--admin=macbook", "--admin=iphone", "--admin-login=me@example.com", "--admin-tag=tag:tincan-admin", "--no-auto-rebind=true", "--wake-grace=5m0s"}
 	if got := relayServiceArgs(cmd.Flags()); !slices.Equal(got, want) {
 		t.Fatalf("args = %q, want %q", got, want)
 	}

@@ -1,0 +1,653 @@
+// Tincan relay setup console. It reads and acts only through the relay's
+// own admin routes, as the CLI on an admin device does. Everything the
+// relay returns (agent names, good-at lines, relay URLs, invite codes) is
+// untrusted text and reaches the page only through textContent, never as
+// markup.
+"use strict";
+
+const API_TIMEOUT_MS = 15000;
+
+const state = {
+  agents: [],
+  kinds: [],
+  relayURLs: [],
+  relayVersion: "",
+  adminTag: "",
+  peers: [],
+  peersLoaded: false,
+  offline: false,
+  loaded: false,
+  lastInvite: null,
+};
+
+// TAILSCALE_MACHINES is the device list in the Tailscale admin panel,
+// where the owner flips the admin tag on a machine.
+const TAILSCALE_MACHINES = "https://login.tailscale.com/admin/machines";
+
+const $ = (id) => document.getElementById(id);
+const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+// el builds an element whose text, if any, is set as text.
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  return e;
+}
+
+function announce(msg) {
+  const live = $("live");
+  live.textContent = "";
+  // A fresh text node after a tick makes screen readers repeat a message.
+  setTimeout(() => { live.textContent = msg; }, 50);
+}
+
+// api calls the relay. A body is sent as JSON, which the relay requires of
+// every state-changing browser request. It throws, as when offline, if the
+// relay has not answered within API_TIMEOUT_MS; the error has timeout set.
+async function api(method, path, body) {
+  const ctl = new AbortController();
+  const stall = setTimeout(() => ctl.abort(), API_TIMEOUT_MS);
+  const init = { method, credentials: "same-origin", cache: "no-store", headers: {}, signal: ctl.signal };
+  if (body !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const timedOut = () => Object.assign(new Error("the relay did not answer in time"), { timeout: true });
+  try {
+    let resp;
+    try {
+      resp = await fetch(path, init);
+    } catch (e) {
+      throw ctl.signal.aborted ? timedOut() : e;
+    }
+    let data = null;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      // A body cut off by the timeout is not an empty answer.
+      if (ctl.signal.aborted) throw timedOut();
+      data = null;
+    }
+    return { status: resp.status, data };
+  } finally {
+    clearTimeout(stall);
+  }
+}
+
+function fail(msg, err) {
+  return msg + ": " + ((err && err.message) || "offline");
+}
+
+// ---- Relay section ----
+
+function renderRelay() {
+  $("relay-version").textContent = "Version: " + (state.relayVersion || "unknown");
+  const ul = $("relay-urls");
+  ul.replaceChildren();
+  if (state.relayURLs.length === 0) {
+    ul.append(el("li", "", "No relay addresses reported."));
+    return;
+  }
+  for (const u of state.relayURLs) ul.append(el("li", "", u));
+}
+
+// ---- Add an agent ----
+
+// fillKinds rebuilds the kind select from the relay's kind list, keeping
+// the selection when it is still there.
+function fillKinds() {
+  const sel = $("add-kind");
+  const current = sel.value;
+  sel.replaceChildren();
+  for (const k of state.kinds) {
+    const opt = el("option", "", k === "" ? "(no kind)" : k);
+    opt.value = k;
+    sel.append(opt);
+  }
+  if (state.kinds.includes(current)) sel.value = current;
+}
+
+// relayURLForInvite is the address the printed join command reaches the
+// relay at: the first address the relay reported, once loaded. Minting
+// before the addresses load falls back to the plain hostname; the command
+// is rewritten when they arrive (see renderInviteCommand).
+function relayURLForInvite() {
+  return state.relayURLs.length > 0 ? state.relayURLs[0] : "http://tincan-relay";
+}
+
+function renderInviteCommand() {
+  if (!state.lastInvite) return;
+  $("invite-command").textContent = "tincan join " + state.lastInvite.code + " --relay " + relayURLForInvite();
+}
+
+async function invite() {
+  const err = $("add-error");
+  err.hidden = true;
+  // Disable up front: the roster check below awaits the relay, and a
+  // second click in that window would mint a second code for the same
+  // name. The relay cancels the older code, so if that response arrived
+  // last the page would show a code that no longer works.
+  const btn = $("add-button");
+  btn.disabled = true;
+  try {
+    const name = $("add-name").value.trim().toLowerCase();
+    if (!NAME_RE.test(name)) {
+      err.textContent = "Agent names are 1-32 lowercase letters, digits and dashes, starting with a letter or digit.";
+      err.hidden = false;
+      return;
+    }
+    if ($("add-new-only").checked) {
+      // Ask the relay for the current roster first: another admin may
+      // have removed the agent since this page loaded, freeing the name.
+      // Read it into a local roster, not shared state: updating
+      // state.agents without redrawing would leave the Agents list and
+      // the device filter disagreeing, and rebuilding the editors
+      // would erase unsaved kind, good-at, or webhook edits. If the
+      // fetch fails, fall back to the loaded roster; the relay still
+      // enforces new_only for names bound to other machines.
+      let roster = state.agents;
+      try { roster = (await fetchAgents()).agents; } catch (e) { /* use the loaded roster */ }
+      if (roster.some((a) => a.name === name)) {
+        // The relay excuses the minting machine from new_only, so a code
+        // for a name already joined here would move that agent if another
+        // machine redeemed it. The roster is in hand: refuse here.
+        err.textContent = "\"" + name + "\" has already joined. Uncheck the box to mint an invite that moves it, or pick a new name.";
+        err.hidden = false;
+        return;
+      }
+    }
+    const kind = $("add-kind").value;
+    const res = await api("POST", "/v1/admin/invite", { name, kind, new_only: $("add-new-only").checked });
+    if (res.status !== 200 || !res.data || !res.data.code) {
+      throw new Error((res.data && res.data.error) || ("invite failed (" + res.status + ")"));
+    }
+    state.lastInvite = { name: res.data.name, code: res.data.code };
+    $("invite-name").textContent = res.data.name;
+    $("invite-expires").textContent = res.data.expires_in || "10m";
+    $("invite-install").textContent = INSTALL_CMD;
+    renderInviteCommand();
+    $("invite-result").hidden = false;
+    $("invite-copied").hidden = true;
+    announce("Invite minted for " + res.data.name + ".");
+    await refreshAgents();
+  } catch (e) {
+    err.textContent = fail("Could not mint invite", e);
+    err.hidden = false;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// INSTALL_CMD is how a fresh machine gets tincan, as the quickstart
+// documents. The agent's machine may not have it yet.
+const INSTALL_CMD = "curl -fsSL https://agenttincan.com/install.sh | sh";
+
+async function copyId(id) {
+  const text = $(id).textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    // Clipboard needs a secure context; fall back to selecting the text.
+    const range = document.createRange();
+    range.selectNodeContents($(id));
+    const sel = getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    return;
+  }
+  $("invite-copied").hidden = false;
+}
+
+// ---- Agents section ----
+
+function statusLine(a) {
+  const bits = [];
+  if (a.status) bits.push(a.status);
+  if (a.status_reason) bits.push(a.status_reason);
+  if (a.node_admin) bits.push("admin");
+  if (a.wake) bits.push("wake: " + a.wake);
+  if (a.kind) bits.push("kind: " + a.kind);
+  return bits.join(" · ") || "joined";
+}
+
+// adminVerdict is the machine story the console shows for an agent: its
+// node, tags, and whether it may run admin commands. Agents without a
+// node run in a connected app, not on a tailnet machine, so admin does
+// not apply to them. When the roster omits node_admin the relay could
+// not check: unknown, never "no". Names come live when the machine was
+// renamed after joining; the saved ones are shown as last known.
+function adminVerdict(a) {
+  if (!a.node_name) return { known: false };
+  if (!("node_admin" in a)) {
+    return { known: false, unknown: true, machine: a.node_name, owner: a.node_user || "", tags: a.node_tags || [] };
+  }
+  const renamed = !!a.node_live_name;
+  const reowned = "node_live_user" in a;
+  return {
+    known: true, admin: !!a.node_admin,
+    machine: a.node_live_name || a.node_name,
+    owner: (reowned ? a.node_live_user : a.node_user) || "",
+    tags: a.node_tags || [],
+    saved: (renamed || reowned) ? { name: a.node_name, owner: a.node_user || "" } : null,
+  };
+}
+
+function renderAgents() {
+  const list = $("agents-list");
+  list.replaceChildren();
+  $("agents-empty").hidden = state.agents.length !== 0;
+  for (const a of state.agents) {
+    const li = el("li", "");
+    li.append(el("h3", "", a.name));
+    li.append(el("p", "meta", statusLine(a)));
+    if (a.good_at) li.append(el("p", "", a.good_at));
+
+    const facts = el("dl", "grid");
+    const v = adminVerdict(a);
+    if (v.known || v.unknown) {
+      facts.append(el("dt", "", "Machine"));
+      let where = v.machine + (v.owner ? " (" + v.owner + ")" : "");
+      if (v.known && v.saved) {
+        where += "; last known as " + v.saved.name + (v.saved.owner ? " (" + v.saved.owner + ")" : "");
+      }
+      facts.append(el("dd", "", where));
+      facts.append(el("dt", "", "Admin"));
+      facts.append(el("dd", "", v.unknown ? "unknown — the relay could not check" : (v.admin ? "yes" : "no")));
+    }
+    if (a.last_active) {
+      facts.append(el("dt", "", "Last active"));
+      facts.append(el("dd", "", new Date(a.last_active).toLocaleString()));
+    }
+    if (a.version) {
+      facts.append(el("dt", "", "Build"));
+      facts.append(el("dd", "", a.version));
+    }
+    if (a.fallback) {
+      facts.append(el("dt", "", "Fallback"));
+      facts.append(el("dd", "", a.fallback));
+    }
+    if (facts.children.length > 0) li.append(facts);
+
+    li.append(configDetails(a));
+    list.append(li);
+  }
+}
+
+// adminSection explains whether the agent's machine may run admin
+// commands and, when it may not, how to grant it: flip the relay's admin
+// tag on the machine in the Tailscale admin panel. Tag changes apply on
+// the next call, with no relay restart.
+function adminSection(a) {
+  const wrap = el("div", "");
+  const v = adminVerdict(a);
+  if (!v.known && !v.unknown) {
+    wrap.append(el("p", "meta", "This agent runs in a connected app, not on a tailnet machine, so admin does not apply to it."));
+    return wrap;
+  }
+  if (v.unknown) {
+    wrap.append(el("p", "meta", "The relay could not check this machine just now — refresh and try again."));
+    return wrap;
+  }
+  const tags = v.tags.length > 0 ? v.tags.join(", ") : "no tags";
+  wrap.append(el("p", "", "Machine " + v.machine + " (" + tags + ")" + (v.admin ? " can run admin commands." : " cannot run admin commands.")));
+  if (v.admin) return wrap;
+  if (state.adminTag) {
+    if (v.tags.includes(state.adminTag)) {
+      // The tag is already on the machine, so adding it again changes
+      // nothing. What still blocks admin is a guest on the machine, or
+      // an --admin-login list that omits its owner.
+      if (a.guest_until) {
+        const why = el("p", "meta", "This agent is a guest, so it cannot run admin commands even though its machine already carries the tag ");
+        why.append(el("code", "", state.adminTag));
+        why.append(".");
+        wrap.append(why);
+      } else {
+        const why = el("p", "meta", "This machine already carries the tag ");
+        why.append(el("code", "", state.adminTag));
+        why.append(", so the tag is not what blocks it. When the relay runs with --admin-login, the machine must also be owned by a listed login.");
+        wrap.append(why);
+      }
+    } else {
+      const how = el("p", "meta", "To grant it, add the tag ");
+      const tag = el("code", "", state.adminTag);
+      how.append(tag);
+      how.append(" to " + v.machine + " in the ");
+      const link = el("a", "", "Tailscale admin panel");
+      link.href = TAILSCALE_MACHINES;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      how.append(link);
+      how.append(", then re-check here. The tag applies immediately.");
+      wrap.append(how);
+    }
+  } else {
+    wrap.append(el("p", "meta", "This relay names no admin tag: restart it with --admin-tag tag:name (or add " + v.machine + " to --admin) to grant admin without touching the relay again."));
+  }
+  return wrap;
+}
+
+// configDetails is the per-agent editor: kind, good-at line, webhook wake
+// and removal. Each save reads its own fields and reports its own error,
+// so one agent's edit never touches another's.
+function configDetails(a) {
+  const d = document.createElement("details");
+  d.append(el("summary", "", "Configure " + a.name));
+  const wrap = el("div", "");
+
+  const kindLabel = el("label", "", "Kind");
+  kindLabel.htmlFor = "kind-" + a.name;
+  const kindSel = document.createElement("select");
+  kindSel.id = "kind-" + a.name;
+  kindSel.className = "field";
+  for (const k of state.kinds) {
+    const opt = el("option", "", k === "" ? "(no kind)" : k);
+    opt.value = k;
+    kindSel.append(opt);
+  }
+  kindSel.value = a.kind || "";
+  if (!state.kinds.includes(a.kind || "")) {
+    const opt = el("option", "", (a.kind || "(unknown kind)") + " (relay reports)");
+    opt.value = a.kind || "";
+    kindSel.append(opt);
+    kindSel.value = a.kind || "";
+  }
+
+  const goodLabel = el("label", "", "Good-at line");
+  goodLabel.htmlFor = "goodat-" + a.name;
+  const goodIn = document.createElement("input");
+  goodIn.id = "goodat-" + a.name;
+  goodIn.className = "field";
+  goodIn.type = "text";
+  goodIn.value = a.good_at || "";
+  goodIn.placeholder = "What this agent is good at";
+
+  const saveMeta = el("p", "meta", "Kind always saves; good-at saves only when edited, so changing kind alone never files the old kind's stock text as a custom line.");
+  const saveBtn = el("button", "primary", "Save kind and good-at");
+  saveBtn.type = "button";
+  const saveErr = el("p", "error", "");
+  saveErr.hidden = true;
+  saveErr.setAttribute("role", "alert");
+  saveBtn.addEventListener("click", async () => {
+    saveErr.hidden = true;
+    saveBtn.disabled = true;
+    try {
+      const k = await api("PUT", "/v1/agents/" + encodeURIComponent(a.name) + "/kind", { kind: kindSel.value });
+      if (k.status !== 200) throw new Error((k.data && k.data.error) || ("saving kind failed (" + k.status + ")"));
+      // The roster returns the effective good-at, so an untouched field
+      // still shows the old kind's stock text: only send it when edited.
+      if (goodIn.value !== (a.good_at || "")) {
+        const g = await api("PUT", "/v1/agents/" + encodeURIComponent(a.name) + "/good-at", { good_at: goodIn.value });
+        if (g.status !== 200) throw new Error("kind saved, but " + ((g.data && g.data.error) || ("saving good-at failed (" + g.status + ")")));
+      }
+      announce(a.name + " updated.");
+      await refreshAgents();
+    } catch (e) {
+      saveErr.textContent = fail("Could not save", e);
+      saveErr.hidden = false;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+
+  const wakeLabel = el("label", "", "Webhook URL");
+  wakeLabel.htmlFor = "webhook-" + a.name;
+  const wakeIn = document.createElement("input");
+  wakeIn.id = "webhook-" + a.name;
+  wakeIn.className = "field";
+  wakeIn.type = "url";
+  wakeIn.autocapitalize = "none";
+  wakeIn.autocomplete = "off";
+  wakeIn.spellcheck = false;
+  wakeIn.placeholder = "https://agent-machine:8787/wake";
+  const wakeCurrent = el("p", "meta", "Current wake: " + (a.wake && a.wake !== "none" ? a.wake : "none") + ". The console never shows the current URL or the saved token.");
+  const tokenLabel = el("label", "", "Bearer token (optional)");
+  tokenLabel.htmlFor = "token-" + a.name;
+  const tokenIn = document.createElement("input");
+  tokenIn.id = "token-" + a.name;
+  tokenIn.className = "field";
+  tokenIn.type = "password";
+  tokenIn.autocomplete = "off";
+  const clearLabel = el("label", "check", "");
+  const clearBox = document.createElement("input");
+  clearBox.type = "checkbox";
+  clearBox.id = "token-clear-" + a.name;
+  clearLabel.append(clearBox, " Clear the saved bearer token");
+  const wakeMeta = el("p", "meta", "Sets a webhook wake for this agent. Re-enter the URL to change it. Leave the token blank to keep the current one, or check the box to clear it.");
+  const wakeBtn = el("button", "", "Save webhook");
+  wakeBtn.type = "button";
+  const wakeErr = el("p", "error", "");
+  wakeErr.hidden = true;
+  wakeErr.setAttribute("role", "alert");
+  wakeBtn.addEventListener("click", async () => {
+    wakeErr.hidden = true;
+    wakeBtn.disabled = true;
+    try {
+      if (!wakeIn.value.trim()) throw new Error("a webhook URL is required");
+      const body = { webhook: wakeIn.value.trim() };
+      if (clearBox.checked) {
+        body.bearer_token = "";
+      } else if (tokenIn.value) {
+        body.bearer_token = tokenIn.value;
+      }
+      const res = await api("PUT", "/v1/admin/wake-config/" + encodeURIComponent(a.name), body);
+      if (res.status !== 200) throw new Error((res.data && res.data.error) || ("saving webhook failed (" + res.status + ")"));
+      tokenIn.value = "";
+      clearBox.checked = false;
+      announce("Webhook saved for " + a.name + ".");
+      await refreshAgents();
+    } catch (e) {
+      wakeErr.textContent = fail("Could not save webhook", e);
+      wakeErr.hidden = false;
+    } finally {
+      wakeBtn.disabled = false;
+    }
+  });
+
+  wrap.append(el("h3", "", "Admin access"));
+  wrap.append(adminSection(a));
+
+  const removeBtn = el("button", "danger", "Remove " + a.name);
+  removeBtn.type = "button";
+  const removeErr = el("p", "error", "");
+  removeErr.hidden = true;
+  removeErr.setAttribute("role", "alert");
+  removeBtn.addEventListener("click", async () => {
+    removeErr.hidden = true;
+    if (!window.confirm("Remove " + a.name + "? Its tokens are revoked and its queued requests cancelled.")) return;
+    removeBtn.disabled = true;
+    try {
+      const res = await api("POST", "/v1/admin/remove", { name: a.name });
+      if (res.status !== 200) throw new Error((res.data && res.data.error) || ("remove failed (" + res.status + ")"));
+      announce(a.name + " removed.");
+      await refreshAgents();
+    } catch (e) {
+      removeErr.textContent = fail("Could not remove", e);
+      removeErr.hidden = false;
+    } finally {
+      removeBtn.disabled = false;
+    }
+  });
+
+  wrap.append(kindLabel, kindSel, goodLabel, goodIn, saveMeta, saveBtn, saveErr);
+  wrap.append(el("h3", "", "Wake"));
+  wrap.append(wakeCurrent, wakeLabel, wakeIn, tokenLabel, tokenIn, clearLabel, wakeMeta, wakeBtn, wakeErr);
+  wrap.append(el("h3", "", "Danger"));
+  wrap.append(removeBtn, removeErr);
+  d.append(wrap);
+  return d;
+}
+
+// ---- Tailnet devices ----
+
+// agentByNode maps node ids to the agent running on them, for agents
+// bound to a tailnet machine.
+function agentByNode() {
+  const byNode = new Map();
+  for (const a of state.agents) {
+    if (a.node_id) byNode.set(a.node_id, a.name);
+  }
+  return byNode;
+}
+
+function renderDevices() {
+  const list = $("devices-list");
+  list.replaceChildren();
+  const filter = $("devices-filter").value.trim().toLowerCase();
+  const agents = agentByNode();
+  let shown = 0;
+  for (const p of state.peers) {
+    if (filter && !(p.name || "").toLowerCase().includes(filter)) continue;
+    shown++;
+    const li = el("li", "");
+    const head = el("div", "agent-head");
+    head.append(el("span", "agent-name", p.name));
+    const bits = [];
+    if (p.self) bits.push("this relay");
+    bits.push(p.online ? "online" : "offline");
+    head.append(el("span", "meta", bits.join(" · ")));
+    li.append(head);
+    const facts = el("dl", "grid");
+    if (p.tags && p.tags.length > 0) {
+      facts.append(el("dt", "", "Tags"));
+      facts.append(el("dd", "", p.tags.join(", ")));
+    }
+    if (p.user) {
+      facts.append(el("dt", "", "Owner"));
+      facts.append(el("dd", "", p.user));
+    }
+    if (facts.children.length > 0) li.append(facts);
+    const agent = agents.get(p.id);
+    if (p.self) {
+      li.append(el("p", "meta", "The relay itself runs here; it needs no invite."));
+    } else if (agent) {
+      li.append(el("p", "meta", "Runs " + agent + "."));
+    } else {
+      const btn = el("button", "", "Invite " + p.name);
+      btn.type = "button";
+      btn.addEventListener("click", () => {
+        // Tailnet machine names may carry uppercase and dots, which agent
+        // names forbid: prefill the closest valid shape, and the invite
+        // form still validates before minting.
+        $("add-name").value = p.name.toLowerCase().replace(/\./g, "-");
+        $("add-name").scrollIntoView({ block: "center" });
+        $("add-name").focus();
+      });
+      li.append(btn);
+    }
+    list.append(li);
+  }
+  $("devices-empty").hidden = shown !== 0;
+}
+
+async function loadDevices() {
+  const err = $("devices-error");
+  err.hidden = true;
+  try {
+    const res = await api("GET", "/v1/admin/peers");
+    if (res.status !== 200 || !res.data) throw new Error((res.data && res.data.error) || ("devices (" + res.status + ")"));
+    state.peers = res.data.peers || [];
+    state.peersLoaded = true;
+    renderDevices();
+  } catch (e) {
+    err.textContent = fail("Could not list devices", e);
+    err.hidden = false;
+  }
+}
+
+function toggleDevices() {
+  const wrap = $("devices-wrap");
+  const open = wrap.hidden;
+  wrap.hidden = !open;
+  const btn = $("devices-toggle");
+  btn.textContent = open ? "Hide tailnet devices" : "Show tailnet devices";
+  btn.setAttribute("aria-expanded", String(open));
+  if (open && !state.peersLoaded) loadDevices();
+  if (open) renderDevices();
+}
+
+$("devices-toggle").addEventListener("click", toggleDevices);
+$("devices-filter").addEventListener("input", renderDevices);
+
+// ---- Loading ----
+
+// fetchAgents reads the roster without touching shared state. The
+// invite check uses it so a rejected invite neither rebuilds the agent
+// editors (erasing unsaved edits) nor updates state.agents without a
+// redraw (which would leave the Agents list and the device filter
+// disagreeing). Callers that redraw assign the result to state.
+async function fetchAgents() {
+  const res = await api("GET", "/v1/agents");
+  if (res.status !== 200 || !res.data) throw new Error((res.data && res.data.error) || ("agents (" + res.status + ")"));
+  return {
+    agents: res.data.agents || [],
+    relayVersion: res.data.relay_version,
+    adminTag: typeof res.data.admin_tag === "string" ? res.data.admin_tag : "",
+  };
+}
+
+async function refreshAgents() {
+  const roster = await fetchAgents();
+  state.agents = roster.agents;
+  if (roster.relayVersion) state.relayVersion = roster.relayVersion;
+  state.adminTag = roster.adminTag;
+  renderAgents();
+  if (state.peersLoaded) renderDevices();
+  renderRelay();
+}
+
+async function refreshAll() {
+  const banner = $("banner");
+  try {
+    const [agents, urls, kinds] = await Promise.all([
+      api("GET", "/v1/agents"),
+      api("GET", "/v1/admin/urls"),
+      api("GET", "/v1/admin/kinds"),
+    ]);
+    if (agents.status !== 200 || !agents.data) throw new Error((agents.data && agents.data.error) || ("agents (" + agents.status + ")"));
+    state.agents = agents.data.agents || [];
+    if (agents.data.relay_version) state.relayVersion = agents.data.relay_version;
+    state.adminTag = typeof agents.data.admin_tag === "string" ? agents.data.admin_tag : "";
+    if (urls.status === 200 && urls.data) state.relayURLs = urls.data.relay_urls || [];
+    if (kinds.status === 200 && kinds.data) state.kinds = ["", ...(kinds.data.kinds || [])];
+    else state.kinds = [""];
+    renderInviteCommand();
+    state.loaded = true;
+    state.offline = false;
+    banner.hidden = true;
+    fillKinds();
+    renderAgents();
+    renderRelay();
+    $("conn").textContent = "Connected";
+  } catch (e) {
+    state.offline = true;
+    banner.textContent = fail("The relay is not answering", e);
+    banner.hidden = false;
+    $("conn").textContent = "Offline";
+  }
+  if (!state.loaded) setTimeout(refreshAll, 3000);
+}
+
+$("add-button").addEventListener("click", invite);
+$("invite-install-copy").addEventListener("click", () => copyId("invite-install"));
+$("invite-copy").addEventListener("click", () => copyId("invite-command"));
+
+// manualRefresh re-reads the roster (and the device list, when loaded),
+// so tag changes in the Tailscale admin panel show up without a save.
+async function manualRefresh() {
+  try {
+    await refreshAgents();
+    if (state.peersLoaded) await loadDevices();
+  } catch (e) {
+    const banner = $("banner");
+    banner.textContent = fail("Could not refresh", e);
+    banner.hidden = false;
+  }
+}
+$("refresh").addEventListener("click", manualRefresh);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.loaded) manualRefresh();
+});
+refreshAll();

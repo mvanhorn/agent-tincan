@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mvanhorn/agent-tincan/internal/adminui"
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/identity"
@@ -546,6 +547,8 @@ func (s *Server) adminRoutes(mux interface {
 }) {
 	mux.HandleFunc("GET /v1/admin/wake-config", s.handleWakeSettings)
 	mux.HandleFunc("PUT /v1/admin/wake-config/{agent}", s.handleWakeSettings)
+	mux.HandleFunc("GET /v1/admin/kinds", s.handleKinds)
+	mux.HandleFunc("GET /v1/admin/peers", s.handlePeers)
 	mux.HandleFunc("GET /v1/admin/held", s.handleHeld)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /v1/admin/requests/{id}/deny", s.handleDeny)
@@ -574,6 +577,7 @@ func (s *Server) adminRoutes(mux interface {
 	mux.HandleFunc("GET /v1/attachments/{id}", s.handleApprovalFetch)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET "+phone.Prefix, s.handlePhone)
+	mux.HandleFunc("GET "+adminui.Prefix, s.handleAdminUI)
 	mux.HandleFunc("GET /v1/admin/push/key", s.handlePushKey)
 	mux.HandleFunc("PUT /v1/admin/push/subscription", s.handlePushSubscribe)
 	mux.HandleFunc("DELETE /v1/admin/push/subscription", s.handlePushUnsubscribe)
@@ -2171,7 +2175,8 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []client.AgentInfo
 	var err error
-	if g, guest := guestOf(r.Context()); guest {
+	g, isGuest := guestOf(r.Context())
+	if isGuest {
 		out, err = s.guestRoster(r.Context(), g)
 	} else {
 		out, err = s.roster(r.Context(), admin)
@@ -2195,6 +2200,12 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.cfg.Version != "" {
 		res["relay_version"] = s.cfg.Version
+	}
+	// The configured --admin-tag rides alongside the roster for every
+	// caller but guests, so doctor and the setup console can name the
+	// tag that grants admin without an admin-only read.
+	if tag := s.dir.AdminTag(); tag != "" && !isGuest {
+		res["admin_tag"] = tag
 	}
 	writeJSON(w, http.StatusOK, res)
 }
@@ -2268,6 +2279,28 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		}
 	}
 	quietUntil := s.started.Add(s.cfg.ClaimLease)
+	// The live admin verdict per node, read before taking s.mu: each
+	// lookup can cost a tailnet Status call, which must not block sends,
+	// polls and claims waiting on the lock. Keyed by node id, so agents
+	// sharing a machine share one lookup.
+	type nodeVerdict struct {
+		admin *bool
+		tags  []string
+		name  string
+		user  string
+	}
+	verdicts := map[string]nodeVerdict{}
+	if admin {
+		for _, a := range agents {
+			if strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
+				continue
+			}
+			if facts, ok := s.dir.MachineFacts(ctx, a.NodeID); ok {
+				admin := facts.Admin
+				verdicts[a.NodeID] = nodeVerdict{admin: &admin, tags: facts.Tags, name: facts.Name, user: facts.User}
+			}
+		}
+	}
 	out := make([]client.AgentInfo, 0, len(agents))
 	s.mu.Lock()
 	for _, a := range agents {
@@ -2288,6 +2321,18 @@ func (s *Server) rosterWith(ctx context.Context, admin, needQueue bool) ([]clien
 		// agent has none to show.
 		if admin && !strings.HasPrefix(a.NodeID, identity.VirtualPrefix) {
 			info.NodeID, info.NodeName, info.NodeUser = a.NodeID, a.NodeName, a.NodeUser
+			if v, ok := verdicts[a.NodeID]; ok {
+				info.NodeAdmin, info.NodeTags = v.admin, v.tags
+				// Names are saved at join and go stale on a rename: carry
+				// the live ones when they differ, so the console tells the
+				// owner to tag the name Tailscale shows now.
+				if v.name != "" && v.name != a.NodeName {
+					info.NodeLiveName = v.name
+				}
+				if v.user != "" && v.user != a.NodeUser {
+					info.NodeLiveUser = v.user
+				}
+			}
 		}
 		stat := stats[a.Name]
 		info.Queued, info.OldestQueued, info.Claimed = stat.Queued, stat.OldestQueued, stat.Claimed

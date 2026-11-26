@@ -54,8 +54,9 @@ the tools can still run it from a shell.
 
 It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, on an admin device any webhook or email agent that
-was woken and has not checked in and whether task hosts have a fallback, this machine's Tailscale (its version against
-the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
+was woken and has not checked in and whether task hosts have a fallback, and whether the setup console at /admin/ answers,
+this machine's Tailscale (its version against
+the minimum, Tailscale SSH, and whether the machine is tagged, including whether it carries the relay's --admin-tag), a self-test of
 tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
 actually been starting tincan mcp (every tincan mcp records its launch),
@@ -174,6 +175,10 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 		if gw := gatewayEventsCheck(ctx, r); gw != nil {
 			add(*gw)
 		}
+		// The setup console an admin device opens at /admin/: it answers
+		// the same admin routes, so a never-joined admin laptop with a
+		// configured relay gets the check too.
+		add(setupConsoleCheck(ctx, r))
 	}
 
 	// 2c. This host's Tailscale, which matters joined or not.
@@ -181,7 +186,14 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	if joined {
 		joinedRelay = r
 	}
-	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, r, guest)...)
+	// The configured relay rides along so the stopped and proxy checks
+	// below see it. The tag read is best-effort and costs a round trip,
+	// so it runs only when the last call got a definitive answer:
+	// joined, or answered but unknown (IsNotJoined). After a timeout or
+	// an unreachable relay, asking it again only adds a second wait to
+	// the outage.
+	tagLookup := joined || client.IsNotJoined(err)
+	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, r, guest, tagLookup)...)
 
 	// 3. Self-test of tincan mcp in both framings.
 	if exe != "" {
@@ -323,6 +335,41 @@ func unansweredCheck(ctx context.Context, r *client.Relay, now time.Time) check 
 	}
 	return check{name, "warn", strings.Join(stuck, "; "),
 		"The relay keeps sending the same webhook or email until the agent checks in, the queue is empty, or the hourly cap is spent. The mark clears on the agent's next check-in. Also check each named agent's own platform: its webhook receiver, routine or email loop may have stopped."}
+}
+
+// setupConsoleCheck confirms the setup console at /admin/ answers for an
+// admin device: the console reads its agent kinds from GET /v1/admin/kinds,
+// and its Tailnet devices section from GET /v1/admin/peers. Both are
+// admin-only, so a non-admin device skips the check, as does a relay that
+// predates the console. Issue #227 (join requests) is still open, so the
+// console has no approve/deny work and the check expects none.
+func setupConsoleCheck(ctx context.Context, r *client.Relay) check {
+	const name = "setup console"
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var kinds struct {
+		Kinds []string `json:"kinds"`
+	}
+	if err := r.Raw(ctx, "GET", "/v1/admin/kinds", nil, &kinds); err != nil {
+		if e, ok := errors.AsType[*client.APIError](err); ok && e.Code == 403 {
+			return check{name, "ok", "skipped: the setup console needs an admin device", ""}
+		}
+		if e, ok := errors.AsType[*client.APIError](err); ok && e.Code == 404 {
+			return check{name, "ok", "skipped: the relay predates the setup console at /admin/", ""}
+		}
+		return check{name, "warn", "could not check the setup console: " + err.Error(), ""}
+	}
+	if len(kinds.Kinds) == 0 {
+		return check{name, "warn", "the setup console answered with no agent kinds", "Upgrade the relay, then run tincan doctor again."}
+	}
+	var peers struct {
+		Peers []json.RawMessage `json:"peers"`
+	}
+	if err := r.Raw(ctx, "GET", "/v1/admin/peers", nil, &peers); err != nil {
+		return check{name, "warn", fmt.Sprintf("setup console at /admin/ serves %d agent kinds, but the tailnet devices section cannot load: %s", len(kinds.Kinds), err.Error()),
+			"Check that the relay can read the tailnet peer list, then run tincan doctor again."}
+	}
+	return check{name, "ok", fmt.Sprintf("setup console at /admin/ serves %d agent kinds; tailnet devices section lists %d peers", len(kinds.Kinds), len(peers.Peers)), ""}
 }
 
 // relayUnreachableCheck explains a failed whoami: no key, an error that

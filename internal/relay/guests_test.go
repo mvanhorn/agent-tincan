@@ -989,6 +989,36 @@ func TestGuestRosters(t *testing.T) {
 	}
 }
 
+// Guests never see which tag grants admin: the roster omits admin_tag
+// for them, while an admin device on the same relay still gets it.
+func TestGuestRosterHidesAdminTag(t *testing.T) {
+	const tag = "tag:tincan-admin"
+	m := testrelay.NewWithAdminLoginAndTag(t, relay.Config{}, tag)
+	g := m.JoinGuest(t, guestName, client.GuestInvite{Ask: []string{"muse"}, ForSeconds: guestFor})
+	var raw json.RawMessage
+	if err := g.Raw(t.Context(), "GET", "/v1/agents", nil, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc["admin_tag"]; ok {
+		t.Fatalf("guest roster names the admin tag: %s", raw)
+	}
+	var adminRaw json.RawMessage
+	if err := m.Client(t, "admin").Raw(t.Context(), "GET", "/v1/agents", nil, &adminRaw); err != nil {
+		t.Fatal(err)
+	}
+	var adminDoc map[string]any
+	if err := json.Unmarshal(adminRaw, &adminDoc); err != nil {
+		t.Fatal(err)
+	}
+	if adminDoc["admin_tag"] != tag {
+		t.Fatalf("admin roster misses the admin tag: %s", adminRaw)
+	}
+}
+
 // The record teammates read leaves a guest out, as the roster does, and the
 // roster's stats field names no one. An admin sees it on both.
 func TestStatsHideGuestsFromTeammates(t *testing.T) {
