@@ -128,7 +128,7 @@ To tag a machine:
 2. Open Machines, find the machine, choose Edit tags from its menu, add `tag:agent` and save.
 3. Run `tincan doctor` on that machine. To undo, run `tailscale up --force-reauth --advertise-tags=` on that machine and sign in as your user. A machine that joined with a tagged auth key cannot drop its tags that way and needs a fresh login; see [Tailscale's tag docs](https://tailscale.com/kb/1068/tags).
 
-To tag a machine as an admin instead, follow the same steps with the admin tag, and list only the owners who may grant admin in its `tagOwners`, for example `"tagOwners": {"tag:tincan-admin": ["you@example.com"]}`.
+To tag a machine as an admin instead, follow the same steps with the admin tag, and list only the owners who may grant admin in its `tagOwners`, for example `"tagOwners": {"tag:tincan-admin": ["you@example.com"]}`. Before applying the tag, check that your tailnet policy lets the admin tag reach the relay on the ports you use. Rules that allow only your user or `autogroup:member` do not cover the tagged device.
 
 ## Rebuilt machines
 
