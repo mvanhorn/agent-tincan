@@ -235,6 +235,25 @@ func TestJoinDecideRelayHostOverSocketRefused(t *testing.T) {
 	}
 }
 
+// A relay that does not know its own node, as after a restart whose
+// self-node read failed, cannot tell a request from its own host, so the
+// socket decides nothing; the page on another device still can.
+func TestJoinDecideOverSocketRefusedWithoutSelfNode(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	a := mustFile(t, m.URL("stranger"), "codex")
+	m.Server.SetSelfNode(identity.Node{})
+	for _, d := range []string{"approve", "deny"} {
+		if code, st := socketDecide(t, m, a.ID, d); code != http.StatusForbidden {
+			t.Fatalf("socket %s with no self node: %d %+v, want 403", d, code, st)
+		}
+	}
+	page := hardened(t, m, "admin")
+	e := listingFor(t, page, a.ID)
+	if code, st := pageDecide(t, page, a.ID, "approve", e.ApproveNonce); code != http.StatusOK {
+		t.Fatalf("page approve: %d %+v", code, st)
+	}
+}
+
 // Approve and deny at once: exactly one lands.
 func TestJoinDecideRace(t *testing.T) {
 	m := testrelay.New(t, relay.Config{})

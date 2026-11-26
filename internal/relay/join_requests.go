@@ -44,6 +44,7 @@ var (
 	errJoinChannel   = errors.New("approve or deny a join request on the phone page or with tincan approve-join / deny-join on the relay host")
 	errJoinOwnNode   = errors.New("a join request cannot be decided from the machine that filed it")
 	errJoinRelayHost = errors.New("this join request came from the relay host itself; approve or deny it on the phone page from another device")
+	errJoinNoSelf    = errors.New("the relay does not know its own tailnet node, so it cannot tell whether this request came from the relay host; approve or deny it on the phone page from another device")
 )
 
 // joinKey names join request id in the hub and in the shared nonce book,
@@ -429,7 +430,13 @@ func (s *Server) decideJoinRequest(w http.ResponseWriter, r *http.Request, decis
 	by := joinBySocket
 	extra := map[string]any{"via": joinBySocket}
 	if socket {
-		if self := s.selfNode(); self.ID != "" && self.ID == jr.NodeID {
+		// Fail closed: a relay that does not know its own node cannot
+		// tell whether the request came from its own host.
+		switch self := s.selfNode(); {
+		case self.ID == "":
+			writeErr(w, http.StatusForbidden, errJoinNoSelf)
+			return
+		case self.ID == jr.NodeID:
 			writeErr(w, http.StatusForbidden, errJoinRelayHost)
 			return
 		}
