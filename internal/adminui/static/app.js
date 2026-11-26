@@ -130,13 +130,20 @@ async function invite() {
     err.hidden = false;
     return;
   }
-  if ($("add-new-only").checked && state.agents.some((a) => a.name === name)) {
-    // The relay excuses the minting machine from new_only, so a code
-    // for a name already joined here would move that agent if another
-    // machine redeemed it. The roster is in hand: refuse here.
-    err.textContent = "\"" + name + "\" has already joined. Uncheck the box to mint an invite that moves it, or pick a new name.";
-    err.hidden = false;
-    return;
+  if ($("add-new-only").checked) {
+    // Ask the relay for the current roster first: another admin may
+    // have removed the agent since this page loaded, freeing the name.
+    // If the refresh fails, fall back to the loaded roster; the relay
+    // still enforces new_only for names bound to other machines.
+    try { await refreshAgents(); } catch (e) { /* use the loaded roster */ }
+    if (state.agents.some((a) => a.name === name)) {
+      // The relay excuses the minting machine from new_only, so a code
+      // for a name already joined here would move that agent if another
+      // machine redeemed it. The roster is in hand: refuse here.
+      err.textContent = "\"" + name + "\" has already joined. Uncheck the box to mint an invite that moves it, or pick a new name.";
+      err.hidden = false;
+      return;
+    }
   }
   const kind = $("add-kind").value;
   const btn = $("add-button");
