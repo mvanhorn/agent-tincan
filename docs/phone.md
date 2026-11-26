@@ -2,11 +2,11 @@
 
 The relay serves a page for your phone at `/phone/`. It shows the team as `tincan top` does, with the same status for every agent, and lists the asks held for your approval with their sender, target and attachment names. You approve or deny a held ask from the page, and once the phone joins as its own agent you can ask any teammate and read the answer there. The Tasks tab shows the team's task list and lets you add, assign and close tasks.
 
-The page works only from an admin device: a machine named in the relay's `--admin` list, untagged, and (with `--admin-login`) owned by a listed login. Any other machine gets 403 for the page and every file it loads. Nothing is hosted anywhere else; the page talks only to your relay over your tailnet.
+The page works only from an admin device: a machine named in the relay's `--admin` list and untagged, or carrying the relay's `--admin-tag`, and (with `--admin-login`) owned by a listed login. Any other machine gets 403 for the page and every file it loads. Nothing is hosted anywhere else; the page talks only to your relay over your tailnet.
 
 ## Open it
 
-1. Add the phone to the relay's admin list. Find its machine name with `tailscale status` (for example `iphone182`) and restart the relay with `--admin macbook-pro-44,iphone182`. The phone must be signed in to Tailscale as you and must not carry a tag.
+1. Add the phone to the relay's admin list. Find its machine name with `tailscale status` (for example `iphone182`) and restart the relay with `--admin macbook-pro-44,iphone182`. The phone must be signed in to Tailscale as you and must be untagged, unless it carries the relay's `--admin-tag`.
 2. On the phone, with Tailscale connected, open the page the relay logs at startup:
    - with HTTPS on your tailnet: `https://<relay>.<tailnet>.ts.net/phone/`
    - without it: `http://<relay>/phone/` (the relay's own address, as `tincan agents` reaches it)

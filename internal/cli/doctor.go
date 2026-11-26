@@ -55,7 +55,7 @@ the tools can still run it from a shell.
 It checks, in order: the saved join, the relay, whether this binary is the
 relay's current release, on an admin device any webhook or email agent that
 was woken and has not checked in and whether task hosts have a fallback, this machine's Tailscale (its version against
-the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
+the minimum, Tailscale SSH, and whether the machine is tagged, including whether it carries the relay's --admin-tag), a self-test of
 tincan mcp in both stdio framings,
 the MCP config entries that point at tincan, whether the app has
 actually been starting tincan mcp (every tincan mcp records its launch),
@@ -181,7 +181,14 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 	if joined {
 		joinedRelay = r
 	}
-	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, r, guest)...)
+	// The configured relay rides along so the stopped and proxy checks
+	// below see it. The tag read is best-effort and costs a round trip,
+	// so it runs only when the last call got a definitive answer:
+	// joined, or answered but unknown (IsNotJoined). After a timeout or
+	// an unreachable relay, asking it again only adds a second wait to
+	// the outage.
+	tagLookup := joined || client.IsNotJoined(err)
+	rep.Checks = append(rep.Checks, tailnetChecks(ctx, joinedRelay, r, guest, tagLookup)...)
 
 	// 3. Self-test of tincan mcp in both framings.
 	if exe != "" {

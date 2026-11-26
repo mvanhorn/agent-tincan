@@ -322,6 +322,84 @@ func TestTaggedNodeWithAdminNameIsNotAdmin(t *testing.T) {
 	}
 }
 
+// A node carrying the admin tag is an admin without being named in
+// --admin. The tag means nothing when no tag is configured, and never
+// overrides the login list.
+func TestAdminTagGrantsTaggedNode(t *testing.T) {
+	ctx := context.Background()
+	newDir := func(cfg identity.Config) *identity.Directory {
+		who := identitytest.New(map[string]identity.Node{
+			"100.0.2.1:1": {ID: "nT", Name: "tablet", User: "mvanhorn@gmail.com", Tags: []string{"tag:tincan-admin"}},
+			"100.0.2.2:1": {ID: "nP", Name: "printer", User: "mvanhorn@gmail.com", Tags: []string{"tag:agent"}},
+			"100.0.2.3:1": {ID: "nO", Name: "other", User: "someone-else@example.com", Tags: []string{"tag:tincan-admin"}},
+		})
+		return identity.NewDirectory(identity.NewMemoryStore(), who, cfg)
+	}
+	dir := newDir(identity.Config{Admins: []string{"macbook-pro-44"}, AdminTag: "tag:tincan-admin"})
+	if !dir.IsAdmin(ctx, "100.0.2.1:1") {
+		t.Fatal("tagged node with the admin tag should be admin")
+	}
+	if _, err := dir.Invite(ctx, "100.0.2.1:1", "newguy"); err != nil {
+		t.Fatalf("invite from tagged admin: want nil, got %v", err)
+	}
+	if dir.IsAdmin(ctx, "100.0.2.2:1") {
+		t.Fatal("node with another tag must not be admin")
+	}
+	// Without the tag configured, the same node has no rights.
+	plain := newDir(identity.Config{Admins: []string{"macbook-pro-44"}})
+	if plain.IsAdmin(ctx, "100.0.2.1:1") {
+		t.Fatal("admin tag means nothing when no tag is configured")
+	}
+	// The login list still applies to tag-granted admins.
+	gated := newDir(identity.Config{Admins: []string{"macbook-pro-44"}, AdminTag: "tag:tincan-admin", AdminLogins: []string{"mvanhorn@gmail.com"}})
+	if !gated.IsAdmin(ctx, "100.0.2.1:1") {
+		t.Fatal("tagged node owned by a listed login should be admin")
+	}
+	if gated.IsAdmin(ctx, "100.0.2.3:1") {
+		t.Fatal("tagged node owned by another login must not be admin")
+	}
+}
+
+// A node that joined with a tagged auth key has no owning user: Tailscale
+// reports its tags and no login. With --admin-login set, the tag path
+// still needs a listed login, so such a node is denied until the owner
+// lists whatever login its tagged admin nodes report (check with
+// `tailscale whois`).
+func TestAdminTagNeedsListedLogin(t *testing.T) {
+	ctx := context.Background()
+	who := identitytest.New(map[string]identity.Node{
+		"100.0.2.9:1": {ID: "nK", Name: "kiosk", Tags: []string{"tag:tincan-admin"}},
+	})
+	dir := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{Admins: []string{"macbook-pro-44"}, AdminTag: "tag:tincan-admin", AdminLogins: []string{"mvanhorn@gmail.com"}})
+	if dir.IsAdmin(ctx, "100.0.2.9:1") {
+		t.Fatal("tagged node with no login must not pass a login list")
+	}
+	open := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{Admins: []string{"macbook-pro-44"}, AdminTag: "tag:tincan-admin"})
+	if !open.IsAdmin(ctx, "100.0.2.9:1") {
+		t.Fatal("tagged node with no login is admin when no login list is set")
+	}
+}
+
+// MachineFacts reports the verdict enforcement uses, with the node's live
+// tags, and nothing for nodes the tailnet does not report.
+func TestMachineFacts(t *testing.T) {
+	ctx := context.Background()
+	who := identitytest.New(map[string]identity.Node{
+		"100.0.2.1:1": {ID: "nT", Name: "tablet", User: "mvanhorn@gmail.com", Tags: []string{"tag:tincan-admin"}},
+	})
+	dir := identity.NewDirectory(identity.NewMemoryStore(), who, identity.Config{AdminTag: "tag:tincan-admin"})
+	admin, tags, ok := dir.MachineFacts(ctx, "nT", "tablet")
+	if !ok || !admin {
+		t.Fatalf("facts: %v %q %v, want admin with tags", admin, tags, ok)
+	}
+	if len(tags) != 1 || tags[0] != "tag:tincan-admin" {
+		t.Fatalf("facts tags: %q, want the admin tag", tags)
+	}
+	if _, _, ok := dir.MachineFacts(ctx, "nGONE", "gone"); ok {
+		t.Fatal("unknown node should report nothing")
+	}
+}
+
 // With --admin-login set, the node's owning login must also match.
 func TestAdminLoginRestrictsOwner(t *testing.T) {
 	dir := adminFixture(t, []string{"mvanhorn@gmail.com"})

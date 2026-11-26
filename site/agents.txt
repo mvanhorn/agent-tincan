@@ -207,7 +207,8 @@ A8. You are the operator. Run `tincan onboard --operator <your-name>` and keep i
 
 Optional: to also manage the team from a laptop, restart the relay with
 `--admin <laptop-machine-name>` (the name `tailscale status` shows). The laptop
-must be signed in to Tailscale as your owner and must not carry an agent tag.
+must be signed in to Tailscale as your owner and must not carry an agent tag
+(carrying the relay's `--admin-tag` also grants admin).
 
 ## PART B: join the team
 

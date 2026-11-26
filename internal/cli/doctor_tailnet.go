@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -45,6 +46,32 @@ func deviceRoleOf(ctx context.Context, r *client.Relay) deviceRole {
 	return roleUnknown
 }
 
+// relayAdminTag reports the relay's configured --admin-tag, or "" when the
+// relay predates it, has none set, or cannot be asked. The relay reports it
+// to every caller, so no admin rights are needed.
+func relayAdminTag(ctx context.Context, r *client.Relay) string {
+	tag, _ := relayAdminFacts(ctx, r)
+	return tag
+}
+
+// relayAdminFacts reads the relay's configured --admin-tag and whether
+// the caller passes the admin check, from one /v1/agents read. The roster
+// carries the tag for every caller and the task fallback only for admin
+// devices, so one read answers both. Best-effort: "" and false when the
+// relay predates the tag, has none set, refuses, or cannot be asked.
+func relayAdminFacts(ctx context.Context, r *client.Relay) (tag string, admin bool) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var out struct {
+		AdminTag     string          `json:"admin_tag"`
+		TaskFallback json.RawMessage `json:"task_fallback"`
+	}
+	if err := r.Raw(ctx, "GET", "/v1/agents", nil, &out); err != nil {
+		return "", false
+	}
+	return out.AdminTag, len(out.TaskFallback) > 0
+}
+
 // tailnetChecks reports each tailscaled on this machine, or one skip line when
 // there is none to ask. r is the joined relay, nil unless the relay answered
 // this run. configured is the relay from the saved config, nil when there is
@@ -56,7 +83,7 @@ func deviceRoleOf(ctx context.Context, r *client.Relay) deviceRole {
 // guest need not ask: the relay refuses it the admin route as it does an
 // agent, but its machine is on another account's tailnet, out of the owner's
 // tag rule.
-func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool) []check {
+func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool, tagLookup bool) []check {
 	selves := tailnetSelves(ctx)
 	if len(selves) == 0 {
 		return []check{{"tailnet", "ok", "skipped: no tailscaled tincan can reach on this machine", ""}}
@@ -67,12 +94,32 @@ func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool)
 			running++
 		}
 	}
-	role := roleUnknown
+	role, adminTag := roleUnknown, ""
 	switch {
 	case guest:
 		role = roleGuest
 	case r != nil && running == 1 && !r.ThroughRemoteProxy():
 		role = deviceRoleOf(ctx, r)
+		// The relay's --admin-tag, when set, is how a tagged node stays
+		// an admin without a relay restart. It is reported to every
+		// caller, so the tag lines below can name it without needing
+		// admin rights. It is read only here, where the relay is asked
+		// for the role anyway: with several daemons, a remote proxy, or
+		// a stopped daemon the relay is not asked at all.
+		adminTag = relayAdminTag(ctx, r)
+	}
+	// An admin device that never joined still names a relay: read the tag
+	// through it for display, and take the roster's word for whether this
+	// machine passes the admin check (it carries the admin-only task
+	// fallback exactly then, in the same read). Guests and remote proxies
+	// are still never asked, and a dead relay is never asked twice: the
+	// caller enables this only after a definitive answer.
+	if tagLookup && adminTag == "" && !guest && r == nil && configured != nil && !configured.ThroughRemoteProxy() && running == 1 {
+		var isAdmin bool
+		adminTag, isAdmin = relayAdminFacts(ctx, configured)
+		if isAdmin {
+			role = roleAdmin
+		}
 	}
 	// Only when the relay did not answer: a relay that answered is reached
 	// some other way (a managed connector, another daemon), and a remote
@@ -80,7 +127,7 @@ func tailnetChecks(ctx context.Context, r, configured *client.Relay, guest bool)
 	stopped := running == 0 && r == nil && (configured == nil || !configured.ThroughRemoteProxy())
 	checks := make([]check, len(selves))
 	for i, s := range selves {
-		checks[i] = tailnetCheck(s, role)
+		checks[i] = tailnetCheck(s, role, adminTag)
 		if stopped {
 			checks[i] = stoppedTailnet(checks[i])
 		}
@@ -104,10 +151,20 @@ func stoppedTailnet(c check) check {
 	return c
 }
 
+// adminTagSuffix names the relay's --admin-tag on an admin-device line, so an
+// owner running doctor there sees the other path to admin.
+func adminTagSuffix(adminTag string) string {
+	if adminTag == "" {
+		return ""
+	}
+	return "; the relay also grants --admin-tag " + adminTag
+}
+
 // tailnetCheck judges one tailscaled. Tailscale is the security boundary, so
 // the check speaks up about it, but it only warns: the host's Tailscale is
-// the owner's to update, and tincan still works on an old one.
-func tailnetCheck(s client.TailnetSelf, role deviceRole) check {
+// the owner's to update, and tincan still works on an old one. adminTag is
+// the relay's configured --admin-tag, or "" when it has none or predates it.
+func tailnetCheck(s client.TailnetSelf, role deviceRole, adminTag string) check {
 	status := "ok"
 	var detail, fix []string
 	warn := func(d, f string) {
@@ -144,15 +201,19 @@ func tailnetCheck(s client.TailnetSelf, role deviceRole) check {
 	switch {
 	case !s.Running:
 		detail = append(detail, "tags unknown: tailscaled is not logged in and running")
+	case len(s.Tags) > 0 && adminTag != "" && slices.Contains(s.Tags, adminTag) && role == roleAdmin:
+		detail = append(detail, "tagged "+strings.Join(s.Tags, ", ")+"; admin via --admin-tag "+adminTag)
+	case len(s.Tags) > 0 && adminTag != "" && slices.Contains(s.Tags, adminTag):
+		detail = append(detail, "tagged "+strings.Join(s.Tags, ", ")+" (carries the relay's --admin-tag "+adminTag+")")
 	case len(s.Tags) > 0:
 		detail = append(detail, "tagged "+strings.Join(s.Tags, ", "))
 	case role == roleAdmin:
-		detail = append(detail, "untagged, as an admin device is by design; agents on this machine have the owner's admin power, including approving held requests")
+		detail = append(detail, "untagged, as an admin device is by design; agents on this machine have the owner's admin power, including approving held requests"+adminTagSuffix(adminTag))
 	case role == roleGuest:
 		detail = append(detail, "untagged, which is fine for a guest: tags are for the owner's own machines")
 	case role == roleAgent:
 		warn("this agent machine is untagged",
-			"Tag it (for example tag:agent) in the Tailscale admin console: a tagged node is never an admin device, whatever it is called. Before tagging a personal laptop, see What lives where in docs/quickstart.md.")
+			"Tag it (for example tag:agent) in the Tailscale admin console: a tagged node without the relay's --admin-tag is never an admin device, whatever it is called. Tags are controlled by tagOwners in the tailnet ACL. Before tagging a personal laptop, see What lives where in docs/quickstart.md.")
 	default:
 		detail = append(detail, "untagged, tag check skipped: could not tell whether this is an admin device")
 	}
