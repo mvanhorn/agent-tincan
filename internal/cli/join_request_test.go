@@ -403,6 +403,33 @@ func TestJoinRequestWriteFailureRejoinHint(t *testing.T) {
 	mustConfig(t, helper, box, "helper")
 }
 
+// A target config that another agent took while the request waited for the
+// owner is not overwritten when the agents are collected: that name gets a
+// rejoin line for a config of its own, and the pending file stays.
+func TestJoinRequestSaveKeepsConfigTakenWhileWaiting(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	useConfig(t, client.Config{})
+	box, owner := newBox(t, m), ownerRelay(t, m)
+	dir := filepath.Dir(client.ConfigPath())
+	helper := filepath.Join(dir, "helper.json")
+
+	j := startCmd(t, "join", "--request", "codex,helper", "--relay", box)
+	l := pendingRequest(t, owner)
+	if err := client.SaveConfigTo(helper, client.Config{Relay: box, Agent: "grokbot"}); err != nil {
+		t.Fatal(err)
+	}
+	decide(t, owner, l.ID, true)
+	out, err := j.wait(t)
+	if err == nil || !strings.Contains(err.Error(), `"grokbot"`) || !strings.Contains(err.Error(), "tincan rejoin --relay "+box+" --name helper") {
+		t.Fatalf("want a refusal naming grokbot with a rejoin line, got %v\n%s", err, out)
+	}
+	mustConfig(t, helper, box, "grokbot")
+	mustConfig(t, filepath.Join(dir, "codex.json"), box, "codex")
+	if _, found, _ := client.LoadPendingJoinRequest(client.JoinRequestPath()); !found {
+		t.Fatal("the pending file must stay while a config is unsaved")
+	}
+}
+
 // Covers R10. An older relay's plain 404 stops with the invite message and
 // writes nothing.
 func TestJoinRequestOlderRelay(t *testing.T) {

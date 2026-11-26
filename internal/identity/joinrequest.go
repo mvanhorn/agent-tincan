@@ -56,7 +56,22 @@ var (
 	// ErrJoinRefused marks a claim refused because a requested name can no
 	// longer be joined; see JoinRefusedError.
 	ErrJoinRefused = errors.New("a requested name can no longer be joined")
+	// ErrJoinInvalid marks a join request the caller got wrong (no names,
+	// too many, a bad or repeated name, a bad kind), as opposed to a store
+	// failure while filing it.
+	ErrJoinInvalid = errors.New("invalid join request")
 )
+
+// joinInvalidError is a caller's mistake in a join request. Its text is the
+// mistake alone; it matches ErrJoinInvalid under errors.Is.
+type joinInvalidError struct{ msg string }
+
+func (e *joinInvalidError) Error() string        { return e.msg }
+func (e *joinInvalidError) Is(target error) bool { return target == ErrJoinInvalid }
+
+func joinInvalid(format string, args ...any) error {
+	return &joinInvalidError{fmt.Sprintf(format, args...)}
+}
 
 // JoinRefusedError is the error a claim returns when a requested name can no
 // longer be joined. It matches ErrJoinRefused and the reason (ErrNameTaken,
@@ -192,21 +207,23 @@ func JoinCapRefusal(open, hour, pending int) error {
 // agent, not the name of an unexpired invite, and not asked for by another
 // open request (ErrNameTaken). The store then enforces the caps
 // (ErrJoinCap). The request returned carries its id and matching code. The
-// relay checks which nodes may file before calling this.
+// relay checks which nodes may file before calling this. A request the
+// caller got wrong is refused with an error matching ErrJoinInvalid; any
+// other error not named above is the store's.
 func (d *Directory) FileJoinRequest(ctx context.Context, n Node, agents []RequestedAgent) (JoinRequest, error) {
 	if len(agents) == 0 || len(agents) > MaxJoinAgents {
-		return JoinRequest{}, fmt.Errorf("a join request names 1 to %d agents", MaxJoinAgents)
+		return JoinRequest{}, joinInvalid("a join request names 1 to %d agents", MaxJoinAgents)
 	}
 	seen := map[string]bool{}
 	for _, a := range agents {
 		if !nameRE.MatchString(a.Name) {
-			return JoinRequest{}, fmt.Errorf("agent name %q must be 1-32 lowercase letters, digits, or dashes", a.Name)
+			return JoinRequest{}, joinInvalid("agent name %q must be 1-32 lowercase letters, digits, or dashes", a.Name)
 		}
 		if err := checkKind(a.Kind); err != nil {
-			return JoinRequest{}, err
+			return JoinRequest{}, joinInvalid("%s", err)
 		}
 		if seen[a.Name] {
-			return JoinRequest{}, fmt.Errorf("%s is named twice", a.Name)
+			return JoinRequest{}, joinInvalid("%s is named twice", a.Name)
 		}
 		seen[a.Name] = true
 	}

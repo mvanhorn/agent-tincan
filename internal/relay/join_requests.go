@@ -134,7 +134,7 @@ func (s *Server) fileRefusal(ctx context.Context, c identity.Caller) (int, error
 	}
 	back, err := s.dir.Readmittable(ctx, n)
 	if err != nil {
-		return statusFor(err), err
+		return joinStatusFor(err), err
 	}
 	if len(back) > 0 {
 		var names []string
@@ -173,7 +173,7 @@ func (s *Server) handleFileJoinRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	jr, err := s.dir.FileJoinRequest(r.Context(), c.Node, in.Agents)
 	if err != nil {
-		writeErr(w, statusFor(err), err)
+		writeErr(w, joinStatusFor(err), err)
 		return
 	}
 	s.record(r.Context(), "join_requested", "", "", r.RemoteAddr, joinDetail(jr, nil))
@@ -218,7 +218,10 @@ func (s *Server) joinVoided(ctx context.Context, jr identity.JoinRequest) {
 
 // handleJoinRequestStatus answers a request's status to the node that
 // filed it. It changes nothing but a void on a changed key; with wait it
-// holds a pending request until it is decided or the wait ends.
+// holds a pending request until it is decided or the wait ends. It takes a
+// hub waiter only for the caller's own pending request, which a decision,
+// void, claim or the expiry sweep always notifies: an unknown, foreign or
+// final id would leave its key in the hub for good.
 func (s *Server) handleJoinRequestStatus(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.joinNode(w, r)
 	if !ok {
@@ -228,15 +231,28 @@ func (s *Server) handleJoinRequestStatus(w http.ResponseWriter, r *http.Request)
 	wait := durationParam(r, "wait", 0, s.cfg.MaxWait)
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
-	for {
-		wake := s.hub.wait(joinKey(id))
+	// answered reads the request and answers it unless the read fails or it
+	// should not be waited on.
+	answered := func() bool {
 		jr, err := s.readOwnJoinRequest(r.Context(), id, c.Node)
 		if err != nil {
 			writeErr(w, joinStatusFor(err), err)
-			return
+			return true
 		}
 		if jr.Status != identity.JoinPending || wait == 0 {
 			writeJSON(w, http.StatusOK, requesterView(jr))
+			return true
+		}
+		return false
+	}
+	for {
+		if answered() {
+			return
+		}
+		// Read again after taking the waiter, so a decision that lands
+		// between the two is never missed.
+		wake := s.hub.wait(joinKey(id))
+		if answered() {
 			return
 		}
 		select {
@@ -292,11 +308,13 @@ func (s *Server) handleClaimJoinRequest(w http.ResponseWriter, r *http.Request) 
 }
 
 // joinStatusFor is statusFor with a store failure as the relay's, not the
-// caller's.
+// caller's: only a request the caller got wrong answers 400.
 func joinStatusFor(err error) int {
 	switch {
+	case errors.Is(err, identity.ErrJoinInvalid):
+		return http.StatusBadRequest
 	case errors.Is(err, identity.ErrJoinNotFound), errors.Is(err, identity.ErrJoinWrongNode), errors.Is(err, identity.ErrJoinCap),
-		errors.Is(err, identity.ErrJoinState), errors.Is(err, identity.ErrNameTaken):
+		errors.Is(err, identity.ErrJoinState), errors.Is(err, identity.ErrNameTaken), errors.Is(err, identity.ErrRebindCheckFailed):
 		return statusFor(err)
 	}
 	return http.StatusInternalServerError

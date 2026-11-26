@@ -1,7 +1,9 @@
 package relay_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -348,6 +350,26 @@ func TestJoinRequestStatusWithNewKeyVoids(t *testing.T) {
 	}
 }
 
+// As docs/protocol.md says: a claim of a still-pending request with a
+// changed key answers pending and changes nothing; the next status read
+// voids it.
+func TestJoinRequestPendingClaimWithNewKeyChangesNothing(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	a := mustFile(t, m.URL("stranger"), "codex")
+	rekeyed := testrelay.TailnetNode("nLAPTOP", "old-laptop", testrelay.Login)
+	rekeyed.Key = "nodekey:new"
+	url := m.AddMachine(t, "rekeyed", rekeyed)
+	if code, st := joinClaim(t, url, a.ID); code != http.StatusOK || st.Status != identity.JoinPending {
+		t.Fatalf("claim of a pending request with a new key: %d %+v, want pending", code, st)
+	}
+	if rows := auditEvents(t, m, "join_voided"); len(rows) != 0 {
+		t.Fatalf("a pending claim voided: %+v", rows)
+	}
+	if code, st := joinStatus(t, url, a.ID); code != http.StatusOK || st.Status != identity.JoinVoided {
+		t.Fatalf("status with the new key: %d %+v, want voided", code, st)
+	}
+}
+
 // An approved, unclaimed request still holds its names against invites
 // and other requests.
 func TestJoinRequestApprovedHoldsNames(t *testing.T) {
@@ -507,6 +529,58 @@ func TestJoinRequestStatusWaits(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("status still waiting %v after approval", time.Since(start))
+	}
+}
+
+// A status read that cannot wait leaves no hub waiter behind: not for an
+// unknown id, another machine's request, a read without wait, or a request
+// already final, so no caller can grow the hub by reading.
+func TestJoinRequestStatusLeavesNoWaiter(t *testing.T) {
+	m := testrelay.New(t, relay.Config{})
+	a := mustFile(t, m.URL("stranger"), "codex")
+	other := m.AddMachine(t, "other", testrelay.TailnetNode("nOTHER", "other-box", testrelay.Login))
+	before := m.Server.HubKeys()
+	for _, id := range []string{"no-such-id", "another-made-up-id"} {
+		if code, st := joinCall(t, "GET", m.URL("stranger"), "/v1/join-requests/"+id+"?wait=5", "", nil); code != http.StatusNotFound {
+			t.Fatalf("unknown id %s: %d %+v", id, code, st)
+		}
+	}
+	if code, st := joinCall(t, "GET", other, "/v1/join-requests/"+a.ID+"?wait=5", "", nil); code != http.StatusForbidden {
+		t.Fatalf("another machine's request: %d %+v", code, st)
+	}
+	if code, st := joinStatus(t, m.URL("stranger"), a.ID); code != http.StatusOK || st.Status != identity.JoinPending {
+		t.Fatalf("status without wait: %d %+v", code, st)
+	}
+	if code, st := socketDecide(t, m, a.ID, "deny"); code != http.StatusOK || st.Status != identity.JoinDenied {
+		t.Fatalf("deny: %d %+v", code, st)
+	}
+	if code, st := joinCall(t, "GET", m.URL("stranger"), "/v1/join-requests/"+a.ID+"?wait=5", "", nil); code != http.StatusOK || st.Status != identity.JoinDenied {
+		t.Fatalf("status of a denied request: %d %+v", code, st)
+	}
+	if got := m.Server.HubKeys(); got != before {
+		t.Fatalf("hub holds %d keys after the reads, want %d", got, before)
+	}
+}
+
+// failingJoinInsert is an identity store whose join request insert fails,
+// as a relay's own store can.
+type failingJoinInsert struct{ identity.Store }
+
+func (failingJoinInsert) InsertJoinRequest(context.Context, identity.JoinRequest, time.Time) error {
+	return errors.New("disk I/O error")
+}
+
+// A filing the relay's own store fails answers 500, not the 400 of a bad
+// request; a bad request still answers 400.
+func TestJoinRequestFilingStoreFailureIs500(t *testing.T) {
+	m := testrelay.NewWithIdentityStore(t, relay.Config{}, func(s identity.Store) identity.Store { return failingJoinInsert{s} })
+	if code, a := fileJoin(t, m.URL("stranger"), "codex"); code != http.StatusInternalServerError || !strings.Contains(a.Error, "disk I/O error") {
+		t.Fatalf("store failure: %d %+v, want 500", code, a)
+	}
+	for _, bad := range [][]string{{"Bad Name"}, {"codex", "codex"}, {"codex:Bad Kind"}, nil} {
+		if code, a := fileJoin(t, m.URL("stranger"), bad...); code != http.StatusBadRequest {
+			t.Fatalf("bad request %q: %d %+v, want 400", bad, code, a)
+		}
 	}
 }
 

@@ -24,6 +24,13 @@ func (s *Server) JoinNoncesLive(id string) int {
 	return n
 }
 
+// HubKeys counts the keys the long-poll hub holds a waiter channel for.
+func (s *Server) HubKeys() int {
+	s.hub.mu.Lock()
+	defer s.hub.mu.Unlock()
+	return len(s.hub.ch)
+}
+
 // KeyForTest exposes the relay key to tests.
 func KeyForTest(s *Server) string { return s.key }
 

@@ -478,11 +478,19 @@ func recoverDelivered(ctx context.Context, cmd *cobra.Command, p client.PendingJ
 
 // saveJoinedConfigs writes each delivered agent's config, then removes the
 // pending file. A config that cannot be written gets its rejoin line, and
-// the pending file stays so doctor and a rerun can finish the job.
+// the pending file stays so doctor and a rerun can finish the job. A config
+// that another agent took while the request waited is left alone, as
+// joinTargets would have refused it before filing: its name gets a rejoin
+// line for a config of its own.
 func saveJoinedConfigs(ctx context.Context, cmd *cobra.Command, p client.PendingJoinRequest, targets []joinTarget, pendingPath string) error {
 	var unsaved []string
 	for _, t := range targets {
 		cfg, err := client.LoadConfigFrom(t.path)
+		if err == nil && cfg.Agent != "" && cfg.Agent != t.agent.Name {
+			unsaved = append(unsaved, fmt.Sprintf("  did not save %s to %s: it now belongs to agent %q, which would then act as %q\n  TINCAN_CONFIG=<new file> tincan rejoin --relay %s --name %s",
+				t.agent.Name, t.path, cfg.Agent, t.agent.Name, p.Relay, t.agent.Name))
+			continue
+		}
 		if err == nil {
 			setRelay(&cfg, p.Relay)
 			cfg.Agent = t.agent.Name
