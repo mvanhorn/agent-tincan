@@ -385,7 +385,7 @@ func TestTailnetChecksRemoteProxySkipsRole(t *testing.T) {
 		return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(`{"error":"no"}`)), Request: req}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = old })
-	r, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://hatch-egress-proxy:3130"})
+	r, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://proxy.example:3130"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +450,7 @@ func TestTailnetChecksUnjoinedStillReadsTag(t *testing.T) {
 		return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader(`{"error":"no"}`)), Request: req}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = old })
-	proxied, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://hatch-egress-proxy:3130"})
+	proxied, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://proxy.example:3130"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +492,7 @@ func TestRunDoctorDeadRelaySkipsTagLookup(t *testing.T) {
 // proxy outage, not a Tailscale one: doctor must not blame local
 // Tailscale, and must not ask the dead relay for the tag either.
 func TestRunDoctorDeadProxySkipsTagAndStartTailscale(t *testing.T) {
-	useConfig(t, client.Config{Relay: "http://tincan-relay", Proxy: "http://hatch-egress-proxy:3130"})
+	useConfig(t, client.Config{Relay: "http://tincan-relay", Proxy: "http://proxy.example:3130"})
 	old := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path == "/v1/whoami" {
@@ -563,7 +563,7 @@ func TestTailnetChecksStopped(t *testing.T) {
 	}
 
 	stubTailnet(t, stopped)
-	r, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://hatch-egress-proxy:3130"})
+	r, err := client.NewRelayFor(client.Config{Relay: "http://tincan-relay", Proxy: "http://proxy.example:3130"})
 	if err != nil {
 		t.Fatal(err)
 	}
