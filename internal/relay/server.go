@@ -2171,7 +2171,8 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []client.AgentInfo
 	var err error
-	if g, guest := guestOf(r.Context()); guest {
+	g, isGuest := guestOf(r.Context())
+	if isGuest {
 		out, err = s.guestRoster(r.Context(), g)
 	} else {
 		out, err = s.roster(r.Context(), admin)
@@ -2197,9 +2198,9 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		res["relay_version"] = s.cfg.Version
 	}
 	// The configured --admin-tag rides alongside the roster for every
-	// caller, so doctor and the setup console can name the tag that
-	// grants admin without an admin-only read.
-	if tag := s.dir.AdminTag(); tag != "" {
+	// caller but guests, so doctor and the setup console can name the
+	// tag that grants admin without an admin-only read.
+	if tag := s.dir.AdminTag(); tag != "" && !isGuest {
 		res["admin_tag"] = tag
 	}
 	writeJSON(w, http.StatusOK, res)
