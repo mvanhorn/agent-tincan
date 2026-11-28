@@ -38,6 +38,7 @@ type DispatchedAsk struct {
 	Link             string    `json:"link,omitempty"`
 	IgnoreRunID      string    `json:"ignore_run_id,omitempty"`
 	Sending          bool      `json:"sending,omitempty"`
+	PendingSendBody  string    `json:"pending_send_body,omitempty"`
 	PendingRequestID string    `json:"pending_request_id,omitempty"`
 	AnsweredCount    int       `json:"answered_count,omitempty"`
 	PermissionNoted  bool      `json:"permission_noted,omitempty"`

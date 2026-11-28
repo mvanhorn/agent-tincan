@@ -140,6 +140,7 @@ func NewBridge(cfg Config) (*Bridge, error) {
 // workers, blocking until ctx is canceled.
 func (b *Bridge) Run(ctx context.Context) error {
 	b.cfg.Relay.SetSession(BridgeSession)
+	b.recoverInterruptedSends(ctx, 0)
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -164,10 +165,63 @@ func (b *Bridge) runRetryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			b.recoverInterruptedSends(ctx, b.cfg.RetryInterval)
 			b.flushPendingEvents(ctx)
 			b.flushPendingRechecks(ctx)
 		}
 	}
+}
+
+// recoverInterruptedSends resumes any handleSendDirective asks that were saved
+// with Sending=true right before a crash, replaying SendThreadMessage with the
+// same idempotent clientRequestId, clearing Sending, and rechecking the thread.
+// When minAge > 0, recently updated sends still in flight on the relay loop are skipped.
+func (b *Bridge) recoverInterruptedSends(ctx context.Context, minAge time.Duration) {
+	snap, err := b.cfg.State.Snapshot()
+	if err != nil {
+		return
+	}
+	now := b.cfg.Now()
+	for _, a := range snap.Asks {
+		if ctx.Err() != nil {
+			return
+		}
+		if a.Done || !a.Sending {
+			continue
+		}
+		if minAge > 0 && !a.UpdatedAt.IsZero() && now.Sub(a.UpdatedAt) < minAge {
+			continue
+		}
+		b.recoverOneSend(ctx, a)
+	}
+}
+
+func (b *Bridge) recoverOneSend(ctx context.Context, ask DispatchedAsk) {
+	if ask.PendingSendBody != "" {
+		clientReqID := "tincan-send-" + ask.RequestID
+		if err := b.cfg.T3.SendThreadMessage(ctx, ask.ThreadID, ask.PendingSendBody, clientReqID); err != nil {
+			if isThreadGoneError(err) {
+				_ = b.cfg.State.Update(func(d *StateData) error {
+					delete(d.Asks, ask.RequestID)
+					return nil
+				})
+				_, _ = b.cfg.Relay.Reply(ctx, ask.RequestID, fmt.Sprintf("Failed to send message to T3 thread %s: %v", ask.ThreadID, err), envelope.StatusFailed)
+				return
+			}
+			b.cfg.Logger.Printf("t3 bridge: recover send for ask %s to thread %s failed (will retry): %v", ask.RequestID, ask.ThreadID, err)
+			return
+		}
+	}
+	_ = b.cfg.State.Update(func(d *StateData) error {
+		if cur, ok := d.Asks[ask.RequestID]; ok {
+			cur.Sending = false
+			cur.PendingSendBody = ""
+			cur.UpdatedAt = b.cfg.Now().UTC()
+			d.Asks[ask.RequestID] = cur
+		}
+		return nil
+	})
+	b.recheckThread(ctx, ask.ThreadID, ask.IgnoreRunID)
 }
 
 func (b *Bridge) runRelayLoop(ctx context.Context) {
@@ -467,10 +521,14 @@ func (b *Bridge) handleInboundRequest(ctx context.Context, req envelope.Request)
 	}
 	req = claimed
 
-	// Check if this is a requeued clarification answer for an existing dispatched ask.
+	// Check if this is a reclaimed interrupted send or a clarification answer.
 	snap, err := b.cfg.State.Snapshot()
 	if err == nil {
 		if existing, ok := snap.Asks[req.ID]; ok && !existing.Done && existing.ThreadID != "" {
+			if existing.Sending {
+				b.recoverOneSend(ctx, existing)
+				return
+			}
 			b.handleClarificationAnswer(ctx, req, existing)
 			return
 		}
@@ -642,14 +700,15 @@ func (b *Bridge) handleSendDirective(ctx context.Context, req envelope.Request, 
 	now := b.cfg.Now().UTC()
 	if err := b.cfg.State.Update(func(d *StateData) error {
 		d.Asks[req.ID] = DispatchedAsk{
-			RequestID:   req.ID,
-			From:        req.From,
-			ThreadID:    dir.ThreadID,
-			Link:        prevTR.Thread.Link,
-			IgnoreRunID: prevRunID,
-			Sending:     true,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			RequestID:       req.ID,
+			From:            req.From,
+			ThreadID:        dir.ThreadID,
+			Link:            prevTR.Thread.Link,
+			IgnoreRunID:     prevRunID,
+			Sending:         true,
+			PendingSendBody: dir.Message,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		}
 		return nil
 	}); err != nil {
@@ -668,6 +727,7 @@ func (b *Bridge) handleSendDirective(ctx context.Context, req envelope.Request, 
 	_ = b.cfg.State.Update(func(d *StateData) error {
 		if a, ok := d.Asks[req.ID]; ok {
 			a.Sending = false
+			a.PendingSendBody = ""
 			a.UpdatedAt = b.cfg.Now().UTC()
 			d.Asks[req.ID] = a
 		}
@@ -943,6 +1003,17 @@ func (b *Bridge) onThreadSettledLocked(ctx context.Context, snap StateData, m Mi
 		b.markAskDone(ask.RequestID)
 	}
 
+	settledDedupToken := eventID
+	if settledDedupToken == "" {
+		if m.RunID != "" {
+			settledDedupToken = "run:" + m.RunID
+		} else if curRunID != "" {
+			settledDedupToken = "run:" + curRunID
+		} else {
+			settledDedupToken = "thread:" + m.ThreadID + ":items:" + strconv.Itoa(len(tr.Items))
+		}
+	}
+
 	consumed := map[string]struct{}{}
 	for _, w := range watches {
 		if !watchWantsEvent(w, "thread.run_settled") {
@@ -958,11 +1029,8 @@ func (b *Bridge) onThreadSettledLocked(ctx context.Context, snap StateData, m Mi
 			consumed[w.Key()] = struct{}{}
 			continue
 		}
-		notifyKey := ""
-		if eventID != "" {
-			notifyKey = "watch-settled:" + w.Key() + ":" + eventID
-		}
-		if notifyKey == "" || !b.isEventSeen(notifyKey) {
+		notifyKey := "watch-settled:" + w.Key() + ":" + settledDedupToken
+		if !b.isEventSeen(notifyKey) {
 			sent, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, body, envelope.KindAsk, "", false)
 			if err != nil {
 				b.cfg.Logger.Printf("t3 bridge: notify %s for settled thread %s failed (will retry): %v", w.NotifyAgent, m.ThreadID, err)
@@ -970,9 +1038,7 @@ func (b *Bridge) onThreadSettledLocked(ctx context.Context, snap StateData, m Mi
 				continue
 			}
 			_ = b.cfg.Routes.RecordNotice(sent.ID, w.NotifyAgent)
-			if notifyKey != "" {
-				b.recordEventSeen(notifyKey)
-			}
+			b.recordEventSeen(notifyKey)
 		}
 		if w.OneShot {
 			consumed[w.Key()] = struct{}{}
@@ -1081,17 +1147,20 @@ func (b *Bridge) onThreadNeedsInputLocked(ctx context.Context, snap StateData, m
 		}
 	}
 
+	inputDedupToken := eventID
+	if inputDedupToken == "" {
+		if m.RequestID != "" {
+			inputDedupToken = "req:" + m.RequestID
+		} else {
+			inputDedupToken = "thread:" + m.ThreadID + ":perm"
+		}
+	}
 	for _, w := range watches {
 		if !watchWantsEvent(w, "thread.needs_input") {
 			continue
 		}
-		notifyKey := ""
-		if eventID != "" {
-			notifyKey = "watch-input:" + w.Key() + ":" + eventID
-		} else if m.RequestID != "" {
-			notifyKey = "watch-input:" + w.Key() + ":" + m.RequestID
-		}
-		if notifyKey != "" && b.isEventSeen(notifyKey) {
+		notifyKey := "watch-input:" + w.Key() + ":" + inputDedupToken
+		if b.isEventSeen(notifyKey) {
 			continue
 		}
 		var notice string
@@ -1107,9 +1176,7 @@ func (b *Bridge) onThreadNeedsInputLocked(ctx context.Context, snap StateData, m
 			continue
 		}
 		_ = b.cfg.Routes.RecordNotice(sent.ID, w.NotifyAgent)
-		if notifyKey != "" {
-			b.recordEventSeen(notifyKey)
-		}
+		b.recordEventSeen(notifyKey)
 	}
 	return allOK
 }

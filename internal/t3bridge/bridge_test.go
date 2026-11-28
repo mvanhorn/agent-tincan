@@ -689,3 +689,95 @@ func TestBridgeSendDirectiveIgnoresPreviousRunSettle(t *testing.T) {
 		t.Fatalf("expected reply with run-new answer, got %+v, %v", grokIn.Replies, err)
 	}
 }
+
+func TestBridgeRecoversInterruptedSendAndDedupsRecheckWatchNotices(t *testing.T) {
+	mesh := testrelay.New(t, relay.Config{})
+	t3Relay := mesh.JoinOnMachineOf(t, "muse", "t3")
+	grok := mesh.Client(t, "grokbot")
+
+	fake := newFakeT3Server(t)
+	fake.mu.Lock()
+	fake.threads["thr-crash"] = ThreadReadResult{
+		Thread:     ThreadSummary{ThreadID: "thr-crash", Title: "Crash recovery", Status: "completed", LatestRunID: "run-2", Link: "https://app.t3.codes/threads/e/thr-crash"},
+		RecentRuns: []ThreadRun{{RunID: "run-2", Status: "completed"}},
+		Items:      []ThreadItem{{Type: "assistant_message", Text: "Recovered after crash."}},
+	}
+	fake.mu.Unlock()
+
+	mcpCli, _ := NewMCPClient(fake.srv.URL, "tok", "0.34.0")
+	dir := t.TempDir()
+	state := NewStateStore(filepath.Join(dir, "t3-state.json"))
+	routes := NewRouteStore(filepath.Join(dir, "t3-routes.json"))
+
+	// Simulate an ask saved with Sending=true right before a crash, plus two
+	// persistent watches where one recipient ("nonexistent-agent") rejects Send.
+	sentAsk, err := grok.Send(context.Background(), "t3", "send thr-crash: finish it", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := t3Relay.Claim(context.Background(), sentAsk.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Update(func(d *StateData) error {
+		d.Asks[sentAsk.ID] = DispatchedAsk{
+			RequestID:       sentAsk.ID,
+			From:            "grokbot",
+			ThreadID:        "thr-crash",
+			IgnoreRunID:     "run-1",
+			Sending:         true,
+			PendingSendBody: "finish it",
+			CreatedAt:       time.Now().UTC(),
+			UpdatedAt:       time.Now().UTC(),
+		}
+		d.Watches["thr-crash"] = []ThreadWatch{
+			{ID: "w-good", ThreadID: "thr-crash", NotifyAgent: "grokbot", OneShot: false, Events: []string{"thread.run_settled"}, CreatedAt: time.Now().UTC()},
+			{ID: "w-bad", ThreadID: "thr-crash", NotifyAgent: "nonexistent-agent", OneShot: false, Events: []string{"thread.run_settled"}, CreatedAt: time.Now().UTC()},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	br, err := NewBridge(Config{
+		Relay:    t3Relay,
+		T3:       mcpCli,
+		State:    state,
+		Routes:   routes,
+		PollHold: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Recovery replays SendThreadMessage with the same clientRequestId, clears
+	// Sending, and rechecks the thread (answering sentAsk and notifying grokbot once).
+	br.recoverInterruptedSends(context.Background(), 0)
+
+	fake.mu.Lock()
+	if len(fake.sendCalls) != 1 || fake.sendCalls[0]["clientRequestId"] != "tincan-send-"+sentAsk.ID {
+		fake.mu.Unlock()
+		t.Fatalf("expected 1 recovered SendThreadMessage with idempotent clientRequestId, got %+v", fake.sendCalls)
+	}
+	fake.mu.Unlock()
+
+	snap, _ := state.Snapshot()
+	if snap.Asks[sentAsk.ID].Sending || !snap.Asks[sentAsk.ID].Done {
+		t.Fatalf("expected recovered ask Sending=false and Done=true, got %+v", snap.Asks[sentAsk.ID])
+	}
+
+	// Trigger recheck retry twice (w-bad fails each time); w-good must STILL receive
+	// only 1 notification (never repeated).
+	br.flushPendingRechecks(context.Background())
+	br.flushPendingRechecks(context.Background())
+
+	grokIn, err := grok.Poll(context.Background(), 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grokIn.Requests) != 1 {
+		t.Fatalf("expected exactly 1 persistent watch notice to grokbot across retries, got %d: %+v", len(grokIn.Requests), grokIn.Requests)
+	}
+	if len(grokIn.Replies) != 1 || !strings.Contains(grokIn.Replies[0].Reply.Body, "Recovered after crash.") {
+		t.Fatalf("expected recovered ask reply, got %+v", grokIn.Replies)
+	}
+}
