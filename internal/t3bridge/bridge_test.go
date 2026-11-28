@@ -749,9 +749,22 @@ func TestBridgeRecoversInterruptedSendAndDedupsRecheckWatchNotices(t *testing.T)
 		t.Fatal(err)
 	}
 
-	// Recovery replays SendThreadMessage with the same clientRequestId, clears
-	// Sending, and rechecks the thread (answering sentAsk and notifying grokbot once).
-	br.recoverInterruptedSends(context.Background(), 0)
+	// Active send lock prevents recovery from racing an in-flight handleSendDirective.
+	if !br.tryAcquireSend(sentAsk.ID) {
+		t.Fatal("failed to acquire active send lock")
+	}
+	br.recoverInterruptedSends(context.Background())
+	fake.mu.Lock()
+	if len(fake.sendCalls) != 0 {
+		fake.mu.Unlock()
+		t.Fatalf("recovery must skip active sends, got %+v", fake.sendCalls)
+	}
+	fake.mu.Unlock()
+	br.releaseSend(sentAsk.ID)
+
+	// Once released (simulating restart), recovery replays SendThreadMessage with
+	// the same clientRequestId, clears Sending, and rechecks the thread.
+	br.recoverInterruptedSends(context.Background())
 
 	fake.mu.Lock()
 	if len(fake.sendCalls) != 1 || fake.sendCalls[0]["clientRequestId"] != "tincan-send-"+sentAsk.ID {

@@ -82,6 +82,8 @@ type pendingRecheck struct {
 type Bridge struct {
 	cfg             Config
 	handleMu        sync.Mutex
+	sendMu          sync.Mutex
+	activeSends     map[string]struct{}
 	seenMu          sync.Mutex
 	seenIDs         map[string]struct{}
 	seenList        []string
@@ -130,6 +132,7 @@ func NewBridge(cfg Config) (*Bridge, error) {
 	}
 	return &Bridge{
 		cfg:             cfg,
+		activeSends:     map[string]struct{}{},
 		seenIDs:         map[string]struct{}{},
 		inFlightPending: map[string]int{},
 		unmatchedSeen:   map[string]int{},
@@ -140,7 +143,7 @@ func NewBridge(cfg Config) (*Bridge, error) {
 // workers, blocking until ctx is canceled.
 func (b *Bridge) Run(ctx context.Context) error {
 	b.cfg.Relay.SetSession(BridgeSession)
-	b.recoverInterruptedSends(ctx, 0)
+	b.recoverInterruptedSends(ctx)
 
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -165,23 +168,39 @@ func (b *Bridge) runRetryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.recoverInterruptedSends(ctx, b.cfg.RetryInterval)
+			b.recoverInterruptedSends(ctx)
 			b.flushPendingEvents(ctx)
 			b.flushPendingRechecks(ctx)
 		}
 	}
 }
 
+func (b *Bridge) tryAcquireSend(reqID string) bool {
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
+	if _, busy := b.activeSends[reqID]; busy {
+		return false
+	}
+	b.activeSends[reqID] = struct{}{}
+	return true
+}
+
+func (b *Bridge) releaseSend(reqID string) {
+	b.sendMu.Lock()
+	defer b.sendMu.Unlock()
+	delete(b.activeSends, reqID)
+}
+
 // recoverInterruptedSends resumes any handleSendDirective asks that were saved
 // with Sending=true right before a crash, replaying SendThreadMessage with the
 // same idempotent clientRequestId, clearing Sending, and rechecking the thread.
-// When minAge > 0, recently updated sends still in flight on the relay loop are skipped.
-func (b *Bridge) recoverInterruptedSends(ctx context.Context, minAge time.Duration) {
+// Active sends owned by handleSendDirective or another recovery call are skipped
+// via activeSends so recovery can never race an in-flight send or its cleanup.
+func (b *Bridge) recoverInterruptedSends(ctx context.Context) {
 	snap, err := b.cfg.State.Snapshot()
 	if err != nil {
 		return
 	}
-	now := b.cfg.Now()
 	for _, a := range snap.Asks {
 		if ctx.Err() != nil {
 			return
@@ -189,14 +208,28 @@ func (b *Bridge) recoverInterruptedSends(ctx context.Context, minAge time.Durati
 		if a.Done || !a.Sending {
 			continue
 		}
-		if minAge > 0 && !a.UpdatedAt.IsZero() && now.Sub(a.UpdatedAt) < minAge {
-			continue
-		}
 		b.recoverOneSend(ctx, a)
 	}
 }
 
 func (b *Bridge) recoverOneSend(ctx context.Context, ask DispatchedAsk) {
+	if !b.tryAcquireSend(ask.RequestID) {
+		return
+	}
+	defer b.releaseSend(ask.RequestID)
+
+	// Re-read state after acquiring the per-request send lock in case the
+	// original handleSendDirective just finished or cleaned up on failure.
+	snap, err := b.cfg.State.Snapshot()
+	if err != nil {
+		return
+	}
+	cur, ok := snap.Asks[ask.RequestID]
+	if !ok || cur.Done || !cur.Sending {
+		return
+	}
+	ask = cur
+
 	if ask.PendingSendBody != "" {
 		clientReqID := "tincan-send-" + ask.RequestID
 		if err := b.cfg.T3.SendThreadMessage(ctx, ask.ThreadID, ask.PendingSendBody, clientReqID); err != nil {
@@ -213,11 +246,11 @@ func (b *Bridge) recoverOneSend(ctx context.Context, ask DispatchedAsk) {
 		}
 	}
 	_ = b.cfg.State.Update(func(d *StateData) error {
-		if cur, ok := d.Asks[ask.RequestID]; ok {
-			cur.Sending = false
-			cur.PendingSendBody = ""
-			cur.UpdatedAt = b.cfg.Now().UTC()
-			d.Asks[ask.RequestID] = cur
+		if c, ok := d.Asks[ask.RequestID]; ok {
+			c.Sending = false
+			c.PendingSendBody = ""
+			c.UpdatedAt = b.cfg.Now().UTC()
+			d.Asks[ask.RequestID] = c
 		}
 		return nil
 	})
@@ -690,6 +723,10 @@ func (b *Bridge) handleSendDirective(ctx context.Context, req envelope.Request, 
 		_, _ = b.cfg.Relay.Reply(ctx, req.ID, "No message body provided after thread directive.", envelope.StatusFailed)
 		return
 	}
+	if !b.tryAcquireSend(req.ID) {
+		return
+	}
+	defer b.releaseSend(req.ID)
 	// Capture the prior run id (best-effort) and register the ask with
 	// Sending=true + IgnoreRunID BEFORE calling SendThreadMessage so:
 	// (a) an in-flight previous run settling cannot answer this new ask, and
