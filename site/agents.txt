@@ -151,12 +151,12 @@ A5. Join this machine's own agent (you), if you are one of the team:
 
     Then do B3 to B6 for yourself. Kinds: vm-webhook, e2b-email, proxy-sandbox, manus-cue,
     claude-code, chatgpt, hermes, openclaw, codex, gemini-cli, grok-cli,
-    copilot-cli, cursor-cli, history, council, pass, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
+    copilot-cli, cursor-cli, history, notes, t3-code, council, pass, chatgpt-web, claude-web, grok-web, gemini-web, perplexity-web,
     copilot-web, dot-web, duet-web, phone, scheduled, generic.
     (phone is your owner's phone: it joins itself from the relay's phone
     page at /phone/ and never answers, so never ask or notify it, and never
     invite it yourself.)
-    (manus-cue, gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web, duet-web and scheduled need a relay from this
+    (t3-code, manus-cue, gemini-cli, grok-cli, copilot-cli, cursor-cli, grok-web, gemini-web, perplexity-web, copilot-web, dot-web, duet-web and scheduled need a relay from this
     release or later; on an older relay invite without --kind and run
     tincan onboard --kind <name>=<kind>. dot-web and duet-web are the
     exceptions: web serve --site dots or --site duet refuses to start unless

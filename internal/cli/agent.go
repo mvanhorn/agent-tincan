@@ -21,6 +21,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/history"
 	"github.com/mvanhorn/agent-tincan/internal/onboard"
 	"github.com/mvanhorn/agent-tincan/internal/relay"
+	"github.com/mvanhorn/agent-tincan/internal/t3bridge"
 	"github.com/mvanhorn/agent-tincan/internal/wake"
 )
 
@@ -536,9 +537,14 @@ instead, as a new request with every send check applied at that time.
 			if err := checkThenArgs(thenTo, args, notify, attach); err != nil {
 				return err
 			}
-			r, _, err := connect()
+			r, cfg, err := connect()
 			if err != nil {
 				return err
+			}
+			t3ThreadID := strings.TrimSpace(os.Getenv("T3CODE_THREAD_ID"))
+			var t3Routes *t3bridge.RouteStore
+			if t3ThreadID != "" && t3LateReplyRoutingActive(client.ConfigPath(), cfg) {
+				t3Routes = t3bridge.NewRouteStore(t3bridge.RoutesPathForConfig(client.ConfigPath()))
 			}
 			defer printHeld(cmd, r)
 			ctx := client.WithAskSource(client.WithProject(cmd.Context(), project), source)
@@ -573,6 +579,11 @@ instead, as a new request with every send check applied at that time.
 					g, err = r.WaitGroup(cmd.Context(), g, client.ClampWait(wait))
 					if err != nil {
 						return err
+					}
+					if t3Routes != nil {
+						for _, gr := range g.Results {
+							recordT3OutboundResult(t3Routes, t3ThreadID, gr.Result)
+						}
 					}
 				}
 				return printGroup(cmd, g, asJSON, notify)
@@ -610,6 +621,9 @@ instead, as a new request with every send check applied at that time.
 			}
 			if err != nil {
 				return err
+			}
+			if t3Routes != nil {
+				recordT3OutboundResult(t3Routes, t3ThreadID, res)
 			}
 			if asJSON {
 				return printResultJSON(cmd.OutOrStdout(), res)

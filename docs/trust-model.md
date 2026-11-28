@@ -435,3 +435,12 @@ remain excluded from delivery; pending entries carry only ids and senders.
 An approved request follows the ordinary body and attachment access rules,
 even after it reaches a terminal state. Approval history survives relay restarts;
 upgrades backfill existing holds and decisions from request state and audit events.
+
+## T3 Code bridge (`t3-code`)
+
+- `tincan t3 auth` stores the T3 Code OAuth 2.1 PKCE bearer token in `t3-auth.json` at mode `0600` inside a `0700` directory. The token is never logged, returned by `tincan t3 doctor`, included in error messages, or placed in URLs.
+- Outbound HTTP from `tincan t3` to T3 Code allows plain `http://` only on loopback (`127.0.0.1`, `localhost`, `::1`), requires `https://` for any non-loopback `--t3-url`, and refuses all HTTP redirects.
+- T3 permission and approval prompts are never approved over Agent Tincan. Only answerable user questions listed by `t3_pending_request(action: "list")` are relayed via `needs_input` and answered via `t3_pending_request(action: "respond")`.
+- Requests marked `FromGuest` are declined before touching T3 Code on any directive targeting an existing thread (`watch`, `unwatch`, `status`, `thread:`, `send`); ordinary guest asks launch isolated Scratch threads carrying Tincan's guest framing.
+- `tincan t3 install` wires `agent-tincan` into T3 Code's provider configs (`~/.t3/userdata/settings.json` Claude `homePath`s, `~/.t3/userdata/providers/antigravity/*/config/mcp_config.json`, `~/.config/opencode/opencode.json`, `~/.codex/config.toml`), backing up each file first, preserving unrelated keys, and leaving existing standalone `agent-tincan` entries untouched unless `--override-shared` is passed.
+

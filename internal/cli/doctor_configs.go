@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mvanhorn/agent-tincan/internal/client"
+	"github.com/mvanhorn/agent-tincan/internal/t3bridge"
 )
 
 // mcpConfigEntry is one MCP server entry, in a config file an app reads,
@@ -70,11 +71,17 @@ func mcpConfigFiles(extra []string) []string {
 		filepath.Join(home, ".openclaw", "openclaw.json"),
 		filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
 		filepath.Join(home, ".config", "Claude", "claude_desktop_config.json"),
+		filepath.Join(home, ".config", "opencode", "opencode.json"),
 		filepath.Join(cwd, ".mcp.json"),
 		filepath.Join(cwd, ".cursor", "mcp.json"),
 		"/workspace/.mcp.json",
 		"/workspace/.cursor/mcp.json",
 		grokWakeConfig(),
+	}
+	if targets, err := t3bridge.DiscoverProviders(home, t3bridge.DefaultT3Home(home)); err == nil {
+		for _, tgt := range targets {
+			files = append(files, tgt.ConfigPath)
+		}
 	}
 	files = append(files, extra...)
 	seen := map[string]bool{}
@@ -187,7 +194,7 @@ func jsonServers(v any, path string, out *[]mcpConfigEntry) {
 		}
 	case map[string]any:
 		for k, x := range t {
-			if servers, ok := x.(map[string]any); ok && (k == "mcpServers" || k == "servers" || k == "mcp_servers") {
+			if servers, ok := x.(map[string]any); ok && (k == "mcpServers" || k == "servers" || k == "mcp_servers" || k == "mcp") {
 				for name, s := range servers {
 					if e, ok := jsonEntry(name, s); ok {
 						if strings.HasPrefix(path, "projects.") {
@@ -213,7 +220,19 @@ func jsonEntry(name string, v any) (mcpConfigEntry, bool) {
 		return mcpConfigEntry{}, false
 	}
 	e := mcpConfigEntry{Name: name}
-	e.Command, _ = m["command"].(string)
+	switch cmd := m["command"].(type) {
+	case string:
+		e.Command = cmd
+	case []any:
+		// OpenCode stores command as ["<binary>", "mcp", ...].
+		if len(cmd) > 0 {
+			e.Command, _ = cmd[0].(string)
+			for _, a := range cmd[1:] {
+				s, _ := a.(string)
+				e.Args = append(e.Args, s)
+			}
+		}
+	}
 	if args, ok := m["args"].([]any); ok {
 		for _, a := range args {
 			s, _ := a.(string)
@@ -224,6 +243,10 @@ func jsonEntry(name string, v any) (mcpConfigEntry, bool) {
 		return e, false
 	}
 	if d, _ := m["disabled"].(bool); d {
+		e.Problems = append(e.Problems, "disabled")
+		e.broken = true
+	}
+	if en, ok := m["enabled"].(bool); ok && !en {
 		e.Problems = append(e.Problems, "disabled")
 		e.broken = true
 	}

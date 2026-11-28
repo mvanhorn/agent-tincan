@@ -103,6 +103,15 @@ type options struct {
 	// workerRequest is the one request a per-request window works on, ""
 	// for an ordinary server. Such a server takes no other requests.
 	workerRequest string
+	// onAskResult is called after ask/askThen/askAttached/group ask returns,
+	// so hosts like T3 Code can route late replies back to the originating thread.
+	onAskResult func(client.Result)
+}
+
+// OnAskResult registers a callback invoked with each ask Result returned by
+// the ask tool (single or group).
+func OnAskResult(fn func(client.Result)) Option {
+	return func(o *options) { o.onAskResult = fn }
 }
 
 // WorkerRequest makes the server one window's, working on request id alone
@@ -1076,6 +1085,9 @@ func (f files) askAttached(ctx context.Context, in askIn) (*mcp.CallToolResult, 
 }
 
 func (f files) askResult(ctx context.Context, res client.Result, suffix string) (*mcp.CallToolResult, any, error) {
+	if f.onAskResult != nil {
+		f.onAskResult(res)
+	}
 	id := res.Request.TaskID
 	result, data, err := f.result(ctx, client.FormatAskResult(res)+suffix, replyAttachments(res))
 	if id != 0 {
@@ -1191,6 +1203,11 @@ type groupBackend interface {
 }
 
 func (f files) groupResult(ctx context.Context, g client.GroupResult) (*mcp.CallToolResult, any, error) {
+	if f.onAskResult != nil {
+		for _, r := range g.Results {
+			f.onAskResult(r.Result)
+		}
+	}
 	var atts []envelope.Attachment
 	for _, r := range g.Results {
 		atts = append(atts, replyAttachments(r.Result)...)
