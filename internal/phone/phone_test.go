@@ -863,3 +863,143 @@ func TestTaskRowsStayInPlace(t *testing.T) {
 		t.Error("the assign picker must leave out phone, history, notes, pass and council agents")
 	}
 }
+
+// joinsScript is the part of app.js that draws and decides join requests.
+func joinsScript(t *testing.T) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(read(t, "app.js"), "// ---- Join requests:")
+	if !ok {
+		t.Fatal("app.js has no Join requests section")
+	}
+	body, _, ok := strings.Cut(rest, "\n// ---- ")
+	if !ok {
+		t.Fatal("the Join requests section does not end at another section")
+	}
+	return body
+}
+
+// Every push still shows one of the two fixed texts, chosen by the join
+// flag alone: the service worker reads nothing else from the payload, so no
+// requester text can reach a notification.
+func TestPushAlertTextIsFixed(t *testing.T) {
+	sw := read(t, "sw.js")
+	for _, want := range []string{"A request is waiting for your approval", "A machine is asking to join", "msg.join === 1"} {
+		if !strings.Contains(sw, want) {
+			t.Errorf("sw.js lacks %q", want)
+		}
+	}
+	for _, m := range regexp.MustCompile(`msg\s*(\.\s*\w+|\[)`).FindAllString(sw, -1) {
+		if f := strings.Join(strings.Fields(m), ""); f != "msg.count" && f != "msg.join" {
+			t.Errorf("sw.js reads %s from the push payload; only count and join are allowed", m)
+		}
+	}
+	if strings.Contains(sw, "event.data.text") {
+		t.Error("sw.js must not read the push payload as text")
+	}
+}
+
+// The page lists pending join requests above the tabs, and draws every
+// value the requesting machine chose (its name, login, tags, addresses and
+// the names it asks for) as text.
+func TestJoinRequestsInThePage(t *testing.T) {
+	html := read(t, "index.html")
+	for _, want := range []string{`<section id="joins" aria-labelledby="joins-title" hidden>`, `id="joins-count" class="count"`, `<ol id="joins-list" class="cards"></ol>`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html lacks %s", want)
+		}
+	}
+	held, joins, tabs := strings.Index(html, `id="held"`), strings.Index(html, `id="joins"`), strings.Index(html, `role="tablist"`)
+	if held < 0 || joins < held || tabs < joins {
+		t.Errorf("held at %d, joins at %d, tabs at %d: join requests go between the held asks and the tabs", held, joins, tabs)
+	}
+	app := read(t, "app.js")
+	if !strings.Contains(funcBody(t, app, "refresh"), `api("GET", "/v1/admin/join-requests")`) {
+		t.Error("the page's poll must read the join-request listing")
+	}
+	joinsJS := joinsScript(t)
+	if m := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|DOMParser|createContextualFragment|srcdoc|\.src\s*=|\.href\s*=|createElement`).FindString(joinsJS); m != "" {
+		t.Errorf("the Join requests code uses %q; it must build nodes with el", m)
+	}
+	card := funcBody(t, app, "joinCard")
+	for _, want := range []string{
+		`el("p", "join-code", item.code)`,
+		`el("p", "route", machine + " asks to join")`,
+		"item.node_user",
+		"item.tags",
+		"item.addrs",
+		`el("li", "", a.name + (a.kind ? " (" + a.kind + ")" : " (no kind)"))`,
+		"item.node_agents",
+		`actions.append(deny, approve)`,
+		`deny.setAttribute("aria-label"`,
+		`approve.setAttribute("aria-label"`,
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("joinCard lacks %s", want)
+		}
+	}
+	if d, a := strings.Index(card, `el("button", "deny"`), strings.Index(card, `el("button", "approve"`); d < 0 || a < 0 || d > a {
+		t.Error("Deny must be built before Approve on a join card")
+	}
+	if !strings.Contains(funcBody(t, app, "updateJoinCard"), "item.expires_at") {
+		t.Error("a join card must say when the request expires")
+	}
+	_, branch, ok := strings.Cut(funcBody(t, app, "refresh"), "if (held.status === 403) {")
+	if !ok {
+		t.Fatal("refresh has no branch for a device that is not an admin's")
+	}
+	branch, _, _ = strings.Cut(branch, "\n    }\n")
+	if !strings.Contains(branch, "clearJoins();") {
+		t.Error("a device that is not an admin's must lose its join requests")
+	}
+	if !strings.Contains(read(t, "style.css"), ".join-code") {
+		t.Error("the matching code needs its own, large style")
+	}
+}
+
+// Approve and deny go through decideJoin, which asks the owner to compare
+// the matching code before approving, sends the nonce the listing issued for
+// that decision only while it is live, and explains every answer.
+func TestJoinDecisionsSendNonce(t *testing.T) {
+	app := read(t, "app.js")
+	decide := funcBody(t, app, "decideJoin")
+	for _, want := range []string{
+		"if (!joinReady(entry)) return;",
+		`"Does the other machine (" + machine + ") show " + item.code + "?`,
+		`const nonce = verb === "approve" ? item.approve_nonce : item.deny_nonce;`,
+		`api("POST", joinPath(id) + "/" + verb, { nonce })`,
+		"res.data.already_decided",
+		"res.status === 409",
+		"res.status === 403",
+		"res.status === 404",
+		"refresh();",
+	} {
+		if !strings.Contains(decide, want) {
+			t.Errorf("decideJoin lacks %s", want)
+		}
+	}
+	// The owner's confirmation comes before the decision is sent.
+	if c, p := strings.Index(decide, "window.confirm("), strings.Index(decide, `api("POST"`); c < 0 || p < 0 || c > p {
+		t.Error("decideJoin must ask for confirmation before it sends the decision")
+	}
+	if !strings.Contains(app, `const joinPath = (id) => "/v1/admin/join-requests/" + encodeURIComponent(id);`) {
+		t.Error("the decision routes must be built from the request id, encoded")
+	}
+	joinsJS := joinsScript(t)
+	for _, verb := range []string{"approve", "deny"} {
+		if n := strings.Count(joinsJS, `decideJoin(item.id, "`+verb+`")`); n != 1 {
+			t.Errorf("%d buttons call decideJoin for %s, want 1", n, verb)
+		}
+	}
+	ready := funcBody(t, app, "joinReady")
+	for _, want := range []string{"state.joinsFresh", "!state.offline", "!state.notAdmin", "nonceLive(entry.item)"} {
+		if !strings.Contains(ready, want) {
+			t.Errorf("joinReady lacks %s", want)
+		}
+	}
+	if !strings.Contains(funcBody(t, app, "schedule"), "state.joinsFresh = false") {
+		t.Error("schedule must mark the join requests stale when the page hides or returns")
+	}
+	if !strings.Contains(funcBody(t, app, "refresh"), "state.joinsFresh = ") {
+		t.Error("refresh must mark the join requests fresh after a good listing")
+	}
+}

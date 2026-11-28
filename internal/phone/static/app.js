@@ -40,6 +40,9 @@ const state = {
   taskClosed: { done: 0, dropped: 0 }, // how many done and dropped tasks the relay holds
   taskClosedCut: 0, // how many closed tasks are listed when the page cap cut their list short, else 0
   taskAsks: new Map(), // request id -> who sent the ask under a question task, and the question
+  joins: new Map(), // join request id -> {item, li, deciding, note, error}
+  joinsFresh: false, // the join requests were read since the page last came to the foreground
+  lastJoinCount: -1,
 };
 
 // sending is true while an ask is on its way, so a render from a poll in
@@ -1858,11 +1861,210 @@ async function addTask() {
 function render() {
   renderConn();
   renderHeld();
+  renderJoins();
   renderTabs();
   renderTeam();
   renderAsk();
   renderRooms();
   renderTasks();
+}
+
+// ---- Join requests: a machine asks to join, the owner compares codes ----
+// A machine that has not joined files a request naming the agents it wants.
+// The relay shows the same matching code on that machine and here, and the
+// owner approves only after seeing that the two match; nothing is typed.
+// The machine's name, login, tags and the names it asks for are chosen by
+// whoever controls it, so they reach the page only as text.
+
+const joinPath = (id) => "/v1/admin/join-requests/" + encodeURIComponent(id);
+const joinMachine = (item) => item.node_name || "an unnamed machine";
+
+function joinReady(entry) {
+  return state.joinsFresh && !state.offline && !state.notAdmin && !entry.deciding && !entry.note && nonceLive(entry.item);
+}
+
+// joinText is what a join card shows the owner before they decide.
+function joinText(item) {
+  return JSON.stringify([item.code, item.node_name, item.node_user, item.tags || [], item.addrs || [], item.agents || [], item.node_agents || []]);
+}
+
+function joinCard(entry) {
+  const item = entry.item;
+  const machine = joinMachine(item);
+  const li = el("li", "card");
+  li.dataset.id = item.id;
+  li.append(el("p", "route", machine + " asks to join"));
+  li.append(el("p", "meta", "Matching code:"));
+  li.append(el("p", "join-code", item.code));
+  li.append(el("p", "meta", "Approve only if " + machine + " shows this same code. The machine chose its own name."));
+  const facts = [];
+  if (item.node_user) facts.push("owned by " + item.node_user);
+  if (item.tags && item.tags.length) facts.push("tags " + item.tags.join(", "));
+  if (item.addrs && item.addrs.length) facts.push("address " + item.addrs.join(", "));
+  if (facts.length) li.append(el("p", "meta", facts.join("; ")));
+  const agents = item.agents || [];
+  li.append(el("p", "meta", "Asks to join as " + plural(agents.length, "new agent") + ":"));
+  const ul = el("ul", "files");
+  for (const a of agents) ul.append(el("li", "", a.name + (a.kind ? " (" + a.kind + ")" : " (no kind)")));
+  li.append(ul);
+  const onNode = item.node_agents || [];
+  li.append(el("p", "meta", onNode.length ? "Already on this machine: " + onNode.join(", ") : "No agents on this machine yet."));
+  const when = el("p", "meta");
+  li.append(when);
+  const note = el("p", "meta");
+  note.hidden = true;
+  li.append(note);
+  const error = el("p", "error");
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  li.append(error);
+  const actions = el("div", "actions");
+  const deny = el("button", "deny", "Deny");
+  deny.type = "button";
+  deny.setAttribute("aria-label", "Deny the join request from " + machine);
+  deny.addEventListener("click", () => decideJoin(item.id, "deny"));
+  const approve = el("button", "approve", "Approve");
+  approve.type = "button";
+  approve.setAttribute("aria-label", "Approve the join request from " + machine + ", code " + item.code);
+  approve.addEventListener("click", () => decideJoin(item.id, "approve"));
+  actions.append(deny, approve);
+  li.append(actions);
+  entry.li = li;
+  entry.whenEl = when;
+  entry.noteEl = note;
+  entry.errorEl = error;
+  entry.buttons = [deny, approve];
+  return li;
+}
+
+function updateJoinCard(entry) {
+  const item = entry.item;
+  const on = joinReady(entry);
+  for (const b of entry.buttons) b.disabled = !on;
+  const left = Math.ceil((new Date(item.expires_at).getTime() - Date.now()) / 60000);
+  const filed = item.filed_at ? "filed " + age(item.filed_at) + " ago, " : "";
+  entry.whenEl.textContent = filed + (left > 0 ? "expires in " + plural(left, "minute") : "expiring now") + ", request " + item.id;
+  if (entry.note) {
+    entry.noteEl.textContent = entry.note;
+    entry.noteEl.hidden = false;
+  } else if ((!state.joinsFresh || !nonceLive(item)) && !state.offline) {
+    entry.noteEl.textContent = "Refreshing this request before it can be decided.";
+    entry.noteEl.hidden = false;
+  } else {
+    entry.noteEl.hidden = true;
+  }
+  entry.errorEl.textContent = entry.error || "";
+  entry.errorEl.hidden = !entry.error;
+}
+
+function renderJoins() {
+  const list = $("joins-list");
+  const live = [...state.joins.values()];
+  for (const entry of live) {
+    if (!entry.li) list.append(joinCard(entry));
+    updateJoinCard(entry);
+  }
+  $("joins-count").textContent = String(live.filter((e) => !e.note).length);
+  $("joins").hidden = live.length === 0 || state.notAdmin;
+}
+
+function mergeJoins(items) {
+  const seen = new Set();
+  for (const item of items) {
+    seen.add(item.id);
+    const entry = state.joins.get(item.id);
+    if (entry) {
+      // Fresh nonces; a card whose facts changed is drawn again, so a nonce
+      // is never offered beside facts it was not issued with.
+      const old = entry.item;
+      entry.item = item;
+      if (entry.li && joinText(old) !== joinText(item)) entry.li.replaceWith(joinCard(entry));
+    } else {
+      state.joins.set(item.id, { item, li: null, deciding: false, note: "", noteAt: 0, error: "" });
+    }
+  }
+  for (const [id, entry] of state.joins) {
+    // A card this page decided stays a few seconds so its result can be read.
+    const showing = entry.note && Date.now() - entry.noteAt < 8000;
+    if (!seen.has(id) && !entry.deciding && !showing) {
+      if (entry.li) entry.li.remove();
+      state.joins.delete(id);
+    }
+  }
+  const n = items.length;
+  if (n !== state.lastJoinCount) {
+    if (state.lastJoinCount >= 0 || n > 0) announce(n === 0 ? "No machines asking to join." : n === 1 ? "A machine is asking to join." : n + " machines are asking to join.");
+    state.lastJoinCount = n;
+  }
+}
+
+function clearJoins() {
+  for (const entry of state.joins.values()) {
+    if (entry.li) entry.li.remove();
+  }
+  state.joins.clear();
+  state.joinsFresh = false;
+  state.lastJoinCount = -1;
+}
+
+async function decideJoin(id, verb) {
+  const entry = state.joins.get(id);
+  if (!entry) return;
+  if (!joinReady(entry)) return;
+  const item = entry.item;
+  const machine = joinMachine(item);
+  const names = (item.agents || []).map((a) => a.name).join(", ");
+  const question = verb === "approve"
+    ? "Does the other machine (" + machine + ") show " + item.code + "?\n\nApprove only if the code on that machine matches exactly. It will join as " + names + "."
+    : "Deny the join request from " + machine + "? It cannot be undone; the machine would have to ask again.";
+  if (!window.confirm(question)) return;
+  // The listing may have moved on while the question was open.
+  if (!joinReady(entry) || entry.item.code !== item.code) {
+    refresh();
+    return;
+  }
+  entry.deciding = true;
+  entry.error = "";
+  updateJoinCard(entry);
+  const nonce = verb === "approve" ? item.approve_nonce : item.deny_nonce;
+  let res;
+  try {
+    res = await api("POST", joinPath(id) + "/" + verb, { nonce });
+  } catch (_) {
+    entry.deciding = false;
+    state.offline = true;
+    render();
+    announce("Offline. This join request may not have been decided; the list shows it once the relay answers.");
+    return;
+  }
+  entry.deciding = false;
+  if (res.status === 200 && res.data) {
+    if (res.data.already_decided) {
+      entry.note = "Already decided: " + res.data.status + ".";
+    } else if (verb === "approve") {
+      entry.note = "Approved. " + machine + " gets its agents the next time it checks.";
+    } else {
+      entry.note = "Denied.";
+    }
+    entry.noteAt = Date.now();
+    announce(entry.note);
+  } else if (res.status === 409) {
+    announce("That button expired. Refreshing.");
+  } else if (res.status === 404) {
+    entry.note = "This join request is gone; it may have expired.";
+    entry.noteAt = Date.now();
+    announce(entry.note);
+  } else if (res.status === 403) {
+    // The relay says why: this device is not an admin's, or it is the
+    // machine that filed the request.
+    entry.error = "Not " + (verb === "approve" ? "approved" : "denied") + ": " + relayError(res);
+    announce(entry.error);
+  } else {
+    entry.error = "Could not " + verb + ": " + relayError(res);
+    announce(entry.error);
+  }
+  render();
+  refresh();
 }
 
 // ---- Polling ----
@@ -1873,13 +2075,15 @@ async function refresh() {
   polling = true;
   const gen = heldGen;
   try {
-    const [held, agents] = await Promise.all([api("GET", "/v1/admin/held"), api("GET", "/v1/agents")]);
+    const [held, agents, joins] = await Promise.all([api("GET", "/v1/admin/held"), api("GET", "/v1/agents"), api("GET", "/v1/admin/join-requests")]);
     if (held.status === 403) {
       state.notAdmin = true;
       state.held.clear();
       $("held-list").replaceChildren();
-      // The tasks were read as an admin too: none may stay on the page.
+      // The tasks and join requests were read as an admin too: none may
+      // stay on the page.
       clearTasks();
+      clearJoins();
       state.loaded = true;
       return;
     }
@@ -1891,6 +2095,15 @@ async function refresh() {
     mergeHeld(held.data || []);
     // A listing that started before the page last hid does not count.
     state.heldFresh = gen === heldGen;
+    if (joins.status === 200) {
+      mergeJoins((joins.data && joins.data.requests) || []);
+      state.joinsFresh = gen === heldGen;
+    } else {
+      // A relay older than join requests answers 404 and has none; any
+      // other failure keeps the cards, off until a listing lands.
+      if (joins.status === 404 || joins.status === 403) mergeJoins([]);
+      state.joinsFresh = false;
+    }
     state.roster = (agents.data && agents.data.agents) || [];
     state.relayVersion = (agents.data && agents.data.relay_version) || "";
     if (!state.meChecked) await whoami();
@@ -2147,7 +2360,9 @@ function schedule() {
   heldGen++;
   state.heldFresh = false;
   state.tasksFresh = false;
+  state.joinsFresh = false;
   renderHeld();
+  renderJoins();
   renderTasks();
   if (document.visibilityState === "visible") {
     refresh();

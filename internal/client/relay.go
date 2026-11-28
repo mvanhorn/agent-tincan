@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -320,6 +322,7 @@ func (m DistManifest) SHA256Of(name string) string {
 type APIError struct {
 	Code    int
 	Message string
+	body    []byte // the response body, for a caller that reads a JSON error answer
 }
 
 func (e *APIError) Error() string { return fmt.Sprintf("relay: %s (HTTP %d)", e.Message, e.Code) }
@@ -1281,7 +1284,7 @@ func (r *Relay) callOnce(ctx context.Context, c *http.Client, method, path strin
 		if json.Unmarshal(raw, &e) != nil || e.Error == "" {
 			e.Error = strings.TrimSpace(string(raw))
 		}
-		return &APIError{Code: resp.StatusCode, Message: e.Error}
+		return &APIError{Code: resp.StatusCode, Message: e.Error, body: raw}
 	}
 	if out == nil {
 		return nil
@@ -1748,4 +1751,183 @@ func (r *Relay) WaitGroup(ctx context.Context, g GroupResult, wait time.Duration
 	r.cacheGroupLocked(cached)
 	r.groupsMu.Unlock()
 	return g, nil
+}
+
+// Join request statuses, as the relay answers them (see docs/protocol.md).
+const (
+	JoinPending   = "pending"
+	JoinApproved  = "approved"
+	JoinDelivered = "delivered"
+	JoinDenied    = "denied"
+	JoinExpired   = "expired"
+	JoinVoided    = "voided"
+	JoinFailed    = "failed"
+)
+
+// JoinRequestAgent is one name a join request asks for, with its kind (""
+// for none).
+type JoinRequestAgent struct {
+	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"`
+}
+
+// JoinRequestState is the relay's answer about a join request: its status,
+// and while it is open its code and names. Agents on a claim's answer are
+// the names it delivered, present only on the claim that delivered them.
+// Name and Error say which name a failed claim refused, and why.
+type JoinRequestState struct {
+	ID        string             `json:"id"`
+	Status    string             `json:"status"`
+	Code      string             `json:"code,omitempty"`
+	Agents    []JoinRequestAgent `json:"agents,omitempty"`
+	FiledAt   time.Time          `json:"filed_at,omitzero"`
+	ExpiresAt time.Time          `json:"expires_at,omitzero"`
+	Name      string             `json:"name,omitempty"`
+	Error     string             `json:"error,omitempty"`
+}
+
+// JoinRequestListing is one pending join request as the owner sees it. The
+// requester controls NodeName and its agent names: render them as text.
+type JoinRequestListing struct {
+	ID         string             `json:"id"`
+	Code       string             `json:"code"`
+	NodeName   string             `json:"node_name"`
+	NodeUser   string             `json:"node_user,omitempty"`
+	Tags       []string           `json:"tags,omitempty"`
+	Addrs      []string           `json:"addrs,omitempty"`
+	Agents     []JoinRequestAgent `json:"agents"`
+	NodeAgents []string           `json:"node_agents,omitempty"`
+	FiledAt    time.Time          `json:"filed_at"`
+	ExpiresAt  time.Time          `json:"expires_at"`
+	AgeSeconds int                `json:"age_seconds"`
+}
+
+// FileJoinRequest asks the relay to join this machine under agents' names.
+// Nothing is joined until the owner approves and ClaimJoinRequest collects.
+// An older relay answers its plain 404 (IsOlderRelay).
+func (r *Relay) FileJoinRequest(ctx context.Context, agents []JoinRequestAgent) (JoinRequestState, error) {
+	var out JoinRequestState
+	err := r.call(ctx, r.api, "POST", "/v1/join-requests", map[string]any{"agents": agents}, &out)
+	return out, err
+}
+
+// JoinRequestStatus reads request id's status without changing it. With
+// wait above zero the relay holds a pending request until it is decided or
+// the wait (whole seconds, capped by the relay) ends.
+func (r *Relay) JoinRequestStatus(ctx context.Context, id string, wait time.Duration) (JoinRequestState, error) {
+	var out JoinRequestState
+	path, c := "/v1/join-requests/"+url.PathEscape(id), r.api
+	if secs := int(wait / time.Second); secs > 0 {
+		path, c = path+"?wait="+strconv.Itoa(secs), r.polls
+	}
+	err := r.call(ctx, c, "GET", path, nil, &out)
+	return out, err
+}
+
+// ClaimJoinRequest collects an approved request's agents, once. A request
+// that is not approved comes back with its current status and no agents; a
+// claim the relay refused because a name can no longer be joined comes back
+// failed, naming it, rather than as an error.
+func (r *Relay) ClaimJoinRequest(ctx context.Context, id string) (JoinRequestState, error) {
+	var out JoinRequestState
+	err := r.call(ctx, r.api, "POST", "/v1/join-requests/"+url.PathEscape(id)+"/claim", nil, &out)
+	if e, ok := errors.AsType[*APIError](err); ok && e.Code == http.StatusConflict {
+		var failed JoinRequestState
+		if json.Unmarshal(e.body, &failed) == nil && failed.Status == JoinFailed {
+			if failed.ID == "" {
+				failed.ID = id
+			}
+			return failed, nil
+		}
+	}
+	return out, err
+}
+
+// JoinRequests lists the pending join requests (the owner's view: admin
+// socket or admin device).
+func (r *Relay) JoinRequests(ctx context.Context) ([]JoinRequestListing, error) {
+	var out struct {
+		Requests []JoinRequestListing `json:"requests"`
+	}
+	err := r.call(ctx, r.api, "GET", "/v1/admin/join-requests", nil, &out)
+	return out.Requests, err
+}
+
+// DecideJoinRequest approves or denies pending request id. The relay takes
+// it over the local admin socket only; an admin device decides on the phone
+// page.
+func (r *Relay) DecideJoinRequest(ctx context.Context, id string, approve bool) (JoinRequestState, error) {
+	decision := "deny"
+	if approve {
+		decision = "approve"
+	}
+	var out JoinRequestState
+	err := r.call(ctx, r.api, "POST", "/v1/admin/join-requests/"+url.PathEscape(id)+"/"+decision, map[string]string{}, &out)
+	return out, err
+}
+
+// IsOlderRelay reports whether err is an older relay's plain-text "404 page
+// not found" for a route it does not have. The relay's own JSON 404 (an
+// unknown id) is not.
+func IsOlderRelay(err error) bool {
+	e, ok := errors.AsType[*APIError](err)
+	return ok && e.Code == http.StatusNotFound && strings.Contains(e.Message, "page not found")
+}
+
+// PendingJoinRequest is the requesting machine's record of the join request
+// it filed and has not finished: which relay, the request, the names with
+// their kinds, and the matching code (shown to the owner; not a secret, but
+// kept owner-only like the configs beside it).
+type PendingJoinRequest struct {
+	Relay     string             `json:"relay"`
+	ID        string             `json:"id"`
+	Code      string             `json:"code"`
+	Agents    []JoinRequestAgent `json:"agents"`
+	FiledAt   time.Time          `json:"filed_at,omitzero"`
+	ExpiresAt time.Time          `json:"expires_at,omitzero"`
+}
+
+// JoinRequestPath is the pending join request file: join-request.json in
+// the folder of ConfigPath().
+func JoinRequestPath() string { return filepath.Join(filepath.Dir(ConfigPath()), "join-request.json") }
+
+// SavePendingJoinRequest writes p to path with owner-only permissions,
+// creating the folder (owner-only) as needed.
+func SavePendingJoinRequest(path string, p PendingJoinRequest) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writePrivate(path, raw)
+}
+
+// LoadPendingJoinRequest reads the pending join request at path; found is
+// false when there is none.
+func LoadPendingJoinRequest(path string) (p PendingJoinRequest, found bool, err error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return p, false, nil
+	}
+	if err != nil {
+		return p, false, err
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return p, false, fmt.Errorf("%s: %w", path, err)
+	}
+	if p.Relay == "" || p.ID == "" || len(p.Agents) == 0 {
+		return p, false, fmt.Errorf("%s does not name a relay, a request and its names", path)
+	}
+	return p, true, nil
+}
+
+// RemovePendingJoinRequest removes the pending join request file; a
+// missing one is not an error.
+func RemovePendingJoinRequest(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

@@ -59,12 +59,12 @@ func start(t *testing.T, cfg relay.Config, adminLogins []string, wrap func(ident
 	}
 	t.Cleanup(func() { st.Close() })
 	who := identitytest.New(map[string]identity.Node{
-		addrs["admin"]:    {ID: "nMAC", Name: "macbook-pro-44", User: Login},
-		addrs["grokbot"]:  {ID: "nGROK", Name: "grok-bot", User: Login},
-		addrs["instinct"]: {ID: "nINST", Name: "instinct", User: Login},
-		addrs["muse"]:     {ID: "nMUSE", Name: "muse", User: Login},
-		addrs["stranger"]: {ID: "nLAPTOP", Name: "old-laptop", User: Login},
-		addrs["visitor"]:  {ID: "nVISIT", Name: "friends-laptop", User: GuestLogin},
+		addrs["admin"]:    TailnetNode("nMAC", "macbook-pro-44", Login),
+		addrs["grokbot"]:  TailnetNode("nGROK", "grok-bot", Login),
+		addrs["instinct"]: TailnetNode("nINST", "instinct", Login),
+		addrs["muse"]:     TailnetNode("nMUSE", "muse", Login),
+		addrs["stranger"]: TailnetNode("nLAPTOP", "old-laptop", Login),
+		addrs["visitor"]:  {ID: "nVISIT", Name: "friends-laptop", User: GuestLogin, Key: "nodekey:nVISIT", DNSName: "friends-laptop.friend.ts.net", SharedIn: true},
 	})
 	var ids identity.Store = st
 	if wrap != nil {
@@ -77,6 +77,7 @@ func start(t *testing.T, cfg relay.Config, adminLogins []string, wrap func(ident
 		cfg.TaskBriefing = "off"
 	}
 	srv := relay.New(dir, st, cfg)
+	srv.SetSelfNode(RelayNode)
 	srv.SetPreparer(policy.New(st, policy.Config{}))
 	m := &Mesh{Server: srv, Store: st, Dir: dir, Who: who, urls: map[string]string{}, addrs: map[string]string{}, h: srv.Handler()}
 	for name, addr := range addrs {
@@ -105,6 +106,30 @@ func (m *Mesh) endpoint(t *testing.T, addr string) string {
 // single-person tailnet.
 const Login = "owner@example.com"
 
+// Tailnet is the MagicDNS suffix of the mesh's tailnet.
+const Tailnet = "example.ts.net"
+
+// RelayNode is the relay's own tailnet node, which names the tailnet join
+// requests must come from.
+var RelayNode = identity.Node{ID: "nRELAY", Name: "tincan-relay", Key: "nodekey:nRELAY", DNSName: "tincan-relay." + Tailnet}
+
+// TailnetNode is a machine of the mesh's tailnet named name and owned by
+// user, with a node key and MagicDNS name derived from id and name.
+func TailnetNode(id, name, user string) identity.Node {
+	return identity.Node{ID: id, Name: name, User: user, Key: "nodekey:" + id, DNSName: name + "." + Tailnet}
+}
+
+// AddMachine puts a new machine n on the tailnet under the mesh name name
+// (Client(t, name) then calls as it) and returns its endpoint.
+func (m *Mesh) AddMachine(t *testing.T, name string, n identity.Node) string {
+	t.Helper()
+	addr := fmt.Sprintf("100.0.2.%d:1", len(m.addrs)+10)
+	m.Who.Set(addr, n)
+	m.addrs[name] = addr
+	m.urls[name] = m.endpoint(t, addr)
+	return m.urls[name]
+}
+
 // GuestLogin is the other person's account that owns the visitor machine.
 const GuestLogin = "friend@example.net"
 
@@ -117,7 +142,7 @@ func (m *Mesh) Rebuild(t *testing.T, agent, machineName string) string {
 	old := m.addrs[agent]
 	addr := fmt.Sprintf("100.0.1.%d:1", len(m.addrs)+10)
 	m.Who.Remove(old)
-	m.Who.Set(addr, identity.Node{ID: "n" + machineName + "-rebuilt", Name: machineName, User: Login})
+	m.Who.Set(addr, TailnetNode("n"+machineName+"-rebuilt", machineName, Login))
 	for name, a := range m.addrs {
 		if a == old {
 			m.addrs[name], m.urls[name] = addr, ""

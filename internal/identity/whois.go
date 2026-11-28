@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 
 	"tailscale.com/client/local"
+	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/ipn/ipnstate"
 )
 
@@ -18,6 +20,16 @@ type Node struct {
 	Name string // short machine name, for display and the admin list
 	User string // owning login
 	Tags []string
+	// Key is the node's current node key ("nodekey:..."). It changes when
+	// the machine re-authenticates, while ID stays the same.
+	Key string
+	// Addrs are the node's tailnet addresses.
+	Addrs []netip.Addr
+	// DNSName is the node's full MagicDNS name, without the trailing dot.
+	DNSName string
+	// SharedIn is set for a node that is in the relay's netmap only because
+	// it was shared in from, or is owned by a user of, another tailnet.
+	SharedIn bool
 }
 
 // Resolver answers which tailnet node a connection came from.
@@ -57,11 +69,29 @@ func (r *LocalResolver) WhoIs(ctx context.Context, remoteAddr string) (Node, err
 	if res.Node == nil {
 		return Node{}, fmt.Errorf("whois %s: no node", remoteAddr)
 	}
-	n := Node{ID: string(res.Node.StableID), Name: shortName(res.Node.Name), Tags: res.Node.Tags}
+	return whoIsNode(res), nil
+}
+
+// whoIsNode is the Node a WhoIs answer with a node describes.
+func whoIsNode(res *apitype.WhoIsResponse) Node {
+	tn := res.Node
+	n := Node{
+		ID:      string(tn.StableID),
+		Name:    shortName(tn.Name),
+		Tags:    tn.Tags,
+		Key:     tn.Key.String(),
+		DNSName: strings.TrimSuffix(tn.Name, "."),
+		// A sharee node is in the netmap because a user of another tailnet
+		// owns it; a sharer marks a node shared in from another tailnet.
+		SharedIn: tn.Sharer != 0 || (tn.Hostinfo.Valid() && tn.Hostinfo.ShareeNode()),
+	}
+	for _, p := range tn.Addresses {
+		n.Addrs = append(n.Addrs, p.Addr())
+	}
 	if res.UserProfile != nil {
 		n.User = res.UserProfile.LoginName
 	}
-	return n, nil
+	return n
 }
 
 // NodeOnline implements NodeStatus from the tailnet peer list: found when a
@@ -97,16 +127,42 @@ func (r *LocalResolver) LookupNode(ctx context.Context, stableID string) (Node, 
 		if p == nil || string(p.ID) != stableID {
 			continue
 		}
-		n := Node{ID: stableID, Name: shortName(p.DNSName)}
-		if p.Tags != nil {
-			n.Tags = p.Tags.AsSlice()
-		}
-		if u, ok := st.User[p.UserID]; ok {
-			n.User = u.LoginName
-		}
-		return n, true, nil
+		return peerNode(st, p), true, nil
 	}
 	return Node{}, false, nil
+}
+
+// peerNode is the Node a peer in st describes, with the same fields WhoIs
+// fills.
+func peerNode(st *ipnstate.Status, p *ipnstate.PeerStatus) Node {
+	n := Node{
+		ID:       string(p.ID),
+		Name:     shortName(p.DNSName),
+		Key:      p.PublicKey.String(),
+		Addrs:    p.TailscaleIPs,
+		DNSName:  strings.TrimSuffix(p.DNSName, "."),
+		SharedIn: p.ShareeNode || p.AltSharerUserID != 0,
+	}
+	if p.Tags != nil {
+		n.Tags = p.Tags.AsSlice()
+	}
+	if u, ok := st.User[p.UserID]; ok {
+		n.User = u.LoginName
+	}
+	return n
+}
+
+// SelfNode is this tailnet node (the relay's own), with the same fields
+// WhoIs fills.
+func (r *LocalResolver) SelfNode(ctx context.Context) (Node, error) {
+	st, err := r.lc.StatusWithoutPeers(ctx)
+	if err != nil {
+		return Node{}, fmt.Errorf("tailnet status: %w", err)
+	}
+	if st.Self == nil {
+		return Node{}, fmt.Errorf("tailnet status: no self node")
+	}
+	return peerNode(st, st.Self), nil
 }
 
 // Probe fails when the LocalAPI is unreachable. --listen mode calls it at

@@ -13,6 +13,8 @@ Docs: https://github.com/mvanhorn/agent-tincan  (README, docs/adapters/<platform
   on an always-on machine (a cloud VM, a Mac mini, a home server): do PART A.
 - Your owner gave you an invite code (looks like ABCD-EFGH) and a name to join as:
   do PART B.
+- Your owner asked you to join under a name but gave you no invite code: do
+  PART B, joining with a join request (B2).
 - Your owner asked you to add ChatGPT and Claude: do PART C.
 - Your owner asked you to add Council (put one question to every model on
   the team): do PART D.
@@ -232,6 +234,26 @@ B2. Manus Cue:
     usually http://tincan-relay):
 
         tincan join <CODE> --relay <relay URL>
+
+    No invite code (your owner is not at an admin device to mint one): ask to
+    join instead, with the name your owner gave you and the relay address:
+
+        tincan join --request <name> --relay <relay URL>
+
+    It prints a request id and a matching code (looks like ABC-DEF), then waits
+    for your owner. Tell your owner the code and ask them to approve the request
+    on the phone page, or on the relay host with `tincan join-requests` and
+    `tincan approve-join <id>`, only if they see the same code. The code is not
+    a secret and nobody types it. Never approve it yourself. When it is
+    approved the command saves your config and prints its path. If your shell
+    shows output only after a command ends, run it with a time limit, read the
+    code, tell your owner, then run the same command again: it picks up the same
+    request. A request expires 10 minutes after it was filed; if it expired or
+    was denied, ask your owner before filing again. `tincan doctor` says where
+    the request stands. A bare name that is a kind (codex, hermes, ...) gets
+    that kind; add `:<kind>` otherwise, as in `--request helper:hermes`. A join
+    request needs this machine on your owner's tailnet reaching the relay
+    directly: with a proxy, or as a guest, ask for an invite instead.
 
     Save the config path printed by join and reuse it for every later call.
     Without TINCAN_CONFIG, macOS writes ~/Library/Application Support/tincan/client.json;

@@ -52,7 +52,8 @@ each problem found. Run it whenever the tincan MCP tools are missing, show 0
 tools, or stop answering. It works without MCP, so an agent whose app lost
 the tools can still run it from a shell.
 
-It checks, in order: the saved join, the relay, whether this binary is the
+It checks, in order: the saved join, the relay, a join request this
+machine filed with tincan join --request and has not finished, whether this binary is the
 relay's current release, on an admin device any webhook or email agent that
 was woken and has not checked in and whether task hosts have a fallback, this machine's Tailscale (its version against
 the minimum, Tailscale SSH, and whether the machine is tagged), a self-test of
@@ -153,6 +154,11 @@ func runDoctor(ctx context.Context, exe string, extraConfigs []string) doctorRep
 					"Check that the file is writable and names the relay at " + r.Base() + ", then run tincan doctor again."})
 			}
 		}
+	}
+
+	// 1b. A join request this machine filed and has not finished.
+	if c, ok := joinRequestCheck(ctx); ok {
+		add(c)
 	}
 
 	// 2. Version against the relay's release.

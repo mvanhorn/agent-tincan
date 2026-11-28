@@ -593,6 +593,7 @@ func runRelay(ctx context.Context, f relayFlags) error {
 	srv := relay.New(dir, st, f.relayConfig())
 	srv.SetEmailTagKey(emailTagKey)
 	srv.SetPusher(pusher)
+	setRelaySelfNode(ctx, srv, who)
 	urls := who.SelfURLs(ctx, advertisePort(listenAt, f.port))
 	srv.SetURLs(urls)
 	log.Printf("tincan relay advertises %s to its agents", strings.Join(urls, ", "))
@@ -937,6 +938,37 @@ func (h hostTailnet) ListenTLS(ctx context.Context) (net.Listener, string, error
 		return nil, "", err
 	}
 	return ln, domains[0], nil
+}
+
+// selfNoder is a relay resolver that can read the relay's own tailnet
+// node.
+type selfNoder interface {
+	SelfNode(ctx context.Context) (identity.Node, error)
+}
+
+// setRelaySelfNode tells srv its own tailnet node, which join requests are
+// checked against. Without it every join request is refused.
+func setRelaySelfNode(ctx context.Context, srv *relay.Server, who relayResolver) {
+	sn, ok := who.(selfNoder)
+	if !ok {
+		log.Printf("join requests: this tailnet cannot report the relay's own node; join requests are refused")
+		return
+	}
+	n, err := sn.SelfNode(ctx)
+	if err != nil {
+		log.Printf("join requests: read the relay's own node: %v; join requests are refused", err)
+		return
+	}
+	srv.SetSelfNode(n)
+}
+
+// SelfNode forwards to the tsnet node's resolver.
+func (r tailnetResolver) SelfNode(ctx context.Context) (identity.Node, error) {
+	sn, ok := r.relayResolver.(selfNoder)
+	if !ok {
+		return identity.Node{}, errors.New("the resolver cannot report its own node")
+	}
+	return sn.SelfNode(ctx)
 }
 
 // tailnetDialer is a relay resolver that can also open connections to

@@ -105,6 +105,14 @@ func (d *Directory) oldNodeOnline(ctx context.Context, a Agent) (bool, error) {
 	return online && found, nil
 }
 
+// Readmittable returns the agents n would take over as a rebuilt machine
+// on its next call, without moving any: empty when it would take over none.
+// A join request from such a machine is refused, since tincan rejoin brings
+// its agents back without the owner.
+func (d *Directory) Readmittable(ctx context.Context, n Node) ([]Agent, error) {
+	return d.awaitingReadmit(ctx, n)
+}
+
 // awaitingReadmit returns the agents n could still re-admit: eligible, with
 // their old node offline or gone. It is empty when n may not re-admit.
 func (d *Directory) awaitingReadmit(ctx context.Context, n Node) ([]Agent, error) {
@@ -191,7 +199,7 @@ func (d *Directory) commitRebind(ctx context.Context, n Node, checked Agent) (Re
 	if err != nil {
 		return Resolved{}, false, err
 	}
-	if carriesGuest(others) {
+	if CarriesGuest(others) {
 		return Resolved{}, false, nil
 	}
 	rb := &Rebind{Agent: a.Name, OldNode: a.NodeID, OldNodeName: a.NodeName, NewNode: n.ID, NewNodeName: n.Name, TaskHostCleared: a.TaskHost}

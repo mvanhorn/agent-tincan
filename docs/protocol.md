@@ -271,9 +271,13 @@ For each held send the relay queues an alert round to every subscription in
 the background (a held send's response never waits for it): an aes128gcm Web
 Push message with `TTL: 3600`, `Urgency: high`, `Topic: tincan-held` and the
 JSON payload `{"count":<held>}`, the number of requests held when the round
-goes out, at least 1. The payload carries no text or link: the page's service
-worker supplies the notification text and opens `/phone/#held` when it is
-tapped. Held sends that arrive close together share one round: a send while a
+goes out, at least 1. Filing a [join request](#join-requests) queues a round
+too; when no request is held and join requests are pending, the payload is
+`{"count":<pending join requests>,"join":1}`, and a held request always wins
+the round. The payload carries no text or link: the page's service worker
+supplies the notification text ("A request is waiting for your approval", or
+with `join` set "A machine is asking to join") and opens `/phone/#held` when
+it is tapped. Held sends that arrive close together share one round: a send while a
 round is already waiting joins it, and that round's count covers them all.
 A 404 or 410 deletes the subscription (reason `gone`), and so does a 401 or
 403 (reason `rejected`): the push service no longer takes the relay's VAPID
@@ -338,6 +342,25 @@ remain excluded from delivery; pending entries carry only ids and senders.
 An approved request follows the ordinary body and attachment access rules,
 even after it reaches a terminal state. Approval history survives relay restarts;
 upgrades backfill existing holds and decisions from request state and audit events.
+
+## Join requests
+
+A machine that has not joined can ask the owner to let it join under new names, instead of redeeming an invite (`tincan join --request`). The relay records the calling node from `WhoIs` when the request is filed, and only that node can read the request or collect its agents. None of these routes is open to a guest.
+
+Every answer from the requester's routes is JSON with `id` and `status`, one of `pending`, `approved`, `delivered`, `denied`, `expired`, `voided` or `failed`. `pending` and `approved` are open; the rest are final. While a request is open the answer also carries `code`, the matching code, and `agents`, an array of `{"name","kind"}` (`kind` omitted for none); every answer carries `filed_at` and `expires_at`. Errors are `{"error":"..."}`. An unknown id answers that JSON with 404; a relay without join requests answers Go's plain-text `404 page not found`, which the client reports as needing an invite and never retries as something else.
+
+- `POST /v1/join-requests` with `{"agents":[{"name":"codex","kind":"codex"},{"name":"helper"}]}` files a request and answers 200 with it, status `pending`. One to 8 agents, each a valid agent name, named once, of a known kind or none; `proxy-sandbox` answers 400, since a proxy-only sandbox joins with an invite. Unknown fields answer 400. Each name must be new: not an agent, not the name of an unexpired invite, not in another open request (409). Caps answer 429: one open request per node, 5 filed per node in the last hour whatever their outcome, and 10 pending on the relay. Refused with 403: a gateway (virtual) caller, a machine that carries a guest, a machine shared in from another tailnet, and a machine whose MagicDNS name is not under the relay's own tailnet suffix, which is every machine while the relay does not know its own node. A machine the relay would re-admit as the rebuilt machine of an agent answers 409 and is told to run `tincan rejoin`. Tagged nodes may file, and so may a node that already runs agents. A failure of the relay's own store while filing answers 500, not 400.
+- `GET /v1/join-requests/{id}` answers the request's status to the node that filed it and changes nothing, except as below. `?wait=<seconds>` holds a pending request until it is decided or the wait ends, capped at the relay's long-poll hold (25 seconds by default). Another node gets 403 and the request is unchanged.
+- `POST /v1/join-requests/{id}/claim` collects an approved request's agents, once. In one transaction the relay checks every name again (as new, its own hold excepted, and refusing a node that now carries a guest), writes an agent row on the calling node for each, and moves the request to `delivered`, so it binds every name or none. The answer is 200 with `status: "delivered"` and `agents`, the names and kinds bound, with a `joined` audit row per name. The claim answer carries no key or config: the client saves each agent's config itself and then reads the relay key as that joined agent. A request that is not approved answers 200 with its current status, without `code` or `agents`, and binds nothing. A name that can no longer be joined answers 409 `{"id","status":"failed","name","error"}` and fails the request. Another node gets 403 and the request is unchanged.
+
+The recorded node calling with a different node key voids the request (status `voided`, audited `join_voided`): a status read voids any open request, and a claim voids an approved one. A claim of a request that is still pending answers `pending` and changes nothing, whatever the key; the next status read voids it. A request expires 10 minutes after filing whatever its state, approved but unclaimed included. A final request keeps a slim row, with no names and no code, for one hour, so the requester can still read its status and the hourly cap survives a restart; after that the id answers 404.
+
+Admin devices and the local admin socket have these routes; anyone else gets 403. No agent route and no MCP tool reaches them.
+
+- `GET /v1/admin/join-requests`: `{"requests":[...]}`, the pending, unexpired requests oldest first, each with `id`, `code`, `node_name`, `node_user`, `tags`, `addrs` (tailnet IPs), `agents`, `node_agents` (agents already on that node), `filed_at`, `expires_at` and `age_seconds`. A tailnet caller also gets `approve_nonce`, `deny_nonce` and `nonce_expires_at` on each entry, bound to its device, for the same reason as the held listing; the local admin socket gets none. This listing is the only place join-request nonces are issued.
+- `POST /v1/admin/join-requests/{id}/approve` and `.../deny` decide a pending request; both answer `{"id","status"}` with `approved` or `denied`. Deny is final. Approving binds nothing: the requesting node collects its agents with the claim. A tailnet call must be browser-marked and send `{"nonce":"..."}` from its own listing, bound to the request, the decision and the device, good for 10 minutes and once, and voided by any decision, expiry, void or failure of the request; a tailnet call without browser headers answers 403. A missing, used or mismatched nonce on a still-pending request answers 409; on a request that is no longer pending a browser call gets 200 `{"id","status","already_decided":true}`. Over the socket a request that is no longer pending answers 409 `{"id","status","error"}`. A caller whose `WhoIs` node filed the request gets 403, and so does the socket for a request filed from the relay's own tailnet node (the built-in node with tsnet, the host's node with `--listen`), and for every request while the relay does not know its own node. An unknown id answers 404.
+
+The audit log records `join_requested`, `join_approved`, `join_denied`, `join_expired`, `join_voided` (with `reason`) and `join_failed` (with `refused` and `reason`), each with `join_request`, `node`, `node_name`, `node_user` and `agents`, and never the code. `join_approved` and `join_denied` carry `via`: `socket`, or `page` with `device`, the deciding machine's name. A delivered claim writes `joined` for each name with `join_request`, `node` and `node_name`.
 
 ## Idempotent sends
 

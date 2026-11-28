@@ -106,6 +106,11 @@ main { padding: 0 16px 24px; max-width: 640px; margin: 0 auto; }
   background: var(--bg);
   font-size: 15px;
 }
+.join-code {
+  margin: 4px 0 8px;
+  font: 700 32px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+}
 .files { margin: 4px 0; padding-left: 20px; font-size: 14px; }
 
 .actions {

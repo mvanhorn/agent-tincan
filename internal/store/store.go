@@ -264,6 +264,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate push subscriptions: %w", err)
 	}
+	if err := s.migrateJoinRequests(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate join requests: %w", err)
+	}
 	if err := s.migrateRooms(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate rooms: %w", err)

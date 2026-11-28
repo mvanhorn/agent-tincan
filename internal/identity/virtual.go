@@ -37,7 +37,8 @@ var ErrRealNodeBound = errors.New("connecting would take its name from that mach
 // BindVirtual joins a virtual agent (for example chatgpt) directly, without
 // an invite code. Only the relay calls this, when an admin connects the
 // gateway. A name already bound to a real tailnet node is refused unless
-// replace is set; a name that is already virtual rebinds either way.
+// replace is set; a name that is already virtual rebinds either way. A name
+// an open join request holds is refused with ErrNameTaken, replace or not.
 func (d *Directory) BindVirtual(ctx context.Context, name string, replace bool) error {
 	if !nameRE.MatchString(name) {
 		return ErrUnknownAgent
@@ -46,6 +47,9 @@ func (d *Directory) BindVirtual(ctx context.Context, name string, replace bool) 
 	// between the check below and the write.
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.refuseHeld(ctx, name, "", d.cfg.Now()); err != nil {
+		return err
+	}
 	prev, ok, err := d.Agent(ctx, name)
 	if err != nil {
 		return err
@@ -64,13 +68,17 @@ func (d *Directory) BindVirtual(ctx context.Context, name string, replace bool) 
 // is new-only, whatever holds the name and on whichever machine: a guest
 // cannot take a name, and a live guest's terms are not rewritten here. Its
 // virtual node carries nothing else, so no machine name or login is involved,
-// and adminCaller refuses it whatever the --admin list says.
+// and adminCaller refuses it whatever the --admin list says. A name an open
+// join request holds is refused with ErrNameTaken.
 func (d *Directory) BindVirtualGuest(ctx context.Context, name string, terms GuestTerms) error {
 	if !nameRE.MatchString(name) {
 		return ErrUnknownAgent
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if err := d.refuseHeld(ctx, name, "", d.cfg.Now()); err != nil {
+		return err
+	}
 	_, ok, err := d.Agent(ctx, name)
 	if err != nil {
 		return err

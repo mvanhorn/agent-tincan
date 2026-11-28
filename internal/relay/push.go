@@ -183,7 +183,8 @@ func (s *Server) pushLoop(p *Pusher) {
 // pushRound alerts every subscription once, a few at a time. Nothing it
 // does changes a held request: failures are audited and the next held ask
 // tries again. The alert carries only the held count, the one field sw.js
-// reads; it never names a held ask. A subscription whose device is no
+// reads, or with no held ask but a pending join request, the count of those
+// and the join flag; it never names a held ask or a requester. A subscription whose device is no
 // longer an admin gets nothing and is dropped. ctx ends when the relay
 // stops.
 func (s *Server) pushRound(ctx context.Context, p *Pusher) {
@@ -201,6 +202,16 @@ func (s *Server) pushRound(ctx context.Context, p *Pusher) {
 		log.Printf("push: count held requests: %v", err)
 	}
 	payload, _ := json.Marshal(map[string]int{"count": max(held, 1)})
+	// With no held ask waiting, a pending join request gets its own fixed
+	// text (sw.js reads the join flag); a held ask always wins the round.
+	if held == 0 && err == nil {
+		joins, err := s.store.PendingJoinRequests(ctx, s.cfg.Now())
+		if err != nil {
+			log.Printf("push: count join requests: %v", err)
+		} else if len(joins) > 0 {
+			payload, _ = json.Marshal(map[string]int{"count": len(joins), "join": 1})
+		}
+	}
 	var g errgroup.Group
 	g.SetLimit(pushParallel)
 	for _, sub := range subs {

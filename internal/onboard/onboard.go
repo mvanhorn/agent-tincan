@@ -65,6 +65,11 @@ var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindManusCue
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
 
+// RequestableKind reports whether a join request may name kind: any kind
+// KnownKind accepts except proxy-sandbox, since a proxy-only sandbox would
+// file from the proxy's machine and keeps using invites.
+func RequestableKind(kind string) bool { return KnownKind(kind) && kind != KindProxySandbox }
+
 // Extra recipe kinds that are not agent kinds.
 const (
 	RecipeSecondAgent = "second-agent"

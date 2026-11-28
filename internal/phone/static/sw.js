@@ -1,7 +1,8 @@
 // Tincan phone page service worker. It caches nothing: the page is only
 // useful with live data from the relay, and a cached copy could outlive an
-// upgrade or a device losing admin. It shows the relay's held-ask alerts,
-// which carry no request text, and opens the held list when one is tapped.
+// upgrade or a device losing admin. It shows the relay's held-ask and
+// join-request alerts, which carry no request or requester text, and opens
+// the held list when one is tapped.
 "use strict";
 
 self.addEventListener("install", () => self.skipWaiting());
@@ -20,7 +21,11 @@ self.addEventListener("push", (event) => {
     msg = {};
   }
   const count = Number.isInteger(msg.count) && msg.count > 1 ? msg.count : 1;
-  const body = count > 1 ? count + " requests are waiting for your approval" : "A request is waiting for your approval";
+  let body = count > 1 ? count + " requests are waiting for your approval" : "A request is waiting for your approval";
+  // The relay sets join only when join requests, and no held asks, wait.
+  if (msg.join === 1) {
+    body = "A machine is asking to join";
+  }
   event.waitUntil(self.registration.showNotification("Agent Tincan", {
     body,
     tag: "tincan-held",

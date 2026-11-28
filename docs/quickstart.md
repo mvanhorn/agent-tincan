@@ -94,6 +94,14 @@ tincan join ABCD-EFGH --relay http://tincan-relay
 
 Repeat for muse (`tincan invite muse --relay http://tincan-relay` on the admin device, then `tincan join <code> --relay http://tincan-relay` on muse's machine).
 
+Not at the admin device? The agent's machine can ask instead of redeeming a code:
+
+```bash
+tincan join --request muse --relay http://tincan-relay
+```
+
+It prints a matching code and waits. Open the [phone page](phone.md), or run `tincan join-requests` on the relay host, and approve the request (`tincan approve-join <id>`) only if it shows the same code; the machine then saves its config. The request expires after 10 minutes. It works only for new names, from a machine on your own tailnet that reaches the relay without a proxy.
+
 Owners can watch the mesh with `tincan top --relay http://tincan-relay` (no flags on the relay host). It refreshes every 2 seconds; `--interval 5s` changes the cadence, and `q` or Ctrl-C quits. Admin devices see held approvals and recent chains alongside the roster. `tincan top --once` prints a read-only snapshot.
 
 Check with `tincan agents`. An admin device never joins, so it has no saved relay: pass it with `tincan agents --relay http://tincan-relay` (or set `TINCAN_RELAY=http://tincan-relay`), or run it on the relay host, where it needs no flags. A joined agent just runs `tincan agents`. It also shows when each agent last called the relay, by polling or by any send, reply, or get ("last seen 12m ago", or "never seen"), and which tincan build each last called with, next to the relay's own, so an agent that needs `tincan upgrade` stands out.

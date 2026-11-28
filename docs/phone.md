@@ -74,19 +74,20 @@ Task titles, details, results, comments and history are teammates' text and are 
 
 ## Alerts
 
-With HTTPS, the page can alert you when an ask is held. The row under the team says which state applies:
+With HTTPS, the page can alert you when an ask is held or a machine asks to join. The row under the team says which state applies:
 
 - Alerts need HTTPS: the page was opened over plain HTTP. Turn on HTTPS certificates for the tailnet; until then the approval policy's `notify` teammate is the alert path.
 - Add to Home Screen first: on iPhone, Safari only allows alerts from a page opened from the Home Screen.
 - Turn on alerts: tap it and allow notifications. The page asks only when you tap.
-- Alerts are on: this phone gets an alert for held asks. Turn off removes its subscription from the relay, and the phone remembers the choice: opening the page again shows Turn on alerts rather than subscribing anew.
+- Alerts are on: this phone gets an alert for held asks and join requests. Turn off removes its subscription from the relay, and the phone remembers the choice: opening the page again shows Turn on alerts rather than subscribing anew.
 - Alerts are blocked: notifications for Tincan are off in the phone's settings.
 
-An alert says only "A request is waiting for your approval" (or how many are). It never carries the request text, who asked or whom. Asks held close together share one alert. Tapping it opens the page at the held list. The alert goes from the relay through your phone's push service (Apple, Google, Mozilla or Microsoft), encrypted to the phone; see [the trust model](trust-model.md). The page sends its subscription again every time it opens (unless alerts were turned off on this phone), so a phone that was offline or reinstalled picks alerts back up.
+An alert says only "A request is waiting for your approval" (or how many are). It never carries the request text, who asked or whom. Asks held close together share one alert. When a machine asks to join and no ask is held, the alert says only "A machine is asking to join", never the machine's name or the names it asks for. Tapping it opens the page at the held list, with machines asking to join just below it. The alert goes from the relay through your phone's push service (Apple, Google, Mozilla or Microsoft), encrypted to the phone; see [the trust model](trust-model.md). The page sends its subscription again every time it opens (unless alerts were turned off on this phone), so a phone that was offline or reinstalled picks alerts back up.
 
 ## What the page shows
 
 - Held for approval, at the top, with a count. Each held ask shows who asked whom (with the target's kind, so a council or dot-web ask is plain), how long it has been held, its chain, the start of its text, and each attachment's name and size. Deny is on the left, Approve on the right.
+- Machines asking to join, below the held list, with a count, shown only while a machine has asked with `tincan join --request`. Each card shows the machine's name, the matching code in large type, the machine's owning login, tags and tailnet address, the names it asks to join as with each one's kind, any agents already on that machine, when it asked, when the request expires and its id. The machine chose its own name, so the code is what tells you which machine this is.
 - Tasks, on its own tab, with the count of tasks waiting on you. See [Tasks from the phone](#tasks-from-the-phone).
 - Team, below. Every agent with its status (busy, idle, stuck, offline, with the same detail `tincan agents` shows), kind, queue, good-at line and what it is working on, ordered as `tincan top` orders them: stuck and signed-out agents first.
 
@@ -102,3 +103,9 @@ Each held ask in the page's list comes with two one-time codes from the relay, o
 - After the page has been in the background, it fetches fresh codes before Approve and Deny turn on again.
 
 The relay audits each decision as `approved` or `denied` with the device's machine name. Approval stays with people: no agent tool lists, approves or denies held asks, and none approves a proposed task or resets its assign count. Only a task host you named marks a task done, reopens it or drops it from an agent, and only on your word.
+
+### Machines asking to join
+
+Approve only when the matching code on the card is the code on the machine that asked; nobody types it, you compare it by eye. Approve asks once more whether the other machine shows that code and names the agents it will join as. Deny asks before it acts and is final: the machine would have to ask again. Approving binds nothing by itself: the machine collects its agents the next time it checks, within seconds while `tincan join --request` is waiting there.
+
+Approve and Deny on a join request use one-time codes the same way, issued with the list of join requests the page reads, good only from this device, for that request and decision, for 10 minutes. A decision, or the request expiring, ends its codes. The page cannot decide a request filed from the device it is open on. On the relay host, `tincan join-requests` lists the same requests and `tincan approve-join <id>` or `tincan deny-join <id>` decides one, except a request filed from the relay host itself, which only the page on another device can decide. The relay audits each decision as `join_approved` or `join_denied` with where it was made, and no agent tool lists or decides join requests. See [the trust model](trust-model.md#join-requests).

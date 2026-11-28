@@ -203,6 +203,10 @@ type Store interface {
 	// TakeInvite removes and returns the invite, so a code works once.
 	// Callers pass the digest produced by hashInviteCode, not the raw code.
 	TakeInvite(ctx context.Context, code string) (Invite, bool, error)
+	// LiveInviteNamed reports whether an unredeemed invite for name has not
+	// expired at now.
+	LiveInviteNamed(ctx context.Context, name string, now time.Time) (bool, error)
+	JoinRequestStore
 }
 
 // Config tunes a Directory.
@@ -331,7 +335,7 @@ func (d *Directory) ResolveCaller(ctx context.Context, c Caller, claimed string)
 				return d.resolved(ctx, n, a)
 			}
 		}
-		if !carriesGuest(agents) {
+		if !CarriesGuest(agents) {
 			if res, ok, err := d.readmit(ctx, n, claimed); ok || err != nil {
 				return res, err
 			}
@@ -345,7 +349,7 @@ func (d *Directory) ResolveCaller(ctx context.Context, c Caller, claimed string)
 		}
 		return Resolved{}, fmt.Errorf("%s: %w", n.Name, ErrNotJoined)
 	case 1:
-		if carriesGuest(agents) {
+		if CarriesGuest(agents) {
 			return d.resolved(ctx, n, agents[0])
 		}
 		// Another agent from the same rebuilt machine may still be waiting to
@@ -472,12 +476,20 @@ func (d *Directory) refuseGuestName(ctx context.Context, name string) error {
 }
 
 // mint stores inv under a fresh code and returns the raw code. The caller
-// has checked admin rights.
+// has checked admin rights. A name an open join request holds is refused
+// with ErrNameTaken. The check and the write run under d.mu, the lock
+// filing a join request holds, so an invite and a request for the same name
+// cannot both be made.
 func (d *Directory) mint(ctx context.Context, inv Invite) (string, error) {
 	if !nameRE.MatchString(inv.Name) {
 		return "", fmt.Errorf("agent name %q must be 1-32 lowercase letters, digits, or dashes", inv.Name)
 	}
 	if err := checkKind(inv.Kind); err != nil {
+		return "", err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.refuseHeld(ctx, inv.Name, "", d.cfg.Now()); err != nil {
 		return "", err
 	}
 	code, err := NewCode()
@@ -560,7 +572,8 @@ func newOnlyRefusal(a Agent, found bool, mintNode string) error {
 // the new machine; other agents on the old machine stay. A code minted by
 // InviteNew is refused with ErrNameTaken if the name has since come to be
 // bound to a machine other than the minting one; the check runs under the
-// same lock as the join, so no other join can slip in between.
+// same lock as the join, so no other join can slip in between. A name an
+// open join request holds is refused with ErrNameTaken.
 func (d *Directory) Join(ctx context.Context, remoteAddr, code string) (string, error) {
 	j, err := d.JoinAgent(ctx, remoteAddr, code)
 	return j.Name, err
@@ -591,6 +604,11 @@ func (d *Directory) JoinAgent(ctx context.Context, remoteAddr, code string) (Joi
 	}
 	if !ok || d.cfg.Now().After(inv.Expires) {
 		return Joined{}, ErrBadInvite
+	}
+	// A code minted before a join request came to hold the name loses to
+	// the request.
+	if err := d.refuseHeld(ctx, inv.Name, "", d.cfg.Now()); err != nil {
+		return Joined{}, err
 	}
 	prev, found, err := d.Agent(ctx, inv.Name)
 	if err != nil {
@@ -807,14 +825,14 @@ func (d *Directory) adminCaller(ctx context.Context, n Node) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w: %w", n.Name, ErrNotAdmin, err)
 	}
-	if carriesGuest(agents) {
+	if CarriesGuest(agents) {
 		return fmt.Errorf("%s carries a guest: %w", n.Name, ErrNotAdmin)
 	}
 	return nil
 }
 
-// carriesGuest reports whether any of a node's agents is a guest.
-func carriesGuest(agents []Agent) bool {
+// CarriesGuest reports whether any of a node's agents is a guest.
+func CarriesGuest(agents []Agent) bool {
 	return slices.ContainsFunc(agents, func(a Agent) bool { return a.Guest.Set() })
 }
 
@@ -823,7 +841,7 @@ func carriesGuest(agents []Agent) bool {
 // carries one, and then a failure means the claim named no guest of this
 // node, or named none on a node with several.
 func (c Caller) Guest(claimed string) (a Agent, guest bool, err error) {
-	if !carriesGuest(c.Agents) {
+	if !CarriesGuest(c.Agents) {
 		return Agent{}, false, nil
 	}
 	if claimed == "" && len(c.Agents) > 1 {
@@ -887,14 +905,18 @@ func (d *Directory) adminNode(n Node) error {
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // NewCode returns a random one-time code shaped XXXX-XXXX.
-func NewCode() (string, error) {
-	b := make([]byte, 8)
+func NewCode() (string, error) { return randomCode(8) }
+
+// randomCode returns n characters from codeAlphabet, drawn from crypto/rand,
+// with a dash after the first half.
+func randomCode(n int) (string, error) {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	out := make([]byte, 0, 9)
+	out := make([]byte, 0, n+1)
 	for i, c := range b {
-		if i == 4 {
+		if i == n/2 {
 			out = append(out, '-')
 		}
 		out = append(out, codeAlphabet[int(c)%len(codeAlphabet)])
