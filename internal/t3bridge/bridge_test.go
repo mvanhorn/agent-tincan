@@ -600,3 +600,92 @@ func TestBridgeRetriesFailedReadAndPreservesConcurrentWatches(t *testing.T) {
 		t.Fatalf("expected watch notification reply to stay acked, got %+v, %v", t3In2.Replies, err)
 	}
 }
+
+func TestBridgeSendDirectiveIgnoresPreviousRunSettle(t *testing.T) {
+	mesh := testrelay.New(t, relay.Config{})
+	t3Relay := mesh.JoinOnMachineOf(t, "muse", "t3")
+	grok := mesh.Client(t, "grokbot")
+
+	fake := newFakeT3Server(t)
+	fake.mu.Lock()
+	fake.threads["thr-busy"] = ThreadReadResult{
+		Thread: ThreadSummary{
+			ThreadID:    "thr-busy",
+			Title:       "Busy thread",
+			Status:      "running",
+			ActiveRunID: "run-old",
+			Link:        "https://app.t3.codes/threads/e/thr-busy",
+		},
+		RecentRuns: []ThreadRun{{RunID: "run-old", Status: "running"}},
+		Items:      []ThreadItem{{Type: "assistant_message", Text: "Old answer from run-old."}},
+	}
+	fake.mu.Unlock()
+
+	mcpCli, _ := NewMCPClient(fake.srv.URL, "tok", "0.34.0")
+	dir := t.TempDir()
+	state := NewStateStore(filepath.Join(dir, "t3-state.json"))
+	routes := NewRouteStore(filepath.Join(dir, "t3-routes.json"))
+	br, err := NewBridge(Config{
+		Relay:    t3Relay,
+		T3:       mcpCli,
+		State:    state,
+		Routes:   routes,
+		PollHold: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sentAsk, err := grok.Send(context.Background(), "t3", "send thr-busy: follow-up question", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := t3Relay.Claim(context.Background(), sentAsk.ID); err != nil {
+		t.Fatal(err)
+	}
+	br.handleSendDirective(context.Background(), sentAsk, Directive{
+		Kind:     DirectiveSend,
+		ThreadID: "thr-busy",
+		Message:  "follow-up question",
+	})
+
+	// Previous run-old finishes -> must NOT answer the new ask with run-old's output.
+	fake.mu.Lock()
+	fake.threads["thr-busy"] = ThreadReadResult{
+		Thread:     ThreadSummary{ThreadID: "thr-busy", Title: "Busy thread", Status: "completed", LatestRunID: "run-old", Link: "https://app.t3.codes/threads/e/thr-busy"},
+		RecentRuns: []ThreadRun{{RunID: "run-old", Status: "completed"}},
+		Items:      []ThreadItem{{Type: "assistant_message", Text: "Old answer from run-old."}},
+	}
+	fake.mu.Unlock()
+	br.handleMilestoneEvent(context.Background(), "thread.run_settled", EventOccurrence{
+		EventID: "ev-old-run",
+		Cursor:  "c-old",
+		Data:    json.RawMessage(`{"type":"thread.run_settled","threadId":"thr-busy","runId":"run-old","outcome":"completed"}`),
+	})
+	snap, _ := state.Snapshot()
+	if snap.Asks[sentAsk.ID].Done {
+		t.Fatal("new ask was wrongly answered by previous run-old settle event")
+	}
+
+	// Now run-new finishes -> must answer the new ask with run-new's output.
+	fake.mu.Lock()
+	fake.threads["thr-busy"] = ThreadReadResult{
+		Thread:     ThreadSummary{ThreadID: "thr-busy", Title: "Busy thread", Status: "completed", LatestRunID: "run-new", Link: "https://app.t3.codes/threads/e/thr-busy"},
+		RecentRuns: []ThreadRun{{RunID: "run-new", Status: "completed"}},
+		Items:      []ThreadItem{{Type: "assistant_message", Text: "New answer from run-new."}},
+	}
+	fake.mu.Unlock()
+	br.handleMilestoneEvent(context.Background(), "thread.run_settled", EventOccurrence{
+		EventID: "ev-new-run",
+		Cursor:  "c-new",
+		Data:    json.RawMessage(`{"type":"thread.run_settled","threadId":"thr-busy","runId":"run-new","outcome":"completed"}`),
+	})
+	snap2, _ := state.Snapshot()
+	if !snap2.Asks[sentAsk.ID].Done {
+		t.Fatal("expected ask done after run-new settled")
+	}
+	grokIn, err := grok.Poll(context.Background(), 50*time.Millisecond)
+	if err != nil || len(grokIn.Replies) != 1 || !strings.Contains(grokIn.Replies[0].Reply.Body, "New answer from run-new.") {
+		t.Fatalf("expected reply with run-new answer, got %+v, %v", grokIn.Replies, err)
+	}
+}

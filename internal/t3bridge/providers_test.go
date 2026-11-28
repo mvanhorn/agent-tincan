@@ -220,8 +220,9 @@ func TestWireProvidersCodexQuotedKeysAndComments(t *testing.T) {
 		t.Fatalf("commented codex header not recognized as wired: %+v", res)
 	}
 
-	// Quoted table header pointing to another config must be stripped cleanly on OverrideShared=true.
-	quoted := "model = \"o3\"\n\n[mcp_servers.\"agent-tincan\"] # shared\ncommand = \"/usr/local/bin/tincan\"\nargs = [\"mcp\"]\n\n[mcp_servers.'agent-tincan'.env]\nTINCAN_CONFIG = \"/tmp/codex.json\"\n\n[mcp_servers.other]\ncommand = \"echo\"\n"
+	// Quoted table header pointing to another config must be stripped cleanly on OverrideShared=true,
+	// while a separate server whose name happens to contain "tincan" (tincan-helper) is preserved untouched.
+	quoted := "model = \"o3\"\n\n[mcp_servers.\"agent-tincan\"] # shared\ncommand = \"/usr/local/bin/tincan\"\nargs = [\"mcp\"]\n\n[mcp_servers.'agent-tincan'.env]\nTINCAN_CONFIG = \"/tmp/codex.json\"\n\n[mcp_servers.tincan-helper]\ncommand = \"/usr/local/bin/helper\"\n\n[mcp_servers.other]\ncommand = \"echo\"\n"
 	if err := os.WriteFile(cfgPath, []byte(quoted), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +243,9 @@ func TestWireProvidersCodexQuotedKeysAndComments(t *testing.T) {
 	out := string(outBytes)
 	if strings.Contains(out, `"agent-tincan"`) || strings.Contains(out, `'agent-tincan'`) {
 		t.Fatalf("quoted agent-tincan table was not stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "[mcp_servers.tincan-helper]") || !strings.Contains(out, `command = "/usr/local/bin/helper"`) {
+		t.Fatalf("unrelated tincan-helper server was removed:\n%s", out)
 	}
 	if !strings.Contains(out, "[mcp_servers.other]") || strings.Count(out, "[mcp_servers.agent-tincan]") != 1 {
 		t.Fatalf("unexpected overridden codex config.toml:\n%s", out)

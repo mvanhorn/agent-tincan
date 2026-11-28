@@ -422,13 +422,14 @@ func writeCodexProvider(path string, mode os.FileMode, binary, tincanCfg string)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	// Strip any existing tincan table sections (including quoted keys or trailing comments).
+	// Strip only the exact agent-tincan table and its child tables (preserving
+	// any other MCP servers, including ones whose names also contain "tincan").
 	lines := strings.Split(raw, "\n")
 	var kept []string
 	skip := false
 	for _, line := range lines {
 		if segs, isHdr := parseTOMLTableHeader(line); isHdr {
-			skip = isCodexTincanSection(segs)
+			skip = isCodexAgentTincanSection(segs)
 		}
 		if !skip {
 			kept = append(kept, line)
@@ -443,6 +444,10 @@ func writeCodexProvider(path string, mode os.FileMode, binary, tincanCfg string)
 		final = base + block
 	}
 	return writeFileAtomicWithMode(path, []byte(final), mode)
+}
+
+func isCodexAgentTincanSection(segs []string) bool {
+	return len(segs) >= 2 && segs[0] == "mcp_servers" && segs[1] == "agent-tincan"
 }
 
 func isCodexTincanSection(segs []string) bool {

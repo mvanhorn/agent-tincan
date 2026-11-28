@@ -73,17 +73,24 @@ type pendingEvent struct {
 	ev        EventOccurrence
 }
 
+type pendingRecheck struct {
+	threadID  string
+	prevRunID string
+}
+
 // Bridge connects the Agent Tincan relay to T3 Code's /mcp server and SEP-3415 event streams.
 type Bridge struct {
-	cfg           Config
-	handleMu      sync.Mutex
-	seenMu        sync.Mutex
-	seenIDs       map[string]struct{}
-	seenList      []string
-	pendingMu     sync.Mutex
-	pendingEvents []pendingEvent
-	unmatchedMu   sync.Mutex
-	unmatchedSeen map[string]int
+	cfg             Config
+	handleMu        sync.Mutex
+	seenMu          sync.Mutex
+	seenIDs         map[string]struct{}
+	seenList        []string
+	pendingMu       sync.Mutex
+	pendingEvents   []pendingEvent
+	inFlightPending map[string]int
+	pendingRechecks []pendingRecheck
+	unmatchedMu     sync.Mutex
+	unmatchedSeen   map[string]int
 }
 
 // NewBridge creates a Bridge from cfg.
@@ -122,9 +129,10 @@ func NewBridge(cfg Config) (*Bridge, error) {
 		cfg.Now = time.Now
 	}
 	return &Bridge{
-		cfg:           cfg,
-		seenIDs:       map[string]struct{}{},
-		unmatchedSeen: map[string]int{},
+		cfg:             cfg,
+		seenIDs:         map[string]struct{}{},
+		inFlightPending: map[string]int{},
+		unmatchedSeen:   map[string]int{},
 	}, nil
 }
 
@@ -157,6 +165,7 @@ func (b *Bridge) runRetryLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			b.flushPendingEvents(ctx)
+			b.flushPendingRechecks(ctx)
 		}
 	}
 }
@@ -303,6 +312,9 @@ func (b *Bridge) enqueuePendingEvent(eventName string, ev EventOccurrence) {
 func (b *Bridge) hasPendingFor(eventName string) bool {
 	b.pendingMu.Lock()
 	defer b.pendingMu.Unlock()
+	if b.inFlightPending[eventName] > 0 {
+		return true
+	}
 	for _, pe := range b.pendingEvents {
 		if pe.eventName == eventName {
 			return true
@@ -320,6 +332,9 @@ func (b *Bridge) flushPendingEvents(ctx context.Context) {
 	batch := make([]pendingEvent, len(b.pendingEvents))
 	copy(batch, b.pendingEvents)
 	b.pendingEvents = b.pendingEvents[:0]
+	for _, pe := range batch {
+		b.inFlightPending[pe.eventName]++
+	}
 	b.pendingMu.Unlock()
 
 	failedByType := map[string]bool{}
@@ -342,18 +357,62 @@ func (b *Bridge) flushPendingEvents(ctx context.Context) {
 		}
 	}
 
+	b.pendingMu.Lock()
 	if len(stillPending) > 0 {
-		b.pendingMu.Lock()
 		b.pendingEvents = append(stillPending, b.pendingEvents...)
 		if len(b.pendingEvents) > maxPendingEvents {
 			b.pendingEvents = b.pendingEvents[len(b.pendingEvents)-maxPendingEvents:]
 		}
-		b.pendingMu.Unlock()
 	}
+	for _, pe := range batch {
+		b.inFlightPending[pe.eventName]--
+		if b.inFlightPending[pe.eventName] <= 0 {
+			delete(b.inFlightPending, pe.eventName)
+		}
+	}
+	b.pendingMu.Unlock()
+
 	for evName, cur := range lastGoodCursor {
 		if !failedByType[evName] && !b.hasPendingFor(evName) {
 			b.saveCursor(evName, cur)
 		}
+	}
+}
+
+func (b *Bridge) enqueuePendingRecheck(threadID, prevRunID string) {
+	if threadID == "" {
+		return
+	}
+	b.pendingMu.Lock()
+	defer b.pendingMu.Unlock()
+	for _, r := range b.pendingRechecks {
+		if r.threadID == threadID && r.prevRunID == prevRunID {
+			return
+		}
+	}
+	if len(b.pendingRechecks) >= maxPendingEvents {
+		b.pendingRechecks = b.pendingRechecks[1:]
+	}
+	b.pendingRechecks = append(b.pendingRechecks, pendingRecheck{threadID: threadID, prevRunID: prevRunID})
+}
+
+func (b *Bridge) flushPendingRechecks(ctx context.Context) {
+	b.pendingMu.Lock()
+	if len(b.pendingRechecks) == 0 {
+		b.pendingMu.Unlock()
+		return
+	}
+	batch := make([]pendingRecheck, len(b.pendingRechecks))
+	copy(batch, b.pendingRechecks)
+	b.pendingRechecks = b.pendingRechecks[:0]
+	b.pendingMu.Unlock()
+
+	for _, r := range batch {
+		if ctx.Err() != nil {
+			b.enqueuePendingRecheck(r.threadID, r.prevRunID)
+			continue
+		}
+		b.recheckThread(ctx, r.threadID, r.prevRunID)
 	}
 }
 
@@ -573,19 +632,24 @@ func (b *Bridge) handleSendDirective(ctx context.Context, req envelope.Request, 
 		_, _ = b.cfg.Relay.Reply(ctx, req.ID, "No message body provided after thread directive.", envelope.StatusFailed)
 		return
 	}
-	// Capture the prior run id (best-effort) and register the ask BEFORE
-	// sending so an early thread event cannot race ahead of state persistence.
+	// Capture the prior run id (best-effort) and register the ask with
+	// Sending=true + IgnoreRunID BEFORE calling SendThreadMessage so:
+	// (a) an in-flight previous run settling cannot answer this new ask, and
+	// (b) once SendThreadMessage succeeds and Sending clears, recheckThread
+	// catches any fast new run that settled before Sending cleared.
 	prevTR, _ := b.cfg.T3.ReadThread(ctx, dir.ThreadID, 1)
 	prevRunID := latestRunID(prevTR)
 	now := b.cfg.Now().UTC()
 	if err := b.cfg.State.Update(func(d *StateData) error {
 		d.Asks[req.ID] = DispatchedAsk{
-			RequestID: req.ID,
-			From:      req.From,
-			ThreadID:  dir.ThreadID,
-			Link:      prevTR.Thread.Link,
-			CreatedAt: now,
-			UpdatedAt: now,
+			RequestID:   req.ID,
+			From:        req.From,
+			ThreadID:    dir.ThreadID,
+			Link:        prevTR.Thread.Link,
+			IgnoreRunID: prevRunID,
+			Sending:     true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
 		return nil
 	}); err != nil {
@@ -601,6 +665,14 @@ func (b *Bridge) handleSendDirective(ctx context.Context, req envelope.Request, 
 		_, _ = b.cfg.Relay.Reply(ctx, req.ID, fmt.Sprintf("Failed to send message to T3 thread %s: %v", dir.ThreadID, err), envelope.StatusFailed)
 		return
 	}
+	_ = b.cfg.State.Update(func(d *StateData) error {
+		if a, ok := d.Asks[req.ID]; ok {
+			a.Sending = false
+			a.UpdatedAt = b.cfg.Now().UTC()
+			d.Asks[req.ID] = a
+		}
+		return nil
+	})
 	link := threadDisplay(dir.ThreadID, prevTR.Thread.Link)
 	_ = b.cfg.Relay.Progress(ctx, req.ID, fmt.Sprintf("Sent message to T3 thread %s.", link))
 	b.recheckThread(ctx, dir.ThreadID, prevRunID)
@@ -704,17 +776,23 @@ func (b *Bridge) recheckThread(ctx context.Context, threadID, prevRunID string) 
 
 	tr, err := b.cfg.T3.ReadThread(ctx, threadID, 10)
 	if err != nil {
+		if !isThreadGoneError(err) {
+			b.enqueuePendingRecheck(threadID, prevRunID)
+		}
 		return
 	}
 	snap, err := b.cfg.State.Snapshot()
 	if err != nil {
+		b.enqueuePendingRecheck(threadID, prevRunID)
 		return
 	}
 	if tr.Thread.PendingRequestCount > 0 {
-		b.onThreadNeedsInputLocked(ctx, snap, MilestoneData{
+		if !b.onThreadNeedsInputLocked(ctx, snap, MilestoneData{
 			Type:     "thread.needs_input",
 			ThreadID: threadID,
-		}, "")
+		}, "") {
+			b.enqueuePendingRecheck(threadID, prevRunID)
+		}
 		return
 	}
 	if tr.IsRunning() {
@@ -731,11 +809,14 @@ func (b *Bridge) recheckThread(ctx context.Context, threadID, prevRunID string) 
 			return
 		}
 	}
-	b.onThreadSettledLocked(ctx, snap, MilestoneData{
+	if !b.onThreadSettledLocked(ctx, snap, MilestoneData{
 		Type:     "thread.run_settled",
 		ThreadID: threadID,
+		RunID:    curRunID,
 		Outcome:  settledOutcome(tr),
-	}, "")
+	}, "") {
+		b.enqueuePendingRecheck(threadID, prevRunID)
+	}
 }
 
 func (b *Bridge) handleMilestoneEvent(ctx context.Context, eventName string, ev EventOccurrence) bool {
@@ -785,9 +866,13 @@ func (b *Bridge) handleMilestoneEvent(ctx context.Context, eventName string, ev 
 func (b *Bridge) onThreadSettledLocked(ctx context.Context, snap StateData, m MilestoneData, eventID string) bool {
 	var matchingAsks []DispatchedAsk
 	for _, a := range snap.Asks {
-		if !a.Done && a.ThreadID == m.ThreadID {
-			matchingAsks = append(matchingAsks, a)
+		if a.Done || a.Sending || a.ThreadID != m.ThreadID {
+			continue
 		}
+		if a.IgnoreRunID != "" && m.RunID != "" && m.RunID == a.IgnoreRunID {
+			continue
+		}
+		matchingAsks = append(matchingAsks, a)
 	}
 	watches := snap.Watches[m.ThreadID]
 	if len(matchingAsks) == 0 && len(watches) == 0 {
@@ -841,7 +926,11 @@ func (b *Bridge) onThreadSettledLocked(ctx context.Context, snap StateData, m Mi
 	}
 
 	allOK := true
+	curRunID := latestRunID(tr)
 	for _, ask := range matchingAsks {
+		if ask.IgnoreRunID != "" && curRunID != "" && curRunID == ask.IgnoreRunID {
+			continue
+		}
 		body := formatSettledSummary(tr, m.Outcome, "")
 		if body == "" {
 			body = fmt.Sprintf("T3 thread %s finished (%s).", threadDisplay(m.ThreadID, ask.Link), m.Outcome)
@@ -918,7 +1007,7 @@ func (b *Bridge) removeWatchesByKey(threadID string, consumed map[string]struct{
 func (b *Bridge) onThreadNeedsInputLocked(ctx context.Context, snap StateData, m MilestoneData, eventID string) bool {
 	var matchingAsks []DispatchedAsk
 	for _, a := range snap.Asks {
-		if !a.Done && a.ThreadID == m.ThreadID {
+		if !a.Done && !a.Sending && a.ThreadID == m.ThreadID {
 			matchingAsks = append(matchingAsks, a)
 		}
 	}
