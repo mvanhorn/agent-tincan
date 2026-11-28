@@ -9,6 +9,7 @@ import (
 	"log"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +22,14 @@ const (
 	// BridgeSession is the X-Tincan-Session used by tincan t3 serve.
 	BridgeSession = "t3-serve"
 
-	defaultPollHold       = 25 * time.Second
-	defaultLateReplyGrace = 5 * time.Second
-	maxReplyBodyChars     = 16000
-	maxSeenEventIDs       = 2048
+	defaultPollHold          = 25 * time.Second
+	defaultLateReplyGrace    = 5 * time.Second
+	defaultRetryInterval     = 3 * time.Second
+	defaultUnmatchedReplyTTL = 30 * time.Second
+	maxReplyBodyChars        = 16000
+	maxSeenEventIDs          = 2048
+	maxPendingEvents         = 256
+	unmatchedAckThreshold    = 3
 )
 
 // WatchedMilestoneEvents are the four T3 Code SEP-3415 event types the bridge streams.
@@ -49,24 +54,36 @@ type RelayClient interface {
 
 // Config configures a Bridge instance.
 type Config struct {
-	Relay          RelayClient
-	T3             *MCPClient
-	State          *StateStore
-	Routes         *RouteStore
-	DefaultProject string
-	Logger         *log.Logger
-	PollHold       time.Duration
-	LateReplyGrace time.Duration
-	HeartbeatMs    int
-	Now            func() time.Time
+	Relay             RelayClient
+	T3                *MCPClient
+	State             *StateStore
+	Routes            *RouteStore
+	DefaultProject    string
+	Logger            *log.Logger
+	PollHold          time.Duration
+	LateReplyGrace    time.Duration
+	RetryInterval     time.Duration
+	UnmatchedReplyTTL time.Duration
+	HeartbeatMs       int
+	Now               func() time.Time
+}
+
+type pendingEvent struct {
+	eventName string
+	ev        EventOccurrence
 }
 
 // Bridge connects the Agent Tincan relay to T3 Code's /mcp server and SEP-3415 event streams.
 type Bridge struct {
-	cfg      Config
-	seenMu   sync.Mutex
-	seenIDs  map[string]struct{}
-	seenList []string
+	cfg           Config
+	handleMu      sync.Mutex
+	seenMu        sync.Mutex
+	seenIDs       map[string]struct{}
+	seenList      []string
+	pendingMu     sync.Mutex
+	pendingEvents []pendingEvent
+	unmatchedMu   sync.Mutex
+	unmatchedSeen map[string]int
 }
 
 // NewBridge creates a Bridge from cfg.
@@ -92,6 +109,12 @@ func NewBridge(cfg Config) (*Bridge, error) {
 	if cfg.LateReplyGrace < 0 {
 		cfg.LateReplyGrace = 0
 	}
+	if cfg.RetryInterval <= 0 {
+		cfg.RetryInterval = defaultRetryInterval
+	}
+	if cfg.UnmatchedReplyTTL <= 0 {
+		cfg.UnmatchedReplyTTL = max(cfg.LateReplyGrace*2, defaultUnmatchedReplyTTL)
+	}
 	if cfg.HeartbeatMs <= 0 {
 		cfg.HeartbeatMs = defaultHeartbeatMs
 	}
@@ -99,28 +122,43 @@ func NewBridge(cfg Config) (*Bridge, error) {
 		cfg.Now = time.Now
 	}
 	return &Bridge{
-		cfg:     cfg,
-		seenIDs: map[string]struct{}{},
+		cfg:           cfg,
+		seenIDs:       map[string]struct{}{},
+		unmatchedSeen: map[string]int{},
 	}, nil
 }
 
-// Run starts the relay poller and the 4 SEP-3415 event stream workers, blocking
-// until ctx is canceled.
+// Run starts the relay poller, retry loop, and the 4 SEP-3415 event stream
+// workers, blocking until ctx is canceled.
 func (b *Bridge) Run(ctx context.Context) error {
 	b.cfg.Relay.SetSession(BridgeSession)
 
 	var wg sync.WaitGroup
+	wg.Go(func() {
+		b.runRetryLoop(ctx)
+	})
 	for _, evName := range WatchedMilestoneEvents {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			b.runEventStream(ctx, name)
-		}(evName)
+		wg.Go(func() {
+			b.runEventStream(ctx, evName)
+		})
 	}
 
 	b.runRelayLoop(ctx)
 	wg.Wait()
 	return ctx.Err()
+}
+
+func (b *Bridge) runRetryLoop(ctx context.Context) {
+	ticker := time.NewTicker(b.cfg.RetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.flushPendingEvents(ctx)
+		}
+	}
 }
 
 func (b *Bridge) runRelayLoop(ctx context.Context) {
@@ -143,8 +181,16 @@ func (b *Bridge) runRelayLoop(ctx context.Context) {
 		for _, req := range inbox.Requests {
 			b.handleInboundRequest(ctx, req)
 		}
+		deferred := 0
 		if len(inbox.Replies) > 0 {
-			b.handleUnseenReplies(ctx, inbox.Replies)
+			deferred = b.handleUnseenReplies(ctx, inbox.Replies)
+		}
+		if len(inbox.Requests) == 0 && deferred > 0 {
+			pause := 200 * time.Millisecond
+			if b.cfg.LateReplyGrace > 0 {
+				pause = min(max(b.cfg.LateReplyGrace/2, 200*time.Millisecond), 2*time.Second)
+			}
+			sleepCtx(ctx, pause)
 		}
 	}
 }
@@ -164,18 +210,21 @@ func (b *Bridge) runEventStream(ctx context.Context, eventName string) {
 				if truncated {
 					needPoll = true
 				}
-				if c != "" {
+				if c != "" && !b.hasPendingFor(eventName) {
 					b.saveCursor(eventName, c)
 				}
 			},
 			OnEvent: func(ev EventOccurrence) {
-				if ev.Cursor != "" {
-					b.saveCursor(eventName, ev.Cursor)
+				if b.handleMilestoneEvent(ctx, eventName, ev) {
+					if ev.Cursor != "" && !b.hasPendingFor(eventName) {
+						b.saveCursor(eventName, ev.Cursor)
+					}
+				} else {
+					b.enqueuePendingEvent(eventName, ev)
 				}
-				b.handleMilestoneEvent(ctx, eventName, ev)
 			},
 			OnHeartbeat: func(c string) {
-				if c != "" {
+				if c != "" && !b.hasPendingFor(eventName) {
 					b.saveCursor(eventName, c)
 				}
 			},
@@ -210,15 +259,100 @@ func (b *Bridge) pollCatchUp(ctx context.Context, eventName string) {
 			b.cfg.Logger.Printf("t3 bridge: poll catch-up (%s) failed: %v", eventName, err)
 			return
 		}
+		allHandled := true
+		lastHandledCursor := ""
 		for _, ev := range res.Events {
-			b.handleMilestoneEvent(ctx, eventName, ev)
+			if b.handleMilestoneEvent(ctx, eventName, ev) {
+				if allHandled && ev.Cursor != "" {
+					lastHandledCursor = ev.Cursor
+				}
+			} else {
+				allHandled = false
+				b.enqueuePendingEvent(eventName, ev)
+			}
 		}
-		if res.Cursor != "" {
+		if allHandled && res.Cursor != "" && !b.hasPendingFor(eventName) {
 			cursor = res.Cursor
 			b.saveCursor(eventName, cursor)
+		} else if lastHandledCursor != "" && !b.hasPendingFor(eventName) {
+			cursor = lastHandledCursor
+			b.saveCursor(eventName, cursor)
 		}
-		if !res.HasMore {
+		if !allHandled || !res.HasMore {
 			return
+		}
+	}
+}
+
+func (b *Bridge) enqueuePendingEvent(eventName string, ev EventOccurrence) {
+	b.pendingMu.Lock()
+	defer b.pendingMu.Unlock()
+	if ev.EventID != "" {
+		for _, existing := range b.pendingEvents {
+			if existing.eventName == eventName && existing.ev.EventID == ev.EventID {
+				return
+			}
+		}
+	}
+	if len(b.pendingEvents) >= maxPendingEvents {
+		b.pendingEvents = b.pendingEvents[1:]
+	}
+	b.pendingEvents = append(b.pendingEvents, pendingEvent{eventName: eventName, ev: ev})
+}
+
+func (b *Bridge) hasPendingFor(eventName string) bool {
+	b.pendingMu.Lock()
+	defer b.pendingMu.Unlock()
+	for _, pe := range b.pendingEvents {
+		if pe.eventName == eventName {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bridge) flushPendingEvents(ctx context.Context) {
+	b.pendingMu.Lock()
+	if len(b.pendingEvents) == 0 {
+		b.pendingMu.Unlock()
+		return
+	}
+	batch := make([]pendingEvent, len(b.pendingEvents))
+	copy(batch, b.pendingEvents)
+	b.pendingEvents = b.pendingEvents[:0]
+	b.pendingMu.Unlock()
+
+	failedByType := map[string]bool{}
+	var stillPending []pendingEvent
+	lastGoodCursor := map[string]string{}
+
+	for _, pe := range batch {
+		if ctx.Err() != nil {
+			stillPending = append(stillPending, pe)
+			failedByType[pe.eventName] = true
+			continue
+		}
+		if b.handleMilestoneEvent(ctx, pe.eventName, pe.ev) {
+			if !failedByType[pe.eventName] && pe.ev.Cursor != "" {
+				lastGoodCursor[pe.eventName] = pe.ev.Cursor
+			}
+		} else {
+			stillPending = append(stillPending, pe)
+			failedByType[pe.eventName] = true
+		}
+	}
+
+	if len(stillPending) > 0 {
+		b.pendingMu.Lock()
+		b.pendingEvents = append(stillPending, b.pendingEvents...)
+		if len(b.pendingEvents) > maxPendingEvents {
+			b.pendingEvents = b.pendingEvents[len(b.pendingEvents)-maxPendingEvents:]
+		}
+		b.pendingMu.Unlock()
+	}
+	for evName, cur := range lastGoodCursor {
+		if !failedByType[evName] && !b.hasPendingFor(evName) {
+			b.saveCursor(evName, cur)
 		}
 	}
 }
@@ -238,14 +372,24 @@ func (b *Bridge) saveCursor(eventName, cursor string) {
 	})
 }
 
-func (b *Bridge) markEventSeen(eventID string) bool {
+func (b *Bridge) isEventSeen(eventID string) bool {
 	if eventID == "" {
-		return true
+		return false
+	}
+	b.seenMu.Lock()
+	defer b.seenMu.Unlock()
+	_, ok := b.seenIDs[eventID]
+	return ok
+}
+
+func (b *Bridge) recordEventSeen(eventID string) {
+	if eventID == "" {
+		return
 	}
 	b.seenMu.Lock()
 	defer b.seenMu.Unlock()
 	if _, ok := b.seenIDs[eventID]; ok {
-		return false
+		return
 	}
 	b.seenIDs[eventID] = struct{}{}
 	b.seenList = append(b.seenList, eventID)
@@ -254,7 +398,6 @@ func (b *Bridge) markEventSeen(eventID string) bool {
 		b.seenList = b.seenList[1:]
 		delete(b.seenIDs, oldest)
 	}
-	return true
 }
 
 func (b *Bridge) handleInboundRequest(ctx context.Context, req envelope.Request) {
@@ -367,6 +510,7 @@ func (b *Bridge) handleWatchDirective(ctx context.Context, req envelope.Request,
 		return
 	}
 	watch := ThreadWatch{
+		ID:          "ask-" + req.ID,
 		ThreadID:    dir.ThreadID,
 		NotifyAgent: req.From,
 		RequestID:   req.ID,
@@ -383,6 +527,9 @@ func (b *Bridge) handleWatchDirective(ctx context.Context, req envelope.Request,
 		return
 	}
 	_ = b.cfg.Relay.Progress(ctx, req.ID, fmt.Sprintf("Watching T3 thread %s (%s). Will notify on settle, input, or PR watch.", link, tr.Thread.Title))
+	// Recheck after saving so a thread that settled between the initial read
+	// and saving the watch cannot be stranded.
+	b.recheckThread(ctx, dir.ThreadID, "")
 }
 
 func (b *Bridge) handleUnwatchDirective(ctx context.Context, req envelope.Request, dir Directive) {
@@ -426,26 +573,37 @@ func (b *Bridge) handleSendDirective(ctx context.Context, req envelope.Request, 
 		_, _ = b.cfg.Relay.Reply(ctx, req.ID, "No message body provided after thread directive.", envelope.StatusFailed)
 		return
 	}
-	clientReqID := "tincan-send-" + req.ID
-	if err := b.cfg.T3.SendThreadMessage(ctx, dir.ThreadID, dir.Message, clientReqID); err != nil {
-		_, _ = b.cfg.Relay.Reply(ctx, req.ID, fmt.Sprintf("Failed to send message to T3 thread %s: %v", dir.ThreadID, err), envelope.StatusFailed)
-		return
-	}
-	tr, _ := b.cfg.T3.ReadThread(ctx, dir.ThreadID, 1)
-	link := threadDisplay(dir.ThreadID, tr.Thread.Link)
+	// Capture the prior run id (best-effort) and register the ask BEFORE
+	// sending so an early thread event cannot race ahead of state persistence.
+	prevTR, _ := b.cfg.T3.ReadThread(ctx, dir.ThreadID, 1)
+	prevRunID := latestRunID(prevTR)
 	now := b.cfg.Now().UTC()
-	_ = b.cfg.State.Update(func(d *StateData) error {
+	if err := b.cfg.State.Update(func(d *StateData) error {
 		d.Asks[req.ID] = DispatchedAsk{
 			RequestID: req.ID,
 			From:      req.From,
 			ThreadID:  dir.ThreadID,
-			Link:      tr.Thread.Link,
+			Link:      prevTR.Thread.Link,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 		return nil
-	})
+	}); err != nil {
+		_, _ = b.cfg.Relay.Reply(ctx, req.ID, fmt.Sprintf("Failed to record ask state for T3 thread %s: %v", dir.ThreadID, err), envelope.StatusFailed)
+		return
+	}
+	clientReqID := "tincan-send-" + req.ID
+	if err := b.cfg.T3.SendThreadMessage(ctx, dir.ThreadID, dir.Message, clientReqID); err != nil {
+		_ = b.cfg.State.Update(func(d *StateData) error {
+			delete(d.Asks, req.ID)
+			return nil
+		})
+		_, _ = b.cfg.Relay.Reply(ctx, req.ID, fmt.Sprintf("Failed to send message to T3 thread %s: %v", dir.ThreadID, err), envelope.StatusFailed)
+		return
+	}
+	link := threadDisplay(dir.ThreadID, prevTR.Thread.Link)
 	_ = b.cfg.Relay.Progress(ctx, req.ID, fmt.Sprintf("Sent message to T3 thread %s.", link))
+	b.recheckThread(ctx, dir.ThreadID, prevRunID)
 }
 
 func (b *Bridge) handleLaunchDirective(ctx context.Context, req envelope.Request, dir Directive) {
@@ -531,41 +689,100 @@ func (b *Bridge) handleLaunchDirective(ctx context.Context, req envelope.Request
 		return nil
 	})
 	_ = b.cfg.Relay.Progress(ctx, req.ID, fmt.Sprintf("Started T3 thread: %s", threadDisplay(threadID, link)))
+	// Recheck after saving so an early settle/needs_input event that fired
+	// before LaunchThread returned cannot strand the request.
+	b.recheckThread(ctx, threadID, "")
 }
 
-func (b *Bridge) handleMilestoneEvent(ctx context.Context, eventName string, ev EventOccurrence) {
-	if !b.markEventSeen(ev.EventID) {
-		return
-	}
-	m, err := ev.ParseMilestone()
+// recheckThread inspects threadID right after saving an ask or watch to catch
+// fast runs or input prompts that occurred before state persistence completed.
+// When prevRunID is non-empty (send to an existing thread), a settled state is
+// only acted on if a newer run completed after prevRunID.
+func (b *Bridge) recheckThread(ctx context.Context, threadID, prevRunID string) {
+	b.handleMu.Lock()
+	defer b.handleMu.Unlock()
+
+	tr, err := b.cfg.T3.ReadThread(ctx, threadID, 10)
 	if err != nil {
-		b.cfg.Logger.Printf("t3 bridge: %v", err)
-		return
-	}
-	if m.Type == "" {
-		m.Type = eventName
-	}
-	if m.ThreadID == "" {
 		return
 	}
 	snap, err := b.cfg.State.Snapshot()
 	if err != nil {
 		return
 	}
-
-	switch m.Type {
-	case "thread.run_settled":
-		b.onThreadSettled(ctx, snap, m)
-	case "thread.needs_input":
-		b.onThreadNeedsInput(ctx, snap, m)
-	case "thread.input_resolved":
-		b.onThreadInputResolved(ctx, snap, m)
-	case "pr.watch_wake":
-		b.onPRWatchWake(ctx, snap, m)
+	if tr.Thread.PendingRequestCount > 0 {
+		b.onThreadNeedsInputLocked(ctx, snap, MilestoneData{
+			Type:     "thread.needs_input",
+			ThreadID: threadID,
+		}, "")
+		return
 	}
+	if tr.IsRunning() {
+		return
+	}
+	curRunID := latestRunID(tr)
+	if prevRunID != "" {
+		if curRunID == "" || curRunID == prevRunID {
+			return
+		}
+	} else {
+		hasWatch := len(snap.Watches[threadID]) > 0
+		if !hasWatch && len(tr.RecentRuns) == 0 && tr.LatestAssistantText() == "" {
+			return
+		}
+	}
+	b.onThreadSettledLocked(ctx, snap, MilestoneData{
+		Type:     "thread.run_settled",
+		ThreadID: threadID,
+		Outcome:  settledOutcome(tr),
+	}, "")
 }
 
-func (b *Bridge) onThreadSettled(ctx context.Context, snap StateData, m MilestoneData) {
+func (b *Bridge) handleMilestoneEvent(ctx context.Context, eventName string, ev EventOccurrence) bool {
+	if b.isEventSeen(ev.EventID) {
+		return true
+	}
+	m, err := ev.ParseMilestone()
+	if err != nil {
+		b.cfg.Logger.Printf("t3 bridge: %v", err)
+		b.recordEventSeen(ev.EventID)
+		return true
+	}
+	if m.Type == "" {
+		m.Type = eventName
+	}
+	if m.ThreadID == "" {
+		b.recordEventSeen(ev.EventID)
+		return true
+	}
+
+	b.handleMu.Lock()
+	defer b.handleMu.Unlock()
+
+	snap, err := b.cfg.State.Snapshot()
+	if err != nil {
+		b.cfg.Logger.Printf("t3 bridge: read state for event %s failed: %v", ev.EventID, err)
+		return false
+	}
+
+	handled := true
+	switch m.Type {
+	case "thread.run_settled":
+		handled = b.onThreadSettledLocked(ctx, snap, m, ev.EventID)
+	case "thread.needs_input":
+		handled = b.onThreadNeedsInputLocked(ctx, snap, m, ev.EventID)
+	case "thread.input_resolved":
+		b.onThreadInputResolvedLocked(ctx, snap, m)
+	case "pr.watch_wake":
+		handled = b.onPRWatchWakeLocked(ctx, snap, m, ev.EventID)
+	}
+	if handled {
+		b.recordEventSeen(ev.EventID)
+	}
+	return handled
+}
+
+func (b *Bridge) onThreadSettledLocked(ctx context.Context, snap StateData, m MilestoneData, eventID string) bool {
 	var matchingAsks []DispatchedAsk
 	for _, a := range snap.Asks {
 		if !a.Done && a.ThreadID == m.ThreadID {
@@ -574,64 +791,131 @@ func (b *Bridge) onThreadSettled(ctx context.Context, snap StateData, m Mileston
 	}
 	watches := snap.Watches[m.ThreadID]
 	if len(matchingAsks) == 0 && len(watches) == 0 {
-		return
+		return true
 	}
 
 	tr, err := b.cfg.T3.ReadThread(ctx, m.ThreadID, 10)
 	if err != nil {
-		b.cfg.Logger.Printf("t3 bridge: read settled thread %s failed: %v", m.ThreadID, err)
+		if !isThreadGoneError(err) {
+			b.cfg.Logger.Printf("t3 bridge: read settled thread %s failed (will retry): %v", m.ThreadID, err)
+			return false
+		}
+		// Thread was deleted; report failure instead of retrying forever.
+		goneMsg := fmt.Sprintf("T3 thread %s no longer exists: %v", m.ThreadID, err)
+		allOK := true
+		for _, ask := range matchingAsks {
+			if _, rErr := b.cfg.Relay.Reply(ctx, ask.RequestID, goneMsg, envelope.StatusFailed); rErr != nil {
+				b.cfg.Logger.Printf("t3 bridge: reply gone thread for ask %s failed: %v", ask.RequestID, rErr)
+				allOK = false
+				continue
+			}
+			b.markAskDone(ask.RequestID)
+		}
+		consumed := map[string]struct{}{}
+		for _, w := range watches {
+			if !watchWantsEvent(w, "thread.run_settled") {
+				continue
+			}
+			if w.OneShot && w.RequestID != "" {
+				if _, rErr := b.cfg.Relay.Reply(ctx, w.RequestID, goneMsg, envelope.StatusFailed); rErr != nil {
+					allOK = false
+					continue
+				}
+				consumed[w.Key()] = struct{}{}
+				continue
+			}
+			if sent, sErr := b.cfg.Relay.Send(ctx, w.NotifyAgent, goneMsg, envelope.KindAsk, "", false); sErr != nil {
+				allOK = false
+			} else {
+				_ = b.cfg.Routes.RecordNotice(sent.ID, w.NotifyAgent)
+				consumed[w.Key()] = struct{}{}
+			}
+		}
+		b.removeWatchesByKey(m.ThreadID, consumed)
+		return allOK
 	}
+
 	status := envelope.StatusAnswered
 	if m.Outcome != "" && m.Outcome != "completed" {
 		status = envelope.StatusFailed
 	}
 
+	allOK := true
 	for _, ask := range matchingAsks {
 		body := formatSettledSummary(tr, m.Outcome, "")
 		if body == "" {
 			body = fmt.Sprintf("T3 thread %s finished (%s).", threadDisplay(m.ThreadID, ask.Link), m.Outcome)
 		}
 		if _, err := b.cfg.Relay.Reply(ctx, ask.RequestID, body, status); err != nil {
-			b.cfg.Logger.Printf("t3 bridge: reply to ask %s failed: %v", ask.RequestID, err)
+			b.cfg.Logger.Printf("t3 bridge: reply to ask %s failed (will retry): %v", ask.RequestID, err)
+			allOK = false
 			continue
 		}
 		b.markAskDone(ask.RequestID)
 	}
 
-	var remaining []ThreadWatch
+	consumed := map[string]struct{}{}
 	for _, w := range watches {
 		if !watchWantsEvent(w, "thread.run_settled") {
-			remaining = append(remaining, w)
 			continue
 		}
 		body := formatSettledSummary(tr, m.Outcome, w.Note)
 		if w.OneShot && w.RequestID != "" {
 			if _, err := b.cfg.Relay.Reply(ctx, w.RequestID, body, status); err != nil {
-				b.cfg.Logger.Printf("t3 bridge: reply to watch ask %s failed: %v", w.RequestID, err)
-				remaining = append(remaining, w)
+				b.cfg.Logger.Printf("t3 bridge: reply to watch ask %s failed (will retry): %v", w.RequestID, err)
+				allOK = false
+				continue
 			}
+			consumed[w.Key()] = struct{}{}
 			continue
 		}
-		if _, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, body, envelope.KindAsk, "", false); err != nil {
-			b.cfg.Logger.Printf("t3 bridge: notify %s for settled thread %s failed: %v", w.NotifyAgent, m.ThreadID, err)
+		notifyKey := ""
+		if eventID != "" {
+			notifyKey = "watch-settled:" + w.Key() + ":" + eventID
 		}
-		if !w.OneShot {
-			remaining = append(remaining, w)
-		}
-	}
-	if len(watches) > 0 {
-		_ = b.cfg.State.Update(func(d *StateData) error {
-			if len(remaining) == 0 {
-				delete(d.Watches, m.ThreadID)
-			} else {
-				d.Watches[m.ThreadID] = remaining
+		if notifyKey == "" || !b.isEventSeen(notifyKey) {
+			sent, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, body, envelope.KindAsk, "", false)
+			if err != nil {
+				b.cfg.Logger.Printf("t3 bridge: notify %s for settled thread %s failed (will retry): %v", w.NotifyAgent, m.ThreadID, err)
+				allOK = false
+				continue
 			}
-			return nil
-		})
+			_ = b.cfg.Routes.RecordNotice(sent.ID, w.NotifyAgent)
+			if notifyKey != "" {
+				b.recordEventSeen(notifyKey)
+			}
+		}
+		if w.OneShot {
+			consumed[w.Key()] = struct{}{}
+		}
 	}
+	b.removeWatchesByKey(m.ThreadID, consumed)
+	return allOK
 }
 
-func (b *Bridge) onThreadNeedsInput(ctx context.Context, snap StateData, m MilestoneData) {
+func (b *Bridge) removeWatchesByKey(threadID string, consumed map[string]struct{}) {
+	if len(consumed) == 0 {
+		return
+	}
+	_ = b.cfg.State.Update(func(d *StateData) error {
+		cur := d.Watches[threadID]
+		var kept []ThreadWatch
+		for _, w := range cur {
+			if _, drop := consumed[w.Key()]; drop {
+				continue
+			}
+			kept = append(kept, w)
+		}
+		if len(kept) == 0 {
+			delete(d.Watches, threadID)
+		} else {
+			d.Watches[threadID] = kept
+		}
+		return nil
+	})
+}
+
+func (b *Bridge) onThreadNeedsInputLocked(ctx context.Context, snap StateData, m MilestoneData, eventID string) bool {
 	var matchingAsks []DispatchedAsk
 	for _, a := range snap.Asks {
 		if !a.Done && a.ThreadID == m.ThreadID {
@@ -640,11 +924,15 @@ func (b *Bridge) onThreadNeedsInput(ctx context.Context, snap StateData, m Miles
 	}
 	watches := snap.Watches[m.ThreadID]
 	if len(matchingAsks) == 0 && len(watches) == 0 {
-		return
+		return true
 	}
 
 	// R5 & R6: T3 omits permission/approval prompts from t3_pending_request(list).
 	pendingIDs, err := b.cfg.T3.ListPendingQuestions(ctx, m.ThreadID)
+	if err != nil && !isThreadGoneError(err) {
+		b.cfg.Logger.Printf("t3 bridge: list pending requests for %s failed (will retry): %v", m.ThreadID, err)
+		return false
+	}
 	isUserQuestion := err == nil && m.RequestID != "" && slices.Contains(pendingIDs, m.RequestID)
 	if !isUserQuestion && err == nil && m.RequestID == "" && len(pendingIDs) > 0 {
 		m.RequestID = pendingIDs[0]
@@ -661,12 +949,17 @@ func (b *Bridge) onThreadNeedsInput(ctx context.Context, snap StateData, m Miles
 		}
 	}
 
+	allOK := true
 	for _, ask := range matchingAsks {
 		link := threadDisplay(m.ThreadID, ask.Link)
 		if isUserQuestion {
+			if ask.PendingRequestID == m.RequestID {
+				continue
+			}
 			body := fmt.Sprintf("T3 thread %s needs your answer:\n\n%s", link, questionBody)
 			if _, err := b.cfg.Relay.Reply(ctx, ask.RequestID, body, envelope.StatusNeedsInput); err != nil {
-				b.cfg.Logger.Printf("t3 bridge: post needs_input for %s failed: %v", ask.RequestID, err)
+				b.cfg.Logger.Printf("t3 bridge: post needs_input for %s failed (will retry): %v", ask.RequestID, err)
+				allOK = false
 				continue
 			}
 			_ = b.cfg.State.Update(func(d *StateData) error {
@@ -679,8 +972,15 @@ func (b *Bridge) onThreadNeedsInput(ctx context.Context, snap StateData, m Miles
 			})
 		} else {
 			// R6: Permission/approval prompt - NEVER approve over Tincan.
+			if ask.PermissionNoted {
+				continue
+			}
 			note := fmt.Sprintf("T3 thread %s is paused waiting for the owner to approve a permission prompt directly in T3 Code (permission prompts are never approved over Agent Tincan).", link)
-			_ = b.cfg.Relay.Progress(ctx, ask.RequestID, note)
+			if err := b.cfg.Relay.Progress(ctx, ask.RequestID, note); err != nil {
+				b.cfg.Logger.Printf("t3 bridge: post permission notice for %s failed (will retry): %v", ask.RequestID, err)
+				allOK = false
+				continue
+			}
 			_ = b.cfg.State.Update(func(d *StateData) error {
 				if a, ok := d.Asks[ask.RequestID]; ok {
 					a.PermissionNoted = true
@@ -696,19 +996,36 @@ func (b *Bridge) onThreadNeedsInput(ctx context.Context, snap StateData, m Miles
 		if !watchWantsEvent(w, "thread.needs_input") {
 			continue
 		}
+		notifyKey := ""
+		if eventID != "" {
+			notifyKey = "watch-input:" + w.Key() + ":" + eventID
+		} else if m.RequestID != "" {
+			notifyKey = "watch-input:" + w.Key() + ":" + m.RequestID
+		}
+		if notifyKey != "" && b.isEventSeen(notifyKey) {
+			continue
+		}
 		var notice string
 		if isUserQuestion {
 			notice = fmt.Sprintf("Watched T3 thread %s needs input (reply via `thread: %s`):\n\n%s", m.ThreadID, m.ThreadID, questionBody)
 		} else {
 			notice = fmt.Sprintf("Watched T3 thread %s is waiting for owner permission approval directly in T3 Code (cannot be approved over Agent Tincan).", m.ThreadID)
 		}
-		if _, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, notice, envelope.KindAsk, "", false); err != nil {
-			b.cfg.Logger.Printf("t3 bridge: notify %s for needs_input on %s failed: %v", w.NotifyAgent, m.ThreadID, err)
+		sent, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, notice, envelope.KindAsk, "", false)
+		if err != nil {
+			b.cfg.Logger.Printf("t3 bridge: notify %s for needs_input on %s failed (will retry): %v", w.NotifyAgent, m.ThreadID, err)
+			allOK = false
+			continue
+		}
+		_ = b.cfg.Routes.RecordNotice(sent.ID, w.NotifyAgent)
+		if notifyKey != "" {
+			b.recordEventSeen(notifyKey)
 		}
 	}
+	return allOK
 }
 
-func (b *Bridge) onThreadInputResolved(ctx context.Context, snap StateData, m MilestoneData) {
+func (b *Bridge) onThreadInputResolvedLocked(ctx context.Context, snap StateData, m MilestoneData) {
 	for _, ask := range snap.Asks {
 		if !ask.Done && ask.ThreadID == m.ThreadID && ask.PermissionNoted {
 			_ = b.cfg.Relay.Progress(ctx, ask.RequestID, fmt.Sprintf("T3 thread %s input resolved (%s); continuing.", threadDisplay(m.ThreadID, ask.Link), m.Resolution))
@@ -724,48 +1041,95 @@ func (b *Bridge) onThreadInputResolved(ctx context.Context, snap StateData, m Mi
 	}
 }
 
-func (b *Bridge) onPRWatchWake(ctx context.Context, snap StateData, m MilestoneData) {
+func (b *Bridge) onPRWatchWakeLocked(ctx context.Context, snap StateData, m MilestoneData, eventID string) bool {
 	watches := snap.Watches[m.ThreadID]
 	if len(watches) == 0 {
-		return
+		return true
 	}
-	tr, _ := b.cfg.T3.ReadThread(ctx, m.ThreadID, 3)
+	tr, err := b.cfg.T3.ReadThread(ctx, m.ThreadID, 3)
+	if err != nil && !isThreadGoneError(err) {
+		b.cfg.Logger.Printf("t3 bridge: read thread %s for pr.watch_wake failed (will retry): %v", m.ThreadID, err)
+		return false
+	}
 	link := threadDisplay(m.ThreadID, tr.Thread.Link)
+	allOK := true
 	for _, w := range watches {
 		if !watchWantsEvent(w, "pr.watch_wake") {
+			continue
+		}
+		notifyKey := ""
+		if eventID != "" {
+			notifyKey = "watch-pr:" + w.Key() + ":" + eventID
+		}
+		if notifyKey != "" && b.isEventSeen(notifyKey) {
 			continue
 		}
 		msg := fmt.Sprintf("PR watch woke T3 thread %s (%s).", link, tr.Thread.Title)
 		if m.Detail != "" {
 			msg += "\n" + m.Detail
 		}
-		if _, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, msg, envelope.KindAsk, "", false); err != nil {
-			b.cfg.Logger.Printf("t3 bridge: notify %s for pr.watch_wake on %s failed: %v", w.NotifyAgent, m.ThreadID, err)
+		sent, err := b.cfg.Relay.Send(ctx, w.NotifyAgent, msg, envelope.KindAsk, "", false)
+		if err != nil {
+			b.cfg.Logger.Printf("t3 bridge: notify %s for pr.watch_wake on %s failed (will retry): %v", w.NotifyAgent, m.ThreadID, err)
+			allOK = false
+			continue
+		}
+		_ = b.cfg.Routes.RecordNotice(sent.ID, w.NotifyAgent)
+		if notifyKey != "" {
+			b.recordEventSeen(notifyKey)
 		}
 	}
+	return allOK
 }
 
-func (b *Bridge) handleUnseenReplies(ctx context.Context, replies []client.Result) {
+func (b *Bridge) handleUnseenReplies(ctx context.Context, replies []client.Result) int {
 	now := b.cfg.Now()
+	deferred := 0
 	for _, res := range replies {
 		if res.Reply == nil {
-			continue
-		}
-		rt, ok, err := b.cfg.Routes.Lookup(res.Request.ID)
-		if err != nil || !ok || rt.ThreadID == "" {
-			continue
-		}
-		if rt.InlineDone {
-			_ = b.cfg.Relay.AckReplies(ctx, nil, envelope.ReplyAck{ID: res.Request.ID, Generation: res.Reply.Generation})
-			continue
-		}
-		// Short grace so synchronous inline ask waiters finish first without races.
-		if b.cfg.LateReplyGrace > 0 && !res.Reply.CreatedAt.IsZero() && now.Sub(res.Reply.CreatedAt) < b.cfg.LateReplyGrace {
 			continue
 		}
 		gen := res.Reply.Generation
 		if gen <= 0 {
 			gen = 1
+		}
+		unmatchedKey := res.Request.ID + ":" + strconv.FormatInt(gen, 10)
+
+		rt, ok, err := b.cfg.Routes.Lookup(res.Request.ID)
+		if err != nil {
+			b.cfg.Logger.Printf("t3 bridge: lookup route for reply %s failed: %v", res.Request.ID, err)
+			deferred++
+			continue
+		}
+		if !ok || rt.Notice || rt.InlineDone {
+			if ok && (rt.Notice || rt.InlineDone) {
+				_ = b.cfg.Relay.AckReplies(ctx, nil, envelope.ReplyAck{ID: res.Request.ID, Generation: res.Reply.Generation})
+				b.clearUnmatched(unmatchedKey)
+				continue
+			}
+			// No route found yet: allow a bounded retry window in case the
+			// outbound ask process is still flushing t3-routes.json, then ack so
+			// orphaned replies never jam the relay batch or spin Poll.
+			attempts := b.bumpUnmatched(unmatchedKey)
+			tooOld := res.Reply.CreatedAt.IsZero() || now.Sub(res.Reply.CreatedAt) >= b.cfg.UnmatchedReplyTTL
+			if attempts >= unmatchedAckThreshold && tooOld {
+				b.cfg.Logger.Printf("t3 bridge: acking unmatched reply %s (no T3 thread route after %d polls)", res.Request.ID, attempts)
+				_ = b.cfg.Relay.AckReplies(ctx, nil, envelope.ReplyAck{ID: res.Request.ID, Generation: res.Reply.Generation})
+				b.clearUnmatched(unmatchedKey)
+				continue
+			}
+			deferred++
+			continue
+		}
+		b.clearUnmatched(unmatchedKey)
+		if rt.ThreadID == "" {
+			_ = b.cfg.Relay.AckReplies(ctx, nil, envelope.ReplyAck{ID: res.Request.ID, Generation: res.Reply.Generation})
+			continue
+		}
+		// Short grace so synchronous inline ask waiters finish first without races.
+		if b.cfg.LateReplyGrace > 0 && !res.Reply.CreatedAt.IsZero() && now.Sub(res.Reply.CreatedAt) < b.cfg.LateReplyGrace {
+			deferred++
+			continue
 		}
 		if rt.DeliveredGen >= gen {
 			// Previously delivered to T3 before a crash; finish acking now without re-sending.
@@ -782,6 +1146,7 @@ func (b *Bridge) handleUnseenReplies(ctx context.Context, replies []client.Resul
 				continue
 			}
 			b.cfg.Logger.Printf("t3 bridge: deliver late reply %s to thread %s failed: %v", res.Request.ID, rt.ThreadID, err)
+			deferred++
 			continue
 		}
 		_ = b.cfg.Routes.MarkDelivered(res.Request.ID, gen)
@@ -789,6 +1154,40 @@ func (b *Bridge) handleUnseenReplies(ctx context.Context, replies []client.Resul
 			b.cfg.Logger.Printf("t3 bridge: ack reply %s failed (marked delivered so retry will not double-send): %v", res.Request.ID, err)
 		}
 	}
+	return deferred
+}
+
+func (b *Bridge) bumpUnmatched(key string) int {
+	b.unmatchedMu.Lock()
+	defer b.unmatchedMu.Unlock()
+	b.unmatchedSeen[key]++
+	return b.unmatchedSeen[key]
+}
+
+func (b *Bridge) clearUnmatched(key string) {
+	b.unmatchedMu.Lock()
+	defer b.unmatchedMu.Unlock()
+	delete(b.unmatchedSeen, key)
+}
+
+func latestRunID(tr ThreadReadResult) string {
+	if tr.Thread.ActiveRunID != "" {
+		return tr.Thread.ActiveRunID
+	}
+	if tr.Thread.LatestRunID != "" {
+		return tr.Thread.LatestRunID
+	}
+	if len(tr.RecentRuns) > 0 {
+		return tr.RecentRuns[0].RunID
+	}
+	return ""
+}
+
+func settledOutcome(tr ThreadReadResult) string {
+	if len(tr.RecentRuns) > 0 && strings.TrimSpace(tr.RecentRuns[0].Status) != "" {
+		return strings.TrimSpace(tr.RecentRuns[0].Status)
+	}
+	return "completed"
 }
 
 func (b *Bridge) markAskDone(reqID string) {

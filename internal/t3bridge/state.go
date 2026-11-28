@@ -46,6 +46,7 @@ type DispatchedAsk struct {
 
 // ThreadWatch tracks an opt-in watch on an existing interactive T3 thread.
 type ThreadWatch struct {
+	ID          string    `json:"id,omitempty"`
 	ThreadID    string    `json:"thread_id"`
 	NotifyAgent string    `json:"notify_agent"`
 	RequestID   string    `json:"request_id,omitempty"`
@@ -53,6 +54,18 @@ type ThreadWatch struct {
 	Note        string    `json:"note,omitempty"`
 	Events      []string  `json:"events,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Key returns a stable identity for w so state updates remove only handled
+// watches without overwriting concurrent watch/unwatch edits.
+func (w ThreadWatch) Key() string {
+	if w.ID != "" {
+		return "id:" + w.ID
+	}
+	if w.RequestID != "" {
+		return "req:" + w.RequestID
+	}
+	return w.ThreadID + "|" + w.NotifyAgent + "|" + w.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + w.Note
 }
 
 // StateData is the persisted JSON body of t3-state.json.
@@ -157,10 +170,11 @@ func (s *StateStore) prune(st *StateData) {
 // that originating T3 thread for late-reply delivery.
 type OutboundRoute struct {
 	RequestID    string    `json:"request_id"`
-	ThreadID     string    `json:"thread_id"`
+	ThreadID     string    `json:"thread_id,omitempty"`
 	ToAgent      string    `json:"to_agent,omitempty"`
 	DeliveredGen int64     `json:"delivered_gen,omitempty"`
 	InlineDone   bool      `json:"inline_done,omitempty"`
+	Notice       bool      `json:"notice,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -196,6 +210,25 @@ func (r *RouteStore) Record(requestID, threadID, toAgent string) error {
 			RequestID: requestID,
 			ThreadID:  threadID,
 			ToAgent:   toAgent,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	})
+}
+
+// RecordNotice records a bridge-originated notification ask (for example a watch
+// alert) whose replies should be acknowledged automatically without routing to a
+// T3 thread.
+func (r *RouteStore) RecordNotice(requestID, toAgent string) error {
+	if requestID == "" {
+		return nil
+	}
+	return r.Update(func(d *RouteData) {
+		now := r.now().UTC()
+		d.Routes[requestID] = OutboundRoute{
+			RequestID: requestID,
+			ToAgent:   toAgent,
+			Notice:    true,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}

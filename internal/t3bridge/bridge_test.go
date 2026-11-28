@@ -459,3 +459,144 @@ func TestBridgeLateReplyRoutingAndIdempotency(t *testing.T) {
 		t.Fatalf("unexpected send call: %+v", fake.sendCalls[0])
 	}
 }
+
+func TestBridgeRetriesFailedReadAndPreservesConcurrentWatches(t *testing.T) {
+	mesh := testrelay.New(t, relay.Config{})
+	t3Relay := mesh.JoinOnMachineOf(t, "muse", "t3")
+	grok := mesh.Client(t, "grokbot")
+
+	var failOnce sync.Mutex
+	shouldFailRead := true
+	fake := newFakeT3Server(t)
+	origSrv := fake.srv
+	// Wrap fake server so the first t3_thread_read for thr-retry returns an error,
+	// and subsequent reads succeed.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("MCP-Name") == "t3_thread_read" {
+			failOnce.Lock()
+			fail := shouldFailRead
+			shouldFailRead = false
+			failOnce.Unlock()
+			if fail {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      1,
+					"error":   map[string]any{"code": -32000, "message": "temporary T3 read error"},
+				})
+				return
+			}
+		}
+		origSrv.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+
+	fake.mu.Lock()
+	fake.threads["thr-retry"] = ThreadReadResult{
+		Thread: ThreadSummary{ThreadID: "thr-retry", Title: "Retry test", Status: "completed", Link: "https://app.t3.codes/threads/e/thr-retry"},
+		Items:  []ThreadItem{{Type: "assistant_message", Text: "Recovered answer after retry."}},
+	}
+	fake.mu.Unlock()
+
+	mcpCli, _ := NewMCPClient(proxy.URL, "tok", "0.34.0")
+	dir := t.TempDir()
+	state := NewStateStore(filepath.Join(dir, "t3-state.json"))
+	routes := NewRouteStore(filepath.Join(dir, "t3-routes.json"))
+	br, err := NewBridge(Config{
+		Relay:         t3Relay,
+		T3:            mcpCli,
+		State:         state,
+		Routes:        routes,
+		PollHold:      50 * time.Millisecond,
+		RetryInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add two watches: w1 (one-shot, notified via Send) and w2 (concurrently added, wants only pr.watch_wake).
+	sentAsk, err := grok.Send(context.Background(), "t3", "placeholder", envelope.KindAsk, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := t3Relay.Claim(context.Background(), sentAsk.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Update(func(d *StateData) error {
+		d.Asks[sentAsk.ID] = DispatchedAsk{
+			RequestID: sentAsk.ID,
+			From:      "grokbot",
+			ThreadID:  "thr-retry",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}
+		d.Watches["thr-retry"] = []ThreadWatch{
+			{ID: "w1", ThreadID: "thr-retry", NotifyAgent: "grokbot", OneShot: true, Events: []string{"thread.run_settled"}, CreatedAt: time.Now().UTC()},
+			{ID: "w2", ThreadID: "thr-retry", NotifyAgent: "grokbot", OneShot: false, Events: []string{"pr.watch_wake"}, CreatedAt: time.Now().UTC()},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := EventOccurrence{
+		EventID: "ev-retry-1",
+		Cursor:  "cur-retry-1",
+		Data:    json.RawMessage(`{"type":"thread.run_settled","threadId":"thr-retry","outcome":"completed"}`),
+	}
+	// First attempt fails ReadThread -> must NOT mark event seen, must NOT reply empty, must NOT drop watches.
+	if br.handleMilestoneEvent(context.Background(), "thread.run_settled", ev) {
+		t.Fatal("expected first attempt with transient ReadThread failure to return false")
+	}
+	if br.isEventSeen("ev-retry-1") {
+		t.Fatal("failed event must not be marked seen")
+	}
+	// Simulate concurrent watch addition between failure and retry.
+	if err := state.Update(func(d *StateData) error {
+		d.Watches["thr-retry"] = append(d.Watches["thr-retry"], ThreadWatch{
+			ID: "w3-concurrent", ThreadID: "thr-retry", NotifyAgent: "grokbot", OneShot: false, Events: []string{"pr.watch_wake"}, CreatedAt: time.Now().UTC(),
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retry succeeds: replies with real assistant text, removes only w1, preserves w2 and w3-concurrent,
+	// and records the watch notification in routes so grok's reply to it gets auto-acked.
+	if !br.handleMilestoneEvent(context.Background(), "thread.run_settled", ev) {
+		t.Fatal("expected retry attempt to succeed")
+	}
+	snap, err := state.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Asks[sentAsk.ID].Done {
+		t.Fatal("expected ask marked done after retry succeeded")
+	}
+	if len(snap.Watches["thr-retry"]) != 2 {
+		t.Fatalf("expected w2 and w3-concurrent preserved, got %+v", snap.Watches["thr-retry"])
+	}
+
+	// Verify grok received the watch notification AND replying to it is acked automatically.
+	in, err := grok.Poll(context.Background(), 50*time.Millisecond)
+	if err != nil || len(in.Requests) != 1 {
+		t.Fatalf("expected 1 watch notification request for grok, got %+v, %v", in, err)
+	}
+	if _, err := grok.Claim(context.Background(), in.Requests[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grok.Reply(context.Background(), in.Requests[0].ID, "thanks", envelope.StatusAnswered); err != nil {
+		t.Fatal(err)
+	}
+	t3In, err := t3Relay.Poll(context.Background(), 50*time.Millisecond)
+	if err != nil || len(t3In.Replies) != 1 {
+		t.Fatalf("expected reply to watch notification in t3 inbox, got %+v, %v", t3In, err)
+	}
+	if deferred := br.handleUnseenReplies(context.Background(), t3In.Replies); deferred != 0 {
+		t.Fatalf("expected watch notification reply to be auto-acked with deferred=0, got %d", deferred)
+	}
+	t3In2, err := t3Relay.Poll(context.Background(), 20*time.Millisecond)
+	if err != nil || len(t3In2.Replies) != 0 {
+		t.Fatalf("expected watch notification reply to stay acked, got %+v, %v", t3In2.Replies, err)
+	}
+}

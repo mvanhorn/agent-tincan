@@ -127,15 +127,30 @@ func TestT3DoctorJSONNeverLeaksToken(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      1,
-			"result": map[string]any{
-				"_meta":  map[string]any{"io.modelcontextprotocol/serverInfo": map[string]any{"name": "T3 Code", "version": "0.1.13"}},
-				"events": []map[string]any{{"name": "thread.run_settled"}},
-			},
-		})
+		switch r.Header.Get("MCP-Method") {
+		case "events/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/events/active\",\"params\":{\"cursor\":\"c1\",\"heartbeatMs\":5000}}\n\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			events := make([]map[string]any, 0, len(t3bridge.WatchedMilestoneEvents))
+			for _, name := range t3bridge.WatchedMilestoneEvents {
+				events = append(events, map[string]any{"name": name})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result": map[string]any{
+					"_meta":  map[string]any{"io.modelcontextprotocol/serverInfo": map[string]any{"name": "T3 Code", "version": "0.1.13"}},
+					"events": events,
+				},
+			})
+		}
 	}))
 	defer srv.Close()
 
@@ -189,5 +204,108 @@ func TestRecordT3OutboundResult(t *testing.T) {
 	rt, ok, err = rs.Lookup("req-pending")
 	if err != nil || !ok || !rt.InlineDone {
 		t.Fatalf("expected inline done marked: %+v, %v, %v", rt, ok, err)
+	}
+}
+
+func TestResolveT3OriginPrefersSavedAuthOverLocal(t *testing.T) {
+	t3Home := t.TempDir()
+	ud := filepath.Join(t3Home, "userdata")
+	if err := os.MkdirAll(ud, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ud, "server-runtime.json"), []byte(`{"origin":"http://127.0.0.1:3773"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Saved remote OAuth origin must beat local server-runtime.json so remote
+	// tokens are never sent to a local T3 instance.
+	got, err := resolveT3Origin("", t3Home, t3bridge.AuthConfig{Origin: "https://t3.example.ts.net"})
+	if err != nil || got != "https://t3.example.ts.net" {
+		t.Fatalf("resolveT3Origin with saved remote auth = (%q, %v), want https://t3.example.ts.net", got, err)
+	}
+	// Explicit --t3-url beats both.
+	gotFlag, err := resolveT3Origin("https://override.example.ts.net", t3Home, t3bridge.AuthConfig{Origin: "https://t3.example.ts.net"})
+	if err != nil || gotFlag != "https://override.example.ts.net" {
+		t.Fatalf("resolveT3Origin with flag = (%q, %v)", gotFlag, err)
+	}
+	// Initial login (empty AuthConfig) falls back to local server-runtime.json.
+	gotLocal, err := resolveT3Origin("", t3Home, t3bridge.AuthConfig{})
+	if err != nil || gotLocal != "http://127.0.0.1:3773" {
+		t.Fatalf("resolveT3Origin local fallback = (%q, %v)", gotLocal, err)
+	}
+}
+
+func TestT3LateReplyRoutingDoesNotAffectNeighborConfigs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t3Cfg := filepath.Join(dir, "t3-studio.json")
+	claudeCfg := filepath.Join(dir, "claude.json")
+	if err := t3bridge.SaveAuth(t3bridge.AuthPathForConfig(t3Cfg), t3bridge.AuthConfig{
+		Origin:     "http://127.0.0.1:3773",
+		Token:      "tok",
+		Agent:      "t3-studio",
+		ConfigPath: t3Cfg,
+		IssuedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !t3LateReplyRoutingActive(t3Cfg, client.Config{Agent: "t3-studio"}) {
+		t.Fatal("expected custom-named T3 bridge config to activate T3 late-reply routing")
+	}
+	if t3LateReplyRoutingActive(claudeCfg, client.Config{Agent: "claude"}) {
+		t.Fatal("standalone claude.json sharing directory with t3-auth.json must NOT activate T3 routing")
+	}
+}
+
+func TestT3DoctorFailsOnMissingEventsOrBrokenStream(t *testing.T) {
+	mesh := testrelay.New(t, relay.Config{})
+	t3Relay := mesh.JoinOnMachineOf(t, "muse", "t3")
+
+	home := t.TempDir()
+	t3Home := filepath.Join(home, ".t3")
+	cfgDir := filepath.Join(home, ".config", "tincan")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(cfgDir, "t3.json")
+	if err := client.SaveConfigTo(cfgPath, client.Config{Agent: "t3", Relay: t3Relay.Base()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Server advertises empty events list -> doctor must fail t3 events check.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result": map[string]any{
+				"_meta":  map[string]any{"io.modelcontextprotocol/serverInfo": map[string]any{"name": "T3 Code", "version": "0.1.13"}},
+				"events": []map[string]any{},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	if err := t3bridge.SaveAuth(t3bridge.AuthPathForConfig(cfgPath), t3bridge.AuthConfig{
+		Origin:   srv.URL,
+		Token:    "tok",
+		IssuedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	setHome(t, home)
+	checks, _ := runT3DoctorChecks(t.Context(), home, t3Home, cfgPath, srv.URL)
+	var evCheck check
+	for _, c := range checks {
+		if c.Name == "t3 events" {
+			evCheck = c
+		}
+	}
+	if evCheck.Status != "fail" || !strings.Contains(evCheck.Detail, "missing required MCP events") {
+		t.Fatalf("expected missing events failure, got %+v", evCheck)
 	}
 }

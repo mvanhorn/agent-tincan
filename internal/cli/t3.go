@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -66,11 +67,13 @@ func resolveT3Origin(urlFlag, t3Home string, auth t3bridge.AuthConfig) (string, 
 	if strings.TrimSpace(urlFlag) != "" {
 		return t3bridge.ValidateOrigin(urlFlag)
 	}
-	if rt, err := t3bridge.DiscoverLocalOrigin(t3Home); err == nil && rt.Origin != "" {
-		return rt.Origin, nil
-	}
+	// When credentials are already loaded, prefer their bound OAuth origin so a
+	// remote login never sends its bearer token to a local T3 instance.
 	if auth.Origin != "" {
 		return t3bridge.ValidateOrigin(auth.Origin)
+	}
+	if rt, err := t3bridge.DiscoverLocalOrigin(t3Home); err == nil && rt.Origin != "" {
+		return rt.Origin, nil
 	}
 	return "", fmt.Errorf("could not discover T3 Code server in %s/userdata/server-runtime.json; start T3 Code or pass --t3-url", t3Home)
 }
@@ -138,6 +141,10 @@ pass --token-file <path>.`,
 			if err != nil {
 				return fmt.Errorf("T3 Code accepted login but events/list failed: %w", err)
 			}
+			auth.ConfigPath = cleanAbsPath(cfgPath)
+			if cfg, err := client.LoadConfigFrom(cfgPath); err == nil && cfg.Agent != "" {
+				auth.Agent = cfg.Agent
+			}
 			if err := t3bridge.SaveAuth(authPath, auth); err != nil {
 				return err
 			}
@@ -184,6 +191,13 @@ func t3ServeCmd() *cobra.Command {
 			auth, err := t3bridge.LoadAuth(authPath)
 			if err != nil {
 				return fmt.Errorf("load T3 auth (%s): %w (run tincan t3 auth first)", authPath, err)
+			}
+			if auth.ConfigPath == "" || auth.Agent == "" {
+				auth.ConfigPath = cleanAbsPath(cfgPath)
+				if cfg.Agent != "" {
+					auth.Agent = cfg.Agent
+				}
+				_ = t3bridge.SaveAuth(authPath, auth)
 			}
 			origin, err := resolveT3Origin(t3URL, t3Home, auth)
 			if err != nil {
@@ -247,6 +261,7 @@ func t3WatchCmd() *cobra.Command {
 			events := parseWatchEvents(eventsCSV)
 			state := t3bridge.NewStateStore(t3bridge.StatePathForConfig(cfgPath))
 			w := t3bridge.ThreadWatch{
+				ID:          fmt.Sprintf("cli-%d", time.Now().UnixNano()),
 				ThreadID:    tid,
 				NotifyAgent: strings.TrimSpace(notifyAgent),
 				OneShot:     oneShot,
@@ -450,7 +465,42 @@ func runT3DoctorChecks(ctx context.Context, home, t3Home, cfgPath, t3URL string)
 			if lErr != nil {
 				checks = append(checks, check{Name: "t3 events", Status: "fail", Detail: fmt.Sprintf("events/list at %s failed: %v", origin, lErr), Fix: "Confirm T3 Code Nightly is running with MCP Events enabled and re-run `tincan t3 auth` if 401."})
 			} else {
-				checks = append(checks, check{Name: "t3 events", Status: "ok", Detail: fmt.Sprintf("%s %s at %s (%d SEP-3415 event types)", nonEmptyStr(evRes.ServerInfo.Name, "T3 Code"), evRes.ServerInfo.Version, origin, len(evRes.Events))})
+				available := make(map[string]bool, len(evRes.Events))
+				for _, ev := range evRes.Events {
+					available[ev.Name] = true
+				}
+				var missing []string
+				for _, reqEv := range t3bridge.WatchedMilestoneEvents {
+					if !available[reqEv] {
+						missing = append(missing, reqEv)
+					}
+				}
+				if len(missing) > 0 {
+					checks = append(checks, check{
+						Name:   "t3 events",
+						Status: "fail",
+						Detail: fmt.Sprintf("%s %s at %s is missing required MCP events: %s", nonEmptyStr(evRes.ServerInfo.Name, "T3 Code"), evRes.ServerInfo.Version, origin, strings.Join(missing, ", ")),
+						Fix:    "Upgrade T3 Code Nightly to a build that exposes thread.run_settled, thread.needs_input, thread.input_resolved, and pr.watch_wake on /mcp.",
+					})
+				} else {
+					sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
+					pErr := mcpCli.ProbeEventStream(sctx, t3bridge.WatchedMilestoneEvents[0])
+					scancel()
+					if pErr != nil {
+						checks = append(checks, check{
+							Name:   "t3 events",
+							Status: "fail",
+							Detail: fmt.Sprintf("events/stream probe at %s failed: %v", origin, pErr),
+							Fix:    "Confirm T3 Code Nightly supports SEP-3415 SSE streaming on /mcp and re-run `tincan t3 auth` if unauthorized.",
+						})
+					} else {
+						checks = append(checks, check{
+							Name:   "t3 events",
+							Status: "ok",
+							Detail: fmt.Sprintf("%s %s at %s (%d SEP-3415 event types; events/stream handshake ok)", nonEmptyStr(evRes.ServerInfo.Name, "T3 Code"), evRes.ServerInfo.Version, origin, len(evRes.Events)),
+						})
+					}
+				}
 			}
 		}
 	}
@@ -537,21 +587,38 @@ func parseWatchEvents(csv string) []string {
 }
 
 // t3LateReplyRoutingActive reports whether outbound asks from a T3 Code thread
-// using cfgPath/cfg should record routes for tincan t3 serve.
+// using cfgPath/cfg should record routes for tincan t3 serve. It matches only
+// the T3 bridge's own agent/config, never a standalone teammate whose config
+// happens to share the same directory as t3-auth.json.
 func t3LateReplyRoutingActive(cfgPath string, cfg client.Config) bool {
 	if cfg.Agent == "t3" || cfg.Agent == "t3-code" {
 		return true
 	}
-	for _, p := range []string{
-		t3bridge.AuthPathForConfig(cfgPath),
-		t3bridge.StatePathForConfig(cfgPath),
-		t3bridge.RoutesPathForConfig(cfgPath),
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
+	if cfgPath == "" {
+		return false
 	}
-	return false
+	auth, err := t3bridge.LoadAuth(t3bridge.AuthPathForConfig(cfgPath))
+	if err != nil {
+		return false
+	}
+	if auth.ConfigPath != "" && cleanAbsPath(auth.ConfigPath) == cleanAbsPath(cfgPath) {
+		return true
+	}
+	if auth.Agent != "" && cfg.Agent != "" && auth.Agent == cfg.Agent {
+		return true
+	}
+	return auth.ConfigPath == "" && auth.Agent == "" && filepath.Base(cfgPath) == "t3.json"
+}
+
+func cleanAbsPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(abs)
 }
 
 // recordT3OutboundResult records pending asks in t3-routes.json and clears or

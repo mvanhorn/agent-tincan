@@ -213,6 +213,27 @@ type StreamHandlers struct {
 	OnHeartbeat func(cursor string)
 }
 
+// ProbeEventStream verifies that events/stream completes its initial
+// notifications/events/active handshake for eventName and closes cleanly.
+func (c *MCPClient) ProbeEventStream(ctx context.Context, eventName string) error {
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var active atomic.Bool
+	err := c.StreamEvents(probeCtx, eventName, "", map[string]any{}, 5000, StreamHandlers{
+		OnActive: func(string, bool, int) {
+			active.Store(true)
+			cancel()
+		},
+	})
+	if active.Load() {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("events/stream (%s) closed before notifications/events/active", eventName)
+}
+
 // StreamEvents opens a persistent SSE push stream for eventName and blocks
 // until ctx is canceled, the server terminates the stream, or a heartbeat stalls.
 func (c *MCPClient) StreamEvents(ctx context.Context, eventName, cursor string, args map[string]any, heartbeatMs int, h StreamHandlers) error {

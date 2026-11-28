@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -32,31 +33,37 @@ const (
 // AuthConfig holds the OAuth bearer credential for T3 Code's /mcp endpoint.
 // Token must never be logged, printed in errors, or returned in status JSON.
 type AuthConfig struct {
-	Origin    string    `json:"origin"`
-	Token     string    `json:"token"`
-	ClientID  string    `json:"client_id,omitempty"`
-	Scope     string    `json:"scope,omitempty"`
-	IssuedAt  time.Time `json:"issued_at"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Origin     string    `json:"origin"`
+	Token      string    `json:"token"`
+	ClientID   string    `json:"client_id,omitempty"`
+	Scope      string    `json:"scope,omitempty"`
+	Agent      string    `json:"agent,omitempty"`
+	ConfigPath string    `json:"config_path,omitempty"`
+	IssuedAt   time.Time `json:"issued_at"`
+	ExpiresAt  time.Time `json:"expires_at,omitempty"`
 }
 
 // AuthSummary is the non-secret view of AuthConfig for doctor and logs.
 type AuthSummary struct {
-	Origin    string    `json:"origin"`
-	ClientID  string    `json:"client_id,omitempty"`
-	Scope     string    `json:"scope,omitempty"`
-	IssuedAt  time.Time `json:"issued_at"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Origin     string    `json:"origin"`
+	ClientID   string    `json:"client_id,omitempty"`
+	Scope      string    `json:"scope,omitempty"`
+	Agent      string    `json:"agent,omitempty"`
+	ConfigPath string    `json:"config_path,omitempty"`
+	IssuedAt   time.Time `json:"issued_at"`
+	ExpiresAt  time.Time `json:"expires_at,omitempty"`
 }
 
 // Summary strips secrets from AuthConfig.
 func (a AuthConfig) Summary() AuthSummary {
 	return AuthSummary{
-		Origin:    a.Origin,
-		ClientID:  a.ClientID,
-		Scope:     a.Scope,
-		IssuedAt:  a.IssuedAt,
-		ExpiresAt: a.ExpiresAt,
+		Origin:     a.Origin,
+		ClientID:   a.ClientID,
+		Scope:      a.Scope,
+		Agent:      a.Agent,
+		ConfigPath: a.ConfigPath,
+		IssuedAt:   a.IssuedAt,
+		ExpiresAt:  a.ExpiresAt,
 	}
 }
 
@@ -225,8 +232,10 @@ func checkPrivateFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("stat credentials directory %s: %w", dir, err)
 	}
-	if perm := di.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("credentials directory %s has mode %04o; it must be private (chmod 700 %s)", dir, perm, dir)
+	if runtime.GOOS != "windows" {
+		if perm := di.Mode().Perm(); perm&0o077 != 0 {
+			return fmt.Errorf("credentials directory %s has mode %04o; it must be private (chmod 700 %s)", dir, perm, dir)
+		}
 	}
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -235,8 +244,10 @@ func checkPrivateFile(path string) error {
 	if fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("credentials file %s must not be a symlink", path)
 	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("credentials file %s has mode %04o; it must be private (chmod 600 %s)", path, perm, path)
+	if runtime.GOOS != "windows" {
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			return fmt.Errorf("credentials file %s has mode %04o; it must be private (chmod 600 %s)", path, perm, path)
+		}
 	}
 	return nil
 }

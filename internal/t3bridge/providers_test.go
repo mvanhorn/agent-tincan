@@ -191,3 +191,83 @@ func TestWireProvidersCodexTOML(t *testing.T) {
 		t.Fatalf("unexpected codex config.toml:\n%s", raw)
 	}
 }
+
+func TestWireProvidersCodexQuotedKeysAndComments(t *testing.T) {
+	home := t.TempDir()
+	t3Home := filepath.Join(home, ".t3")
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(codexDir, "config.toml")
+	tincanCfg := filepath.Join(home, ".config", "tincan", "t3.json")
+
+	// Existing commented header already wired to tincanCfg must be recognized as wired (no duplicate appended).
+	initial := "model = \"o3\"\n\n[mcp_servers.agent-tincan] # existing\ncommand = \"/usr/local/bin/tincan\"\nargs = [\"mcp\"]\n\n[mcp_servers.agent-tincan.env] # env\nTINCAN_CONFIG = \"" + tincanCfg + "\" # pinned\n"
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := WireProviders(WireOptions{
+		Home:         home,
+		T3Home:       t3Home,
+		TincanBinary: "/Users/test/bin/tincan",
+		TincanConfig: tincanCfg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].State != ProviderWired || res[0].Action != "unchanged" {
+		t.Fatalf("commented codex header not recognized as wired: %+v", res)
+	}
+
+	// Quoted table header pointing to another config must be stripped cleanly on OverrideShared=true.
+	quoted := "model = \"o3\"\n\n[mcp_servers.\"agent-tincan\"] # shared\ncommand = \"/usr/local/bin/tincan\"\nargs = [\"mcp\"]\n\n[mcp_servers.'agent-tincan'.env]\nTINCAN_CONFIG = \"/tmp/codex.json\"\n\n[mcp_servers.other]\ncommand = \"echo\"\n"
+	if err := os.WriteFile(cfgPath, []byte(quoted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	over, err := WireProviders(WireOptions{
+		Home:           home,
+		T3Home:         t3Home,
+		TincanBinary:   "/Users/test/bin/tincan",
+		TincanConfig:   tincanCfg,
+		OverrideShared: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(over) != 1 || over[0].Action != "wired" {
+		t.Fatalf("expected wired on OverrideShared, got %+v", over)
+	}
+	outBytes, _ := os.ReadFile(cfgPath)
+	out := string(outBytes)
+	if strings.Contains(out, `"agent-tincan"`) || strings.Contains(out, `'agent-tincan'`) {
+		t.Fatalf("quoted agent-tincan table was not stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "[mcp_servers.other]") || strings.Count(out, "[mcp_servers.agent-tincan]") != 1 {
+		t.Fatalf("unexpected overridden codex config.toml:\n%s", out)
+	}
+}
+
+func TestDiscoverAntigravityIncludesProfilesWithoutMCPConfigYet(t *testing.T) {
+	home := t.TempDir()
+	t3Home := filepath.Join(home, ".t3")
+	profA := filepath.Join(t3Home, "userdata", "providers", "antigravity", "prof-a", "config")
+	profB := filepath.Join(t3Home, "userdata", "providers", "antigravity", "prof-b", "config")
+	if err := os.MkdirAll(profA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(profB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Profile A already has mcp_config.json; Profile B only has its config/ directory.
+	if err := os.WriteFile(filepath.Join(profA, "mcp_config.json"), []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := DiscoverProviders(home, t3Home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("expected both Antigravity profiles discovered, got %d: %+v", len(targets), targets)
+	}
+}

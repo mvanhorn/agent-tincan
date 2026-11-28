@@ -27,7 +27,7 @@ local tincan mcp, and only tincan connect <name> on an admin device rejoins
 them; Gateway is set for them.
 */ -}}
 
-{{- define "cfgpath"}}~/.config/tincan/{{if and .Service (or (not (isWebKind .Kind)) (eq .Name "<name>"))}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
+{{- define "cfgpath"}}~/.config/tincan/{{if eq .Kind "t3-code"}}t3{{else if and .Service (or (not (isWebKind .Kind)) (eq .Name "<name>"))}}{{.Kind}}{{else}}{{.Name}}{{end}}.json{{end -}}
 {{- define "cfg"}}{{if .OwnConfig}}TINCAN_CONFIG={{template "cfgpath" .}} {{end}}{{end -}}
 {{- define "mcpenv"}}env TINCAN_CONFIG set to the full path of {{template "cfgpath" .}} (MCP configs do not expand ~){{end -}}
 {{- define "setup.cfghint" -}}
@@ -477,10 +477,10 @@ If the service log (~/Library/Logs/tincan-pass.log) says it is not joined, run {
 
 {{- define "setup.t3-code" -}}
 Run it on the machine where T3 Code Nightly (with SEP-3415 MCP Events on /mcp) runs. Upgrade the relay first so it accepts the t3-code kind.
-Invite and join with its own config: tincan invite {{.Name}} --kind t3-code on an admin device, then TINCAN_CONFIG=~/.config/tincan/t3.json tincan join <code> --relay {{.RelayURL}} on the T3 host.
-Authorize Agent Tincan against T3 Code's /mcp server: tincan t3 auth --config ~/.config/tincan/t3.json (opens T3 Code's OAuth screen so you pick the access ceiling; saves a 0600 token in ~/.config/tincan/t3-auth.json).
-Wire T3's configured providers (Antigravity isolated profiles, Claude custom homePaths, OpenCode, Codex) and install the background service: tincan t3 install --config ~/.config/tincan/t3.json --start (leaves existing standalone claude-code/codex entries untouched unless --override-shared is passed).
-Verify every check (relay, T3 auth, SEP-3415 events/stream, service, and T3 providers) with tincan t3 doctor --config ~/.config/tincan/t3.json.
+Invite and join with its own config: tincan invite {{.Name}} --kind t3-code on an admin device, then {{template "cfg" .}}tincan join <code> --relay {{.RelayURL}} on the T3 host.
+Authorize Agent Tincan against T3 Code's /mcp server: tincan t3 auth --config {{template "cfgpath" .}} (opens T3 Code's OAuth screen so you pick the access ceiling; saves a 0600 token in ~/.config/tincan/t3-auth.json).
+Wire T3's configured providers (Antigravity isolated profiles, Claude custom homePaths, OpenCode, Codex) and install the background service: tincan t3 install --config {{template "cfgpath" .}} --start (leaves existing standalone claude-code/codex entries untouched unless --override-shared is passed).
+Verify every check (relay, T3 auth, SEP-3415 events/stream, service, and T3 providers) with tincan t3 doctor --config {{template "cfgpath" .}}.
 On the relay host, in wake.json: set {{.Name}} to method "wait"; the bridge long-polls the relay. No secret fields.
 To watch an interactive T3 thread from the shell: tincan t3 watch <thread-url-or-id> --notify <teammate>.
 If the service log (~/Library/Logs/tincan-t3.log) says it is not joined, run {{template "rejoin" .}} and restart the service.

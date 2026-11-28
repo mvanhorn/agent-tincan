@@ -195,15 +195,19 @@ func jsonServers(v any, path string, out *[]mcpConfigEntry) {
 	case map[string]any:
 		for k, x := range t {
 			if servers, ok := x.(map[string]any); ok && (k == "mcpServers" || k == "servers" || k == "mcp_servers" || k == "mcp") {
+				matched := false
 				for name, s := range servers {
 					if e, ok := jsonEntry(name, s); ok {
 						if strings.HasPrefix(path, "projects.") {
 							e.Scope = path
 						}
 						*out = append(*out, e)
+						matched = true
 					}
 				}
-				continue
+				if matched || k != "mcp" {
+					continue
+				}
 			}
 			sub := k
 			if path != "" {

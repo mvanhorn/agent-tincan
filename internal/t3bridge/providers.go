@@ -170,19 +170,33 @@ func DiscoverProviders(home, t3Home string) ([]ProviderTarget, error) {
 }
 
 func discoverAntigravityMCPConfigs(t3Home string) []string {
+	seen := map[string]struct{}{}
+	add := func(p string) {
+		p = filepath.Clean(p)
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+		}
+	}
 	pattern := filepath.Join(t3Home, "userdata", "providers", "antigravity", "*", "config", "mcp_config.json")
-	matches, _ := filepath.Glob(pattern)
-	if len(matches) == 0 {
-		// Also find profile directories where config/ exists even if mcp_config.json has not been created yet.
-		dirs, _ := filepath.Glob(filepath.Join(t3Home, "userdata", "providers", "antigravity", "*", "config"))
+	if matches, err := filepath.Glob(pattern); err == nil {
+		for _, m := range matches {
+			add(m)
+		}
+	}
+	// Always include profile config/ directories even when mcp_config.json has not been created yet.
+	if dirs, err := filepath.Glob(filepath.Join(t3Home, "userdata", "providers", "antigravity", "*", "config")); err == nil {
 		for _, d := range dirs {
 			if st, err := os.Stat(d); err == nil && st.IsDir() {
-				matches = append(matches, filepath.Join(d, "mcp_config.json"))
+				add(filepath.Join(d, "mcp_config.json"))
 			}
 		}
 	}
-	slices.Sort(matches)
-	return matches
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // InspectProviders returns the current Agent Tincan MCP wiring status of each discovered T3 provider.
@@ -316,10 +330,8 @@ func inspectCodexTOML(st ProviderStatus, raw, wantCfg string) ProviderStatus {
 	found := false
 	existingCfg := ""
 	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
-			sec := strings.Trim(t, "[] ")
-			if sec == "mcp_servers.agent-tincan" || sec == "mcp_servers.agent-tincan.env" || (strings.HasPrefix(sec, "mcp_servers.") && strings.Contains(strings.ToLower(sec), "tincan")) {
+		if segs, isHdr := parseTOMLTableHeader(line); isHdr {
+			if isCodexTincanSection(segs) {
 				inTincan = true
 				found = true
 			} else {
@@ -327,9 +339,9 @@ func inspectCodexTOML(st ProviderStatus, raw, wantCfg string) ProviderStatus {
 			}
 			continue
 		}
-		if inTincan && strings.Contains(t, "TINCAN_CONFIG") {
-			if _, rhs, ok := strings.Cut(t, "="); ok {
-				existingCfg = strings.Trim(strings.TrimSpace(rhs), "\"'")
+		if inTincan {
+			if k, rhs, ok := strings.Cut(stripTOMLComment(line), "="); ok && strings.TrimSpace(k) == "TINCAN_CONFIG" {
+				existingCfg = unquoteTOMLValue(rhs)
 			}
 		}
 	}
@@ -410,15 +422,13 @@ func writeCodexProvider(path string, mode os.FileMode, binary, tincanCfg string)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	// Strip any existing [mcp_servers.agent-tincan] and [mcp_servers.agent-tincan.env] sections.
+	// Strip any existing tincan table sections (including quoted keys or trailing comments).
 	lines := strings.Split(raw, "\n")
 	var kept []string
 	skip := false
 	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
-			sec := strings.Trim(t, "[] ")
-			skip = sec == "mcp_servers.agent-tincan" || sec == "mcp_servers.agent-tincan.env"
+		if segs, isHdr := parseTOMLTableHeader(line); isHdr {
+			skip = isCodexTincanSection(segs)
 		}
 		if !skip {
 			kept = append(kept, line)
@@ -433,6 +443,146 @@ func writeCodexProvider(path string, mode os.FileMode, binary, tincanCfg string)
 		final = base + block
 	}
 	return writeFileAtomicWithMode(path, []byte(final), mode)
+}
+
+func isCodexTincanSection(segs []string) bool {
+	return len(segs) >= 2 && segs[0] == "mcp_servers" && strings.Contains(strings.ToLower(segs[1]), "tincan")
+}
+
+// parseTOMLTableHeader parses a TOML table header line such as
+// `[mcp_servers."agent-tincan".env] # comment` into unquoted key segments.
+// Array-of-tables headers (`[[...]]`) return (nil, true) so callers terminate
+// any preceding table section cleanly.
+func parseTOMLTableHeader(line string) ([]string, bool) {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, "[") {
+		return nil, false
+	}
+	if strings.HasPrefix(t, "[[") {
+		return nil, true
+	}
+	var inQuote byte
+	escaped := false
+	closeIdx := -1
+	for i := 1; i < len(t); i++ {
+		ch := t[i]
+		if inQuote != 0 {
+			if inQuote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if inQuote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			inQuote = ch
+			continue
+		}
+		if ch == ']' {
+			closeIdx = i
+			break
+		}
+	}
+	if closeIdx < 0 {
+		return nil, false
+	}
+	tail := strings.TrimSpace(t[closeIdx+1:])
+	if tail != "" && !strings.HasPrefix(tail, "#") {
+		return nil, false
+	}
+	inner := t[1:closeIdx]
+	var segs []string
+	var cur strings.Builder
+	inQuote = 0
+	escaped = false
+	flush := func() {
+		s := unquoteTOMLValue(cur.String())
+		if s != "" {
+			segs = append(segs, s)
+		}
+		cur.Reset()
+	}
+	for i := 0; i < len(inner); i++ {
+		ch := inner[i]
+		if inQuote != 0 {
+			cur.WriteByte(ch)
+			if inQuote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if inQuote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			inQuote = ch
+			cur.WriteByte(ch)
+			continue
+		}
+		if ch == '.' {
+			flush()
+			continue
+		}
+		cur.WriteByte(ch)
+	}
+	flush()
+	return segs, true
+}
+
+func stripTOMLComment(line string) string {
+	var inQuote byte
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if inQuote != 0 {
+			if inQuote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if inQuote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			inQuote = ch
+			continue
+		}
+		if ch == '#' {
+			return line[:i]
+		}
+	}
+	return line
+}
+
+func unquoteTOMLValue(raw string) string {
+	s := strings.TrimSpace(raw)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		var u string
+		if err := json.Unmarshal([]byte(s), &u); err == nil {
+			return u
+		}
+		return s[1 : len(s)-1]
+	}
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 func writeFileAtomicWithMode(path string, data []byte, mode os.FileMode) error {
