@@ -19,6 +19,7 @@ import (
 	"github.com/mvanhorn/agent-tincan/internal/client"
 	"github.com/mvanhorn/agent-tincan/internal/envelope"
 	"github.com/mvanhorn/agent-tincan/internal/mcpserver"
+	"github.com/mvanhorn/agent-tincan/internal/t3bridge"
 )
 
 func mcpCmd() *cobra.Command {
@@ -76,10 +77,15 @@ and --no-project sends none.`,
 			if err != nil {
 				return err
 			}
-			if r.Session() == "" {
+			t3ThreadID := strings.TrimSpace(os.Getenv("T3CODE_THREAD_ID"))
+			t3Routing := t3ThreadID != "" && t3LateReplyRoutingActive(client.ConfigPath(), cfg)
+			if r.Session() == "" && !t3Routing {
 				// One Claude Code session runs one MCP server, so a fresh
 				// id per process gives each session the replies to its own
 				// asks. One-shot CLI commands name no session and see all.
+				// Inside a T3 Code thread using the t3 bridge, leave the
+				// session empty so late replies reach tincan t3 serve
+				// promptly instead of waiting 10 minutes for SessionGrace.
 				r.SetSession(newSession())
 			}
 			label, err := sessionProject(project, noProject)
@@ -110,6 +116,13 @@ and --no-project sends none.`,
 			}
 			files := mcpserver.LocalFiles(client.AttachmentDir(cfg))
 			watch := mcpserver.Watch(mcpserver.NewBuildWatch(ownBinary(), Version))
+			var extraOpts []mcpserver.Option
+			if t3Routing {
+				routes := t3bridge.NewRouteStore(t3bridge.RoutesPathForConfig(client.ConfigPath()))
+				extraOpts = append(extraOpts, mcpserver.OnAskResult(func(res client.Result) {
+					recordT3OutboundResult(routes, t3ThreadID, res)
+				}))
+			}
 			if id := os.Getenv("TINCAN_WORKER_REQUEST"); id != "" {
 				// A window tincan window serve opened for one request: no
 				// wake, since every new ask to its agent belongs to a window
@@ -119,25 +132,27 @@ and --no-project sends none.`,
 				ctx, cancel := context.WithCancel(runCtx)
 				defer cancel()
 				go keepSession(ctx, r, sessionKeepalive)
-				return mcpserver.New(r, Version, files, watch, mcpserver.WorkerRequest(id)).Run(ctx, mcpserver.StdioRecorded(rec))
+				opts := append([]mcpserver.Option{files, watch, mcpserver.WorkerRequest(id)}, extraOpts...)
+				return mcpserver.New(r, Version, opts...).Run(ctx, mcpserver.StdioRecorded(rec))
 			}
 			route, p := pickWake(channel, wakeSocket, claudeSocketFromEnv)
 			if route != wakeByChannel {
 				ctx, cancel := context.WithCancel(runCtx)
 				defer cancel()
-				if route == wakeBySocket {
+				if route == wakeBySocket && !t3Routing {
 					// The socket wake peeks, which keeps the session live.
 					shared := socketShared{dir: socketWakeDir(), agent: cfg.Agent}
 					timing := socketWakeTiming{keepalive: sessionKeepalive, retry: socketRetryAfter}
 					go socketWake(ctx, r, p, shared, timing, func() (socketTarget, error) {
 						return newClaudeSocketPusher(os.Getenv, os.Getppid())
 					})
-				} else {
+				} else if !t3Routing {
 					// Without a channel nothing calls the relay between tool
 					// calls, so keep this session live while the window is open.
 					go keepSession(ctx, r, sessionKeepalive)
 				}
-				return mcpserver.New(r, Version, files, watch).Run(ctx, mcpserver.StdioRecorded(rec))
+				opts := append([]mcpserver.Option{files, watch}, extraOpts...)
+				return mcpserver.New(r, Version, opts...).Run(ctx, mcpserver.StdioRecorded(rec))
 			}
 			t := mcpserver.NewChannelTransport(mcpserver.StdioRecorded(rec))
 			ctx, cancel := context.WithCancel(runCtx)

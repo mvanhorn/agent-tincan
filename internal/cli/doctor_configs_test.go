@@ -531,3 +531,70 @@ func TestFindMCPConfigsReadsCopilotConfig(t *testing.T) {
 		t.Fatalf("$COPILOT_HOME/mcp-config.json entries = %+v", es)
 	}
 }
+
+func TestFindMCPConfigsReadsOpenCodeAndT3Antigravity(t *testing.T) {
+	dir := t.TempDir()
+	exe := fakeTincan(t, dir)
+	home := filepath.Join(dir, "home")
+	setHome(t, home)
+	t.Setenv("T3CODE_HOME", filepath.Join(home, ".t3"))
+
+	// OpenCode config under ~/.config/opencode/opencode.json.
+	ocDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(ocDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ocPath := filepath.Join(ocDir, "opencode.json")
+	ocBody, err := json.Marshal(map[string]any{
+		"mcp": map[string]any{
+			"agent-tincan": map[string]any{
+				"type":        "local",
+				"command":     []string{exe, "mcp"},
+				"environment": map[string]string{"TINCAN_CONFIG": filepath.Join(dir, "t3.json")},
+				"enabled":     true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ocPath, ocBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// T3 isolated Antigravity profile under ~/.t3/userdata/providers/antigravity/<hash>/config/mcp_config.json.
+	agyDir := filepath.Join(home, ".t3", "userdata", "providers", "antigravity", "hash123", "config")
+	if err := os.MkdirAll(agyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agyPath := filepath.Join(agyDir, "mcp_config.json")
+	agyBody, err := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			"agent-tincan": map[string]any{
+				"command": exe,
+				"args":    []string{"mcp"},
+				"env":     map[string]string{"TINCAN_CONFIG": filepath.Join(dir, "t3.json")},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agyPath, agyBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := findMCPConfigs(nil)
+	var gotOC, gotAgy bool
+	for _, e := range entries {
+		if e.File == ocPath && e.Command == exe && len(e.Args) == 1 && e.Args[0] == "mcp" && len(e.Problems) == 0 {
+			gotOC = true
+		}
+		if e.File == agyPath && e.Command == exe && len(e.Args) == 1 && e.Args[0] == "mcp" && len(e.Problems) == 0 {
+			gotAgy = true
+		}
+	}
+	if !gotOC || !gotAgy {
+		t.Fatalf("expected OpenCode (%v) and T3 Antigravity (%v) entries; got %+v", gotOC, gotAgy, entries)
+	}
+}

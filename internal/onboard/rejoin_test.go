@@ -40,10 +40,12 @@ func TestEveryAgentGetsTheSelfHealLine(t *testing.T) {
 			}
 			continue
 		}
-		if kind == KindNotes || kind == KindCouncil || kind == KindPass || kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb || kind == KindDotWeb || kind == KindDuetWeb {
-			// Web services keep the invited name in their own config; other services use the kind default.
+		if kind == KindNotes || kind == KindT3Code || kind == KindCouncil || kind == KindPass || kind == KindChatGPTWeb || kind == KindClaudeWeb || kind == KindGrokWeb || kind == KindGeminiWeb || kind == KindPerplexityWeb || kind == KindCopilotWeb || kind == KindDotWeb || kind == KindDuetWeb {
+			// Web services keep the invited name in their own config; t3-code defaults to t3.json; other services use the kind default.
 			configName := kind
-			if isWebKind(kind) {
+			if kind == KindT3Code {
+				configName = "t3"
+			} else if isWebKind(kind) {
 				configName = "a-" + kind
 			}
 			setup := strings.Join(block(t, k, "a-"+kind).Setup, "\n")

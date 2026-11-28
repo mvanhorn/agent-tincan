@@ -10,6 +10,10 @@
       {
         "scope": ["internal/envelope/**", "internal/relay/**", "internal/client/**"],
         "path": "docs/protocol.md"
+      },
+      {
+        "scope": ["internal/t3bridge/**", "internal/cli/t3*.go"],
+        "path": "docs/trust-model.md"
       }
     ],
     "rules": [
@@ -83,7 +87,11 @@
       },
       {
         "scope": ["internal/**/*.go", "cmd/**/*.go"],
-        "rule": "tincan legitimately reads some local agent files as part of its job: doctor and onboard read and write MCP config for Claude Code, Codex, Hermes and OpenClaw to check or add the agent-tincan server; the history agent reads local Codex, Claude Code and Grok CLI session history, Cursor CLI chats (~/.cursor/chats/*/*/meta.json and store.db), the Cursor editor's User/globalStorage/state.vscdb (only its composerData: and bubbleId: rows), Copilot CLI sessions (~/.copilot/session-state/*/workspace.yaml and events.jsonl), Gemini CLI sessions (~/.gemini/tmp/*/.project_root and chats/session-*), OpenCode's ~/.local/share/opencode/opencode.db (or each CLI's home override), and ~/.config/tincan/*.wake-sessions. SQLite stores are read only from a copy in a fresh 0700 temp dir that is removed after every read; flag a read that opens one in place or leaves the copy behind. Judge any new file read against that surface. Flag P0 when code newly reads ~/.aws, ~/.ssh, ~/.kube, ~/.netrc, browser profile or cookie stores, keychains, or env vars such as AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, GITHUB_TOKEN, NPM_TOKEN or ACTIONS_ID_TOKEN_REQUEST_URL, and when config writes touch anything beyond the agent-tincan MCP entry."
+        "rule": "tincan legitimately reads some local agent files as part of its job: doctor and onboard read and write MCP config for Claude Code, Codex, Hermes, OpenClaw, OpenCode, and T3 Code's configured providers (~/.t3/userdata/settings.json, ~/.t3/userdata/server-runtime.json, ~/.t3/userdata/providers/antigravity/*/config/mcp_config.json, Claude custom homePaths, ~/.config/opencode/opencode.json) to check or add the agent-tincan server; the history agent reads local Codex, Claude Code and Grok CLI session history, Cursor CLI chats (~/.cursor/chats/*/*/meta.json and store.db), the Cursor editor's User/globalStorage/state.vscdb (only its composerData: and bubbleId: rows), Copilot CLI sessions (~/.copilot/session-state/*/workspace.yaml and events.jsonl), Gemini CLI sessions (~/.gemini/tmp/*/.project_root and chats/session-*), OpenCode's ~/.local/share/opencode/opencode.db (or each CLI's home override), and ~/.config/tincan/*.wake-sessions. SQLite stores are read only from a copy in a fresh 0700 temp dir that is removed after every read; flag a read that opens one in place or leaves the copy behind. Judge any new file read against that surface. Flag P0 when code newly reads ~/.aws, ~/.ssh, ~/.kube, ~/.netrc, browser profile or cookie stores, keychains, or env vars such as AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, GITHUB_TOKEN, NPM_TOKEN or ACTIONS_ID_TOKEN_REQUEST_URL, and when config writes touch anything beyond the agent-tincan MCP entry."
+      },
+      {
+        "scope": ["internal/t3bridge/**/*.go", "internal/cli/t3*.go"],
+        "rule": "P0. The T3 Code bridge (internal/t3bridge, tincan t3) keeps T3 OAuth tokens in 0600 files inside 0700 dirs (t3-auth.json) and never logs, prints, or returns them in errors, doctor JSON, or URLs. Outbound HTTP to T3 Code allows plain http only on loopback (127.0.0.1, localhost, ::1), requires https for any non-loopback origin, and refuses HTTP redirects. T3 permission/approval prompts must never be approved over Agent Tincan (only user questions returned by t3_pending_request list may be answered via respond). Requests marked FromGuest must be declined before touching T3 on any directive targeting an existing thread (watch, unwatch, status, thread:, send), and ordinary guest launches must stay in Scratch with guest framing. tincan t3 install must not overwrite an existing agent-tincan entry pointing to another teammate unless --override-shared is explicitly set. Flag any violation of these five invariants."
       },
       {
         "scope": ["internal/store/**/*.go"],

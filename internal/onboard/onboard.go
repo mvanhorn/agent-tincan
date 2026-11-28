@@ -41,6 +41,7 @@ const (
 	KindCursorCLI     = "cursor-cli"
 	KindHistory       = "history"
 	KindNotes         = "notes"
+	KindT3Code        = "t3-code"
 	KindCouncil       = "council"
 	KindPass          = "pass"
 	KindChatGPTWeb    = "chatgpt-web"
@@ -59,7 +60,7 @@ const (
 )
 
 // Kinds lists every agent kind in recipe order.
-var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindManusCue, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindHistory, KindNotes, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindDuetWeb, KindPhone, KindScheduled, KindGeneric}
+var Kinds = []string{KindVMWebhook, KindE2BEmail, KindProxySandbox, KindManusCue, KindClaudeCode, KindChatGPT, KindSesame, KindHermes, KindOpenClaw, KindCodex, KindGeminiCLI, KindGrokCLI, KindCopilotCLI, KindCursorCLI, KindHistory, KindNotes, KindT3Code, KindCouncil, KindPass, KindChatGPTWeb, KindClaudeWeb, KindGrokWeb, KindGeminiWeb, KindPerplexityWeb, KindCopilotWeb, KindDotWeb, KindDuetWeb, KindPhone, KindScheduled, KindGeneric}
 
 // KnownKind reports whether kind is empty (no kind) or one of Kinds.
 func KnownKind(kind string) bool { return kind == "" || slices.Contains(Kinds, kind) }
@@ -92,6 +93,8 @@ var runtimeNames = map[string]string{
 	"cursor-cli":     KindCursorCLI,
 	"history":        KindHistory,
 	"notes":          KindNotes,
+	"t3":             KindT3Code,
+	"t3-code":        KindT3Code,
 	"council":        KindCouncil,
 	"pass":           KindPass,
 	"chatgpt-web":    KindChatGPTWeb,
@@ -123,6 +126,7 @@ var defaultWake = map[string]string{
 	KindCursorCLI:     "command",
 	KindHistory:       "wait",
 	KindNotes:         "wait",
+	KindT3Code:        "wait",
 	KindCouncil:       "wait",
 	KindPass:          "wait",
 	KindChatGPTWeb:    "wait",
@@ -144,6 +148,7 @@ var defaultWake = map[string]string{
 var stockGoodAt = map[string]string{
 	KindHistory:       "chats, images: ChatGPT, claude.ai, Grok, Gemini, Copilot, Codex, Claude Code, Cursor, OpenCode, Gemini/Copilot/Grok CLI",
 	KindNotes:         "saves, finds, reads owner's Agent Notes (family names, birthdays, loyalty numbers); search before asking the owner",
+	KindT3Code:        "runs coding tasks as T3 Code threads and babysits opted-in interactive T3 threads via MCP Events",
 	KindCouncil:       "asks web, CLI and webhook agents (not Claude Code) one question, ranks answers blind; slow, held for approval by default",
 	KindPass:          "moves one of the owner's chats (by URL or id) into a new chat on a web chat teammate; held for approval by default",
 	KindChatGPTWeb:    "asks ChatGPT (chatgpt.com) in the owner's browser and replies with the answer and any images ChatGPT made",
@@ -412,7 +417,7 @@ func expectOnline(kind, wake string) bool {
 // isService reports whether kind is a Tincan Go service rather than a
 // model: history, notes, council, pass, and the web agents.
 func isService(kind string) bool {
-	return kind == KindHistory || kind == KindNotes || kind == KindCouncil || kind == KindPass || isWebKind(kind)
+	return kind == KindHistory || kind == KindNotes || kind == KindT3Code || kind == KindCouncil || kind == KindPass || isWebKind(kind)
 }
 
 // WebChatKinds are the six web chat teammates the relay moves an unsent

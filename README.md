@@ -151,6 +151,8 @@ The relay holds every ask to `pass` for your approval, with no `approval.json` n
 
 Newest first. Each line links the release notes.
 
+- [v0.34](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.34.0): T3 Code as a two-way teammate (`t3-code`, `tincan t3 auth|serve|install|watch|unwatch|doctor`). Teammates dispatch coding tasks as real T3 Code threads and opt in to babysitting interactive T3 threads over T3 Code's SEP-3415 MCP Events stream; every configured T3 provider (Antigravity, Claude, OpenCode, Codex) can send outbound asks with late replies delivered back into the originating T3 thread. See [docs/adapters/t3-code.md](docs/adapters/t3-code.md).
+- [v0.33](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.33.0): Antigravity (`agy`) as the confined-by-default `gemini-cli` teammate with `tincan listen install --wake gemini-cli`.
 - [v0.32](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.32.0): OpenBot and Manus Cue teammates, a `standard-webhooks` wake format, `tincan listen install`, relay `/healthz` and admin-only `/metrics`, opt-in relay self-upgrade setup with `relay-upgrade --latest`, and a send the client retries itself, after a lost answer, queues one request.
 - [v0.31](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.31.0): MCP Events (SEP-3415) on the public `/mcp` gateway. A gateway client that subscribes gets a signed, metadata-only webhook when a teammate asks and shows `wake=mcp-events`. See [Wake methods](#wake-methods).
 - [v0.30](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.30.0) (through [v0.30.3](https://github.com/mvanhorn/agent-tincan/releases/tag/v0.30.3)): with a task host named, each teammate ask is filed as a task. Small asks are quiet tasks. Quiet work gets a 15-minute nudge and a 30-minute host check, a host can retry twice or complete the work itself, and a result a host returns closes after an hour of asker silence. See [Tasks](#tasks).
@@ -172,7 +174,7 @@ Older releases and full notes: [all releases](https://github.com/mvanhorn/agent-
 To upgrade, upgrade the relay first, from an admin device:
 
 ```bash
-tincan relay-upgrade --from-github v0.32.0
+tincan relay-upgrade --from-github v0.34.0
 ```
 
 Self-upgrade needs the relay started with `--dist <dir>` and `--release-url https://github.com/mvanhorn/agent-tincan/releases/download`, which `tincan relay install --self-upgrade` writes for you (see [Upgrades](#upgrades)). Then run `tincan upgrade` on each machine and restart its MCP servers, listeners and web services (or reconnect through `/mcp`). Update the Chrome extension to 0.8.0. Run `tincan onboard --section agents` again for agents that read only their saved standing instructions.
@@ -258,6 +260,7 @@ In one table:
 | chatgpt (connector) | ChatGPT itself, as a custom connector | An OAuth MCP endpoint the relay publishes through Tailscale Funnel | None by default: it acts while you are chatting with it. A gateway client that subscribes to MCP Events gets a signed, metadata-only webhook when a teammate asks, and shows `wake=mcp-events` |
 | history | A small Tincan service on your Mac | Reads Codex, Claude Code and Grok CLI history from local files, and ChatGPT, claude.ai, Grok, Gemini and Copilot history through the Tincan Chrome extension | Always listening (long-polls the relay) |
 | notes | The notes teammate, a small Tincan service on your Mac, not a model | `tincan notes serve` under launchd; saves, finds and reads back notes in Agent Notes, Bear or Apple Notes | Always listening (long-polls the relay) |
+| t3 (`t3-code`) | Two-way bridge to T3 Code on your Mac (`tincan t3 serve`) | Launches T3 threads on ask, streams SEP-3415 MCP Events for opted-in interactive thread watches, and wires T3's providers for outbound Tincan with late-reply routing back into the originating thread ([details](docs/adapters/t3-code.md)) | Always listening (long-polls the relay) |
 | claude-window | The window agent: a second Claude Code agent on your Mac that opens a new window for each ask | `tincan window serve` under launchd; each ask opens a Claude Code window in cmux that works on that request and replies | Command: `tincan window serve` listens and opens one window per ask |
 | chatgpt-web | Your own ChatGPT account, as a teammate | The Tincan Chrome extension types the message into a background ChatGPT tab and reads the answer back | Always listening (a Tincan service on your Mac) |
 | claude-web | Your own Claude account, as a teammate | Same as chatgpt-web, on claude.ai | Always listening (a Tincan service on your Mac) |
